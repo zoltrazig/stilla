@@ -1,0 +1,6 @@
+// CLI `--run` compile-error probe: deliberately invalid Stilla (a `{`
+// where an identifier is expected). The CLI sniffs input by content, not
+// extension, so the `.txt` name still takes the source compile path and
+// must exit 2 with a diagnostic on stderr.
+
+fn main( {

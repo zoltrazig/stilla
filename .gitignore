@@ -1,3 +1,7 @@
 .zig-cache/
 zig-out/
 *.o
+.pi-subagents/
+.zig-gcache/
+.zig-lcache/
+.serena/

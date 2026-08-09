@@ -1,0 +1,876 @@
+; ============================================================================
+; Stilla Core Language Grammar
+; Version: v1.3 Draft
+; ============================================================================
+;
+; Normative ABNF grammar (RFC 5234) for the Stilla core language.
+;
+; This is the standalone normative grammar for the Stilla core language.
+; It defines the lexical and syntactic productions together with the
+; descriptive notes (grammar notation, case-sensitivity, comments, reserved
+; words, and the static-semantics notes for each production).
+;
+; Grammar notation
+; ----------------
+;   The normative grammar uses ABNF as defined by RFC 5234.
+;   Case-sensitive literal strings use RFC 7405 %s"..." notation.
+;   Stilla source is case-sensitive.
+;   The syntactic ABNF is defined over lexical tokens.
+;   Whitespace and comments separate tokens and are otherwise discarded
+;   before syntactic parsing.
+;
+; Cross-references to the companion documents refer to them as a whole:
+;   "the Core specification" and "the Runtime specification".
+;
+; LL(1) parsing notes
+; -------------------
+;   Every syntactic decision point in this grammar is resolvable with a single
+;   token of lookahead over the token stream. Parenthesized forms are
+;   left-factored so that the "(" decision point needs only the token after
+;   "(" (see "paren-or-tuple" and "tuple-pattern"). Four FOLLOW-set overlaps
+;   are resolved by documented parser rules rather than in the BNF itself:
+;     1. block: after parsing an expression at statement level, a ";" makes it
+;        an expression statement; a "}" makes it the final expression.
+;     2. path-tail: a "::" immediately following a type-path always enters the
+;        path-tail "::" branch (variant or specialization); the postfix
+;        "specialization-suffix" applies only after other primary forms.
+;     3. pattern: an identifier at pattern start is parsed as a type-path; an
+;        identifier immediately following that type-path (with optional
+;        type-args) marks a type-test pattern binding (the Core specification), and a
+;        "list", "box", "tuple", "fn", or primitive-type keyword at pattern
+;        start likewise begins a "type-test-pattern" directly.
+;     4. path-segment: the token after "." or "::" is read as a member name
+;        even when it is a reserved word (lexically pre-identified), so
+;        members named by reserved words such as "builtin.str" parse; the
+;        reserved-word spelling is only recognized as a keyword at a
+;        decision point, not after a member-access dot.
+;   Lexical productions note the short extra-character scans they require
+;   (see "wildcard-token", "integer" / "float").
+; ============================================================================
+
+
+; ----------------------------------------------------------------------------
+; Lexical grammar
+; ----------------------------------------------------------------------------
+
+; A lone "_" is the wildcard token. Lexical rule (maximal munch): a "_"
+; followed by another XID_Continue character or "_" begins an identifier
+; (e.g. "_foo"); a bare "_" is emitted as "wildcard-token".
+
+wildcard-token  = "_"
+
+; Identifiers are Unicode identifiers (UAX #31): XID_Start for the first
+; character, XID_Continue thereafter. ASCII "_" is allowed in both
+; positions ("_" itself has XID_Continue; leading it is a compatibility
+; exception). Keywords remain the ASCII reserved words, so a non-ASCII
+; identifier can never collide with one. Source is UTF-8; an identifier
+; token must be a valid UTF-8 sequence. Identifiers are not normalized:
+; canonically equivalent spellings are distinct identifiers.
+
+identifier      = ( xid-start / "_" ) *( xid-continue / "_" )
+
+xid-start       = <a code point with the Unicode XID_Start property>
+
+xid-continue    = <a code point with the Unicode XID_Continue property>
+
+digit           = %x30-39
+
+integer         = 1*digit
+
+; Lexical rule: after "1*digit", a "." belongs to the token only if a digit
+; immediately follows it; otherwise the integer ends and "." is a separate
+; token (e.g. "1.5" is one float token, "1.x" is an integer followed by ".").
+float           = 1*digit "." 1*digit
+
+string          = DQUOTE *( string-char / escape ) DQUOTE
+
+escape          = "\\" ( DQUOTE
+                      / "\\"
+                      / "n"
+                      / "r"
+                      / "t"
+                      / ( "u" unicode-escape ) )
+
+; A \u escape is explicit: it may produce any scalar value, including
+; ones the raw "string-char" rule rejects (control characters); surrogate
+; code points (D800-DFFF) and values above 10FFFF are invalid scalars and
+; are rejected lexically.
+unicode-escape  = "{" 1*6hexdig "}"
+
+string-char     = <any Unicode scalar value except
+                   DQUOTE, "\\", or control characters>
+
+bool-literal    = %s"true"
+                / %s"false"
+
+; The empty tuple "()" is the unique value of type "void". In expression
+; position it is the empty branch of "paren-or-tuple"; in pattern position it
+; is the empty branch of "tuple-pattern".
+
+void-literal    = "(" ")"
+
+; The leading "-" is an operator and is not part of an integer or float
+; token. Identifiers and string contents may contain Unicode: identifiers
+; via the XID properties (see above), string contents as raw scalar values
+; or via \u escapes (see above).
+
+
+; ----------------------------------------------------------------------------
+; Comments (lexical)
+; ----------------------------------------------------------------------------
+; Line comments begin with "//" and continue to end of line.
+; Block comments begin with "/*" and end with "*/".
+; Block comments may nest; nested comment recognition is performed lexically.
+
+
+; ----------------------------------------------------------------------------
+; Reserved words
+; ----------------------------------------------------------------------------
+;   The following identifiers are reserved:
+;   and any as bool borrow box byte const drop else f64 false float32 fn
+;   hostdata i64 if import int32 let list match move never opaque or str struct
+;   true tuple type u64 uint32 union using void
+; The collection type names "array" and "hashmap" are not reserved words. The module name "builtin" is not a reserved word
+; either: it is an ordinary importable standard-library module (the Core specification).
+; The keyword "opaque" (the Core specification, "Host-backed opaque nominal types")
+; is reserved and recognized lexically.
+; Reserved words are recognized lexically, before syntactic parsing.
+; The primitive type "hostdata" (the Core specification) is reserved and appears in
+; both the reserved list above and "primitive-type".
+
+
+; ----------------------------------------------------------------------------
+; Program structure
+; ----------------------------------------------------------------------------
+
+program =
+    *module-item
+
+module-item =
+      const-def
+    / func-def
+    / type-def
+    / struct-def
+    / union-def
+    / opaque-def
+    / using-decl
+
+
+; ----------------------------------------------------------------------------
+; Path aliases
+; ----------------------------------------------------------------------------
+; A "using" declaration introduces a compile-time alias for a path in the
+; current scope (the Core specification). Without "as", the alias takes the final
+; segment of the path. The alias is scoped: at module level it is visible to
+; the end of the module; inside a block it is visible to the end of that
+; block. It is not a runtime member and does not appear on the module struct.
+; Each path segment may be a reserved word as well as an identifier, so that
+; members named by reserved words (e.g. "builtin.str", "builtin.box") parse;
+
+using-decl =
+    %s"using"
+    type-path
+    [ %s"as" identifier ]
+    ";"
+
+
+; ----------------------------------------------------------------------------
+; Module constants
+; ----------------------------------------------------------------------------
+; Static semantics restrict module-resident generated struct values to
+; module-level "const" bindings and restrict "import-expression" to this
+; initializer position (the Core specification).
+; The second form — "const identifier : type ;" — is a host constant
+; (the Core specification): a declaration without an initializer whose value the
+; host provides at load/instantiation time; it requires the type
+; annotation because there is no initializer to infer from.
+
+const-def =
+    %s"const"
+    identifier
+    ( ":" type ( ";" / "=" expression ";" )
+    / "=" expression ";" )
+
+
+; ----------------------------------------------------------------------------
+; Functions
+; ----------------------------------------------------------------------------
+; A plain parameter accepts only Copy types by static semantics.
+; A "borrow" parameter is non-owning. A "move" parameter is owning.
+; Function types are monomorphic. Generic parameters are permitted on named
+; function declarations but not on lambdas or function types.
+; The second form — "fn ... ;" — is a host binding (the Core specification): a
+; declaration without a Stilla body whose implementation the host
+; provides; calls to it lower to runtime system calls and its body is
+; never lowered.
+
+func-def =
+      %s"fn"
+      identifier
+      [ type-params ]
+      "(" param-list ")"
+      [ "->" type ]
+      block
+    / %s"fn"
+      identifier
+      [ type-params ]
+      "(" param-list ")"
+      [ "->" type ]
+      ";"
+
+lambda =
+    %s"fn"
+    "(" param-list ")"
+    [ "->" type ]
+    block
+
+param-list =
+    [ param *( "," param ) ]
+
+param =
+    [ %s"borrow" / %s"move" ]
+    identifier
+    ":"
+    type
+
+function-type =
+    %s"fn"
+    "(" [ function-param-type
+          *( "," function-param-type ) ] ")"
+    "->"
+    type
+
+function-param-type =
+    [ %s"borrow" / %s"move" ]
+    type
+
+
+; ----------------------------------------------------------------------------
+; Generic parameters
+; ----------------------------------------------------------------------------
+; Generic syntax is compile-time syntax (the Core specification).
+
+type-params =
+    "["
+    identifier
+    *( "," identifier )
+    "]"
+
+type-args =
+    "["
+    type
+    *( "," type )
+    "]"
+
+
+; ----------------------------------------------------------------------------
+; Types
+; ----------------------------------------------------------------------------
+; Stilla v1.3 has no anonymous struct or anonymous union types.
+
+type =
+      primitive-type
+    / named-type
+    / list-type
+    / box-type
+    / tuple-type
+    / function-type
+
+primitive-type =
+      %s"any"
+    / %s"byte"
+    / %s"hostdata"
+    / %s"int32"
+    / %s"uint32"
+    / %s"i64"
+    / %s"u64"
+    / %s"float32"
+    / %s"f64"
+    / %s"bool"
+    / %s"str"
+    / %s"void"
+    / %s"never"
+
+named-type =
+    type-path
+    [ type-args ]
+
+; A path segment is normally an identifier, but a reserved word
+; (lexically pre-identified; see "Reserved words") is also accepted as a
+; segment after "." and "::", so that members named by reserved words —
+; e.g. "builtin.str" and "builtin.box" (the Core specification) — parse. This is a
+; documented parser rule (LL(1) parsing note 4): the token after "." or
+; "::" is read as a member name whether or not it is reserved. The same
+; rule applies to the first segment of a "type-path" when the path names
+; a type member such as "builtin.Option".
+
+type-path =
+    identifier
+    *( "." identifier )
+
+list-type =
+    %s"list"
+    "["
+    type
+    "]"
+
+box-type =
+    %s"box"
+    "["
+    type
+    "]"
+
+; The empty tuple type "tuple[]" is not a type: the empty tuple "()" is
+; the unique value of type "void" (the Core specification). A single-element
+; tuple type "tuple[int32]" is valid and distinct from "int32".
+
+tuple-type =
+    %s"tuple"
+    "["
+    type *( "," type )
+    "]"
+
+
+; ----------------------------------------------------------------------------
+; Type aliases
+; ----------------------------------------------------------------------------
+; A type alias is transparent.
+
+type-def =
+    %s"type"
+    identifier
+    [ type-params ]
+    "="
+    type
+    ";"
+
+
+; ----------------------------------------------------------------------------
+; Named structs
+; ----------------------------------------------------------------------------
+; A "drop-decl", when present, must appear after all fields.
+; A struct may contain at most one "drop-decl".
+
+struct-def =
+    %s"struct"
+    identifier
+    [ type-params ]
+    "{"
+    *field-decl
+    [ drop-decl ]
+    "}"
+
+field-decl =
+    identifier
+    ":"
+    type
+    ";"
+
+drop-decl =
+    %s"drop"
+    "(" identifier ")"
+    block
+
+
+; ----------------------------------------------------------------------------
+; Named unions
+; ----------------------------------------------------------------------------
+; A union declaration creates a nominal sum type.
+
+union-def =
+    %s"union"
+    identifier
+    [ type-params ]
+    "{"
+    [ variant-decl *( "," variant-decl ) [ "," ] ]
+    "}"
+
+variant-decl =
+    identifier
+    [ "(" type *( "," type ) ")" ]
+
+
+; ----------------------------------------------------------------------------
+; Host-backed opaque nominal types
+; ----------------------------------------------------------------------------
+; An opaque declaration creates a nominal type with no fields, no variants,
+; and no user-visible representation (the Core specification, "Host-backed
+; opaque nominal types"). Only the host constructs values of the type and
+; only the host's drop dispatch destroys them; Stilla source cannot
+; construct, destructure, or inspect an opaque value.
+; Static semantics: an opaque declaration is legal only in a
+; standard-library or host-provided module interface; a Stilla source module
+; may not declare one. All opaque types are unique (the Core specification):
+; the declaration carries no ownership annotation.
+
+opaque-def =
+    %s"opaque"
+    %s"type"
+    identifier
+    [ type-params ]
+    ";"
+
+
+; ----------------------------------------------------------------------------
+; Blocks
+; ----------------------------------------------------------------------------
+; A final expression is distinguished from an expression statement by the
+; absence of a trailing semicolon.
+; Parser rule (LL(1) parsing note 1): in the statement loop, parse an
+; expression and then expect ";" (expression statement) or "}" (final
+; expression, terminating the block).
+
+block =
+    "{"
+    *statement
+    [ expression ]
+    "}"
+
+
+; ----------------------------------------------------------------------------
+; Statements
+; ----------------------------------------------------------------------------
+; Static semantics require the "let" pattern to be irrefutable.
+
+statement =
+      let-stmt
+    / drop-stmt
+    / using-decl
+    / expr-stmt
+    / empty-stmt
+
+let-stmt =
+    %s"let"
+    pattern
+    [ ":" type ]
+    "="
+    expression
+    ";"
+
+drop-stmt =
+    %s"drop"
+    identifier
+    ";"
+
+expr-stmt =
+    expression
+    ";"
+
+empty-stmt =
+    ";"
+
+
+; ----------------------------------------------------------------------------
+; Expressions
+; ----------------------------------------------------------------------------
+; "move" syntactically names a complete local binding. There is no general
+; "borrow" expression; borrowing is introduced by borrow parameters and
+; defined borrowing operations.
+
+expression =
+    logic-or
+
+logic-or =
+    logic-and
+    *( "or" logic-and )
+
+logic-and =
+    comparison
+    *( "and" comparison )
+
+comparison =
+    bitwise-or
+    [ comparison-op bitwise-or ]
+
+comparison-op =
+      "=="
+    / "!="
+    / "<"
+    / "<="
+    / ">"
+    / ">="
+
+; Bitwise ops sit between comparison and shift (Core §16.1): the three
+; levels differ like C/Python — `|` loosest, `&` tightest. All three are
+; left-associative: `a | b ^ c` parses as `a | (b ^ c)` and
+; `a & b | c` as `(a & b) | c`; all bind tighter than comparisons
+; (`a & b == c` is `(a & b) == c`) and looser than shifts
+; (`a & b << c` is `a & (b << c)`).
+bitwise-or =
+    bitwise-xor
+    *( "|" bitwise-xor )
+
+bitwise-xor =
+    bitwise-and
+    *( "^" bitwise-and )
+
+bitwise-and =
+    shift
+    *( "&" shift )
+
+; Shifts sit between bitwise-and and additive (Core §16.3):
+; `a + b << c` parses as `(a + b) << c`, like C and Zig.
+shift =
+    addition
+    *( shift-op addition )
+
+shift-op =
+      "<<"
+    / ">>"
+
+addition =
+    multiply
+    *( add-op multiply )
+
+add-op =
+      "+"
+    / "-"
+
+multiply =
+    unary
+    *( multiply-op unary )
+
+multiply-op =
+      "*"
+    / "/"
+    / "%"
+
+unary =
+      "-" unary
+    / "!" unary
+    / move-expression
+    / cast
+
+move-expression =
+    %s"move"
+    identifier
+
+cast =
+    postfix
+    *( %s"as" type )
+
+
+; ----------------------------------------------------------------------------
+; Postfix expressions
+; ----------------------------------------------------------------------------
+; "specialization-suffix" is accepted syntactically as postfix syntax but is
+; eliminated during compile-time generic specialization. It cannot survive
+; into runtime evaluation.
+
+postfix =
+    primary
+    *postfix-suffix
+
+postfix-suffix =
+      member-suffix
+    / call-suffix
+    / specialization-suffix
+
+; Reserved words are accepted as member names after "." (path-segment
+; rule under "type-path", LL(1) parsing note 4), so "builtin.str" parses.
+
+member-suffix =
+    "."
+    identifier
+
+call-suffix =
+    "("
+    arg-list
+    ")"
+
+; Per the LL(1) parsing note 2, this suffix applies only after primary forms
+; other than a bare type-path; a "::" immediately after a type-path is
+; consumed by "path-tail".
+specialization-suffix =
+    "::"
+    type-args
+
+arg-list =
+    [ expression *( "," expression ) ]
+
+
+; ----------------------------------------------------------------------------
+; Primary expressions
+; ----------------------------------------------------------------------------
+; An identifier leading a primary is parsed uniformly as "path-expression"
+; (see below): a path followed by a construction brace is "struct-construct";
+; a path followed by ":: identifier" is a union variant expression; a path
+; followed by ":: [ ... ]" is a generic specialization; otherwise the path
+; begins an ordinary value expression. "[" after a path is always type
+; arguments (there is no index suffix).
+
+primary =
+      literal
+    / path-expression
+    / paren-or-tuple
+    / list-literal
+    / lambda
+    / if-expression
+    / match-expression
+    / import-expression
+    / block
+
+
+; ----------------------------------------------------------------------------
+; Path expressions
+; ----------------------------------------------------------------------------
+
+path-expression =
+    type-path
+    [ type-args ]
+    path-tail
+
+path-tail =
+      "{" [ struct-field-init
+            *( "," struct-field-init )
+            [ "," ] ]
+        "}"
+    / "::" ( identifier [ "(" arg-list ")" ]
+           / type-args )
+    / "" ; empty -- ordinary value expression
+
+
+; ----------------------------------------------------------------------------
+; Parenthesized and tuple expressions
+; ----------------------------------------------------------------------------
+; The empty form "()" is "void-literal". A single-element tuple "(e)" is not
+; a tuple literal; the parenthesized form "(e)" is a "paren-expression". A
+; one-element tuple is written "(e,)".
+; Left-factored for LL(1): a "(" is either the void literal (the empty
+; branch, matching the void value) or a parenthesized/tuple expression;
+; after the first expression, ")" or "," decides.
+
+paren-or-tuple =
+      void-literal
+    / "(" expression
+      ( ")"                     ; parenthesized expression
+      / "," [ expression *( "," expression ) ] ")" )   ; tuple literal
+
+
+; ----------------------------------------------------------------------------
+; Imports
+; ----------------------------------------------------------------------------
+; The string must be a literal token.
+; Static semantics permit this production only as the initializer of a
+; module-level "const" binding.
+
+import-expression =
+    %s"import"
+    "("
+    string
+    ")"
+
+
+; ----------------------------------------------------------------------------
+; Struct construction
+; ----------------------------------------------------------------------------
+; All fields must be supplied exactly once.
+; Field initializers are evaluated in written source order. Field order does
+; not affect the struct's destruction order (the Runtime specification).
+; Syntactically this is the "{" alternative of "path-tail" following a
+; type-path with optional type arguments.
+
+struct-field-init =
+    identifier
+    ":"
+    expression
+
+
+; ----------------------------------------------------------------------------
+; Union variant expressions
+; ----------------------------------------------------------------------------
+; Static semantics require the type path to denote a named union type and the
+; identifier to name one of its variants.
+; This production does not define arbitrary associated functions.
+; Syntactically this is the ":: identifier" alternative of "path-tail"
+; following a type-path with optional type arguments.
+
+
+; ----------------------------------------------------------------------------
+; List literals
+; ----------------------------------------------------------------------------
+
+list-literal =
+    "["
+    [ expression *( "," expression ) [ "," ] ]
+    "]"
+
+
+; ----------------------------------------------------------------------------
+; "if"
+; ----------------------------------------------------------------------------
+
+if-expression =
+    %s"if"
+    "("
+    expression
+    ")"
+    block
+    [ %s"else"
+      ( block / if-expression ) ]
+
+
+; ----------------------------------------------------------------------------
+; "match"
+; ----------------------------------------------------------------------------
+; Because a block is itself an expression, a match arm may use a block
+; without a separate grammar production.
+
+match-expression =
+    %s"match"
+    "("
+    expression
+    ")"
+    "{"
+    match-arm
+    *( "," match-arm )
+    [ "," ]
+    "}"
+
+match-arm =
+    pattern
+    "=>"
+    expression
+
+
+; ----------------------------------------------------------------------------
+; Patterns
+; ----------------------------------------------------------------------------
+; Static semantics divide these forms into irrefutable and refutable
+; patterns (the Core specification).
+
+pattern =
+      wildcard-pattern
+    / literal-pattern
+    / type-test-pattern
+    / tuple-pattern
+    / path-pattern
+    / list-pattern
+
+wildcard-pattern =
+    wildcard-token
+
+; An identifier alone (not followed by "{", "::", "[", or another identifier in
+; pattern position) is an "identifier-pattern": the empty "pattern-tail" of
+; "path-pattern".
+
+
+; ----------------------------------------------------------------------------
+; Literal patterns
+; ----------------------------------------------------------------------------
+; The empty form "()" is a literal pattern matching the void value; it is
+; parsed as the empty branch of "tuple-pattern" (see below).
+
+literal-pattern =
+      integer
+    / "-" integer
+    / float
+    / "-" float
+    / string
+    / bool-literal
+
+
+; ----------------------------------------------------------------------------
+; Type-test patterns
+; ----------------------------------------------------------------------------
+; A "type-test-pattern" matches an "any" value by its runtime type tag (the Core specification). It is a concrete type name optionally followed by a
+; binding identifier. Keyword-led forms are parsed here. An identifier-led
+; form ("File f", "Option[int32] o") is parsed as a "path-pattern" whose
+; "pattern-tail" is the binding identifier (LL(1) parsing note 3).
+; Static semantics reject "any", "never", and "hostdata" as test types: the
+; test type must be concrete (the Core specification), and no pattern is defined on
+; "hostdata" (the Core specification).
+
+type-test-pattern =
+    type-test-type
+    [ identifier ]
+
+type-test-type =
+      %s"byte"
+    / %s"int32"
+    / %s"uint32"
+    / %s"i64"
+    / %s"u64"
+    / %s"float32"
+    / %s"f64"
+    / %s"bool"
+    / %s"str"
+    / list-type
+    / box-type
+    / tuple-type
+    / function-type
+
+
+; ----------------------------------------------------------------------------
+; Tuple patterns
+; ----------------------------------------------------------------------------
+; Left-factored for LL(1): a "(" is either the void literal (the empty
+; tuple, matching the void value) or a non-empty tuple pattern; after the
+; first pattern, "," and then "]"/")" decide.
+
+tuple-pattern =
+      void-literal
+    / "(" pattern "," [ pattern *( "," pattern ) ] ")"
+
+
+; ----------------------------------------------------------------------------
+; Path patterns
+; ----------------------------------------------------------------------------
+; An identifier-leading pattern is parsed uniformly as "path-pattern": a path
+; followed by a construction brace is a "struct-pattern"; a path followed by
+; ":: identifier" is a "union-pattern"; a path followed by a binding
+; identifier is a "type-test-pattern" (the Core specification); otherwise the
+; identifier is an "identifier-pattern". There is no indexed element-read
+; syntax in pattern position (list element reads are `[head, ..tail]` list
+; patterns), so "["
+; after a path in pattern position is always "type-args".
+
+path-pattern =
+    type-path
+    [ type-args ]
+    pattern-tail
+
+pattern-tail =
+      "{" [ field-pattern
+            *( "," field-pattern )
+            [ "," ] ]
+        "}"
+    / "::" identifier
+      [ "(" pattern *( "," pattern ) ")" ]
+    / identifier ; type-test binding
+    / "" ; empty -- identifier-pattern
+
+field-pattern =
+    identifier
+    [ ":" pattern ]
+
+
+; ----------------------------------------------------------------------------
+; List patterns
+; ----------------------------------------------------------------------------
+
+list-pattern =
+    "["
+    [ list-pattern-items ]
+    "]"
+
+list-pattern-items =
+      pattern
+      *( "," pattern )
+      [ "," list-rest ]
+    / list-rest
+
+list-rest =
+    ".."
+    identifier
+
+
+; ----------------------------------------------------------------------------
+; Literals
+; ----------------------------------------------------------------------------
+
+literal =
+      integer
+    / float
+    / string
+    / bool-literal

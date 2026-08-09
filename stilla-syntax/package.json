@@ -1,0 +1,34 @@
+{
+  "name": "stilla-syntax",
+  "displayName": "Stilla Syntax Highlighting",
+  "description": "TextMate syntax highlighting and language support for the Stilla language",
+  "version": "0.1.0",
+  "engines": {
+    "vscode": "^1.75.0"
+  },
+  "categories": [
+    "Programming Languages"
+  ],
+  "contributes": {
+    "languages": [
+      {
+        "id": "stilla",
+        "aliases": [
+          "Stilla"
+        ],
+        "extensions": [
+          ".st",
+          ".stilla"
+        ],
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "grammars": [
+      {
+        "language": "stilla",
+        "scopeName": "source.stilla",
+        "path": "./syntaxes/stilla.tmLanguage.json"
+      }
+    ]
+  }
+}
