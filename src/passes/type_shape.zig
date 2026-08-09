@@ -1,0 +1,131 @@
+//! Pass: type shape queries — frontend.md §4.2.
+//! In: `Resolve` view + `from` module + written type name or IR-native
+//! `cfg.Type`. Out: the struct/union declaration behind a name, the index
+//! of a field or variant, and the structural ownership of a type.
+//!
+//! Written-name lookups and alias-following come from `type_resolve.zig`;
+//! the ownership walk resolves field and variant types through the graph
+//! (`resolveType`). `src/moduleinfo.zig` re-exports these so callers keep
+//! using `moduleinfo.ownershipOf` and friends.
+
+const std = @import("std");
+const ast = @import("../ast.zig");
+const cfg = @import("../cfg.zig");
+const moduleinfo = @import("../moduleinfo.zig");
+const type_resolve = @import("type_resolve.zig");
+
+const ModuleInfo = moduleinfo.ModuleInfo;
+const TypeMember = moduleinfo.TypeMember;
+const Resolve = type_resolve.Resolve;
+
+/// The struct declaration behind a written type name (following `using`
+/// aliases and transparent `type` aliases), or null.
+pub fn structDecl(resolve: Resolve, from: *ModuleInfo, name: []const u8) ?*const ast.StructDef {
+    const tm = type_resolve.resolveTypeName(resolve, from, name) orelse return null;
+    const final = type_resolve.followAlias(resolve, from, tm) orelse return null;
+    return switch (final.decl) {
+        .struct_ => |s| s,
+        else => null,
+    };
+}
+
+/// The union declaration behind a written type name, or null.
+pub fn unionDecl(resolve: Resolve, from: *ModuleInfo, name: []const u8) ?*const ast.UnionDef {
+    const tm = type_resolve.resolveTypeName(resolve, from, name) orelse return null;
+    const final = type_resolve.followAlias(resolve, from, tm) orelse return null;
+    return switch (final.decl) {
+        .union_ => |u| u,
+        else => null,
+    };
+}
+
+/// Index of a named field in a struct declaration (declaration order,
+/// Core §8.1).
+pub fn fieldIndex(sd: *const ast.StructDef, name: []const u8) ?u32 {
+    for (sd.fields, 0..) |f, i| {
+        if (std.mem.eql(u8, f.name.text, name)) return @intCast(i);
+    }
+    return null;
+}
+
+/// Index of a named variant in a union declaration (declaration order,
+/// Core §11.1); the discriminant of a `switch`.
+pub fn variantIndex(ud: *const ast.UnionDef, name: []const u8) ?u32 {
+    for (ud.variants, 0..) |v, i| {
+        if (std.mem.eql(u8, v.name.text, name)) return @intCast(i);
+    }
+    return null;
+}
+
+/// Structural ownership of an IR-native type (Core §10.1–§10.3):
+/// primitives and function/module values are duplicable (except `any`),
+/// containers join their components, named types resolve through the
+/// graph. `null` means the ownership is genuinely deferred (an
+/// unspecialized type parameter). Recursive references contribute
+/// `duplicable` (Core §18: recursion is legal only through indirection,
+/// so the cycle itself is neutral); the caller treats a final `null` as
+/// duplicable.
+pub fn ownershipOf(resolve: Resolve, from: *ModuleInfo, t: cfg.Type) ?cfg.Ownership {
+    // The visited set is arena-owned; no deinit needed.
+    var visited = std.AutoHashMapUnmanaged(*const TypeMember, void).empty;
+    return ownershipVisited(resolve, from, t, &visited);
+}
+
+fn ownershipVisited(
+    resolve: Resolve,
+    from: *ModuleInfo,
+    t: cfg.Type,
+    visited: *std.AutoHashMapUnmanaged(*const TypeMember, void),
+) ?cfg.Ownership {
+    return switch (t) {
+        .primitive => |k| if (k == .any or k == .hostdata) cfg.Ownership.affine else cfg.Ownership.duplicable,
+        .module, .function, .cleanup => cfg.Ownership.duplicable,
+        .list, .box => |inner| inner.ownership(),
+        .tuple => |elems| blk: {
+            var acc: ?cfg.Ownership = cfg.Ownership.duplicable;
+            for (elems) |e| {
+                const ow = ownershipVisited(resolve, from, e, visited) orelse break :blk cfg.Ownership.affine;
+                if (ow == .affine) acc = cfg.Ownership.affine;
+            }
+            break :blk acc;
+        },
+        .named => |name| blk: {
+            const tm = type_resolve.resolveTypeName(resolve, from, name) orelse break :blk null;
+            const final = type_resolve.followAlias(resolve, from, tm) orelse break :blk null;
+            break :blk switch (final.decl) {
+                .struct_ => |s| blk2: {
+                    if (visited.contains(final)) break :blk2 cfg.Ownership.duplicable;
+                    visited.put(resolve.arena, final, {}) catch break :blk2 null;
+                    if (s.drop != null) break :blk2 cfg.Ownership.affine;
+                    var acc: ?cfg.Ownership = cfg.Ownership.duplicable;
+                    for (s.fields) |f| {
+                        const ft = type_resolve.resolveType(resolve, from, &f.type_) orelse continue;
+                        const ow = ownershipVisited(resolve, from, ft, visited) orelse {
+                            acc = cfg.Ownership.affine;
+                            break;
+                        };
+                        if (ow == .affine) acc = cfg.Ownership.affine;
+                    }
+                    break :blk2 acc;
+                },
+                .union_ => |u| blk2: {
+                    if (visited.contains(final)) break :blk2 cfg.Ownership.duplicable;
+                    visited.put(resolve.arena, final, {}) catch break :blk2 null;
+                    var acc: ?cfg.Ownership = cfg.Ownership.duplicable;
+                    for (u.variants) |v| {
+                        if (v.types) |types| for (types) |vt| {
+                            const t2 = type_resolve.resolveType(resolve, from, &vt) orelse continue;
+                            const ow = ownershipVisited(resolve, from, t2, visited) orelse {
+                                acc = cfg.Ownership.affine;
+                                break;
+                            };
+                            if (ow == .affine) acc = cfg.Ownership.affine;
+                        };
+                    }
+                    break :blk2 acc;
+                },
+                .alias => unreachable, // followAlias resolved the chain
+            };
+        },
+    };
+}

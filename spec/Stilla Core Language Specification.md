@@ -1,6 +1,8 @@
-# Stilla Core Language Specification - v1.2 Draft
+# Stilla Core Language Specification
 
-> **Companion document:** *Stilla Runtime Specification - v1.2 Draft* — defines module instantiation, evaluation order, runtime destruction, termination, and the embedding-host contract.
+> **Version:** v1.3 Draft
+>
+> **Companion document:** *Stilla Runtime Specification* — defines module instantiation, evaluation order, runtime destruction, termination, and the embedding-host contract.
 
 ## Table of Contents
 
@@ -28,7 +30,6 @@
 16. Operators
 17. Example Resource Module
 18. Formal Static Semantics
-19. Lexical and Syntactic Grammar
 
 ---
 
@@ -45,11 +46,11 @@
 
 Stilla is engineered around a model that is *visible from the source code*: a program should be easy to parse, easy to statically analyze, and easy to reason about without hidden machinery. Ownership, destruction, and evaluation order are all explicit and deterministic.
 
-This document — the **Core specification** — defines the Stilla v1.2 syntax and the compile-time constraints a conforming compiler must enforce: the type system, ownership checking, generic specialization, and the static module rules. The companion **Runtime specification** defines the execution model: module instantiation, evaluation order, runtime destruction, panic semantics, and the embedding-host contract.
+This document — the **Core specification** — defines the Stilla v1.3 syntax and the compile-time constraints a conforming compiler must enforce: the type system, ownership checking, generic specialization, and the static module rules. The companion **Runtime specification** defines the execution model: module instantiation, evaluation order, runtime destruction, panic semantics, and the embedding-host contract.
 
 The boundary between the two documents is drawn at the point where a program transitions from a static artifact into a running execution context.
 
-The remainder of this specification states those rules precisely. Sections 2 through 17 explain the model; sections 18 and 19 are the normative requirements (the formal static semantics and the grammar).
+The remainder of this specification states those rules precisely. Sections 2 through 17 explain the model; section 18 is the normative requirement (the formal static semantics). The normative lexical and syntactic grammar is defined in the standalone [`Stilla Core Grammar Draft.abnf`](Stilla%20Core%20Grammar%20Draft.abnf).
 
 ### 1.2 Design principles
 
@@ -124,27 +125,29 @@ These terms are used throughout the specification.
 - **module** — a source file compiled into one implicit immutable struct value (§2).
 - **module value / module-resident** — a value of a compiler-generated module type; it may appear only in module-level `const` bindings (§2.3).
 - **binding** — a name bound to an immutable value. `let` creates local bindings (§4); `const` creates module constants (§5).
-- **duplicable** — a value that may be implicitly copied, such as `int64` or `string` (§10.1).
-- **affine** — a value that may be used at most once and must be destroyed exactly once; it is not implicitly copyable (§10.2).
-- **owner** — a binding or location that holds an affine value.
+- **Copy** — a capability held by some types: a Copy value may be implicitly copied, such as `int32` or `str`; dropping a Copy value does nothing (§10.1).
+- **unique** — a value without the Copy capability: it may be used at most once and must be destroyed exactly once; it is not implicitly copyable (§10.2).
+- **owner** — a binding or location that holds a value; every value has ownership (§10).
+- **maybe-unique** — a unique binding released on some but not all normal paths through a conditional construct; it is unusable after the join, and its destruction is guarded by an implementation-maintained liveness state (§10.10).
 - **borrow** — a non-owning, read-only view of a value; it never transfers ownership (§10.6).
 - **move** — explicit ownership transfer of a complete local owner (§10.4).
 - **drop** — deterministic destruction: a user `drop` hook (§9.1), an explicit `drop` statement (§9.4), or automatic destruction when a scope ends (§9.5).
 - **nominal type** — a type defined by a `struct` or `union` declaration; it is distinct from every other type even if shape-identical (§7, §11).
 - **monomorphic function** — a function value whose parameter and return types are fully concrete; there are no runtime generic function values (§12).
 - **specialization** — compile-time expansion of generic code to concrete types (§12).
+- **top type** — `any`, the type every value type coerces to; its counterpart is the bottom type `never`, which has no values and coerces to every type (§11.6, §13.2).
 - **destruction view** — the special borrowed view of a value seen inside its own `drop` hook (§9.2).
 
 Runtime-side terms (execution context, module storage, teardown, host) are defined in Runtime §1.4.
 
 ### 1.6 How this specification is organized
 
-- **§2–§3 — Modules.** Every file is an implicit immutable module value; imports are statically resolved; `builtin` is the single implicitly available module. Module instantiation and the host contract are defined in the Runtime specification.
+- **§2–§3 — Modules.** Every file is an implicit immutable module value; imports are statically resolved; the `builtin` module is imported like any other standard-library module. Module instantiation and the host contract are defined in the Runtime specification.
 - **§4–§8 — Bindings and values.** Locals (`let`), module constants (`const`), functions, structs, and construction.
 - **§9–§12 — Ownership and types.** Destruction, the ownership model, algebraic data types, and compile-time generics. Destruction timing and order are defined in the Runtime specification.
 - **§13–§16 — The expression layer.** Control flow, patterns, operators, and member access. Evaluation order is defined in the Runtime specification.
 - **§17 — Example.** A worked resource module.
-- **§18–§19 — Normative requirements.** The formal static semantics and the normative grammar.
+- **§18 — Normative requirements.** The formal static semantics and the grammar.
 
 The companion **Runtime specification** covers: the execution context (§R1), module instantiation (§R2), the host environment (§R3), the required `builtin` interface (§R4), evaluation order (§R5), destruction at runtime (§R6), termination and traps (§R7), and the core runtime model (§R8).
 
@@ -159,13 +162,13 @@ Every Stilla source file defines one implicit immutable **module struct**.
 For example, `calc.st`:
 
 ```stilla
-const pi: float64 = 3.141592653589793;
+const pi: float32 = 3.141592653589793;
 
-fn add(a: int64, b: int64) -> int64 {
+fn add(a: int32, b: int32) -> int32 {
     a + b
 }
 
-fn square(x: float64) -> float64 {
+fn square(x: float32) -> float32 {
     x * x
 }
 ```
@@ -200,6 +203,7 @@ Example:
 
 ```stilla
 const calc = import("calc");
+const builtin = import("builtin");
 
 fn main() -> void {
     builtin.print(
@@ -261,7 +265,7 @@ The compiler or runtime resolves the specifier to exactly one of:
 
 Resolution is implementation-defined, but a specifier must resolve unambiguously before execution.
 
-Import cycles are rejected in Stilla v1.2.
+Import cycles are rejected in Stilla v1.3.
 
 The standard library is specified separately.
 
@@ -298,8 +302,8 @@ Conceptually:
 
 ```stilla
 struct Database {
-    query: fn(string) -> string;
-    execute: fn(string) -> int64;
+    query: fn(str) -> str;
+    execute: fn(str) -> int32;
 }
 ```
 
@@ -317,23 +321,25 @@ A module may expose another imported module as a runtime constant.
 
 ```stilla
 const math = import("math");
-const text = import("text");
+const string = import("string");
 ```
 
 Here `math` is the standard-library `math` module (Standard Library
-document, §4).
+document, §4), and `string` is the standard-library `string` module
+(Standard Library document, §5).
 
 Consumer:
 
 ```stilla
 const std = import("std");
+const builtin = import("builtin");
 
 fn main() -> void {
     let x =
         std.math.sqrt(16.0);
 
     builtin.print(
-        std.text.upper("hello")
+        std.string.upper("hello")
     );
 }
 ```
@@ -348,19 +354,70 @@ is chained value-member access (§15).
 
 No nested runtime namespace mechanism is required.
 
+## 2.8 Path aliases with `using`
+
+A **path alias** introduces a new name for a path in the current scope.
+Path aliases use:
+
+```stilla
+using
+```
+
+Examples:
+
+```stilla
+const builtin = import("builtin");
+
+using builtin.Option      // Option = builtin.Option
+using string.repeat as re // re = string.repeat
+```
+
+Without `as`, the alias name is the final segment of the path; with `as`, it
+is the identifier that follows. The alias refers to the path as a whole, and
+at a use site denotes whatever the path denotes — a type, a value, or a
+module member (Grammar `using-decl`).
+
+A `using` declaration:
+
+- may appear at module scope and inside blocks (Grammar `module-item`,
+  `statement`);
+- is scoped: the alias is visible from the declaration point to the end of
+  the enclosing module or block, and is not visible to sibling or outer
+  scopes;
+- may shadow an outer binding, and may itself be shadowed, with the same
+  rules as `let` (§4);
+- is a compile-time binding: it does not create a runtime member, is not
+  present on the module struct, and cannot be assigned, moved, or dropped;
+- requires the path to resolve; a path alias for an unresolved path is a
+  compile-time error.
+
+Example:
+
+```stilla
+const string = import("string");
+
+using string.upper as up;
+
+fn shout(text: str) -> str {
+    up(text)
+}
+```
+
+Here `up` is the alias of `string.upper` within the module.
+
 ---
 
 # 3. The `builtin` Module
 
-Every execution context automatically provides:
+`builtin` is an ordinary importable standard-library module (Standard
+Library §1). A program brings it into scope like any other module:
 
 ```stilla
-builtin
+const builtin = import("builtin");
 ```
 
-`builtin` is the only implicitly available module binding.
-
-It behaves as an implementation-provided module and cannot be shadowed.
+There is no implicitly available module binding and no reserved word:
+`builtin` may be bound, aliased, and shadowed like any other identifier.
 
 Core helpers include:
 
@@ -369,8 +426,6 @@ builtin.print
 builtin.str
 builtin.len
 builtin.range
-builtin.map
-builtin.fold
 builtin.box
 builtin.peek
 builtin.unbox
@@ -389,6 +444,8 @@ len(...)
 The explicit forms are always:
 
 ```stilla
+const builtin = import("builtin");
+
 builtin.print(...)
 builtin.len(...)
 ```
@@ -448,7 +505,7 @@ const
 Example:
 
 ```stilla
-const version: int64 = 1;
+const version: int32 = 1;
 const calc = import("calc");
 ```
 
@@ -466,13 +523,15 @@ An initializer may reference:
 
 - earlier module constants;
 - imported modules;
-- module functions;
+- module functions declared anywhere in the module, including functions declared after the constant; function references do not depend on initialization order;
 - types;
-- `builtin`.
+- the `builtin` module (imported like any other module).
 
 It may not reference a later module constant.
 
-An affine non-module constant is owned by the module execution context. It cannot be explicitly moved or explicitly dropped by source code and is destroyed during normal module/context teardown (Runtime §2.5).
+A module constant initializer must not transitively call a function that reads a module constant declared later than the initializer; such a program is rejected at compile time. This preserves the guarantee that module constants are read only after initialization (Runtime §2.3).
+
+A unique non-module constant is owned by the module execution context. It cannot be explicitly moved or explicitly dropped by source code and is destroyed during normal module/context teardown (Runtime §2.5).
 
 ---
 
@@ -488,9 +547,9 @@ Example:
 
 ```stilla
 fn add(
-    a: int64,
-    b: int64
-) -> int64 {
+    a: int32,
+    b: int32
+) -> int32 {
     a + b
 }
 ```
@@ -531,8 +590,8 @@ Given:
 
 ```stilla
 struct Counter {
-    value: int64;
-    next: fn(borrow Counter) -> int64;
+    value: int32;
+    next: fn(borrow Counter) -> int32;
 }
 ```
 
@@ -545,7 +604,7 @@ let counter =
     Counter{
         value: 10,
         next:
-            fn(borrow counter: Counter) -> int64 {
+            fn(borrow counter: Counter) -> int32 {
                 counter.value + 1
             }
     };
@@ -572,10 +631,10 @@ Functions and lambdas may not capture local bindings from an enclosing function 
 Illegal:
 
 ```stilla
-fn example() -> fn(int64) -> int64 {
+fn example() -> fn(int32) -> int32 {
     let factor = 2;
 
-    fn(x: int64) -> int64 {
+    fn(x: int32) -> int32 {
         x * factor
     }
 }
@@ -589,7 +648,7 @@ A function may reference:
 - module functions;
 - imported modules;
 - types;
-- `builtin`.
+- the `builtin` module (imported like any other module).
 
 Module members have execution-context lifetime and do not constitute closure capture.
 
@@ -599,7 +658,7 @@ Anonymous functions use the same syntax without a name:
 
 ```stilla
 let double =
-    fn(x: int64) -> int64 {
+    fn(x: int32) -> int32 {
         x * 2
     };
 ```
@@ -613,7 +672,7 @@ A function returns the value of its body block's final expression.
 Example:
 
 ```stilla
-fn add_one(x: int64) -> int64 {
+fn add_one(x: int32) -> int32 {
     x + 1
 }
 ```
@@ -628,6 +687,14 @@ If a function return type is omitted, it is inferred from the body.
 
 A recursive function must explicitly declare its return type.
 
+## 6.5 Order and recursion
+
+Functions and lambdas are **order-independent** within the module in which they are declared: a function body may reference any module-level function, including functions declared later in the same source file. Direct and **mutual recursion** are permitted. Because functions are non-capturing (§6.2) and are represented as monomorphic code references, a function reference does not depend on module-constant initialization order (§5).
+
+Every function participating in a recursion cycle — direct or mutual — must declare its return type explicitly (§6.4).
+
+A function type is a finite code-reference type. A struct or union may contain a function field whose type mentions the enclosing type; the function type breaks the storage cycle (§11.3) and does not make the enclosing type unique on that account (§10.3).
+
 ---
 
 # 7. Structs
@@ -636,8 +703,8 @@ A named struct defines a nominal record type.
 
 ```stilla
 struct Point {
-    x: float64;
-    y: float64;
+    x: float32;
+    y: float32;
 }
 ```
 
@@ -662,7 +729,7 @@ Function fields are ordinary fields:
 
 ```stilla
 struct Math {
-    add: fn(int64, int64) -> int64;
+    add: fn(int32, int32) -> int32;
 }
 ```
 
@@ -672,7 +739,7 @@ Example:
 let math =
     Math{
         add:
-            fn(a: int64, b: int64) -> int64 {
+            fn(a: int32, b: int32) -> int32 {
                 a + b
             }
     };
@@ -721,15 +788,15 @@ Example:
 const os = import("os");
 
 struct File {
-    fd: int64;
-    path: string;
+    fd: int32;
+    path: str;
 
     drop(file) {
         os.close(file.fd);
     }
 }
 
-fn open_file(path: string) -> File {
+fn open_file(path: str) -> File {
     File{
         fd: os.open(path),
         path: path
@@ -746,15 +813,15 @@ let file = open_file("data.txt");
 A module may naturally provide multiple construction functions:
 
 ```stilla
-fn open(path: string) -> File {
+fn open(path: str) -> File {
     ...
 }
 
-fn create(path: string) -> File {
+fn create(path: str) -> File {
     ...
 }
 
-fn from_fd(fd: int64) -> File {
+fn from_fd(fd: int32) -> File {
     ...
 }
 ```
@@ -770,15 +837,15 @@ let b = file.create("b.txt");
 
 No language-level constructor namespace is required.
 
-## 8.3 No constructor invariants in v1.2
+## 8.3 No constructor invariants in v1.3
 
 Raw struct construction remains available even if a type defines `drop`.
 
-Therefore Stilla v1.2 does not provide language-enforced private constructor invariants.
+Therefore Stilla v1.3 does not provide language-enforced private constructor invariants.
 
 Libraries that require stronger abstraction must rely on module conventions or host-provided opaque interfaces.
 
-Visibility control and opaque source-defined structs are outside the scope of Stilla v1.2.
+Visibility control and opaque source-defined structs are outside the scope of Stilla v1.3.
 
 ---
 
@@ -792,8 +859,8 @@ A named struct may define one destruction hook:
 
 ```stilla
 struct File {
-    fd: int64;
-    path: string;
+    fd: int32;
+    path: str;
 
     drop(file) {
         os.close(file.fd);
@@ -836,8 +903,8 @@ The argument visible inside a `drop` hook is a special borrowed **destruction vi
 
 A destruction view may:
 
-- read duplicable fields;
-- borrow affine fields;
+- read Copy fields;
+- borrow unique fields;
 - apply `builtin.peek` to a boxed field;
 - access ordinary members;
 - call functions whose relevant parameters are declared `borrow` (§10.6);
@@ -855,7 +922,7 @@ Partial movement from a destruction view is forbidden.
 
 ## 9.3 Destruction order
 
-The order in which a struct value is destroyed at runtime is defined in Runtime §6.2: the user `drop` hook runs first, then affine fields are destroyed in reverse declaration order, then the complete value is marked destroyed.
+The order in which a struct value is destroyed at runtime is defined in Runtime §6.2: the user `drop` hook runs first, then unique fields are destroyed in reverse declaration order, then the complete value is marked destroyed.
 
 ## 9.4 Explicit destruction
 
@@ -883,7 +950,7 @@ inspect(file);
 drop file;
 ```
 
-Explicit `drop` applies only to an owning **affine** local binding.
+Explicit `drop` applies only to an owning **unique** local binding.
 
 It cannot directly target:
 
@@ -899,15 +966,15 @@ The destruction sequence performed by an explicit `drop` at runtime is defined i
 
 ## 9.5 Automatic destruction
 
-During normal control flow, an affine local owner that has not been moved or explicitly dropped is automatically destroyed when its scope ends.
+During normal control flow, a unique local owner that has not been moved or explicitly dropped is automatically destroyed when its scope ends.
 
 The destruction order — reverse creation order — is defined in Runtime §6.1.
 
 ## 9.6 Structural destruction
 
-Values containing affine components are destroyed structurally.
+Values containing unique components are destroyed structurally.
 
-The precise ordering for each container form — struct fields, tuple elements, list elements, union payloads, `box[T]`, and module-owned affine constants — and the rule that only the active union variant is destroyed, are defined in Runtime §6.3.
+The precise ordering for each container form — struct fields, tuple elements, list elements, union payloads, `box[T]`, and module-owned unique constants — and the rule that only the active union variant is destroyed, are defined in Runtime §6.3.
 
 ---
 
@@ -916,59 +983,67 @@ The precise ordering for each container form — struct fields, tuple elements, 
 Stilla classifies owned runtime values as:
 
 ```text
-Duplicable
-Affine
+Copy
+Unique
 ```
 
 In addition, the type checker tracks non-owning **borrowed views** of values.
 
 A borrow is never an owner and never participates in destruction.
 
-This section states the static (compile-time) ownership model. The timing of runtime destruction — scope exit, full-expression temporaries, and module teardown — is defined in Runtime §6.
+This section states the static (compile-time) ownership model. Every value has ownership: some types have the **Copy** capability (§10.1), and a value without Copy is **unique** (§10.2). The timing of runtime destruction — scope exit, full-expression temporaries, and module teardown — is defined in Runtime §6.
 
-## 10.1 Duplicable values
+## 10.1 Copy capability
 
-Typical duplicable values include:
+Typical Copy values include:
 
 ```text
-int64
-float64
+byte
+int32
+uint32
+float32
 bool
-string
+str
 void
 fn(...)
 ```
 
-A duplicable value may be copied implicitly.
+A Copy value may be copied implicitly.
+
+Copy is a capability: a Copy value may be copied implicitly; a value without Copy is unique (§10.2); `drop` of a Copy value does nothing.
 
 Immutable strings may use reference-counted sharing.
 
 All first-class function values are monomorphic (§12).
 
-## 10.2 Affine values
+The top type `any` is **not** Copy: because it may hold a value of any type — including a unique value — `any` is always unique (§11.6). The type `hostdata` is **not** Copy: it wraps a host-owned opaque payload and is always unique (§11.7).
 
-A value is affine if:
+## 10.2 Unique values
+
+A value is unique if:
 
 - its named struct type defines `drop`; or
-- one of its owned components is affine.
+- one of its owned components is unique.
 
-Affine values cannot be implicitly copied.
+Unique values cannot be implicitly copied.
 
-An affine owner may be:
+A unique owner may be:
 
 - borrowed any number of times;
 - moved at most once;
 - destroyed at most once.
 
-Use after move or destruction is a compile-time error.
+Use after move or destruction is a compile-time error. A Copy owner is exempt: it may be used, moved, and destroyed any number of times, and `drop` of a Copy value has no effect. The implementation may analyse whether a binding could be a simple Copy (passed by value) and reduce it to a simple value when compiled.
 
 ## 10.3 Composite ownership
 
 Ownership classification is structural.
 
-For example, `tuple[A, B]` is affine if either `A` or `B` is affine.
+For example, `tuple[A, B]` is unique if either `A` or `B` is unique.
 
-A union is affine if any variant payload can contain an affine value.
+A union is unique if any variant payload can contain a unique value.
+
+The top type `any` is unique for the same structural reason: it may hold a value of any type, including a unique value (§11.6).
 
 For containers:
 
@@ -977,15 +1052,44 @@ list[T]
 box[T]
 ```
 
-the container is duplicable if `T` is duplicable and affine if `T` is affine.
+the container is Copy if `T` is Copy and unique if `T` is unique.
 
-An implementation may use reference-counted sharing for duplicable `list[T]` and `box[T]`.
+An implementation may use reference-counted sharing for Copy `list[T]` and `box[T]`.
 
-An affine list or box has unique source-language ownership.
+A non-Copy list or box has unique source-language ownership.
+
+**Recursive classification.** The rules of §10.2–§10.3 define a monotone system of equations over
+types. For a type whose type graph is cyclic, the equations have multiple solutions; Stilla v1.3
+resolves the ambiguity to the **greatest fixpoint**. A recursive occurrence reached through an owned
+component is classified as unique. A type is Copy only if its classification is well-founded
+without treating any recursive back-edge as unique.
+
+Consequences:
+
+- A recursive type with no `drop` hook, such as `Tree` in §11.1, is **unique**: it cannot be
+  copied implicitly, and `box[Tree]` / `list[Tree]` are unique containers.
+- The reference-counting sharing freedom of this section applies only to Copy containers,
+  which under this rule are never recursive.
+- A function type is not an owned component: it contains no payload and is always Copy
+  (§10.1). A type cycle that passes only through function types — for example
+  `struct F { call: fn(F) -> int32 }` — does not make the type unique and is not recursive storage
+  (§11.3).
+
+Implementations must resolve the classification to the greatest fixpoint; the choice is observable
+(§10.4) and is therefore normative. A worklist algorithm over the strongly connected components of
+the type graph is a conforming method.
 
 ## 10.4 Ownership transfer with `move`
 
-`move` always means ownership transfer.
+Consuming a binding `x` of type `T` either duplicates or transfers its value:
+
+```text
+consume x:
+    Copy(T)   => duplicate value, x remains live
+    !Copy(T)  => transfer ownership, x becomes dead (definitely released, §10.10)
+```
+
+`move` is the consume operator: `move x` consumes `x`.
 
 Ownership transfer from an existing local owner is explicit:
 
@@ -998,7 +1102,7 @@ Afterward `a` is invalid.
 
 `move` transfers the complete ownership represented by a local binding.
 
-Stilla v1.2 does not support partial move from:
+Stilla v1.3 does not support partial move from:
 
 - struct fields;
 - tuple elements;
@@ -1009,9 +1113,9 @@ Syntactically, `move` names a complete local binding.
 
 To extract owned components, the complete owner must first be consumed by destructuring (§14.6).
 
-## 10.5 Fresh affine values
+## 10.5 Fresh unique values
 
-A freshly produced affine value already carries fresh ownership and has no existing local owner to invalidate.
+A freshly produced unique value already carries fresh ownership and has no existing local owner to invalidate.
 
 Therefore:
 
@@ -1037,18 +1141,22 @@ Function parameters have three modes.
 ### Plain parameters
 
 ```stilla
-fn add_one(x: int64) -> int64 {
+fn add_one(x: int32) -> int32 {
     x + 1
 }
 ```
 
-A plain parameter accepts only a duplicable argument type. The argument is passed by ordinary value semantics and may be copied.
+A plain parameter accepts only a Copy argument type. The argument is passed by ordinary value semantics and may be copied.
 
-Passing an affine value to a plain parameter is a compile-time error.
+Passing a unique value to a plain parameter is a compile-time error.
+
+The top type `any` is the sole exception (§11.6): a plain parameter of type `any` accepts any argument type. A Copy argument is coerced into the `any` and may be copied; a unique argument must be written with explicit `move` at the call site, and its ownership transfers into the `any`.
 
 ### Borrow parameters
 
 ```stilla
+const builtin = import("builtin");
+
 fn inspect(borrow file: File) -> void {
     builtin.print(file.path);
 }
@@ -1065,13 +1173,15 @@ inspect(file);
 
 The caller remains the owner. A `borrow` parameter may receive an owned value or another compatible borrowed view.
 
-Inside the callee, a borrowed affine value may be read, matched non-consumingly, have members read, and be passed to another compatible `borrow` parameter.
+Inside the callee, a borrowed unique value may be read, matched non-consumingly, have members read, and be passed to another compatible `borrow` parameter.
 
 It may not be moved, explicitly dropped, returned as an owned value, or stored into an owning location.
 
 ### Move parameters
 
 ```stilla
+const builtin = import("builtin");
+
 fn consume(move file: File) -> void {
     builtin.print(file.path);
 }
@@ -1079,28 +1189,28 @@ fn consume(move file: File) -> void {
 
 A `move` parameter is an owner inside the callee.
 
-An existing affine local owner must be transferred explicitly:
+An existing unique local owner must be transferred explicitly:
 
 ```stilla
 consume(move file);
 ```
 
-A fresh affine expression transfers implicitly:
+A fresh unique expression transfers implicitly:
 
 ```stilla
 consume(open_file("data.txt"));
 ```
 
-Calling an ownership-taking parameter with an existing affine owner without `move` is a compile-time error.
+Calling an ownership-taking parameter with an existing unique owner without `move` is a compile-time error.
 
-For duplicable types, `move` is semantically equivalent to an ordinary copy: it has no observable ownership effect, does not invalidate the source binding, and may be omitted.
+For Copy types, `move` is semantically equivalent to an ordinary copy: it has no observable ownership effect, does not invalidate the source binding, and may be omitted.
 
 Function types preserve parameter mode:
 
 ```stilla
 fn(borrow File) -> void
 fn(move File) -> File
-fn(int64) -> int64
+fn(int32) -> int32
 ```
 
 ## 10.7 Borrow lifetime rule
@@ -1117,11 +1227,11 @@ A value seen through a borrow may not:
 - be stored into a module constant;
 - otherwise escape its borrow lifetime.
 
-Stilla v1.2 does not provide general user-visible lifetime parameters.
+Stilla v1.3 does not provide general user-visible lifetime parameters.
 
 Borrow lifetimes are intentionally restricted so they can be checked lexically.
 
-User-defined functions may not return a borrowed affine value in v1.2.
+User-defined functions may not return a borrowed unique value in v1.3.
 
 ## 10.8 Box borrowing and unboxing
 
@@ -1141,9 +1251,9 @@ builtin.unbox(move boxed)
 
 `builtin.peek(boxed)` creates a transient borrowed view of the contained `T`.
 
-For duplicable `T`, the value may be copied normally.
+For Copy `T`, the value may be copied normally.
 
-For affine `T`, the borrowed result:
+For unique `T`, the borrowed result:
 
 - may have members read;
 - may be matched non-consumingly;
@@ -1155,7 +1265,9 @@ The transient borrow lasts until the end of the enclosing full expression.
 This permits read-only recursive traversal:
 
 ```stilla
-fn contains(borrow tree: Tree, v: int64) -> bool {
+const builtin = import("builtin");
+
+fn contains(borrow tree: Tree, v: int32) -> bool {
     match (tree) {
         Tree::Empty => false,
         Tree::Node(left, x, right) =>
@@ -1174,9 +1286,29 @@ fn contains(borrow tree: Tree, v: int64) -> bool {
 
 Partial movement through a borrowed box is forbidden.
 
-## 10.9 Affine temporaries
+## 10.9 Unique temporaries
 
-When an affine temporary is destroyed at runtime — at the end of the containing full expression, in reverse creation order, unless interrupted by panic — is defined in Runtime §6.4.
+When a unique temporary is destroyed at runtime — at the end of the containing full expression, in reverse creation order, unless interrupted by panic — is defined in Runtime §6.4.
+
+## 10.10 Conditional release
+
+A **conditional construct** is an `if`/`else` expression (§13.2), a `match` expression (§13.3), or a short-circuit `and`/`or` operand (§16.2).
+
+Let `v` be a unique local binding whose scope encloses a conditional construct `C`. If any normal-control-flow path through `C` **releases** `v` — by `move` (§10.4), explicit `drop` (§9.4), or a consuming destructure of its whole owner (§14.6) — and some other normal path does not, then `v` is **maybe-unique**: it may not be used, borrowed, moved, or dropped afterward (compile-time error, §10.2 use-after-move), and its scope-end destruction is conditional — the implementation tracks at runtime whether the binding was already released and destroys it only if it is still alive.
+
+Consequently, after a conditional construct `C`, every unique binding whose scope encloses `C` is either **definitely owned**, **maybe-unique**, or **definitely released**:
+
+- a definitely-owned binding behaves normally: it may be borrowed, moved, dropped, or automatically destroyed at scope end;
+- a maybe-unique binding is released on some but not all normal-control-flow paths: it may not be used, borrowed, moved, or dropped afterward, and its scope-end destruction is conditional — the implementation tracks whether the binding was already released and destroys it only if it is still alive;
+- a definitely-released binding was released on every normal path: it may not be used, borrowed, moved, or dropped afterward, and is not automatically destroyed at scope end; any such use is a compile-time error (§10.2, use-after-move).
+
+For a maybe-unique binding, the runtime liveness flag is introduced only when the implementation cannot statically establish that the binding was released on every path (e.g. a binding released in one arm of an `if` but not the other).
+
+Notes:
+
+- A consuming match `match (move v)` releases `v` on every path and is unconditional; this rule governs only moves of *enclosing* bindings that occur inside arm bodies.
+- Borrowing does not participate: a borrow never releases (§10.6, §10.7).
+- Panic and trap paths are not normal control flow (Runtime §7) and neither satisfy nor violate the release requirement; no destruction runs as a consequence of termination.
 
 ---
 
@@ -1196,14 +1328,14 @@ union Option[T] {
 Construction:
 
 ```stilla
-Option[int64]::Some(42)
-Option[int64]::None
+Option[int32]::Some(42)
+Option[int32]::None
 ```
 
 When type arguments are inferable from context, they may be omitted:
 
 ```stilla
-let x: Option[int64] =
+let x: Option[int32] =
     Option::Some(42);
 ```
 
@@ -1239,8 +1371,8 @@ A `union` declaration creates a nominal sum type. Two separately declared unions
 `type` defines a transparent alias rather than a new nominal type:
 
 ```stilla
-type UserId = int64;
-type MaybeInt = Option[int64];
+type UserId = int32;
+type MaybeInt = Option[int32];
 ```
 
 After alias expansion, the alias and aliased type are the same type for static semantics.
@@ -1251,20 +1383,22 @@ Generic aliases are compile-time templates:
 type PairList[T] = list[tuple[T, T]];
 ```
 
-Stilla v1.2 has no anonymous struct or anonymous union type syntax.
+Stilla v1.3 has no anonymous struct or anonymous union type syntax.
 
 ## 11.3 Recursive types
 
 Recursive inline storage is forbidden.
 
-Every recursive storage cycle must pass through indirection such as `box[T]` or `list[T]`.
+Every recursive storage cycle must pass through indirection such as `box[T]`, `list[T]`, or a function type (§10.3).
+
+The unique classification of recursive types follows the greatest-fixpoint rule of §10.3.
 
 ## 11.4 Tuple
 
 Tuple type:
 
 ```stilla
-tuple[int64, string, bool]
+tuple[int32, str, bool]
 ```
 
 Literal:
@@ -1280,7 +1414,7 @@ The empty tuple `()` is the unique `void` value.
 List type:
 
 ```stilla
-list[int64]
+list[int32]
 ```
 
 Literal:
@@ -1291,17 +1425,104 @@ Literal:
 
 Lists are immutable.
 
-Indexing does not mutate a list.
+Indexing uses the `@[...]` syntax and does not mutate a list:
 
-An indexed affine element is borrowed and cannot be independently moved.
+```stilla
+let first = values@[0];
+```
+
+An indexed unique element is borrowed and cannot be independently moved.
 
 `list[T]` is the language's abstract sequence type. Concrete dense sequences such as `array[T]` are standard-library types, not keywords.
+
+## 11.6 The top type `any`
+
+`any` is the language's **top type**: every value type `T` coerces to `any`. The bottom type `never` has no values and coerces to every type; `any` is the inverse — it accepts every type and coerces to no other type (§18 *Typing*).
+
+`any` may hold a value of any type:
+
+```stilla
+let a: any = 42;                    // Copy int32, copied in
+let b: any = "hello";               // Copy str, copied in
+let c: any = move open_file("f");   // unique File, moved in
+```
+
+The coercion is implicit. A Copy source value is copied into the `any`; a unique source value must be moved — an existing unique owner requires explicit `move` at the coercion site — and its ownership transfers into the `any`.
+
+`any` is **unique** (§10.3): because it may hold a unique value, an `any` value may be used at most once, must be destroyed exactly once, and is not implicitly copyable. `any` therefore does not appear in the Copy list of §10.1, and containers of `any` — `list[any]`, `box[any]`, `tuple[..., any]` — are unique.
+
+An `any` value carries a **runtime type tag** recording its concrete payload type (Runtime §8). The tag is deterministic and comparable; Stilla inspects it only through the two typed-recovery operations of §11.6.1 and §11.6.2. No member access, indexing, operator, or equality is defined on `any` (§16.3), and `any` does not coerce to any other type (§18 *Typing*). Destruction of an `any` value destroys the tagged payload by the payload type's own destruction rules (Core §9, Runtime §6).
+
+The primary uses are:
+
+- **heterogeneous data** — unique containers such as `box[any]` and `list[any]` can carry values of different types together;
+- **typed recovery** — `as` (§11.6.1) and `match` type-test patterns (§11.6.2) recover a payload as a specific type, trapping on mismatch;
+- **opaque pass-through** — a Stilla program may receive, store, and forward `any` values without inspecting them.
+
+## 11.6.1 Recovery by `as`
+
+An `any` value may be recovered by an `as` cast naming a concrete type:
+
+```stilla
+let b = a as int32;
+```
+
+The target type `T` must be a concrete Stilla type other than `any` and `never`; in generic code the target is the specialization of `T` (§12). The cast reads the runtime tag:
+
+- if the payload type is `T`, the payload is extracted;
+- otherwise the program traps: **invalid `any` cast** (Runtime §7.2). The trap terminates without unwinding (§7.1), so no partial ownership state remains.
+
+Ownership follows the target type, statically:
+
+- if `T` is Copy (§10.1), the payload is copied out and the source `any` remains definitely owned; the same value may be recovered again;
+- if `T` is unique, the source must be moved: `(move a) as T`. The complete `any` is consumed (§10.4), ownership of the payload transfers to the result, and the source becomes definitely released (§10.10);
+- `hostdata` is unique, so `(move a) as hostdata` is the only recovery that yields a `hostdata` value.
+
+## 11.6.2 Recovery by `match`
+
+A `match` may test an `any` value with **type-test patterns**:
+
+```stilla
+match a {
+    int32 n => ...,
+    str s => ...,
+    File f => ...,
+    _ => ...          // required
+}
+```
+
+A type-test pattern is a concrete type name, optionally followed by a binding identifier (§14.7). It matches when the runtime tag equals that type. Because the tag space is open — any program may define new types — a `match` over an `any` value must include a wildcard `_` arm.
+
+Binding mode follows §13.4:
+
+- in a non-consuming match `match (a)`, the scrutinee is borrowed: Copy arm bindings are copies, and unique arm bindings are borrows usable only within the selected arm;
+- in a consuming match `match (move a)`, the complete `any` is transferred: Copy arm bindings are copies, unique arm bindings are owners of the extracted payload, and the wildcard arm discards the payload.
+
+Type-test patterns may reference generic parameters; under monomorphization (§12) they resolve to concrete tags.
+
+## 11.7 The `hostdata` type
+
+`hostdata` is a distinct nominal type carrying an **opaque, host-defined payload**. It is unrelated to `any` (§11.6): a `hostdata` value is created only by a host binding and leaves Stilla only by being handed back to the host or by destruction.
+
+Only the host constructs `hostdata` values, through host functions and module members (§2.6, Runtime §3.1). No Stilla value coerces into `hostdata`, and `hostdata` is not a top type.
+
+Stilla defines no operation on `hostdata` other than moving, borrowing, storing, passing along, and handing to the host. No member access, indexing, operator, cast, pattern, equality, or hash is defined on `hostdata`, and it coerces to no other type (§16.3).
+
+`hostdata` is **unique** (§10.3): a `hostdata` value may be used at most once, must be destroyed exactly once, and is not implicitly copyable. `hostdata` does not appear in the Copy list of §10.1, and containers of `hostdata` — `list[hostdata]`, `box[hostdata]`, `tuple[..., hostdata]` — are unique.
+
+Destruction of a `hostdata` value — automatic (Core §9.5), explicit `drop` (Core §9.4), or container destruction — returns the opaque payload to the host for disposal (Runtime §3.4, §7.3); this is host cleanup, not execution of a Stilla `drop` hook.
+
+The primary uses are:
+
+- **host bindings** — host-provided functions and module members may accept and return `hostdata` for opaque payloads;
+- **opaque handles** — a host may hand a Stilla program a `hostdata` value wrapping a host-owned resource; Stilla tracks it with unique ownership and hands it back without inspecting it;
+- **host-bound buffering** — unique containers such as `box[hostdata]` and `list[hostdata]` can carry opaque payloads that a Stilla program collects and forwards to the host as a whole.
 
 ---
 
 # 12. Generics
 
-Generics in Stilla v1.2 are compile-time syntax sugar for specialization (monomorphization).
+Generics in Stilla v1.3 are compile-time syntax sugar for specialization (monomorphization).
 
 They are expanded to concrete types and monomorphic functions before runtime semantics. They are not runtime polymorphic values.
 
@@ -1355,10 +1576,10 @@ Conceptually:
 
 ```text
 identity(42)
-    ↓ infer T = int64
-identity::[int64](42)
+    ↓ infer T = int32
+identity::[int32](42)
     ↓ compile-time expansion
-<concrete fn(int64) -> int64>(42)
+<concrete fn(int32) -> int32>(42)
 ```
 
 No generic dispatch occurs at runtime.
@@ -1368,7 +1589,7 @@ No generic dispatch occurs at runtime.
 Explicit function specialization uses:
 
 ```stilla
-identity::[int64](42)
+identity::[int32](42)
 ```
 
 The syntax `::[...]` is compile-time specialization syntax. It does not perform a runtime postfix operation.
@@ -1376,8 +1597,8 @@ The syntax `::[...]` is compile-time specialization syntax. It does not perform 
 Type specialization uses:
 
 ```stilla
-Pair[int64, string]
-Option[int64]
+Pair[int32, str]
+Option[int32]
 ```
 
 ## 12.4 Generic functions are not first-class before specialization
@@ -1395,16 +1616,16 @@ is invalid.
 This is valid:
 
 ```stilla
-let f = identity::[int64];
+let f = identity::[int32];
 ```
 
 and `f` has the monomorphic type:
 
 ```stilla
-fn(move int64) -> int64
+fn(move int32) -> int32
 ```
 
-For a duplicable `int64`, the `move` mode has no observable ownership effect, but it remains part of the function type.
+For a Copy `int32`, the `move` mode has no observable ownership effect, but it remains part of the function type.
 
 Generic functions stored in modules follow the same rule: `module.generic_name` may participate in compile-time call inference or explicit specialization, but only a concrete specialization becomes a runtime function value.
 
@@ -1412,13 +1633,13 @@ Generic functions stored in modules follow the same rule: `module.generic_name` 
 
 Function types are always monomorphic.
 
-The following is not a Stilla v1.2 type:
+The following is not a Stilla v1.3 type:
 
 ```text
 fn[T](T) -> T
 ```
 
-Generic lambdas are also not supported in v1.2.
+Generic lambdas are also not supported in v1.3.
 
 This restriction keeps runtime function representation independent of the generic system.
 
@@ -1457,6 +1678,9 @@ Example:
 }
 ```
 
+A block may contain `using` declarations (§2.8); an alias declared inside a
+block is visible only within that block.
+
 ## 13.2 `if`
 
 `if` is an expression.
@@ -1476,7 +1700,7 @@ Parentheses are mandatory.
 
 This removes ambiguity between control-flow bodies and struct construction.
 
-Both branches must have the same type, except that `never` may coerce to any type.
+Both branches must have the same type, except that `never` may coerce to any type and any type may coerce to the top type `any` (§11.6); the `if` expression then has the wider of the two types.
 
 Without `else`, the expression must have type `void`.
 
@@ -1518,11 +1742,12 @@ Point{ x, y }
 Option::Some(x)
 []
 [head, ..tail]
+int32 n           // type-test pattern (§11.6.2, §14.7)
 ```
 
 ## 13.4 Borrowing and consuming matches
 
-Matching an affine owner normally borrows it:
+Matching a unique owner normally borrows it:
 
 ```stilla
 match (value) {
@@ -1530,7 +1755,7 @@ match (value) {
 }
 ```
 
-Affine pattern bindings produced by such a match are borrowed for the lifetime of the selected match arm.
+Unique pattern bindings produced by such a match are borrowed for the lifetime of the selected match arm.
 
 They may be read or passed to `borrow` parameters, but they are not owners.
 
@@ -1544,76 +1769,23 @@ match (move value) {
 
 the complete value is transferred into the match operation.
 
-Affine payload bindings then become owners within the selected arm.
+Unique payload bindings then become owners within the selected arm.
 
 This never performs a partial move from the original binding: the original binding is invalidated as a whole.
 
-## 13.5 `for`
+## 13.5 Iteration
 
-`for` uses an explicitly delimited header:
-
-```stilla
-for (item in values) {
-    builtin.print(
-        builtin.str(item)
-    );
-}
-```
-
-`for` has type `void`.
-
-It does not provide loop-carried mutable state.
-
-The iterable expression is evaluated exactly once before iteration begins (Runtime §5).
-
-Iteration proceeds in the sequence's defined forward order. For `list[T]`, this is increasing index order (Runtime §5).
-
-Iteration over an affine collection without `move` borrows its elements:
-
-```stilla
-for (item in values) {
-    inspect(item);
-}
-```
-
-A consuming iteration uses:
-
-```stilla
-for (item in move values) {
-    consume(move item);
-}
-```
-
-where the collection is consumed as a whole and each affine element binding becomes an owner as it is yielded.
-
-The `for` pattern must be irrefutable for the element type (§14).
-
-Use `builtin.fold` for accumulation.
-
-Example:
-
-```stilla
-let total =
-    builtin.fold(
-        builtin.range(1, 10),
-        0,
-        fn(move acc: int64, move x: int64) -> int64 {
-            acc + x
-        }
-    );
-```
-
-For duplicable instantiated types such as `int64`, `move` has no observable ownership effect.
+The core language defines no iteration construct. Repetition is expressed with ordinary recursive function calls (§6.5); a library may provide iteration helpers as ordinary module functions (§8), invoked like any other call. The core language has no special knowledge of such helpers.
 
 ---
 
 # 14. Patterns
 
-Patterns are used by `let`, `match`, and `for`.
+Patterns are used by `let` and `match`.
 
 `match` accepts the full pattern language.
 
-`let` and `for` accept only **irrefutable patterns** so that binding never introduces an implicit runtime failure path.
+`let` accepts only **irrefutable patterns** so that binding never introduces an implicit runtime failure path.
 
 Irrefutable forms are:
 
@@ -1680,7 +1852,7 @@ Option::None
 Generic type arguments may be written when required:
 
 ```stilla
-Option[int64]::Some(value)
+Option[int32]::Some(value)
 ```
 
 ## 14.5 List pattern
@@ -1698,7 +1870,7 @@ The rest binding receives the remaining list.
 
 ## 14.6 Ownership and destructuring
 
-Destructuring an affine rvalue transfers ownership into affine pattern bindings.
+Destructuring a unique rvalue transfers ownership into unique pattern bindings.
 
 Example:
 
@@ -1725,7 +1897,7 @@ is invalid.
 
 `first` and `second` are independent owners.
 
-This is the supported way to decompose affine aggregate ownership **when the aggregate type does not define its own `drop` hook**.
+This is the supported way to decompose unique aggregate ownership **when the aggregate type does not define its own `drop` hook**.
 
 A struct that defines `drop` may be destructured only through a borrowing pattern. Consuming destructuring of such a struct is a compile-time error, because moving out its fields would conflict with the struct's own destruction lifecycle.
 
@@ -1736,6 +1908,21 @@ move pair.first
 ```
 
 is illegal.
+
+## 14.7 Type-test pattern
+
+A type-test pattern matches an `any` value (§11.6.2):
+
+```stilla
+int32 n
+str s
+File f
+list[int32] xs
+tuple[int32, str] t
+_              // the required wildcard for `any`
+```
+
+The pattern is a concrete type name, optionally followed by a binding identifier. It matches when the runtime tag equals that type. It is refutable and is accepted only by `match` (§13.3), and only for a scrutinee of type `any`. Under monomorphization (§12) generic parameters resolve to concrete tags. A `match` over an `any` value must include a wildcard `_` arm (§11.6.2).
 
 ---
 
@@ -1765,7 +1952,7 @@ Examples:
 ```stilla
 Option::None
 Option::Some(42)
-Result[string, int64]::Ok("done")
+Result[str, int32]::Ok("done")
 ```
 
 It is not general type-member lookup.
@@ -1777,7 +1964,7 @@ It is not general type-member lookup.
 Example:
 
 ```stilla
-identity::[int64](42)
+identity::[int32](42)
 ```
 
 After specialization, the result is an ordinary monomorphic function value.
@@ -1816,19 +2003,19 @@ Comparison:
 Boolean:
 
 ```text
-&&  ||  !
+and  or  !
 ```
 
 Explicit conversion:
 
 ```stilla
-value as float64
+value as float32
 ```
 
 String concatenation is only:
 
 ```text
-string + string
+str + str
 ```
 
 There is no implicit conversion such as:
@@ -1849,8 +2036,8 @@ instead.
 
 From lowest to highest:
 
-1. `||`
-2. `&&`
+1. `or`
+2. `and`
 3. comparisons
 4. `+ -`
 5. `* / %`
@@ -1869,7 +2056,7 @@ a < b < c
 Write:
 
 ```stilla
-a < b && b < c
+a < b and b < c
 ```
 
 ## 16.2 Evaluation order
@@ -1882,24 +2069,30 @@ Stilla uses a single deterministic evaluation-order rule; it is defined in Runti
 
 Core arithmetic is defined as follows:
 
-- `int64 + - * / % int64 -> int64`;
-- `float64 + - * / float64 -> float64`;
-- `string + string -> string`;
-- unary `-` accepts `int64` or `float64`;
-- `!`, `&&`, and `||` accept `bool`;
+- `int32 + - * / % int32 -> int32`;
+- `uint32 + - * / % uint32 -> uint32`;
+- `float32 + - * / float32 -> float32`;
+- `str + str -> str`;
+- unary `-` accepts `int32`, `uint32`, or `float32`;
+- `!`, `and`, and `or` accept `bool`;
 - `< <= > >=` accept operands of the same numeric type;
-- `== !=` are required for `int64`, `float64`, `bool`, and `string`.
+- `== !=` are required for `byte`, `int32`, `uint32`, `float32`, `bool`, and `str`.
 
-The Stilla v1.2 core does not define equality for functions, structs, unions, tuples, lists, boxes, or modules. Libraries may provide explicit equality helpers.
+The Stilla v1.3 core does not define equality for `any`, functions, structs, unions, tuples, lists, boxes, or modules. Libraries may provide explicit equality helpers.
+
+No operator is defined on `hostdata` (§11.7), and none is defined on `any` other than `as` and `match` type-testing (§11.6): an `any` value can be moved, borrowed, stored, passed along, handed to the host, recovered by `as`, and tested by `match`.
 
 Core `as` conversions are:
 
 ```text
-int64 as float64
-float64 as int64
+int32 as float32
+float32 as int32
+any as T        // T a concrete type, T ≠ any, never (Core §11.6.1)
 ```
 
 No other core conversion is implied by `as`.
+
+`as` is not extended to `hostdata`: no cast is defined from or to `hostdata` (§11.7).
 
 The runtime behavior of these operations — IEEE 754 representation and arithmetic, floating equality, overflow and division traps, and invalid-cast traps — is defined in Runtime §7.2.
 
@@ -1911,24 +2104,25 @@ The runtime behavior of these operations — IEEE 754 representation and arithme
 
 ```stilla
 const os = import("os");
+const builtin = import("builtin");
 
 struct File {
-    fd: int64;
-    path: string;
+    fd: int32;
+    path: str;
 
     drop(file) {
         os.close(file.fd);
     }
 }
 
-fn open(path: string) -> File {
+fn open(path: str) -> File {
     File{
         fd: os.open(path),
         path: path
     }
 }
 
-fn create(path: string) -> File {
+fn create(path: str) -> File {
     File{
         fd: os.create(path),
         path: path
@@ -1989,35 +2183,45 @@ A new local binding may shadow an existing binding.
 
 ## Typing
 
-Function arguments and return values must match exactly unless the source type is `never` or a transparent `type` alias expands to the required type.
+Function arguments and return values must match exactly unless the source type is `never`, the required type is the top type `any`, or a transparent `type` alias expands to the required type (§11.6).
+
+`any` carries a runtime type tag identifying its payload type; recovery requires naming the type explicitly, via `a as T` (§11.6.1) or a `match` type-test pattern (§11.6.2). Stilla defines no equality on `any`. `hostdata` is opaque and tagless; no cast, pattern, or equality is defined on it (§11.7).
 
 ## Conversion
 
-No implicit numeric or string conversions exist.
+No implicit numeric or `str` conversions exist.
+
+Coercion to the top type `any` is the sole implicit widening (§11.6).
 
 ## Closures
 
 A function or lambda may not reference local bindings belonging to an enclosing function scope.
 
+## Functions
+
+Functions are order-independent within a module; direct and mutual recursion are permitted (§6.5). Every function in a recursion cycle declares its return type explicitly. Module constant initialization must not transitively read a later-declared module constant (§5).
+
 ## Match
 
 A match over a union must be exhaustive.
 
-A non-consuming match of an affine value borrows the scrutinee and produces borrowed affine bindings.
+A non-consuming match of a unique value borrows the scrutinee and produces borrowed unique bindings.
 
 A `match (move owner)` consumes the complete owner and may produce owning payload bindings, except that a struct defining its own `drop` hook cannot be consumingly destructured into fields.
 
 ## Patterns
 
-`let` and `for` require irrefutable patterns.
+`let` requires an irrefutable pattern.
 
-Refutable patterns are accepted only by `match` in Stilla v1.2.
+Refutable patterns are accepted only by `match` in Stilla v1.3.
 
 ## Ownership
 
-An affine owner may be borrowed any number of times, moved at most once, and destroyed at most once.
+A unique owner may be borrowed any number of times, moved at most once, and destroyed at most once.
 
 Use after move or destruction is a compile-time error.
+
+If a binding is released on some but not all normal paths through a conditional construct, it becomes **maybe-unique** and is unusable after the join; its automatic destruction is guarded by its runtime liveness state (§10.10). A definitely-released binding is unusable and is not automatically destroyed at scope end.
 
 ## Whole-owner rule
 
@@ -2031,27 +2235,27 @@ Consuming destructuring of a struct that defines its own `drop` hook is forbidde
 
 `borrow` never transfers ownership.
 
-A borrowed affine value cannot be moved, dropped, returned as owned, or stored into an owning location.
+A borrowed unique value cannot be moved, dropped, returned as owned, or stored into an owning location.
 
-Borrow lifetimes are lexically bounded; Stilla v1.2 has no user-visible lifetime parameters and no user-defined borrowed affine return values.
+Borrow lifetimes are lexically bounded; Stilla v1.3 has no user-visible lifetime parameters and no user-defined borrowed unique return values.
 
 ## Parameters
 
-A plain parameter accepts only duplicable argument types.
+A plain parameter accepts only Copy argument types.
 
 A `borrow` parameter receives a non-owning view and leaves the caller's ownership unchanged.
 
 A `move` parameter receives ownership.
 
-Passing an existing affine local owner to a `move` parameter requires `move owner` at the call site.
+Passing an existing unique local owner to a `move` parameter requires `move owner` at the call site.
 
-A fresh affine value may transfer directly without an explicit `move` token.
+A fresh unique value may transfer directly without an explicit `move` token.
 
 ## Destruction
 
-Every live affine local owner is destroyed when its scope ends during normal control flow unless it has already been moved or explicitly dropped.
+Every live unique local owner is destroyed when its scope ends during normal control flow unless it has already been moved or explicitly dropped.
 
-Affine temporaries are destroyed at the end of their full expression in reverse creation order during normal control flow (Runtime §6.4).
+Unique temporaries are destroyed at the end of their full expression in reverse creation order during normal control flow (Runtime §6.4).
 
 ## User drop hook
 
@@ -2063,7 +2267,7 @@ Its destruction-view argument cannot be moved, dropped, returned, or used to tra
 
 ## Structural destruction
 
-After a struct's user hook completes normally, affine fields are destroyed in reverse declaration order (Runtime §6.2).
+After a struct's user hook completes normally, unique fields are destroyed in reverse declaration order (Runtime §6.2).
 
 ## Panic and traps
 
@@ -2077,11 +2281,11 @@ Host cleanup after termination is outside Stilla source semantics.
 
 Unless explicitly stated otherwise, subexpressions are evaluated exactly once from left to right (Runtime §5).
 
-`&&` and `||` short-circuit (Runtime §5).
+`and` and `or` short-circuit (Runtime §5).
 
 ## Recursion
 
-Recursive value types must contain indirection on every recursive storage cycle.
+Recursive value types must contain indirection on every recursive storage cycle, and their ownership classification follows the greatest-fixpoint rule of §10.3.
 
 ## Modules
 
@@ -2135,698 +2339,3 @@ Inferred or explicit specialization must produce a concrete function before runt
 
 ---
 
-# 19. Lexical and Syntactic Grammar
-
-## 19.1 Grammar notation
-
-The normative grammar uses **ABNF** as defined by RFC 5234.
-
-Case-sensitive literal strings use RFC 7405 `%s"..."` notation.
-
-Stilla source is case-sensitive.
-
-The syntactic ABNF is defined over lexical tokens.
-
-Whitespace and comments separate tokens and are otherwise discarded before syntactic parsing.
-
-## 19.2 Lexical grammar
-
-```abnf
-identifier      = letter *( letter / digit / "_" )
-
-letter          = %x41-5A
-                / %x61-7A
-                / "_"
-
-digit           = %x30-39
-
-integer         = 1*digit
-
-float           = 1*digit "." 1*digit
-
-string          = DQUOTE *( string-char / escape ) DQUOTE
-
-escape          = "\\" ( DQUOTE
-                      / "\\"
-                      / "n"
-                      / "r"
-                      / "t" )
-
-string-char     = <any Unicode scalar value except
-                   DQUOTE, "\\", or control characters>
-
-bool-literal    = %s"true"
-                / %s"false"
-
-void-literal    = "(" ")"
-```
-
-The leading `-` is an operator and is not part of an integer or float token.
-
-Identifiers are ASCII in Stilla v1.2. String contents may contain Unicode.
-
-## 19.3 Comments
-
-Line comments begin with `//` and continue to end of line.
-
-Block comments begin with `/*` and end with `*/`.
-
-Block comments may nest. Nested comment recognition is performed lexically.
-
-## 19.4 Reserved words
-
-The following identifiers are reserved:
-
-```text
-as
-bool
-borrow
-box
-builtin
-const
-drop
-else
-false
-float64
-fn
-for
-if
-import
-in
-int64
-let
-list
-match
-move
-never
-string
-struct
-true
-tuple
-type
-union
-void
-```
-
-The removed historical words `def`, `gen`, and `delete` have no special syntactic meaning.
-
-The collection type names `array` and `hashmap` are not reserved words.
-
-## 19.5 Program structure
-
-```abnf
-program =
-    *module-item
-
-module-item =
-      const-def
-    / func-def
-    / type-def
-    / struct-def
-    / union-def
-```
-
-## 19.6 Module constants
-
-```abnf
-const-def =
-    %s"const"
-    identifier
-    [ ":" type ]
-    "="
-    expression
-    ";"
-```
-
-Static semantics restrict module-resident generated struct values to module-level `const` bindings and restrict `import-expression` to this initializer position (§2.2).
-
-## 19.7 Functions
-
-```abnf
-func-def =
-    %s"fn"
-    identifier
-    [ type-params ]
-    "(" param-list ")"
-    [ "->" type ]
-    block
-
-lambda =
-    %s"fn"
-    "(" param-list ")"
-    [ "->" type ]
-    block
-
-param-list =
-    [ param *( "," param ) ]
-
-param =
-    [ %s"borrow" / %s"move" ]
-    identifier
-    ":"
-    type
-
-function-type =
-    %s"fn"
-    "(" [ function-param-type
-          *( "," function-param-type ) ] ")"
-    "->"
-    type
-
-function-param-type =
-    [ %s"borrow" / %s"move" ]
-    type
-```
-
-A plain parameter accepts only duplicable types by static semantics.
-
-A `borrow` parameter is non-owning.
-
-A `move` parameter is owning.
-
-Function types are monomorphic. Generic parameters are permitted on named function declarations but not on lambdas or function types.
-
-## 19.8 Generic parameters
-
-```abnf
-type-params =
-    "["
-    identifier
-    *( "," identifier )
-    "]"
-
-type-args =
-    "["
-    type
-    *( "," type )
-    "]"
-```
-
-Generic syntax is compile-time syntax (§12).
-
-## 19.9 Types
-
-```abnf
-type =
-      primitive-type
-    / named-type
-    / list-type
-    / box-type
-    / tuple-type
-    / function-type
-
-primitive-type =
-      %s"int64"
-    / %s"float64"
-    / %s"bool"
-    / %s"string"
-    / %s"void"
-    / %s"never"
-
-named-type =
-    type-path
-    [ type-args ]
-
-type-path =
-    identifier
-    *( "." identifier )
-
-list-type =
-    %s"list"
-    "["
-    type
-    "]"
-
-box-type =
-    %s"box"
-    "["
-    type
-    "]"
-
-tuple-type =
-    %s"tuple"
-    "["
-    [ type *( "," type ) ]
-    "]"
-```
-
-Stilla v1.2 has no anonymous struct or anonymous union types.
-
-## 19.10 Type aliases
-
-```abnf
-type-def =
-    %s"type"
-    identifier
-    [ type-params ]
-    "="
-    type
-    ";"
-```
-
-A type alias is transparent.
-
-## 19.11 Named structs
-
-```abnf
-struct-def =
-    %s"struct"
-    identifier
-    [ type-params ]
-    "{"
-    *field-decl
-    [ drop-decl ]
-    "}"
-
-field-decl =
-    identifier
-    ":"
-    type
-    ";"
-
-drop-decl =
-    %s"drop"
-    "(" identifier ")"
-    block
-```
-
-A `drop-decl`, when present, must appear after all fields.
-
-A struct may contain at most one `drop-decl`.
-
-## 19.12 Named unions
-
-```abnf
-union-def =
-    %s"union"
-    identifier
-    [ type-params ]
-    "{"
-    [ variant-decl *( "," variant-decl ) [ "," ] ]
-    "}"
-
-variant-decl =
-    identifier
-    [ "(" type *( "," type ) ")" ]
-```
-
-A union declaration creates a nominal sum type.
-
-## 19.13 Blocks
-
-```abnf
-block =
-    "{"
-    *statement
-    [ expression ]
-    "}"
-```
-
-A final expression is distinguished from an expression statement by the absence of a trailing semicolon.
-
-## 19.14 Statements
-
-```abnf
-statement =
-      let-stmt
-    / drop-stmt
-    / for-stmt
-    / expr-stmt
-    / empty-stmt
-
-let-stmt =
-    %s"let"
-    pattern
-    [ ":" type ]
-    "="
-    expression
-    ";"
-
-drop-stmt =
-    %s"drop"
-    identifier
-    ";"
-
-for-stmt =
-    %s"for"
-    "("
-    pattern
-    %s"in"
-    expression
-    ")"
-    block
-
-expr-stmt =
-    expression
-    ";"
-
-empty-stmt =
-    ";"
-```
-
-Static semantics require the `let` and `for` patterns to be irrefutable.
-
-## 19.15 Expressions
-
-```abnf
-expression =
-    logic-or
-
-logic-or =
-    logic-and
-    *( "||" logic-and )
-
-logic-and =
-    comparison
-    *( "&&" comparison )
-
-comparison =
-    addition
-    [ comparison-op addition ]
-
-comparison-op =
-      "=="
-    / "!="
-    / "<"
-    / "<="
-    / ">"
-    / ">="
-
-addition =
-    multiply
-    *( add-op multiply )
-
-add-op =
-      "+"
-    / "-"
-
-multiply =
-    unary
-    *( multiply-op unary )
-
-multiply-op =
-      "*"
-    / "/"
-    / "%"
-
-unary =
-      "-" unary
-    / "!" unary
-    / move-expression
-    / cast
-
-move-expression =
-    %s"move"
-    identifier
-
-cast =
-    postfix
-    *( %s"as" type )
-```
-
-`move` syntactically names a complete local binding. There is no general `borrow` expression; borrowing is introduced by borrow parameters and defined borrowing operations.
-
-## 19.16 Postfix expressions
-
-```abnf
-postfix =
-    primary
-    *postfix-suffix
-
-postfix-suffix =
-      member-suffix
-    / index-suffix
-    / call-suffix
-    / specialization-suffix
-
-member-suffix =
-    "."
-    identifier
-
-index-suffix =
-    "["
-    expression
-    "]"
-
-call-suffix =
-    "("
-    arg-list
-    ")"
-
-specialization-suffix =
-    "::"
-    type-args
-
-arg-list =
-    [ expression *( "," expression ) ]
-```
-
-`specialization-suffix` is accepted syntactically as postfix syntax but is eliminated during compile-time generic specialization. It cannot survive into runtime evaluation.
-
-## 19.17 Primary expressions
-
-```abnf
-primary =
-      literal
-    / struct-construct
-    / variant-expression
-    / tuple-literal
-    / list-literal
-    / lambda
-    / if-expression
-    / match-expression
-    / import-expression
-    / block
-    / paren-expression
-    / identifier
-
-paren-expression =
-    "("
-    expression
-    ")"
-```
-
-When an identifier path is followed by a struct-construction brace, it is parsed as `struct-construct`.
-
-When a type path is followed by optional type arguments and `:: identifier`, it is parsed as a union variant expression.
-
-Otherwise an identifier begins an ordinary value expression.
-
-## 19.18 Imports
-
-```abnf
-import-expression =
-    %s"import"
-    "("
-    string
-    ")"
-```
-
-The string must be a literal token.
-
-Static semantics permit this production only as the initializer of a module-level `const` binding.
-
-## 19.19 Struct construction
-
-```abnf
-struct-construct =
-    type-path
-    [ type-args ]
-    "{"
-    [ struct-field-init
-      *( "," struct-field-init )
-      [ "," ] ]
-    "}"
-
-struct-field-init =
-    identifier
-    ":"
-    expression
-```
-
-All fields must be supplied exactly once.
-
-Field initializers are evaluated in written source order. Field order does not affect the struct's destruction order (Runtime §6.2).
-
-## 19.20 Union variant expressions
-
-```abnf
-variant-expression =
-    type-path
-    [ type-args ]
-    "::"
-    identifier
-    [ "(" arg-list ")" ]
-```
-
-Static semantics require the type path to denote a named union type and the identifier to name one of its variants.
-
-This production does not define arbitrary associated functions.
-
-## 19.21 Tuple literals
-
-```abnf
-tuple-literal =
-    "("
-    expression
-    ","
-    [ expression *( "," expression ) ]
-    ")"
-```
-
-Examples:
-
-```stilla
-(1,)
-(1, 2)
-(1, 2, 3)
-```
-
-The empty form `()` is handled by `void-literal`.
-
-## 19.22 List literals
-
-```abnf
-list-literal =
-    "["
-    [ expression *( "," expression ) [ "," ] ]
-    "]"
-```
-
-## 19.23 `if`
-
-```abnf
-if-expression =
-    %s"if"
-    "("
-    expression
-    ")"
-    block
-    [ %s"else"
-      ( block / if-expression ) ]
-```
-
-## 19.24 `match`
-
-```abnf
-match-expression =
-    %s"match"
-    "("
-    expression
-    ")"
-    "{"
-    match-arm
-    *( "," match-arm )
-    [ "," ]
-    "}"
-
-match-arm =
-    pattern
-    "=>"
-    expression
-```
-
-Because a block is itself an expression, a match arm may use a block without a separate grammar production.
-
-## 19.25 Patterns
-
-```abnf
-pattern =
-      wildcard-pattern
-    / literal-pattern
-    / tuple-pattern
-    / struct-pattern
-    / union-pattern
-    / list-pattern
-    / identifier-pattern
-
-wildcard-pattern =
-    "_"
-
-identifier-pattern =
-    identifier
-```
-
-Static semantics divide these forms into irrefutable and refutable patterns (§14).
-
-## 19.26 Literal patterns
-
-```abnf
-literal-pattern =
-      integer
-    / "-" integer
-    / float
-    / "-" float
-    / string
-    / bool-literal
-    / void-literal
-```
-
-## 19.27 Tuple patterns
-
-```abnf
-tuple-pattern =
-    "("
-    pattern
-    ","
-    [ pattern *( "," pattern ) ]
-    ")"
-```
-
-## 19.28 Struct patterns
-
-```abnf
-struct-pattern =
-    type-path
-    [ type-args ]
-    "{"
-    [ field-pattern
-      *( "," field-pattern )
-      [ "," ] ]
-    "}"
-
-field-pattern =
-    identifier
-    [ ":" pattern ]
-```
-
-## 19.29 Union patterns
-
-```abnf
-union-pattern =
-    type-path
-    [ type-args ]
-    "::"
-    identifier
-    [ "(" pattern *( "," pattern ) ")" ]
-```
-
-## 19.30 List patterns
-
-```abnf
-list-pattern =
-    "["
-    [ list-pattern-items ]
-    "]"
-
-list-pattern-items =
-      pattern
-      *( "," pattern )
-      [ "," list-rest ]
-    / list-rest
-
-list-rest =
-    ".."
-    identifier
-```
-
-## 19.31 Literals
-
-```abnf
-literal =
-      integer
-    / float
-    / string
-    / bool-literal
-    / void-literal
-```

@@ -1,9 +1,11 @@
 //! Required `builtin` interface — Runtime §4.
 //!
-//! Every execution context automatically provides a `builtin` module
-//! (Runtime §3.2, Core §3). `builtin` is the only implicitly available
-//! module binding and cannot be shadowed. The interface the host must
-//! implement is defined in Runtime §4.
+//! `builtin` is an ordinary importable standard-library module (Core §3):
+//! a program brings it into scope like any other module, e.g.
+//! `const builtin = import("builtin");`. There is no implicit module
+//! binding and no reserved word. The interface the host must implement is
+//! defined in Runtime §4; the Stilla-level signatures live in
+//! `std/builtin.st`.
 //!
 //! The Stilla-level signatures below are normative; the Zig `VTable`
 //! mirrors them for the primitives the runtime needs from the host. The
@@ -15,18 +17,18 @@ const panic = @import("panic.zig");
 
 /// Host implementation of the required `builtin` interface.
 pub const VTable = struct {
-    /// `builtin.print: fn(string) -> void` — Runtime §4.1.
+    /// `builtin.print: fn(str) -> void` — Runtime §4.1.
     ///
     /// Outputs a line of text to the host's standard output.
     print: *const fn (userdata: *const anyopaque, message: []const u8) void = defaultPrint,
 
-    /// `builtin.len[T]: fn(borrow list[T]) -> int64` — Runtime §4.3.
+    /// `builtin.len[T]: fn(borrow list[T]) -> int32` — Runtime §4.3.
     ///
     /// The list is borrowed and never consumed. The `count` / `elem_size`
     /// pair describes the borrowed list storage.
     len: *const fn (userdata: *const anyopaque, count: usize, elem_size: usize) i64 = defaultLen,
 
-    /// `builtin.panic: fn(string) -> never` — Runtime §4.9.
+    /// `builtin.panic: fn(str) -> never` — Runtime §4.9.
     ///
     /// Terminates the current execution context immediately; no unwinding
     /// (Runtime §7.1). The returned `panic.Termination` lets the
@@ -61,7 +63,7 @@ test "builtin.VTable routes calls through userdata" {
 
     const capture_fn = struct {
         fn capture(userdata: *const anyopaque, message: []const u8) void {
-            const c: *Capture = @alignCast(@ptrCast(@constCast(userdata)));
+            const c: *Capture = @ptrCast(@alignCast(@constCast(userdata)));
             @memcpy(c.buffer[c.len..][0..message.len], message);
             c.len += message.len;
         }
@@ -83,4 +85,33 @@ test "builtin.VTable supplies default implementations" {
     const t = vt.panic(&userdata, "boom");
     try std.testing.expect(t == .panic);
     try std.testing.expectEqualStrings("boom", t.panic.message);
+}
+
+test "builtin.VTable defaultPanic returns the message" {
+    const vt: VTable = .{};
+    var userdata: u8 = 0;
+    const t = vt.panic(&userdata, "kaboom");
+    try std.testing.expect(t == .panic);
+    try std.testing.expectEqualStrings("kaboom", t.panic.message);
+}
+
+test "builtin.VTable defaultPrint is overridable per host" {
+    // Runtime §3.4: host cleanup/integration is per-embedding; the print
+    // sink is replaceable.
+    const Capture = struct {
+        buffer: [32]u8 = undefined,
+        len: usize = 0,
+    };
+    var state = Capture{};
+    const capture_fn = struct {
+        fn capture(userdata: *const anyopaque, message: []const u8) void {
+            const c: *Capture = @ptrCast(@alignCast(@constCast(userdata)));
+            @memcpy(c.buffer[c.len..][0..message.len], message);
+            c.len += message.len;
+        }
+    }.capture;
+
+    var vt: VTable = .{ .print = capture_fn };
+    vt.print(&state, "hello");
+    try std.testing.expectEqualStrings("hello", state.buffer[0..state.len]);
 }

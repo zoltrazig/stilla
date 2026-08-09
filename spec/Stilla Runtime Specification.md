@@ -1,6 +1,8 @@
-# Stilla Runtime Specification - v1.2 Draft
+# Stilla Runtime Specification
 
-> **Companion document:** *Stilla Core Language Specification - v1.2 Draft* — defines the syntax and compile-time constraints of the language.
+> **Version:** v1.3 Draft
+>
+> **Companion document:** *Stilla Core Language Specification* — defines the syntax and compile-time constraints of the language.
 
 ## Table of Contents
 
@@ -19,7 +21,7 @@
 
 ## 1.1 Scope
 
-This document — the **Runtime specification** — defines the Stilla v1.2 execution model and the contract between a Stilla program and its embedding host. It covers:
+This document — the **Runtime specification** — defines the Stilla v1.3 execution model and the contract between a Stilla program and its embedding host. It covers:
 
 - the execution context;
 - module instantiation, storage, initialization, references, and teardown;
@@ -28,7 +30,7 @@ This document — the **Runtime specification** — defines the Stilla v1.2 exec
 - destruction at runtime;
 - panic, traps, and termination.
 
-Syntax and compile-time constraints — the type system, ownership checking, generic specialization, and the static module rules — are defined in the companion **Core specification** (Core §1–§19). This specification is normative for all conforming implementations.
+Syntax and compile-time constraints — the type system, ownership checking, generic specialization, and the static module rules — are defined in the companion **Core specification** (Core §1–§18), whose normative grammar is defined in the standalone [`Stilla Core Grammar Draft.abnf`](Stilla%20Core%20Grammar%20Draft.abnf). This specification is normative for all conforming implementations.
 
 ## 1.2 Relationship to the Core specification
 
@@ -46,7 +48,6 @@ The execution context:
 
 - is created by the embedding host (§3);
 - owns all module storage (§2);
-- automatically provides the `builtin` module (Core §3);
 - is the unit of panic termination (§7);
 - is disposed of by the embedding host (§3.4).
 
@@ -54,12 +55,12 @@ When a context begins relative to host lifecycle, and whether multiple contexts 
 
 ## 1.4 Key terminology
 
-These terms are used throughout this specification. Language-level terms (binding, affine, borrow, move, drop, etc.) are defined in Core §1.5.
+These terms are used throughout this specification. Language-level terms (binding, unique, borrow, move, drop, etc.) are defined in Core §1.5.
 
 - **execution context** — the unit of program execution created by the host; it owns module storage and is terminated as a whole by panic (§1.3, §7).
 - **module storage** — the immutable storage of an instantiated module (§2.2).
 - **module instantiation** — creating module storage for a resolved specifier (§2.1).
-- **teardown** — normal-context destruction of module-owned affine constants in reverse initialization order (§2.5).
+- **teardown** — normal-context destruction of module-owned unique constants in reverse initialization order (§2.5).
 - **embedding host / host** — the environment that creates the execution context, registers host-provided modules, invokes entry points, and receives control after termination (§3).
 - **host-provided module** — a module implemented by the host that exposes a statically known Stilla-compatible interface (§3.1).
 - **runtime trap** — a deterministic runtime failure such as overflow, division by zero, invalid indexing, or invalid conversion (§7.2).
@@ -69,7 +70,7 @@ These terms are used throughout this specification. Language-level terms (bindin
 A conforming implementation must:
 
 - instantiate each resolved module at most once per execution context (§2.1);
-- initialize module constants in declaration order (§2.3) and destroy module-owned affine constants during normal teardown (§2.5);
+- initialize module constants in declaration order (§2.3) and destroy module-owned unique constants during normal teardown (§2.5);
 - provide the required `builtin` interface (§4);
 - evaluate subexpressions in the defined order (§5);
 - destroy values as specified (§6);
@@ -106,7 +107,7 @@ A module is initialized when it is instantiated.
 
 Module constant initializers are evaluated strictly in declaration order (Core §5).
 
-An initializer may reference earlier module constants, imported modules, module functions, types, and `builtin`; it may not reference a later module constant (Core §5).
+An initializer may reference earlier module constants, imported modules, module functions, types, and imported standard-library modules such as `builtin`; it may not reference a later module constant (Core §5).
 
 Imported modules used by an initializer are instantiated as required; because each specifier is instantiated at most once per context (§2.1) and specifiers must resolve unambiguously before execution (Core §2.4), the resulting initialization is deterministic.
 
@@ -127,7 +128,7 @@ Imported module references do not transfer ownership of module storage.
 
 ## 2.5 Teardown
 
-Module-owned affine constants are destroyed during **normal context teardown** in reverse initialization order.
+Module-owned unique constants are destroyed during **normal context teardown** in reverse initialization order.
 
 Teardown runs only during normal termination of the execution context.
 
@@ -147,7 +148,7 @@ The compiler or runtime resolves the specifier to exactly one of:
 
 Resolution is implementation-defined, but a specifier must resolve unambiguously before execution.
 
-Import cycles are rejected in Stilla v1.2.
+Import cycles are rejected in Stilla v1.3.
 
 The standard library is specified separately.
 
@@ -167,8 +168,8 @@ Conceptually:
 
 ```stilla
 struct Database {
-    query: fn(string) -> string;
-    execute: fn(string) -> int64;
+    query: fn(str) -> str;
+    execute: fn(str) -> int32;
 }
 ```
 
@@ -178,15 +179,16 @@ Source modules, standard-library modules, and host modules use the same `.` memb
 
 ## 3.2 The `builtin` module
 
-Every execution context automatically provides:
+`builtin` is an ordinary importable standard-library module (Core §3): a
+program brings it into scope like any other module, for example
 
 ```stilla
-builtin
+const builtin = import("builtin");
 ```
 
-`builtin` is the only implicitly available module binding (Core §3).
-
-It behaves as an implementation-provided module and cannot be shadowed.
+There is no implicitly available module binding; the context instantiates
+`builtin` on demand, exactly as it instantiates any other resolved
+specifier (§2.1, §2.6).
 
 The required interface the host must provide is defined in §4.
 
@@ -225,17 +227,23 @@ Such host cleanup is outside Stilla source semantics and must not be described a
 
 The host may register host-provided modules (§3.1) and may directly invoke any exposed module function (§3.3).
 
+An `any` value (Core §11.6) is a type-erased payload with a runtime type tag: the tag is deterministic and comparable and identifies the concrete payload type. Stilla inspects the tag only through the two typed-recovery operations, `as` (Core §11.6.1) and `match` type-test patterns (Core §11.6.2). Destruction of an `any` destroys the payload by the payload type's own destruction rules. An `any` argument to or result from a host binding is transferred as that opaque tagged payload.
+
+A `hostdata` value (Core §11.7) is an opaque, type-erased payload with no runtime type tag: its runtime representation is implementation- and host-defined, and Stilla performs no inspection or recovery on it. A payload leaves `hostdata` only when the complete value is passed to a host binding or destroyed. When Stilla destroys a `hostdata` value on normal control flow, the host is responsible for disposing of the opaque payload; such disposal is host cleanup and must not be described as execution of a Stilla `drop` hook. A `hostdata` argument to or result from a host binding is transferred as that opaque payload.
+
 ---
 
 # 4. Required `builtin` Interface
 
-Every conforming implementation must provide the following minimum interface. The language-level availability of these helpers is defined in Core §3.
+Every conforming implementation must provide the following minimum interface. Programs reach it by importing the standard-library `builtin` module (Core §3) and calling its members; each member is a host binding whose calls lower to system calls (frontend §5.6).
+
+Stilla has no closures (Core §18): a function or lambda may not capture enclosing local bindings. The list combinators live in the `iter` module (StdLib §7) — `each`, `each_with`, `fold`, `fold_with`, `consume_each`, `consume_each_with`, `consume_fold`, `consume_fold_with`, `try_fold`, `try_fold_with`. Each accepts the per-element operation as an ordinary function-value parameter — a monomorphic, non-capturing method (Core §12) — and the `*_with` variants additionally take a borrowed context value the operation may read. Method-passing and context threading are Stilla's compensation for the absence of closures.
 
 ## 4.1 Output
 
 ```stilla
 builtin.print:
-    fn(string) -> void
+    fn(str) -> void
 ```
 
 ## 4.2 Conversion
@@ -244,16 +252,18 @@ Conceptually:
 
 ```stilla
 builtin.str[T]:
-    fn(T) -> string
+    fn(T) -> str
 ```
 
 Required supported types:
 
 ```text
-int64
-float64
+byte
+int32
+uint32
+float32
 bool
-string
+str
 ```
 
 Calling it with another type is a compile-time error unless the implementation explicitly extends the interface.
@@ -262,7 +272,7 @@ Calling it with another type is a compile-time error unless the implementation e
 
 ```stilla
 builtin.len[T]:
-    fn(borrow list[T]) -> int64
+    fn(borrow list[T]) -> int32
 ```
 
 The list is borrowed and never consumed.
@@ -271,7 +281,7 @@ The list is borrowed and never consumed.
 
 ```stilla
 builtin.range:
-    fn(int64, int64) -> list[int64]
+    fn(int32, int32) -> list[int32]
 ```
 
 The range is inclusive:
@@ -288,49 +298,22 @@ start > end
 
 the result is an empty list.
 
-## 4.5 Map
-
-```stilla
-builtin.map[A, B]:
-    fn(
-        move list[A],
-        fn(move A) -> B
-    ) -> list[B]
-```
-
-If `list[A]` is affine, the input list is consumed as a whole. If it is duplicable, the caller may retain its copy because `move` has no observable ownership effect.
-
-Elements are processed in increasing index order (§5).
-
-## 4.6 Fold
-
-```stilla
-builtin.fold[A, B]:
-    fn(
-        move list[A],
-        move B,
-        fn(move B, move A) -> B
-    ) -> B
-```
-
-The operation is a deterministic left fold in increasing list-index order (§5). If the instantiated list or accumulator type is duplicable, the corresponding `move` mode has ordinary copy semantics.
-
-## 4.7 Box
+## 4.5 Box
 
 ```stilla
 builtin.box[T]:
     fn(move T) -> box[T]
 ```
 
-A fresh affine expression transfers implicitly:
+A fresh unique expression transfers implicitly:
 
 ```stilla
-builtin.box(Tree[int64]::Empty)
+builtin.box(Tree[int32]::Empty)
 ```
 
-An existing affine owner requires `move` (Core §10.6).
+An existing unique owner requires `move` (Core §10.6).
 
-## 4.8 Peek and unbox
+## 4.6 Peek and unbox
 
 Borrowing access:
 
@@ -339,9 +322,9 @@ builtin.peek[T]:
     fn(borrow box[T]) -> <borrowed T>
 ```
 
-`<borrowed T>` is notation in this specification for a transient non-owning result. It is not a storable source-level type in Stilla v1.2.
+`<borrowed T>` is notation in this specification for a transient non-owning result. It is not a storable source-level type in Stilla v1.3.
 
-For affine `T`, the result lives until the end of the enclosing full expression and is subject to Core §10.7.
+For unique `T`, the result lives until the end of the enclosing full expression and is subject to Core §10.7.
 
 Ownership extraction:
 
@@ -350,7 +333,7 @@ builtin.unbox[T]:
     fn(move box[T]) -> T
 ```
 
-For an existing affine box:
+For an existing unique box:
 
 ```stilla
 builtin.unbox(move boxed)
@@ -358,26 +341,26 @@ builtin.unbox(move boxed)
 
 consumes the box as a whole and returns ownership of `T`.
 
-For a fresh box expression, explicit `move` is unnecessary. If `box[T]` is duplicable, `builtin.unbox(boxed)` is also valid and returns a copy without invalidating the source box.
+For a fresh box expression, explicit `move` is unnecessary. If `box[T]` is Copy, `builtin.unbox(boxed)` is also valid and returns a copy without invalidating the source box.
 
-For duplicable `T`, implementations may return an ordinary copy from `builtin.peek`.
+For Copy `T`, implementations may return an ordinary copy from `builtin.peek`.
 
-## 4.9 Panic
+## 4.7 Panic
 
 ```stilla
 builtin.panic:
-    fn(string) -> never
+    fn(str) -> never
 ```
 
 `builtin.panic` terminates the current Stilla execution context.
 
-Stilla v1.2 defines **no exception-style or destructor-style unwinding** for panic or runtime traps. The full termination semantics are defined in §7.1.
+Stilla v1.3 defines **no exception-style or destructor-style unwinding** for panic or runtime traps. The full termination semantics are defined in §7.1.
 
-## 4.10 Assert
+## 4.8 Assert
 
 ```stilla
 builtin.assert:
-    fn(bool, string) -> void
+    fn(bool, str) -> void
 ```
 
 `builtin.assert(condition, message)` is an ordinary call for evaluation-order purposes:
@@ -389,20 +372,22 @@ builtin.assert:
 
 The message expression is therefore evaluated even when the condition is true.
 
-## 4.11 Hash
+## 4.9 Hash
 
 ```stilla
 builtin.hash[T]:
-    fn(T) -> int64
+    fn(T) -> int32
 ```
 
 Required supported key types:
 
 ```text
-int64
-float64
+byte
+int32
+uint32
+float32
 bool
-string
+str
 ```
 
 Calling it with another type is a compile-time error unless the implementation explicitly extends the interface.
@@ -413,7 +398,7 @@ For a fixed conforming implementation version, the same supported value must pro
 
 Values equal under `==` must produce equal hashes.
 
-For `float64`, `+0.0 == -0.0`, so both must hash identically. NaN follows IEEE comparison behavior and is not equal to itself; equal-hash requirements therefore do not equate distinct NaN payloads.
+For `float32`, `+0.0 == -0.0`, so both must hash identically. NaN follows IEEE comparison behavior and is not equal to itself; equal-hash requirements therefore do not equate distinct NaN payloads.
 
 The exact hash algorithm and cross-implementation hash value are implementation-defined unless a standard-library profile specifies them.
 
@@ -429,7 +414,7 @@ This includes:
 
 - the callee before call arguments;
 - function arguments from left to right;
-- the base before a member or index operation;
+- the base before a member or index (`@[...]`) operation;
 - the index expression after the indexed base;
 - binary operator operands from left to right;
 - tuple elements from left to right;
@@ -439,22 +424,24 @@ This includes:
 - the `match` scrutinee before selecting an arm;
 - the `if` condition before evaluating exactly one selected branch.
 
-`&&` and `||` are short-circuiting:
+`and` and `or` are short-circuiting:
 
-- `a && b` evaluates `b` only if `a` is `true`;
-- `a || b` evaluates `b` only if `a` is `false`.
+- `a and b` evaluates `b` only if `a` is `true`;
+- `a or b` evaluates `b` only if `a` is `false`.
 
 Struct field initializers may be written in any order, but each initializer is evaluated in its written source order. Struct destruction remains reverse declaration order (§6.2); literal field order does not change destruction order.
 
-`for` evaluates its iterable once and visits elements in defined forward order (Core §13.5).
+The `iter` combinators evaluate their iterable exactly once and visit elements in defined forward order (StdLib §7).
 
-`builtin.map` visits list elements in increasing index order.
+`iter.each` visits list elements in increasing index order (StdLib §7).
 
-`builtin.fold` is a left fold from the lowest index to the highest index.
+`iter.fold` is a left fold from the lowest index to the highest index (StdLib §7).
+
+`iter.try_fold` is a left fold that stops at the first `Break`, leaving the remaining elements unvisited (StdLib §7).
 
 Module constants are initialized in declaration order (Core §5).
 
-Affine temporaries surviving to the end of one full expression are destroyed in reverse creation order (§6.4).
+Unique temporaries surviving to the end of one full expression are destroyed in reverse creation order (§6.4).
 
 These rules apply to all conforming implementations and are not optimization hints. An implementation may optimize only when the observable behavior is unchanged.
 
@@ -466,9 +453,11 @@ The compile-time constraints of destruction — how `drop` hooks are declared, w
 
 ## 6.1 Automatic destruction
 
-During normal control flow, an affine local owner that has not been moved or explicitly dropped is automatically destroyed when its scope ends (Core §9.5).
+During normal control flow, a unique local owner that has not been moved or explicitly dropped is automatically destroyed when its scope ends (Core §9.5).
 
 Local owners are destroyed in reverse creation order.
+
+Ownership state is static (Core §10.10) except for **maybe-unique** bindings — those released on some but not all paths through a conditional construct. For such a binding the implementation maintains a runtime liveness flag and destroys the value only if it is still alive (a conditional destruction, Core §10.10). Automatic destruction at scope end otherwise applies exactly to definitely-owned bindings.
 
 For example:
 
@@ -491,7 +480,7 @@ a
 During normal control flow, destroying a struct value proceeds in this exact order:
 
 1. execute the user-defined `drop` hook, if present;
-2. destroy affine fields in reverse declaration order;
+2. destroy unique fields in reverse declaration order;
 3. mark the complete value destroyed.
 
 For:
@@ -519,7 +508,7 @@ The user hook runs while all fields remain valid. If the hook panics or traps, e
 
 ## 6.3 Structural destruction order
 
-Values containing affine components are destroyed structurally.
+Values containing unique components are destroyed structurally.
 
 The required ordering is:
 
@@ -528,13 +517,13 @@ The required ordering is:
 - list elements: reverse index order;
 - union payloads: reverse payload order of the active variant;
 - `box[T]`: destroy the contained value;
-- module-owned affine constants: reverse module initialization order.
+- module-owned unique constants: reverse module initialization order.
 
 Only the active union variant is destroyed.
 
-## 6.4 Affine temporaries
+## 6.4 Unique temporaries
 
-An affine temporary that is not transferred into another owner is automatically destroyed at the end of the containing full expression during normal control flow.
+A unique temporary that is not transferred into another owner is automatically destroyed at the end of the containing full expression during normal control flow.
 
 For example:
 
@@ -544,7 +533,7 @@ open_file("temporary.txt");
 
 constructs and then destroys the returned `File`.
 
-Multiple affine temporaries created within one full expression are destroyed in reverse creation order.
+Multiple unique temporaries created within one full expression are destroyed in reverse creation order.
 
 A panic or runtime trap interrupts this rule because Stilla performs no unwinding (§7.1).
 
@@ -566,9 +555,9 @@ After the statement, the binding is no longer usable; this is enforced at compil
 
 ## 7.1 Panic
 
-`builtin.panic` (interface §4.9) terminates the current Stilla execution context.
+`builtin.panic` (interface §4.7) terminates the current Stilla execution context.
 
-Stilla v1.2 defines **no exception-style or destructor-style unwinding** for panic or runtime traps.
+Stilla v1.3 defines **no exception-style or destructor-style unwinding** for panic or runtime traps.
 
 Once panic or a runtime trap occurs:
 
@@ -592,10 +581,11 @@ The typing rules for operators and conversions are defined in Core §16.3. This 
 - Division by numeric zero traps.
 - Invalid indexing traps.
 - Invalid runtime numeric conversion traps.
-- `int64 as float64` uses the IEEE 754 conversion with round-to-nearest, ties-to-even; precision may be lost.
-- `float64 as int64` truncates toward zero and traps if the source is NaN, infinite, or outside the `int64` range.
-- `float64` uses IEEE 754 binary64 representation.
-- Other `float64` arithmetic follows IEEE 754 binary64 behavior.
+- Invalid `any` cast traps: recovering an `any` payload under a target type that does not match its runtime tag (Core §11.6.1).
+- `int32 as float32` uses the IEEE 754 conversion with round-to-nearest, ties-to-even; precision may be lost.
+- `float32 as int32` truncates toward zero and traps if the source is NaN, infinite, or outside the `int32` range.
+- `float32` uses IEEE 754 binary32 representation.
+- Other `float32` arithmetic follows IEEE 754 binary32 behavior.
 - Floating equality follows IEEE numeric comparison: NaN is unequal to every value including itself, while `+0.0 == -0.0` is true.
 
 All of these traps are deterministic.
@@ -637,7 +627,7 @@ value.member
 The ownership model at runtime is:
 
 ```text
-fresh affine value
+fresh unique value
     ↓
 owner binding
     ├── borrow → temporary/non-owning view
@@ -648,18 +638,18 @@ owner binding
 Function parameter modes (Core §10.6) are:
 
 ```text
-T            duplicable value parameter
+T            Copy value parameter
 borrow T     non-owning parameter
 move T       ownership-taking parameter
 ```
 
-For an existing affine owner, ownership transfer is always explicit:
+For an existing unique owner, ownership transfer is always explicit:
 
 ```stilla
 consume(move owner)
 ```
 
-A fresh affine expression may transfer directly:
+A fresh unique expression may transfer directly:
 
 ```stilla
 consume(make_value())
@@ -688,7 +678,7 @@ Normal evaluation is deterministic (§5):
 
 ```text
 left-to-right evaluation
-short-circuit && / ||
+short-circuit and / or
 forward sequence iteration
 reverse destruction of surviving temporaries
 ```
@@ -717,6 +707,8 @@ runtime generic function object
 canonical struct instance
 exception unwinding
 ```
+
+An `any` value (Core §11.6) carries a deterministic runtime type tag identifying its concrete payload type; Stilla inspects the tag only through the `as` cast (Core §11.6.1) and `match` type-test patterns (Core §11.6.2). A `hostdata` value (Core §11.7) is a type-erased opaque payload with no runtime type tag and no runtime inspection; it leaves Stilla only via host handoff or via host disposal on destruction (§3.4).
 
 The central rules of the language (stated fully in Core §1.3) are:
 
@@ -749,4 +741,4 @@ builtin.peek(boxed)
 builtin.unbox(move boxed)
 ```
 
-and nothing more is required for the Stilla v1.2 runtime.
+and nothing more is required for the Stilla v1.3 runtime.

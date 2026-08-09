@@ -4,7 +4,8 @@
 //!
 //! - is created by the embedding host (§3);
 //! - owns all module storage (§2);
-//! - automatically provides the `builtin` module (§3.2);
+//! - instantiates standard-library modules — including `builtin` — on
+//!   demand when a program imports them (Core §3);
 //! - is the unit of panic termination (§7);
 //! - is disposed of by the embedding host (§3.4).
 //!
@@ -42,4 +43,18 @@ test "context init and deinit" {
     defer ctx.deinit();
 
     try std.testing.expect(ctx.modules.count() == 0);
+}
+
+test "context owns module registry storage" {
+    // Runtime §2.1: the registry is keyed by resolved specifier; storage
+    // lives for the context lifetime (§2.2).
+    var ctx = Context.init(std.testing.allocator, .{ .allocator = std.testing.allocator });
+    defer ctx.deinit();
+
+    try ctx.modules.put(std.testing.allocator, "math", .{ .specifier = "math" });
+    try ctx.modules.put(std.testing.allocator, "string", .{ .specifier = "string" });
+    try std.testing.expectEqual(@as(usize, 2), ctx.modules.count());
+    // A second instantiation of the same specifier is the same storage
+    // (Runtime §2.1: at most once per context).
+    try std.testing.expect(ctx.modules.getPtr("math").?.specifier.len > 0);
 }

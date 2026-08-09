@@ -1,6 +1,6 @@
 //! Termination and traps — Runtime §7.
 //!
-//! Stilla v1.2 defines **no exception-style or destructor-style unwinding**
+//! Stilla v1.3 defines **no exception-style or destructor-style unwinding**
 //! for panic or runtime traps (Runtime §7.1). Once a panic or trap occurs:
 //!
 //! - no enclosing Stilla statements resume;

@@ -39,3 +39,15 @@ test "module.Registry keys modules by specifier" {
     try std.testing.expect(reg.contains("math"));
     try std.testing.expect(!reg.contains("text"));
 }
+
+test "module.Registry dedupes specifiers" {
+    // Runtime §2.1: each resolved specifier is instantiated at most once
+    // per execution context — the registry keys on the specifier.
+    var reg: Registry = .{};
+    defer reg.deinit(std.testing.allocator);
+
+    try reg.put(std.testing.allocator, "math", .{ .specifier = "math" });
+    try reg.put(std.testing.allocator, "math", .{ .specifier = "math" });
+    try std.testing.expectEqual(@as(usize, 1), reg.count());
+    try std.testing.expectEqualStrings("math", reg.get("math").?.specifier);
+}
