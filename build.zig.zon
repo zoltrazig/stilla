@@ -1,0 +1,14 @@
+.{
+    .name = .stilla,
+    .version = "0.0.1",
+    .minimum_zig_version = "0.16.0",
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "src",
+        "spec",
+        "README.md",
+        "LICENSE",
+    },
+    .fingerprint = 0xc438676b6bfd196e,
+}
