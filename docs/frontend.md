@@ -1059,8 +1059,27 @@ that consumes the phase-2 annotation.
   - [x] **8.4 copy propagation — on-the-fly at construction** (§4.3) —
         a `move` of a duplicable value lowers directly to the value (a
         copy of a duplicable value is the value, ir.md §5.4), so no
-        `copy` instructions reach the IR from the frontend. No separate
-        pass;
+        `copy` instructions reach the IR from the frontend; the
+        mid-level pass (`src/passes/cfg_copy_prop.zig`) collapses the
+        copies the checker's state tracking still emits for duplicable
+        moves (copy-of-copy chains and a copied parameter that is
+        directly returned collapse to the value, Core §10.2 — `move` of a
+        Copy value may be omitted);
+  - [x] **8.4 module/member CSE** (`src/passes/cfg_cse.zig`) — reuse an
+        identical `module_ref` earlier in the same block (the module
+        handle is a pure constant) and an identical `load_member` of the
+        same module slot (module storage is written only by
+        `store_member` inside `@init` — cfg_validate rejects stores
+        elsewhere — so a slot's value is stable), duplicable results
+        only, clearing the table at a `store_member`; the canonical def
+        sits earlier in the block, so it dominates every rewritten use;
+  - [x] **8.4 dead-instruction elimination** (`src/passes/cfg_dead_instr.zig`) —
+        remove an instruction whose results are unused, duplicable, and
+        produced by a side-effect-free, non-consuming, non-trapping op
+        (the guarded `read_payload` of a match arm whose payload is
+        unused is the common corpus case); iterated to a fixed point;
+        calls, syscalls, consuming destructures, `div`/`rem`/`cast`/reads
+        (traps) and phis are never candidates;
   - [x] **8.5 dead-block elimination** (`src/passes/cfg_dead_block.zig`) —
         remove blocks unreachable from the entry; update phi incoming
         lists and predecessor sets accordingly (ir.md §3);

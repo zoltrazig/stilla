@@ -1196,6 +1196,17 @@ fn funcBody(out: []const u8, header: []const u8) []const u8 {
     return out[body_start..body_end];
 }
 
+/// The number of non-overlapping occurrences of `needle` in `haystack`.
+fn countOccurrences(haystack: []const u8, needle: []const u8) usize {
+    var n: usize = 0;
+    var rest = haystack;
+    while (std.mem.indexOf(u8, rest, needle)) |i| {
+        n += 1;
+        rest = rest[i + needle.len ..];
+    }
+    return n;
+}
+
 test "frontend join phis own their affine inputs (if, return case)" {
     // ir.md §6.3-§6.4: an affine value listed as a phi input is *not*
     // destroyed at the end of its producing block; the phi result is the
@@ -3414,6 +3425,133 @@ test "Pass 8.6 drop elision removes duplicable drops, keeps affine drops" {
     const text2 = try irText(&reparsed);
     defer testing.allocator.free(text2);
     try testing.expectEqualStrings(text, text2);
+}
+
+test "Pass 8.4 module/member CSE reuses identical loads in a block" {
+    // `m.pi` lowers to `module_ref "math"` + `load_member`, and the
+    // on-the-fly CSE never shared them (module ops are not candidates at
+    // emit time), so two reads of the same member in one block stay as
+    // two loads until this pass. The module handle is a pure constant
+    // and module storage is written only by `store_member` inside @init
+    // (cfg_validate rejects stores elsewhere), so both fold to one.
+    var c = try compileText("app", &.{
+        .{
+            "app",
+            \\const m = import("math");
+            \\fn f() -> float32 {
+            \\    let a = m.pi;
+            \\    let b = m.pi;
+            \\    a + b
+            \\}
+            \\fn main() -> void {}
+        },
+    });
+    defer c.deinit();
+
+    var program = c.program.?;
+    try lower.cse(&program, c.arena.allocator());
+
+    const text = try irText(&program);
+    defer testing.allocator.free(text);
+    const body = funcBody(text, "func @app.f");
+    try testing.expect(countOccurrences(body, "module_ref \"math\"") == 1);
+    try testing.expect(countOccurrences(body, "load_member") == 1);
+}
+
+test "Pass 8.4 copy propagation collapses duplicable copies" {
+    // The checker emits an explicit `copy` of the move parameter before
+    // the ret; for a Copy type `move` is semantically an ordinary copy
+    // (Core §10.2), so the copy is a no-op and the parameter is returned
+    // directly.
+    var c = try compileText("app", &.{
+        .{
+            "app",
+            \\fn id(move x: T) -> T { x }
+            \\fn main() -> void {}
+        },
+    });
+    defer c.deinit();
+
+    var program = c.program.?;
+    try lower.copyProp(&program, c.arena.allocator());
+
+    const text = try irText(&program);
+    defer testing.allocator.free(text);
+    const body = funcBody(text, "func @app.id");
+    try testing.expect(std.mem.indexOf(u8, body, "copy %") == null);
+    try testing.expect(std.mem.indexOf(u8, body, "ret %0") != null);
+}
+
+test "Pass 8.4 copy propagation collapses box round-trip copies" {
+    // The checker's state tracking emits explicit `copy` instructions on
+    // the `move t` of a box whose payload is a plain struct (a Copy
+    // type): `copy %b; copy %copy; unbox`. The mid-level pass collapses
+    // the chain into a direct `unbox` of the box (Core §10.2 — `move` of
+    // a Copy value is an ordinary copy and may be omitted).
+    var c = try compileText("app", &.{
+        .{
+            "app",
+            \\const builtin = import("builtin");
+            \\struct Token { id: int32; }
+            \\fn main() -> void {
+            \\    let b = builtin.box::[int32](42);
+            \\    let view = builtin.peek::[int32](b);
+            \\    builtin.assert(view == 42, "peek");
+            \\    let v = builtin.unbox::[int32](move b);
+            \\    builtin.assert(v == 42, "unbox");
+            \\    let t = builtin.box::[Token](Token { id: 7 });
+            \\    let t2 = builtin.unbox::[Token](move t);
+            \\    builtin.assert(t2.id == 7, "round-trip");
+            \\}
+        },
+    });
+    defer c.deinit();
+
+    var program = c.program.?;
+    const before = try irText(&program);
+    defer testing.allocator.free(before);
+    try testing.expect(std.mem.indexOf(u8, funcBody(before, "func @app.main"), "copy %") != null);
+
+    try lower.copyProp(&program, c.arena.allocator());
+    const text = try irText(&program);
+    defer testing.allocator.free(text);
+    const body = funcBody(text, "func @app.main");
+    try testing.expect(std.mem.indexOf(u8, body, "copy %") == null);
+    try testing.expect(std.mem.indexOf(u8, body, "builtin#unbox") != null);
+}
+
+test "Pass 8.4 dead-instruction elimination drops unused match payloads" {
+    // A `match` arm that binds the payload but returns a constant reads
+    // the payload without using it: the `read_payload` is dead. It is a
+    // guarded projection (the lowering emits it only after the tag
+    // switch) with a duplicable result, so the pass removes it.
+    var c = try compileText("app", &.{
+        .{
+            "app",
+            \\const builtin = import("builtin");
+            \\using builtin.Option;
+            \\fn is_some(o: Option[int32]) -> bool {
+            \\    match (o) {
+            \\        Option::Some(v) => true,
+            \\        Option::None => false,
+            \\    }
+            \\}
+            \\fn main() -> void {}
+        },
+    });
+    defer c.deinit();
+
+    var program = c.program.?;
+    const before = try irText(&program);
+    defer testing.allocator.free(before);
+    const before_body = funcBody(before, "func @app.is_some");
+    try testing.expect(std.mem.indexOf(u8, before_body, "read_payload") != null);
+
+    try lower.deadInstr(&program, c.arena.allocator());
+    const text = try irText(&program);
+    defer testing.allocator.free(text);
+    const body = funcBody(text, "func @app.is_some");
+    try testing.expect(std.mem.indexOf(u8, body, "read_payload") == null);
 }
 
 test "Pass 8.9 optimization harness: corpus compile, optimize, and measure" {

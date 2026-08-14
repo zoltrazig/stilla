@@ -779,6 +779,83 @@ pub fn renumberValues(f: *IrFunc, allocator: std.mem.Allocator) !void {
     f.values = try values.toOwnedSlice(allocator);
 }
 
+/// Rewrite every operand of every instruction and terminator in `f` that
+/// is `from` to `to` — phi incomings and `drop` operands included. The
+/// defining instruction of `from` is left in place (the caller removes it
+/// separately). Sound when `to` is available wherever `from` was: every
+/// use of `from` is dominated by its definition, so replacing `from` with
+/// a value defined earlier in the same block (the rewrite passes' common
+/// case) is always safe.
+pub fn rewriteUses(f: *IrFunc, from: *Value, to: *Value) void {
+    for (f.blocks) |b| {
+        for (b.instrs) |instr| switch (instr.op) {
+            .neg, .not_, .num_cast, .any_pack_copy, .any_pack_move, .any_unpack_copy, .any_unpack_move, .cleanup_owner, .cleanup_disable, .drop_cleanup, .copy, .borrow, .move_, .tail, .unpack_struct, .unpack_tuple, .split_list, .read_tag, .read_payload, .drop_ => |*v| {
+                if (v.* == from) v.* = to;
+            },
+            .unpack_variant => |*uv| {
+                if (uv.base == from) uv.base = to;
+            },
+            .type_is => |*x| {
+                if (x.value == from) x.value = to;
+            },
+            .add, .sub, .mul, .div, .rem, .concat, .eq, .ne, .lt, .le, .gt, .ge => |*x| {
+                if (x.a == from) x.a = to;
+                if (x.b == from) x.b = to;
+            },
+            .load_member => |*x| {
+                if (x.module == from) x.module = to;
+            },
+            .store_member => |*x| {
+                if (x.value == from) x.value = to;
+            },
+            .construct => |*x| {
+                for (x.args) |*a| {
+                    if (a.* == from) a.* = to;
+                }
+            },
+            .read_field, .read_tuple => |*x| {
+                if (x.base == from) x.base = to;
+            },
+            .read_index => |*x| {
+                if (x.base == from) x.base = to;
+                if (x.index == from) x.index = to;
+            },
+            .call => |*x| {
+                if (x.callee == .value and x.callee.value == from) x.callee.value = to;
+                for (x.args) |*a| {
+                    if (a.* == from) a.* = to;
+                }
+            },
+            .syscall => |*x| {
+                for (x.args) |*a| {
+                    if (a.* == from) a.* = to;
+                }
+            },
+            .phi => |*x| {
+                for (x.incoming) |*inc| {
+                    if (inc.value == from) inc.value = to;
+                }
+            },
+            .const_, .arg, .module_ref, .fn_ref => {},
+        };
+        switch (b.terminator) {
+            .ret => |v| {
+                if (v) |val| {
+                    if (val == from) b.terminator.ret = to;
+                }
+            },
+            .branch => {},
+            .branch_cond => |*bc| {
+                if (bc.cond == from) bc.cond = to;
+            },
+            .@"switch" => |*s| {
+                if (s.disc == from) s.disc = to;
+            },
+            .trap => {},
+        }
+    }
+}
+
 pub const SlotMeta = struct {
     type_: Type,
     /// Rank in the module's declaration order (teardown destroys affine

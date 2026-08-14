@@ -161,6 +161,9 @@ pub const tailCall = cfg_tail_call.tailCall;
 pub const dropElide = cfg_drop_elide.dropElide;
 pub const jumpThread = cfg_jump_thread.jumpThread;
 pub const phiSimplify = cfg_phi_simplify.phiSimplify;
+pub const cse = cfg_optimize.cse;
+pub const copyProp = cfg_optimize.copyProp;
+pub const deadInstr = cfg_optimize.deadInstr;
 pub const optimize = cfg_optimize.optimize;
 /// The ir.md §13 IR validator (frontend.md Pass 6.1), re-exported for
 /// the frontend and tests.
