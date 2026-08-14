@@ -997,7 +997,14 @@ that consumes the phase-2 annotation.
   - [x] **7.2** rewrite — replace `call` + `ret` with a `br` back to the
         function's own entry block, re-binding the callee's parameters
         from the call arguments and splicing in phis for the reused
-        frame's SSA values (ir.md §10.9);
+        frame's SSA values (ir.md §10.9). The chain drop is guarded: an
+        intermediate chain block (between the call block and the ret
+        block) must have exactly one predecessor, so it forwards only the
+        call's result — an extra predecessor merges another arm's value,
+        which dropping the chain edge would strand (multi-arm guarded
+        recursion stays a call); and the ret block must keep at least one
+        non-chain predecessor, so the rewrite cannot orphan the
+        function's only `ret`;
   - [x] **7.3** ownership preservation — the rewrite must not reorder any
         `drop` or observable effect: the returned value's destruction
         schedule (Runtime §6) is unchanged because the frame is reused;

@@ -1677,6 +1677,130 @@ test "Pass 7 rewrites a void self-recursive tail call into a loop" {
     try testing.expectEqualStrings(text, text2);
 }
 
+test "Pass 7 skips a tail call whose chain merges another arm's value" {
+    // The guarded recursion `if (n<=0) {0} else if (n==1) {1} else
+    // {f(n-1)}` lowers the middle arm's value through a phi-only join
+    // *before* the ret join. That join is an intermediate chain block
+    // with two predecessors (then_1 and the recursive arm), so the
+    // rewrite's chain-edge drop would strand the `1` — the ret block's
+    // phi would reduce to only the `0` arm and the function would return
+    // 0 for every n >= 1 (§7.2). The call must stay ordinary instead.
+    var c = try compileText("app", &.{
+        .{
+            "app",
+            \\fn f(n: int32) -> int32 {
+            \\    if (n <= 0) {
+            \\        0
+            \\    } else if (n == 1) {
+            \\        1
+            \\    } else {
+            \\        f(n - 1)
+            \\    }
+            \\}
+            \\fn main() -> void {}
+        },
+    });
+    defer c.deinit();
+
+    var program = c.program.?;
+    try lower.tailCall(&program, c.arena.allocator());
+
+    const text = try irText(&program);
+    defer testing.allocator.free(text);
+    // The recursion is left as a call, and the join still receives the
+    // middle arm's `1` through a phi.
+    try testing.expect(std.mem.indexOf(u8, text, "call @app.f") != null);
+    try testing.expect(std.mem.indexOf(u8, text, "phi [%6, then_1], [%9, else_1]") != null);
+    try testing.expect(std.mem.indexOf(u8, text, "br header") == null);
+
+    // The full pipeline keeps the result correct and validates.
+    var full = try compileText("app", &.{
+        .{
+            "app",
+            \\fn f(n: int32) -> int32 {
+            \\    if (n <= 0) {
+            \\        0
+            \\    } else if (n == 1) {
+            \\        1
+            \\    } else {
+            \\        f(n - 1)
+            \\    }
+            \\}
+            \\fn main() -> void {}
+        },
+    });
+    defer full.deinit();
+    var fprogram = full.program.?;
+    try lower.optimize(&fprogram, full.arena.allocator());
+    const ftext = try irText(&fprogram);
+    defer testing.allocator.free(ftext);
+    try testing.expect(std.mem.indexOf(u8, ftext, "call @app.f") != null);
+    try testing.expect(std.mem.indexOf(u8, ftext, "ret %11") != null);
+}
+
+test "Pass 7 skips tail calls whose ret block would be orphaned" {
+    // Both arms call `f` in tail position and both chains end at the
+    // same ret block, whose every predecessor is one of the call blocks.
+    // Rewriting both would leave the ret block with no predecessors and
+    // dead-block elimination would delete the function's only `ret`
+    // (§7.2); both calls must stay ordinary.
+    var c = try compileText("app", &.{
+        .{
+            "app",
+            \\fn f(n: int32) -> int32 {
+            \\    if (n <= 0) {
+            \\        f(n)
+            \\    } else {
+            \\        f(n - 1)
+            \\    }
+            \\}
+            \\fn main() -> void {}
+        },
+    });
+    defer c.deinit();
+
+    var program = c.program.?;
+    try lower.tailCall(&program, c.arena.allocator());
+
+    const text = try irText(&program);
+    defer testing.allocator.free(text);
+    try testing.expect(std.mem.indexOf(u8, text, "call @app.f") != null);
+    try testing.expect(std.mem.indexOf(u8, text, "ret %7") != null);
+    try testing.expect(std.mem.indexOf(u8, text, "br header") == null);
+}
+
+test "Pass 7 skips a void tail call whose chain merges another arm" {
+    // The void guarded recursion `if (n<=0) {} else if (n==1) {} else
+    // { log(n-1) }` lowers the middle arm through a noise-only join
+    // before the ret join. That intermediate chain block has two
+    // predecessors (then_1 and the recursive arm), so the rewrite's
+    // chain-edge drop would strand the middle arm's edge and the
+    // validator's forward-edge check would reject the result (§7.2); the
+    // call must stay ordinary instead.
+    var c = try compileText("app", &.{
+        .{
+            "app",
+            \\fn log(n: int32) -> void {
+            \\    if (n <= 0) {
+            \\    } else if (n == 1) {
+            \\    } else {
+            \\        log(n - 1)
+            \\    }
+            \\}
+            \\fn main() -> void {}
+        },
+    });
+    defer c.deinit();
+
+    var program = c.program.?;
+    try lower.tailCall(&program, c.arena.allocator());
+
+    const text = try irText(&program);
+    defer testing.allocator.free(text);
+    try testing.expect(std.mem.indexOf(u8, text, "call @app.log") != null);
+    try testing.expect(std.mem.indexOf(u8, text, "br header") == null);
+}
+
 test "Pass 7 leaves a non-tail self-recursive call alone" {
     // The recursive call is an operand of `add`, not the last thing before
     // the join's ret, so it is not in tail position (§7.1).

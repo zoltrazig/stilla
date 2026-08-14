@@ -83,6 +83,42 @@ fn validateFunc(f: *const cfg.IrFunc, allocator: std.mem.Allocator) !?[]const u8
         }
     }
 
+    // ---- Forward edge consistency ----
+    // Every terminator edge must be reflected in the target's `preds`
+    // (ir.md §4.3, the one-incoming-per-pred contract): a branch to a
+    // block that does not list this block as a predecessor is a dangling
+    // edge — execution would enter the target along a path its phis do
+    // not expect. Rewrites that drop chain edges (tail-call elimination,
+    // §7.2) must keep the rest of the graph coherent; this catches the
+    // stale terminator left behind if one does not. `ret` and `trap`
+    // have no edges. Dead trap stubs (blocks without predecessors) may
+    // carry a `{self}` pred and are skipped by the reachability
+    // analysis, not by this check: their `trap` terminator has no edge.
+    for (f.blocks) |b| {
+        const targets: []const *const cfg.BasicBlock = switch (b.terminator) {
+            .branch => |t| &.{t},
+            .branch_cond => |bc| &.{ bc.then_, bc.else_ },
+            .@"switch" => |s| blk: {
+                var ts = std.ArrayList(*const cfg.BasicBlock).empty;
+                for (s.arms) |arm| try ts.append(allocator, arm.block);
+                break :blk try ts.toOwnedSlice(allocator);
+            },
+            .ret, .trap => continue,
+        };
+        for (targets) |t| {
+            var listed = false;
+            for (t.preds) |p| {
+                if (p == b) {
+                    listed = true;
+                    break;
+                }
+            }
+            if (!listed) {
+                return msg(allocator, "function @{s}: terminator of block '{s}' targets '{s}', which does not list it as a predecessor", .{ f.name.text, b.name, t.name });
+            }
+        }
+    }
+
     // ---- Dominators (iterative) ----
     // dom[i] is the set of blocks dominating block i. Entry dominates
     // itself; blocks without predecessors (dead trap stubs) keep {self}.

@@ -14,7 +14,15 @@
 //! a `drop` or observable effect: the call must be the last instruction
 //! of its block — a scope-end `drop` would sit after it — and every
 //! intermediate block in the result chain must contain only phis, so no
-//! affine state is live across the boundary.
+//! affine state is live across the boundary. Two further preconditions
+//! keep the chain drop sound (§7.2): an intermediate chain block (any
+//! block between the call block and the ret block) must have exactly one
+//! predecessor, so it forwards only the call's result — an extra
+//! predecessor merges another arm's value, which dropping the chain edge
+//! would strand; and the ret block must keep at least one non-chain
+//! predecessor, or replacing every chain edge with a loop-back would
+//! orphan the function's only `ret`. Both are conservative: the call
+//! stays ordinary when either fails.
 //!
 //! The rewrite (§7.2) replaces the `call`+`ret` pair with a `br` back to
 //! the function's own entry block, re-binding the callee parameters from
@@ -119,13 +127,13 @@ fn resultChain(f: *cfg.IrFunc, block: *cfg.BasicBlock, result: *cfg.Value, alloc
         switch (uses.items[0]) {
             .other => return null,
             .ret => |t| {
-                if (t == cur_block) return try chain.toOwnedSlice(allocator);
+                if (t == cur_block) return finishChain(&chain, allocator);
                 // The block branches to a phi-only block that rets it.
                 if (cur_block.terminator != .branch) return null;
                 if (cur_block.terminator.branch != t) return null;
                 if (!isPhiOnly(t)) return null;
                 try chain.append(allocator, t);
-                return try chain.toOwnedSlice(allocator);
+                return finishChain(&chain, allocator);
             },
             .phi => |p| {
                 if (p.pred != cur_block) return null;
@@ -139,6 +147,20 @@ fn resultChain(f: *cfg.IrFunc, block: *cfg.BasicBlock, result: *cfg.Value, alloc
             },
         }
     }
+}
+
+/// Take the completed chain, or `null` when an *intermediate* chain block
+/// has more than one predecessor. The chain's last block is the ret block
+/// and may merge other arms' values; every block between the call block
+/// and the ret block, however, must forward only the call's result — with
+/// extra predecessors it merges values the rewrite's chain-edge drop
+/// would strand, changing what the ret block receives (multi-arm guarded
+/// recursion, §7.2).
+fn finishChain(chain: *std.ArrayList(*cfg.BasicBlock), allocator: std.mem.Allocator) !?[]*cfg.BasicBlock {
+    for (chain.items[1 .. chain.items.len - 1]) |b| {
+        if (b.preds.len != 1) return null;
+    }
+    return try chain.toOwnedSlice(allocator);
 }
 
 /// The chain of blocks a *void* call's flow reaches a bare `ret` through:
@@ -171,6 +193,13 @@ fn voidChain(block: *cfg.BasicBlock, call_instr: *cfg.Instr, allocator: std.mem.
             },
             .branch => |next| {
                 if (!isNoiseOnly(next)) return null;
+                // An intermediate (branching) chain block must forward
+                // only the call: with extra predecessors it merges other
+                // arms' void values, which the chain-edge drop strands
+                // (multi-arm guarded recursion, §7.2). The ret block may
+                // keep other predecessors — its non-chain values are
+                // preserved.
+                if (next.terminator == .branch and next.preds.len != 1) return null;
                 try chain.append(allocator, next);
                 cur = next;
             },
@@ -291,6 +320,17 @@ fn rewriteFunc(f: *cfg.IrFunc, allocator: std.mem.Allocator) !void {
     defer allocator.free(tails);
     if (tails.len == 0) return;
 
+    // A rewrite replaces the call block's branch to its ret block with a
+    // loop-back, dropping that chain edge from the ret block. When every
+    // predecessor of a ret block is the call block of a tail call whose
+    // chain ends there, the ret block would be left with no predecessors
+    // (dead-block elimination would delete the function's only `ret`), so
+    // the whole group is left un-rewritten — the calls stay ordinary.
+    var keep = try filterOrphanedTails(tails, allocator);
+    defer keep.deinit(allocator);
+    if (keep.items.len == 0) return;
+    const tails_ = keep.items;
+
     const header = f.entry;
     const header_name = try uniqueName(f, "header", allocator);
     header.name = header_name;
@@ -319,7 +359,7 @@ fn rewriteFunc(f: *cfg.IrFunc, allocator: std.mem.Allocator) !void {
 
     // Detach each tail call: drop the call instruction and its chain
     // edges, and branch the block to the header instead of its old ret.
-    for (tails) |t| {
+    for (tails_) |t| {
         var instrs = std.ArrayList(*cfg.Instr).empty;
         for (t.block.instrs) |instr| {
             if (instr != t.instr) try instrs.append(allocator, instr);
@@ -335,7 +375,7 @@ fn rewriteFunc(f: *cfg.IrFunc, allocator: std.mem.Allocator) !void {
     // the trampoline first, then one edge per tail call.
     var hpreds = std.ArrayList(*cfg.BasicBlock).empty;
     try hpreds.append(allocator, trampoline);
-    for (tails) |t| try hpreds.append(allocator, t.block);
+    for (tails_) |t| try hpreds.append(allocator, t.block);
     header.preds = try hpreds.toOwnedSlice(allocator);
 
     // One phi per parameter, merging the entry values with the loop-back
@@ -368,9 +408,9 @@ fn rewriteFunc(f: *cfg.IrFunc, allocator: std.mem.Allocator) !void {
     var phi_instrs = std.ArrayList(*cfg.Instr).empty;
     defer phi_instrs.deinit(allocator);
     for (params, 0..) |p, i| {
-        const incoming = try allocator.alloc(cfg.PhiIn, tails.len + 1);
+        const incoming = try allocator.alloc(cfg.PhiIn, tails_.len + 1);
         incoming[0] = .{ .value = p, .pred = trampoline };
-        for (tails, 0..) |t, j| {
+        for (tails_, 0..) |t, j| {
             const arg = t.args[i];
             incoming[j + 1] = .{ .value = renames.get(arg) orelse arg, .pred = t.block };
         }
@@ -416,6 +456,44 @@ fn dropPred(b: *cfg.BasicBlock, pred: *cfg.BasicBlock, allocator: std.mem.Alloca
         }
         phi.incoming = try incoming.toOwnedSlice(allocator);
     }
+}
+
+/// Drop every tail call whose rewrite would orphan its ret block: when
+/// every predecessor of the ret block is the call block of a tail call
+/// whose chain ends there, replacing all of those branches with loop-backs
+/// leaves the ret block with no predecessors (unreachable; dead-block
+/// elimination would delete the function's only `ret`). The whole group is
+/// skipped so the calls stay ordinary.
+fn filterOrphanedTails(tails: []const TailCall, allocator: std.mem.Allocator) !std.ArrayList(TailCall) {
+    var keep = std.ArrayList(TailCall).empty;
+    var group = std.AutoHashMap(*cfg.BasicBlock, std.ArrayList(usize)).init(allocator);
+    defer group.deinit();
+    for (tails, 0..) |t, i| {
+        const bn = t.chain[t.chain.len - 1];
+        const gop = try group.getOrPut(bn);
+        if (!gop.found_existing) gop.value_ptr.* = std.ArrayList(usize).empty;
+        try gop.value_ptr.append(allocator, i);
+    }
+    var iter = group.iterator();
+    while (iter.next()) |e| {
+        var orphaned = true;
+        for (e.key_ptr.*.preds) |p| {
+            var dropped_edge = false;
+            for (e.value_ptr.items) |i| {
+                if (tails[i].block == p) {
+                    dropped_edge = true;
+                    break;
+                }
+            }
+            if (!dropped_edge) {
+                orphaned = false;
+                break;
+            }
+        }
+        if (orphaned) continue; // ret block would lose every predecessor
+        for (e.value_ptr.items) |i| try keep.append(allocator, tails[i]);
+    }
+    return keep;
 }
 
 /// A block name not already used in `f`, for the trampoline and header.
