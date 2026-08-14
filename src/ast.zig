@@ -271,7 +271,7 @@ pub const Type = union(enum) {
 /// `any` is the top type: every value type coerces to it (Core §11.6);
 /// `never` is the bottom type, which has no values and coerces to every
 /// type (Core §13.2); `hostdata` is an opaque, host-defined payload
-/// (Core §11.7), created only by the host and affine like `any`.
+/// (Core §11.7), created only by the host and unique like `any`.
 pub const PrimitiveKind = enum {
     any,
     byte,

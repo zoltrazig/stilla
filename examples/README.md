@@ -12,7 +12,7 @@ zig build run -- examples/<name>.st
 | [`fib.st`](fib.st) | recursive functions with self-calls, `if`/`else` expression bodies, recursion as the iteration mechanism, `builtin.print`/`builtin.str` syscalls |
 | [`fib_tail_call.st`](fib_tail_call.st) | tail-recursive (accumulator-style) recursion, order-independent function references, explicit return types on recursive functions |
 | [`match.st`](match.st) | union dispatch, `switch` terminators, and join phis |
-| [`ownership.st`](ownership.st) | affine values, a user `drop` hook, borrow/move/drop |
+| [`ownership.st`](ownership.st) | unique values, a user `drop` hook, borrow/move/drop |
 | [`strings.st`](strings.st) | the `string` module: code-point lengths, concat/repeat, substring predicates, split/join, case conversion, trim; `builtin.assert` |
 | [`floats.st`](floats.st) | the `math` module: float32 constants, IEEE 754 functions, rounding, min/max/abs, trigonometry, explicit `as` conversions (Core §16.3) |
 | [`fold.st`](fold.st) | lists and the `iter` module: `builtin.range`, indexing, `fold` with int and tuple accumulators, `each` with a lambda, recursive `[head, ..tail]` patterns |

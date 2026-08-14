@@ -3,7 +3,7 @@
 //! (after tail-call elimination). Out: the same program, with an
 //! identical `module_ref` earlier in the same block reused, and an
 //! identical `load_member` of the same module slot (whose result is
-//! duplicable) reused, so repeated module/member reads fold to one load.
+//! Copy) reused, so repeated module/member reads fold to one load.
 //!
 //! `module_ref` is a pure constant: the module handle is the same value
 //! on every reference, so an identical reference earlier in the block is
@@ -12,8 +12,8 @@
 //! anywhere else, ir.md §5.6), so a slot's value is stable for the life
 //! of a function — a repeated load of the same slot from the same module
 //! value is redundant unless a `store_member` intervenes, which clears
-//! the table. Only duplicable results are shared, mirroring the
-//! on-the-fly CSE rule: a duplicable member read is a copy, an affine
+//! the table. Only Copy results are shared, mirroring the
+//! on-the-fly CSE rule: a Copy member read is a copy, an unique
 //! read is a borrowed view, and sharing a view across uses would change
 //! the destruction schedule (ir.md §6.4).
 //!
@@ -27,10 +27,10 @@
 const std = @import("std");
 const cfg = @import("../cfg.zig");
 
-/// The load_member key: the module value and the slot read.
+/// The load_member key: the module value and the member read.
 const LoadKey = struct {
     module: *cfg.Value,
-    slot: u32,
+    member: u32,
 };
 
 /// Eliminate redundant `module_ref` / `load_member` computations.
@@ -61,8 +61,8 @@ fn cseFunc(f: *cfg.IrFunc, allocator: std.mem.Allocator) !void {
                     try mods.put(allocator, spec, instr.results[0]);
                 },
                 .load_member => |lm| {
-                    if (instr.results.len > 0 and (instr.results[0].ownership orelse .duplicable) != .affine) {
-                        const key = LoadKey{ .module = lm.module, .slot = lm.slot };
+                    if (instr.results.len > 0 and (instr.results[0].ownership orelse .copy) != .unique) {
+                        const key = LoadKey{ .module = lm.module, .member = lm.member };
                         if (loads.get(key)) |canon| {
                             cfg.rewriteUses(f, instr.results[0], canon);
                             continue;

@@ -2,7 +2,7 @@
 //! `tuple-pattern`, `list-pattern`, `path-pattern` (Core §14). In:
 //! Lowerer + FuncState + ast.Pattern + base value. Out: bindings for
 //! pattern-introduced names (with ownership) and drops for discarded
-//! affine values.
+//! unique values.
 
 const std = @import("std");
 const ast = @import("../ast.zig");
@@ -74,12 +74,12 @@ pub fn patternHasTypeTest(p: *const ast.Pattern) bool {
 /// consuming `for`): the base is consumed as a whole by one atomic
 /// `unpack_*` / `split_list` op and all parts are defined at once (Core
 /// §14.6, §18 *Whole-owner rule*, ir.md §5.3). Otherwise projections
-/// are `read_*` (borrowed views of affine bases).
+/// are `read_*` (borrowed views of unique bases).
 pub fn bindPattern(self: *Lowerer, fs: *FuncState, pattern: *const ast.Pattern, base: *cfg.Value, base_owned: bool) LowerError!void {
     switch (pattern.*) {
         .wildcard => {
             // `let _ = expr`: the value is discarded.
-            if (base.ownership == .affine and base.state == .owned and !cfg_lower_emit.isConsumed(fs, base)) {
+            if (base.ownership == .unique and base.state == .owned and !cfg_lower_emit.isConsumed(fs, base)) {
                 try cfg_lower_emit.emitDrop(self, fs, base.span, base);
             }
         },
@@ -96,25 +96,25 @@ pub fn bindPattern(self: *Lowerer, fs: *FuncState, pattern: *const ast.Pattern, 
             }
             const payload_type = try self.resolveType(fs, &tp.type_);
             if (tp.binding) |binding| {
-                if (cfg_lower_emit.isAffine(self, fs, payload_type) and !base_owned) {
-                    return self.fail(tp.span, "cannot recover an affine payload from a borrowed 'any'; use match (move scrutinee)", .{});
+                if (cfg_lower_emit.isUnique(self, fs, payload_type) and !base_owned) {
+                    return self.fail(tp.span, "cannot recover an unique payload from a borrowed 'any'; use match (move scrutinee)", .{});
                 }
                 const payload = if (base_owned)
                     (try cfg_lower_emit.emit(self, fs, binding.span, .{ .any_unpack_move = base }, payload_type)) orelse return
                 else
                     (try cfg_lower_emit.emit(self, fs, binding.span, .{ .any_unpack_copy = base }, payload_type)) orelse return;
-                const owns = payload.state == .owned and (payload.ownership orelse .duplicable) == .affine;
+                const owns = payload.state == .owned and (payload.ownership orelse .copy) == .unique;
                 try cfg_lower_emit.bindLocal(self, fs, binding.text, payload, owns);
             }
         },
         .path => |pp| switch (pp.tail) {
             .none => {
                 // A plain `let x = fresh()` binds fresh ownership (Core
-                // §10.5): the binding owns an affine value in the owned
+                // §10.5): the binding owns an unique value in the owned
                 // state even when no `move` was written, so the scope-end
                 // drop is emitted.
                 const name = pp.path[pp.path.len - 1].text;
-                try cfg_lower_emit.bindLocal(self, fs, name, base, base.ownership == .affine and base.state == .owned);
+                try cfg_lower_emit.bindLocal(self, fs, name, base, base.ownership == .unique and base.state == .owned);
             },
             .struct_ => |sp| try destructureStruct(self, fs, &pp, &sp, base, base_owned),
             .variant => |vp| try destructureVariant(self, fs, &pp, &vp, base, base_owned),
@@ -145,7 +145,7 @@ pub fn destructureStruct(self: *Lowerer, fs: *FuncState, pp: *const ast.PathPatt
             if (fp.pattern) |*p2| {
                 try bindPattern(self, fs, p2, proj, proj.state == .owned);
             } else {
-                try cfg_lower_emit.bindLocal(self, fs, fp.name.text, proj, proj.state == .owned and proj.ownership == .affine);
+                try cfg_lower_emit.bindLocal(self, fs, fp.name.text, proj, proj.state == .owned and proj.ownership == .unique);
             }
         }
     } else {
@@ -157,7 +157,7 @@ pub fn destructureStruct(self: *Lowerer, fs: *FuncState, pp: *const ast.PathPatt
             if (fp.pattern) |*p2| {
                 try bindPattern(self, fs, p2, proj, proj.state == .owned);
             } else {
-                try cfg_lower_emit.bindLocal(self, fs, fp.name.text, proj, proj.state == .owned and proj.ownership == .affine);
+                try cfg_lower_emit.bindLocal(self, fs, fp.name.text, proj, proj.state == .owned and proj.ownership == .unique);
             }
         }
     }
@@ -203,15 +203,15 @@ pub fn destructureList(self: *Lowerer, fs: *FuncState, lp: *const ast.ListPatter
         try cfg_lower_emit.cleanupDisable(self, fs, base.span, base);
         for (lp.items, results[0..lp.items.len]) |*item, proj| try bindPattern(self, fs, item, proj, proj.state == .owned);
         if (lp.rest) |rest| {
-            try cfg_lower_emit.bindLocal(self, fs, rest.text, results[results.len - 1], results[results.len - 1].state == .owned and results[results.len - 1].ownership == .affine);
+            try cfg_lower_emit.bindLocal(self, fs, rest.text, results[results.len - 1], results[results.len - 1].state == .owned and results[results.len - 1].ownership == .unique);
         } else if (results.len > 0) {
             // Exact pattern (ir.md §5.3): the remainder is dead; destroy
-            // it now. The drop fires for affine and deferred (generic)
-            // element types — a generic remainder may resolve to affine
+            // it now. The drop fires for unique and deferred (generic)
+            // element types — a generic remainder may resolve to unique
             // at monomorphization and must not leak; a provably
-            // duplicable remainder (e.g. list[int32]) needs no drop.
+            // Copy remainder (e.g. list[int32]) needs no drop.
             const rest_v = results[results.len - 1];
-            if (cfg_lower_emit.mayBeAffine(self, fs, rest_v.type_) and rest_v.state == .owned and !cfg_lower_emit.isConsumed(fs, rest_v)) {
+            if (cfg_lower_emit.mayBeUnique(self, fs, rest_v.type_) and rest_v.state == .owned and !cfg_lower_emit.isConsumed(fs, rest_v)) {
                 _ = try cfg_lower_emit.emit(self, fs, lp.span, .{ .drop_ = rest_v }, null);
                 cfg_lower_emit.markConsumed(self, fs, rest_v);
             }
@@ -228,7 +228,7 @@ pub fn destructureList(self: *Lowerer, fs: *FuncState, lp: *const ast.ListPatter
             const inner = try self.arena.create(cfg.Type);
             inner.* = elem_type;
             const tail = (try cfg_lower_emit.emit(self, fs, rest.span, .{ .tail = base }, .{ .list = inner })) orelse return;
-            try cfg_lower_emit.bindLocal(self, fs, rest.text, tail, tail.state == .owned and tail.ownership == .affine);
+            try cfg_lower_emit.bindLocal(self, fs, rest.text, tail, tail.state == .owned and tail.ownership == .unique);
         }
     }
 }

@@ -43,7 +43,7 @@ pub fn materialize(self: *Builder, raw: *RawModule) !void {
     // values are known from the load pass, so type resolution below
     // can already follow `import` aliases and `using` targets.
     info.module_values = raw.module_values;
-    const resolve: Resolve = .{ .arena = self.arena, .by_specifier = &self.by_specifier };
+    const resolve: Resolve = .{ .arena = self.arena, .by_specifier = &self.by_specifier, .type_ids = &self.type_interner };
 
     // 1. using aliases first: signatures and const types may use them.
     for (program.items) |*item| switch (item.*) {
@@ -80,6 +80,13 @@ pub fn materialize(self: *Builder, raw: *RawModule) !void {
         },
         else => {},
     };
+
+    // Publish type members now, before function/const signatures: a
+    // same-module struct/union return or field reference must resolve
+    // to its nominal named (not parametrized) type during signature
+    // materialization, so it does not leak as a generic name.
+    info.types = try self.arena.dupe(TypeMember, types.items);
+    info.type_index = type_index;
 
     // 3. Function members (host bindings and definitions). Generic
     // functions are templates (Core §12.4) but are still recorded so

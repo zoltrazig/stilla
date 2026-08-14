@@ -50,9 +50,9 @@ pub const LowerError = error{ OutOfMemory, Diagnostic };
 pub const Local = struct {
     name: []const u8,
     value: *cfg.Value,
-    /// True when this local owns an affine value that must be dropped at
+    /// True when this local owns an unique value that must be dropped at
     /// scope end unless consumed (moved, dropped, returned, stored).
-    owns_affine: bool,
+    owns_unique: bool,
     consumed: bool = false,
 };
 
@@ -78,7 +78,7 @@ pub const FuncState = struct {
     scopes: std.ArrayListUnmanaged(Scope) = .empty,
     /// Values that are bound to a local (for move-at-call decisions).
     local_values: std.AutoHashMapUnmanaged(*cfg.Value, void) = .empty,
-    /// Affine-owned values consumed by an ownership operation (move,
+    /// Unique-owned values consumed by an ownership operation (move,
     /// drop, take, move-call-arg, phi input, ret, construct arg).
     consumed: std.AutoHashMapUnmanaged(*cfg.Value, void) = .empty,
     /// Conditional-release tokens (Core §10.10, ir.md §6.4): value → its
@@ -86,13 +86,13 @@ pub const FuncState = struct {
     /// the construct that first made it a candidate). A consuming path
     /// disarms the token (`cleanup_disable`); the scope-end destruction is
     /// `drop_cleanup` of the token — conditional on the per-path armed
-    /// bit, so the maybe-affine value itself is never referenced after the
+    /// bit, so the maybe-unique value itself is never referenced after the
     /// construct's join.
     cleanup_tokens: std.AutoHashMapUnmanaged(*cfg.Value, *cfg.Value) = .empty,
-    /// The local bound to an affine value, for resetting `consumed` on the
+    /// The local bound to an unique value, for resetting `consumed` on the
     /// owning `Local` at a maybe-merge.
     value_locals: std.AutoHashMapUnmanaged(*cfg.Value, *Local) = .empty,
-    /// Affine-owned values created by `emit`, in creation order: the
+    /// Unique-owned values created by `emit`, in creation order: the
     /// scope-end / full-expression drop candidates.
     created: std.ArrayListUnmanaged(*cfg.Value) = .empty,
     /// Phi incoming builders, keyed by the phi instruction; materialized

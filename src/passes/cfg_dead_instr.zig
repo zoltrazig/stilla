@@ -1,12 +1,12 @@
 //! Pass: local dead-instruction elimination (frontend.md §8.4). In: a
 //! lowered `cfg.IrProgram` (after drop elision, so the unobservable drops
-//! of duplicable values are already gone). Out: the same program, with
-//! every instruction whose results are unused, duplicable, and produced
+//! of Copy values are already gone). Out: the same program, with
+//! every instruction whose results are unused, Copy, and produced
 //! by a side-effect-free, non-consuming, non-trapping op removed.
 //!
-//! Destruction is observable only for affine values (type_shape classifies
-//! any type with a user drop hook affine, and drop elision removes the
-//! unobservable drops of duplicable values), so a duplicable result that
+//! Destruction is observable only for unique values (type_shape classifies
+//! any type with a user drop hook unique, and drop elision removes the
+//! unobservable drops of Copy values), so a Copy result that
 //! no instruction, terminator, or phi incoming reads can be removed
 //! outright. The op must also be pure: calls, syscalls, `drop`,
 //! `store_member`, `cleanup_*`, and the consuming destructures have
@@ -147,11 +147,11 @@ fn deadFunc(f: *cfg.IrFunc, allocator: std.mem.Allocator) !void {
     try cfg.renumberValues(f, allocator);
 }
 
-/// A removable candidate: op in the safe set and every result duplicable.
+/// A removable candidate: op in the safe set and every result Copy.
 fn isCandidate(instr: *const cfg.Instr) bool {
     if (instr.results.len == 0 or !removable(std.meta.activeTag(instr.op))) return false;
     for (instr.results) |r| {
-        if ((r.ownership orelse .duplicable) == .affine) return false;
+        if ((r.ownership orelse .copy) == .unique) return false;
     }
     return true;
 }
@@ -194,7 +194,7 @@ fn collectInstrOperands(instr: *const cfg.Instr, out: *std.ArrayList(*cfg.Value)
             for (x.args) |a| try out.append(allocator, a);
         },
         .syscall => |x| for (x.args) |a| try out.append(allocator, a),
-        .const_, .arg, .module_ref, .fn_ref => {},
+        .const_, .module_ref, .fn_ref => {},
         .phi => |x| for (x.incoming) |inc| try out.append(allocator, inc.value),
     }
 }

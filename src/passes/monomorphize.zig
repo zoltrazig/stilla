@@ -15,10 +15,14 @@
 const std = @import("std");
 const ast = @import("../ast.zig");
 const cfg = @import("../cfg.zig");
+const moduleinfo = @import("../moduleinfo.zig");
 
 const Substitution = struct {
     params: []const ast.Ident,
     args: []const cfg.Type,
+    /// The resolution view, used to turn a substituted `cfg.Type.named`
+    /// (`TypeId`) back into its written name for the re-check (ir.md §11).
+    resolve: moduleinfo.Resolve,
 
     fn lookup(self: Substitution, name: []const u8) ?cfg.Type {
         for (self.params, self.args) |p, a| {
@@ -31,8 +35,8 @@ const Substitution = struct {
 /// Monomorphize a generic function template for one concrete set of type
 /// arguments (Core §12.2). The clone lives in `arena` and shares no nodes
 /// with the template, so the checker can annotate it independently.
-pub fn monomorphizeFunc(arena: std.mem.Allocator, decl: *const ast.FuncDef, type_args: []const cfg.Type) !*ast.FuncDef {
-    const sub = Substitution{ .params = decl.type_params, .args = type_args };
+pub fn monomorphizeFunc(arena: std.mem.Allocator, resolve: moduleinfo.Resolve, decl: *const ast.FuncDef, type_args: []const cfg.Type) !*ast.FuncDef {
+    const sub = Substitution{ .params = decl.type_params, .args = type_args, .resolve = resolve };
     const out = try arena.create(ast.FuncDef);
     out.* = .{
         .span = decl.span,
@@ -58,7 +62,7 @@ fn cloneType(arena: std.mem.Allocator, sub: Substitution, t: *const ast.Type) er
             // A single-segment name matching a type parameter is replaced
             // by the concrete argument; everything else clones verbatim.
             if (n.path.len == 1) {
-                if (sub.lookup(n.path[0].text)) |arg| break :blk try cfgTypeToAst(arena, arg, n.span);
+                if (sub.lookup(n.path[0].text)) |arg| break :blk try cfgTypeToAst(arena, sub.resolve, arg, n.span);
             }
             break :blk .{ .named = .{
                 .span = n.span,
@@ -344,41 +348,46 @@ fn cloneMatchArms(arena: std.mem.Allocator, sub: Substitution, arms: []const ast
 /// Convert a resolved `cfg.Type` back into an `ast.Type` so a substituted
 /// node can be re-resolved by the checker. Dotted named types split into a
 /// path of identifiers; `.module` has no syntax and is unreachable here.
-fn cfgTypeToAst(arena: std.mem.Allocator, t: cfg.Type, span: ast.Span) error{OutOfMemory}!ast.Type {
+fn cfgTypeToAst(arena: std.mem.Allocator, resolve: moduleinfo.Resolve, t: cfg.Type, span: ast.Span) error{OutOfMemory}!ast.Type {
     return switch (t) {
         .primitive => |k| .{ .primitive = .{ .span = span, .kind = k } },
-        .named => |n| .{ .named = .{ .span = span, .path = try splitPath(arena, n), .type_args = null } },
+        .named => |id| .{ .named = .{ .span = span, .path = try splitPath(arena, resolve.typeNameOf(id) orelse ""), .type_args = null } },
+        .param => |p| blk: {
+            const one = try arena.alloc(ast.Ident, 1);
+            one[0] = .{ .span = span, .text = p };
+            break :blk .{ .named = .{ .span = span, .path = one, .type_args = null } };
+        },
         .module, .cleanup => unreachable,
-        .list => |inner| .{ .list = .{ .span = span, .elem = try cfgTypeToAstPtr(arena, inner.*, span) } },
-        .box => |inner| .{ .box = .{ .span = span, .inner = try cfgTypeToAstPtr(arena, inner.*, span) } },
-        .tuple => |elems| .{ .tuple = .{ .span = span, .elems = try cfgTypesToAst(arena, elems, span) } },
+        .list => |inner| .{ .list = .{ .span = span, .elem = try cfgTypeToAstPtr(arena, resolve, inner.*, span) } },
+        .box => |inner| .{ .box = .{ .span = span, .inner = try cfgTypeToAstPtr(arena, resolve, inner.*, span) } },
+        .tuple => |elems| .{ .tuple = .{ .span = span, .elems = try cfgTypesToAst(arena, resolve, elems, span) } },
         .function => |f| .{ .function = .{
             .span = span,
-            .params = try cfgParamsToAst(arena, f.params),
-            .ret = try cfgTypeToAstPtr(arena, f.ret.*, span),
+            .params = try cfgParamsToAst(arena, resolve, f.params),
+            .ret = try cfgTypeToAstPtr(arena, resolve, f.ret.*, span),
         } },
     };
 }
 
-fn cfgTypeToAstPtr(arena: std.mem.Allocator, t: cfg.Type, span: ast.Span) error{OutOfMemory}!*ast.Type {
+fn cfgTypeToAstPtr(arena: std.mem.Allocator, resolve: moduleinfo.Resolve, t: cfg.Type, span: ast.Span) error{OutOfMemory}!*ast.Type {
     const ptr = try arena.create(ast.Type);
-    ptr.* = try cfgTypeToAst(arena, t, span);
+    ptr.* = try cfgTypeToAst(arena, resolve, t, span);
     return ptr;
 }
 
-fn cfgTypesToAst(arena: std.mem.Allocator, types: []const cfg.Type, span: ast.Span) error{OutOfMemory}![]ast.Type {
+fn cfgTypesToAst(arena: std.mem.Allocator, resolve: moduleinfo.Resolve, types: []const cfg.Type, span: ast.Span) error{OutOfMemory}![]ast.Type {
     const out = try arena.alloc(ast.Type, types.len);
-    for (types, 0..) |t, i| out[i] = try cfgTypeToAst(arena, t, span);
+    for (types, 0..) |t, i| out[i] = try cfgTypeToAst(arena, resolve, t, span);
     return out;
 }
 
-fn cfgParamsToAst(arena: std.mem.Allocator, params: []const cfg.Param) error{OutOfMemory}![]ast.FunctionParamType {
+fn cfgParamsToAst(arena: std.mem.Allocator, resolve: moduleinfo.Resolve, params: []const cfg.Param) error{OutOfMemory}![]ast.FunctionParamType {
     const out = try arena.alloc(ast.FunctionParamType, params.len);
     for (params, 0..) |p, i| {
         out[i] = .{
             .span = p.span,
             .mode = p.mode,
-            .type_ = try cfgTypeToAstPtr(arena, p.type_, p.span),
+            .type_ = try cfgTypeToAstPtr(arena, resolve, p.type_, p.span),
         };
     }
     return out;

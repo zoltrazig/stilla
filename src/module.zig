@@ -4,7 +4,7 @@
 //! (Runtime §2.1). Module storage is immutable after initialization (§2.2)
 //! and its lifetime extends until the execution context ends. Module
 //! constants are initialized strictly in declaration order (§2.3); teardown
-//! destroys module-owned affine constants in reverse initialization order
+//! destroys module-owned unique constants in reverse initialization order
 //! (§2.5).
 
 const std = @import("std");
@@ -23,7 +23,7 @@ pub const Module = struct {
     // the same immutable record/member-access model as structs (Runtime
     // §2.2, Core §7, §15); there is no separate runtime `module` type.
     //
-    // TODO(runtime): teardown of module-owned affine constants in reverse
+    // TODO(runtime): teardown of module-owned unique constants in reverse
     // initialization order (Runtime §2.5).
 };
 

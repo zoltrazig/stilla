@@ -105,9 +105,11 @@ test "frontend compiles a single module to IR" {
 
     const out = try irText(&program);
     defer testing.allocator.free(out);
-    // The module init stores the constant; main loads it and syscalls print.
+    // The module init stores the constant (the only stored const, so
+    // slot #0 — member and slot indices are distinct, ir.md §7); main
+    // loads it and syscalls print.
     try testing.expect(std.mem.indexOf(u8, out, "func @init") != null);
-    try testing.expect(std.mem.indexOf(u8, out, "store_member #3") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "store_member #0") != null);
     try testing.expect(std.mem.indexOf(u8, out, "load_member") != null);
     try testing.expect(std.mem.indexOf(u8, out, "syscall builtin#print") != null);
     try testing.expect(std.mem.indexOf(u8, out, "func @app.add") != null);
@@ -128,8 +130,11 @@ test "frontend resolves imports, dependencies first" {
     const out = try irText(&c.program.?);
     defer testing.allocator.free(out);
     try testing.expect(std.mem.indexOf(u8, out, "module \"calc\"") != null);
-    try testing.expect(std.mem.indexOf(u8, out, "module_ref \"calc\"") != null);
     try testing.expect(std.mem.indexOf(u8, out, "call @calc.add") != null);
+    // The imported module value is a static ModuleRef member: it is never
+    // stored, so neither module occupies storage and nothing is written
+    // by @init (ir.md §7).
+    try testing.expect(std.mem.indexOf(u8, out, "store_member") == null);
 }
 
 test "frontend rejects an import cycle" {
@@ -266,20 +271,20 @@ test "frontend lowers ownership: move, borrow, drop" {
     };
     const out = try irText(&program);
     defer testing.allocator.free(out);
-    // An affine owner is moved before a move-param call; the borrow calls
+    // An unique owner is moved before a move-param call; the borrow calls
     // pass it through unchanged.
     try testing.expect(std.mem.indexOf(u8, out, "move ") != null);
-    // The drop hook makes File affine, so `consume(move a)` emits a real
+    // The drop hook makes File unique, so `consume(move a)` emits a real
     // `move` instruction (`%x: File = move %y`) — not merely the
     // `consume(move file: File)` signature text (which is what a
-    // duplicable File would leave us matching).
+    // Copy File would leave us matching).
     try testing.expect(std.mem.indexOf(u8, out, " = move %") != null);
     try testing.expect(std.mem.indexOf(u8, out, "call @app.inspect") != null);
     try testing.expect(std.mem.indexOf(u8, out, "call @app.consume") != null);
     try testing.expect(std.mem.indexOf(u8, out, "construct") != null);
 }
 
-test "frontend drops a plain-let fresh affine value at scope end" {
+test "frontend drops a plain-let fresh unique value at scope end" {
     // Core §10.5: `let a = open_file(...)` binds fresh ownership even
     // without `move`, so the local is dropped at scope end when it is
     // never consumed.
@@ -378,7 +383,7 @@ test "frontend rejects explicitly dropping the destruction view inside a drop ho
 test "frontend does not auto-drop a binding released by every branch" {
     // Core §10.10: a definitely-released binding was already destroyed by
     // the release on every normal path, so it is not destroyed again at
-    // scope end (no maybe-affine flag is needed).
+    // scope end (no maybe-unique flag is needed).
     var c = try compileText("app", &.{
         .{
             "app",
@@ -408,12 +413,12 @@ test "frontend does not auto-drop a binding released by every branch" {
 
 test "frontend lowers a partially released binding to a cleanup token" {
     // Core §10.10: a binding released on some but not all normal paths
-    // becomes maybe-affine. The v0.2 IR represents this with a cleanup
+    // becomes maybe-unique. The v0.2 IR represents this with a cleanup
     // token (ir.md §6.4): `cleanup_owner` arms the token at the
     // construct's entry, the consuming path disarms it (`cleanup_disable`
     // alongside the `move`), and the scope-end destruction is a
     // `drop_cleanup` of the token — conditional on the per-path armed bit.
-    // The maybe-affine value itself is never referenced after the join.
+    // The maybe-unique value itself is never referenced after the join.
     var c = try compileText("app", &.{
         .{
             "app",
@@ -443,9 +448,9 @@ test "frontend lowers a partially released binding to a cleanup token" {
     try testing.expect(std.mem.indexOf(u8, body, " drop %") == null);
 }
 
-test "frontend emits no drop for a duplicable value" {
-    // Core §10.1: a duplicable value is a subset of affine — dropping it
-    // does nothing, so the frontend emits no `drop` at all.
+test "frontend emits no drop for a Copy value" {
+    // Core §10.1: dropping a Copy value does nothing, so the frontend
+    // emits no `drop` at all.
     var c = try compileText("app", &.{
         .{
             "app",
@@ -554,9 +559,9 @@ test "frontend rejects a type-test pattern on a non-any scrutinee" {
     try testing.expect(std.mem.indexOf(u8, c.diag.?.message, "'any' scrutinee") != null);
 }
 
-test "frontend allows affine type-test recovery from a consuming match" {
+test "frontend allows unique type-test recovery from a consuming match" {
     // Core §11.6.2: `match (move a)` transfers the complete `any`, so an
-    // affine arm binding owns the extracted payload.
+    // unique arm binding owns the extracted payload.
     var c = try compileText("app", &.{
         .{
             "app",
@@ -579,9 +584,9 @@ test "frontend allows affine type-test recovery from a consuming match" {
     try testing.expect(std.mem.indexOf(u8, out, " = any_unpack_move %") != null);
 }
 
-test "frontend rejects an affine any cast without a move" {
-    // Core §11.6.1: `a as T` for affine `T` requires `(move a) as T`; a
-    // plain cast would copy an affine payload out of the `any`.
+test "frontend rejects an unique any cast without a move" {
+    // Core §11.6.1: `a as T` for unique `T` requires `(move a) as T`; a
+    // plain cast would copy an unique payload out of the `any`.
     var c = try compileText("app", &.{
         .{
             "app",
@@ -594,10 +599,10 @@ test "frontend rejects an affine any cast without a move" {
 
     try testing.expect(c.program == null);
     try testing.expect(c.diag != null);
-    try testing.expect(std.mem.indexOf(u8, c.diag.?.message, "affine payload") != null);
+    try testing.expect(std.mem.indexOf(u8, c.diag.?.message, "unique payload") != null);
 }
 
-test "frontend allows a moved affine any cast" {
+test "frontend allows a moved unique any cast" {
     // `(move a) as T` transfers ownership of the complete `any` (Core
     // §11.6.1).
     var c = try compileText("app", &.{
@@ -620,8 +625,8 @@ test "frontend allows a moved affine any cast" {
     try testing.expect(std.mem.indexOf(u8, out, " = any_unpack_move %") != null);
 }
 
-test "frontend rejects an affine type-test recovery from a borrowed any" {
-    // Core §11.6.1: an affine payload may be recovered only from a moved
+test "frontend rejects an unique type-test recovery from a borrowed any" {
+    // Core §11.6.1: an unique payload may be recovered only from a moved
     // `any` (`match (move a)`); a borrowed `any` yields only borrows.
     var c = try compileText("app", &.{
         .{
@@ -637,7 +642,7 @@ test "frontend rejects an affine type-test recovery from a borrowed any" {
 
     try testing.expect(c.program == null);
     try testing.expect(c.diag != null);
-    try testing.expect(std.mem.indexOf(u8, c.diag.?.message, "affine payload") != null);
+    try testing.expect(std.mem.indexOf(u8, c.diag.?.message, "unique payload") != null);
 }
 
 test "frontend rejects a type-test pattern nested in another pattern" {
@@ -679,9 +684,9 @@ test "frontend rejects type-test patterns in let" {
     try testing.expect(std.mem.indexOf(u8, c.diag.?.message, "refutable") != null);
 }
 
-test "frontend lowers hostdata host bindings and affine ownership" {
+test "frontend lowers hostdata host bindings and unique ownership" {
     // Core §11.7: `hostdata` is a primitive type created only by host
-    // bindings; its values are affine, so a plain let is destroyed at
+    // bindings; its values are unique, so a plain let is destroyed at
     // scope end.
     var c = try compileText("app", &.{
         .{ "os", "fn get_handle() -> hostdata;" },
@@ -703,7 +708,7 @@ test "frontend lowers hostdata host bindings and affine ownership" {
     defer testing.allocator.free(out);
     try testing.expect(std.mem.indexOf(u8, out, "hostdata") != null);
     try testing.expect(std.mem.indexOf(u8, out, "syscall os#get_handle") != null);
-    // hostdata is affine: the fresh local is destroyed at scope end.
+    // hostdata is unique: the fresh local is destroyed at scope end.
     try testing.expect(std.mem.indexOf(u8, out, "drop ") != null);
 }
 
@@ -740,7 +745,9 @@ test "frontend IR round-trips through the standalone cfg parser" {
     // survives, and the unique ids round-trip in order.
     for (prog.funcs) |f| {
         try testing.expect(f.blocks.len > 0);
-        try testing.expectEqual(f.values.len, f.values[f.values.len - 1].id + 1);
+        // An empty function (e.g. an `@init` with nothing to store) has
+        // no values; otherwise the unique ids round-trip in order.
+        if (f.values.len > 0) try testing.expectEqual(f.values.len, f.values[f.values.len - 1].id + 1);
     }
 }
 
@@ -965,7 +972,7 @@ test "frontend lowers consuming list-pattern destructuring with split_list" {
     // Core §18 (whole-owner rule): destructuring an owned list with
     // `let [head, ..rest] = move xs` consumes the collection as a whole;
     // one atomic `split_list` defines the item and the owned rest (ir.md
-    // §5.3) — each affine element becomes an owner.
+    // §5.3) — each unique element becomes an owner.
     var c = try compileText("app", &.{
         .{
             "app",
@@ -1011,8 +1018,8 @@ test "frontend lowers box, peek, and unbox to syscalls" {
     try testing.expect(std.mem.indexOf(u8, out, "syscall builtin#box") != null);
     try testing.expect(std.mem.indexOf(u8, out, "syscall builtin#peek") != null);
     try testing.expect(std.mem.indexOf(u8, out, "syscall builtin#unbox") != null);
-    // `unbox(move b)` on a duplicable box[int32] lowers `move` to nothing
-    // (Core §10.6: a copy of a duplicable value is the value itself), so
+    // `unbox(move b)` on a Copy box[int32] lowers `move` to nothing
+    // (Core §10.6: a copy of a Copy value is the value itself), so
     // no copy instruction is emitted — the unbox takes the box directly.
     try testing.expect(std.mem.indexOf(u8, out, "copy") == null);
     try testing.expect(std.mem.indexOf(u8, out, "syscall builtin#unbox, %1") != null);
@@ -1084,7 +1091,7 @@ test "frontend rejects moving an unknown binding" {
 }
 
 test "frontend rejects dropping an unknown binding" {
-    // Core §9.4: explicit drop applies only to an owning affine local.
+    // Core §9.4: explicit drop applies only to an owning unique local.
     var c = try compileText("app", &.{
         .{ "app", "fn main() -> void { drop nope; }" },
     });
@@ -1207,8 +1214,8 @@ fn countOccurrences(haystack: []const u8, needle: []const u8) usize {
     return n;
 }
 
-test "frontend join phis own their affine inputs (if, return case)" {
-    // ir.md §6.3-§6.4: an affine value listed as a phi input is *not*
+test "frontend join phis own their unique inputs (if, return case)" {
+    // ir.md §6.3-§6.4: an unique value listed as a phi input is *not*
     // destroyed at the end of its producing block; the phi result is the
     // single owner. A regression: the branch values %2/%4 were dropped in
     // the join block and then the phi result %5 was returned — a triple
@@ -1234,7 +1241,7 @@ test "frontend join phis own their affine inputs (if, return case)" {
     try testing.expect(std.mem.indexOf(u8, body, "drop ") == null);
 }
 
-test "frontend join phis own their affine inputs (match, return case)" {
+test "frontend join phis own their unique inputs (match, return case)" {
     // Same rule through a union match: the arm values feed the join phi
     // and the scrutinee is the only value dropped (it was not moved). The
     // phi result is returned, and no phi input is destroyed.
@@ -1268,7 +1275,7 @@ test "frontend join phis own their affine inputs (match, return case)" {
     try testing.expect(std.mem.indexOf(u8, body, "drop_cleanup") != null);
 }
 
-test "frontend join phis own their affine inputs (let case: one drop)" {
+test "frontend join phis own their unique inputs (let case: one drop)" {
     // `let f = if (c) { … } else { … }`: the phi result is the owned
     // binding, so it receives exactly one scope-end drop; the phi inputs
     // (%2, %4) are consumed by the join and must not be dropped.
@@ -1892,8 +1899,8 @@ test "Pass 7 leaves a value call alone" {
     try testing.expect(std.mem.indexOf(u8, text, "br header") == null);
 }
 
-test "Pass 7 leaves a tail call with live affine state alone" {
-    // The hostdata local is affine: its scope-end `drop` sits in the join,
+test "Pass 7 leaves a tail call with live unique state alone" {
+    // The hostdata local is unique: its scope-end `drop` sits in the join,
     // so the join is not phi-only and the call's result does not reach the
     // `ret` through nothing but phis (§7.1). The rewrite must not reorder
     // the drop (§7.3).
@@ -2440,9 +2447,9 @@ test "frontend reuses duplicate reads and casts" {
     try testing.expect(std.mem.indexOf(u8, out, "add %3, %3") != null);
 }
 
-test "frontend does not CSE affine results" {
-    // Reusing an affine value twice would change the destruction
-    // schedule (ir.md §6.4): `h.file` (result type File, affine) is
+test "frontend does not CSE unique results" {
+    // Reusing an unique value twice would change the destruction
+    // schedule (ir.md §6.4): `h.file` (result type File, unique) is
     // computed twice, so the outer field reads see different bases and
     // all four `read_field`s stay.
     var c = try compileText("app", &.{
@@ -2880,14 +2887,14 @@ test "Pass 8.3 lower.optimize on a full program round-trips through the standalo
 // ---------------------------------------------------------------------------
 // On-the-fly copy elision at construction (frontend.md §4.3) — the frontend
 // has no separate copy-propagation pass (braun13cc.pdf §3.1): a `move` of a
-// duplicable value lowers directly to the value itself (a copy of a
-// duplicable value is the value, ir.md §5.4), so no `copy` instructions
+// Copy value lowers directly to the value itself (a copy of a
+// Copy value is the value, ir.md §5.4), so no `copy` instructions
 // reach the IR from the frontend.
 // ---------------------------------------------------------------------------
 
-test "frontend emits no copies for duplicable moves, keeps move_ for affine" {
+test "frontend emits no copies for Copy moves, keeps move_ for unique" {
     // `consume(move a)` on an int32 is the value itself; `move` of an
-    // affine owner still emits `move_` (ownership transfer, ir.md §5.4).
+    // unique owner still emits `move_` (ownership transfer, ir.md §5.4).
     var c = try compileText("app", &.{
         .{
             "app",
@@ -3393,10 +3400,10 @@ test "Pass 8.7 phi simplification keeps all-self phis" {
     try testing.expectEqualStrings(text, text2);
 }
 
-test "Pass 8.6 drop elision removes duplicable drops, keeps affine drops" {
-    // A `drop` of a duplicable value does nothing and can never run a
-    // user hook (type_shape classifies hook-bearing structs affine), so
-    // it is elided. A `drop` of an affine value (`hostdata`, `any`) may
+test "Pass 8.6 drop elision removes Copy drops, keeps unique drops" {
+    // A `drop` of a Copy value does nothing and can never run a
+    // user hook (type_shape classifies hook-bearing structs unique), so
+    // it is elided. A `drop` of an unique value (`hostdata`, `any`) may
     // run a user hook or hand a payload to the host, so it is kept even
     // though nothing observes it (ir.md §14 — the print-hook guard).
     var t = try cfg_parse.parseText(
@@ -3414,9 +3421,9 @@ test "Pass 8.6 drop elision removes duplicable drops, keeps affine drops" {
 
     const text = try irText(&t.program);
     defer testing.allocator.free(text);
-    // `a: int32` is duplicable: its drop does nothing and is elided.
+    // `a: int32` is Copy: its drop does nothing and is elided.
     try testing.expect(std.mem.indexOf(u8, text, "drop %0") == null);
-    // `b: hostdata` is affine: its drop may run a user hook, kept.
+    // `b: hostdata` is unique: its drop may run a user hook, kept.
     try testing.expect(std.mem.indexOf(u8, text, "drop %1") != null);
 
     var p = cfg.Parser.init(testing.allocator);
@@ -3458,7 +3465,7 @@ test "Pass 8.4 module/member CSE reuses identical loads in a block" {
     try testing.expect(countOccurrences(body, "load_member") == 1);
 }
 
-test "Pass 8.4 copy propagation collapses duplicable copies" {
+test "Pass 8.4 copy propagation collapses copies of Copy values" {
     // The checker emits an explicit `copy` of the move parameter before
     // the ret; for a Copy type `move` is semantically an ordinary copy
     // (Core §10.2), so the copy is a no-op and the parameter is returned
@@ -3524,7 +3531,7 @@ test "Pass 8.4 dead-instruction elimination drops unused match payloads" {
     // A `match` arm that binds the payload but returns a constant reads
     // the payload without using it: the `read_payload` is dead. It is a
     // guarded projection (the lowering emits it only after the tag
-    // switch) with a duplicable result, so the pass removes it.
+    // switch) with a Copy result, so the pass removes it.
     var c = try compileText("app", &.{
         .{
             "app",

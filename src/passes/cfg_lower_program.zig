@@ -5,7 +5,6 @@
 const std = @import("std");
 const ast = @import("../ast.zig");
 const cfg = @import("../cfg.zig");
-const moduleinfo = @import("../moduleinfo.zig");
 const lower = @import("../lower.zig");
 const cfg_lower_module = @import("cfg_lower_module.zig");
 
@@ -24,6 +23,7 @@ pub fn lowerProgram(self: *Lowerer) LowerError!cfg.IrProgram {
     var program = cfg.IrProgram{
         .modules = try self.arena.dupe(*cfg.IrModule, ir_modules.items),
         .funcs = try self.arena.dupe(*cfg.IrFunc, ir_funcs.items),
+        .types = try collectTypeEnv(self),
         .entry = null,
     };
     // Host-selected entry: a function of the entry module named by
@@ -52,6 +52,28 @@ pub fn lowerProgram(self: *Lowerer) LowerError!cfg.IrProgram {
         }
     }
     return program;
+}
+
+/// Build the program's type environment (ir.md §11): one written name
+/// per `TypeId`, indexed by the same `TypeId` `Type.named` carries.
+/// Generic templates are included, so a raw template reference stays
+/// addressable; aliases expand and leave no entry.
+fn collectTypeEnv(self: *Lowerer) LowerError![]const []const u8 {
+    const count = self.graph.type_interner.to_name.items.len;
+    const names = try self.arena.alloc([]const u8, count);
+    @memset(names, "");
+    for (self.graph.modules) |info| {
+        for (info.types) |*tm| {
+            // Aliases expand and leave no entry (Core §11.2).
+            if (tm.decl == .alias) continue;
+            const full = try std.fmt.allocPrint(self.arena, "{s}.{s}", .{ info.specifier, tm.name.text });
+            const id = self.resolve.type_ids.?.idOf(full) orelse continue;
+            // The written (unqualified) declaration name: the text form
+            // names types by string, so printing round-trips on it.
+            names[id] = tm.name.text;
+        }
+    }
+    return names;
 }
 
 /// The module-qualified spelling of a function name ({spec}.{fn}).

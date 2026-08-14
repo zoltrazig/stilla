@@ -31,6 +31,7 @@ pub fn lowerModule(self: *Lowerer, info: *moduleinfo.ModuleInfo) LowerError!*cfg
         init_func = try lowerInit(self, info);
         try funcs.append(self.arena, init_func.?);
     }
+    // Lower every function member.
     for (info.values) |*vm| switch (vm.decl) {
         .func => |f| if (f.body != null) {
             const ir = try cfg_lower_func.lowerFunc(self, info, vm);
@@ -58,13 +59,14 @@ pub fn lowerModule(self: *Lowerer, info: *moduleinfo.ModuleInfo) LowerError!*cfg
     // Lambda literals hoisted during member/drop-hook lowering
     // (ir.md §5.5) join the module's function list.
     for (self.lambda_funcs.items) |lf| try funcs.append(self.arena, lf);
-    // Module storage layout: one slot per value member, in
-    // declaration order (Core §2.1, Runtime §2.2). Function slots are
-    // metadata (the runtime fills them with function values); @init
-    // stores the constant slots.
+    // Module storage layout: the constant members only, in const
+    // declaration order (ir.md §7, Runtime §2.2). Function, module, and
+    // host-binding members are static references and occupy no storage.
     var slots = std.ArrayListUnmanaged(cfg.SlotMeta).empty;
-    for (info.values) |vm| {
-        try slots.append(self.arena, .{ .type_ = vm.type_, .init_order = vm.slot });
+    for (info.values) |*vm| {
+        if (constSlot(info, vm)) |slot| {
+            try slots.append(self.arena, .{ .type_ = vm.*.type_, .init_order = slot });
+        }
     }
     m.* = .{
         .span = ast.Span.init(0, 0, 0),
@@ -76,6 +78,33 @@ pub fn lowerModule(self: *Lowerer, info: *moduleinfo.ModuleInfo) LowerError!*cfg
     return m;
 }
 
+/// The storage slot of a constant member: its position among the
+/// module's slot-bearing constant members (ir.md §7). Module-valued
+/// members (static references) and void-typed constants occupy no
+/// storage; `null` when `vm` is not a slot-bearing const.
+fn constSlot(info: *moduleinfo.ModuleInfo, vm: *const moduleinfo.ValueMember) ?u32 {
+    var n: u32 = 0;
+    for (info.values) |*v| {
+        if (v == vm) {
+            return switch (v.decl) {
+                .const_ => |c| blk: {
+                    _ = c;
+                    if (v.module_spec == null and !cfg_lower_emit.isVoid(v.type_)) break :blk n else break :blk null;
+                },
+                .func => null,
+            };
+        }
+        switch (v.decl) {
+            .const_ => |c| {
+                _ = c;
+                if (v.module_spec == null and !cfg_lower_emit.isVoid(v.type_)) n += 1;
+            },
+            else => {},
+        }
+    }
+    return null;
+}
+
 /// The module init function: evaluate module constants strictly in
 /// declaration order and `store_member` each into its slot; module
 /// values arrive as `module_ref` (ir.md §7, Runtime §2.3).
@@ -83,22 +112,22 @@ pub fn lowerInit(self: *Lowerer, info: *moduleinfo.ModuleInfo) LowerError!*cfg.I
     var fs = try cfg_lower_func.newFuncState(self, info, .{ .span = ast.Span.init(info.source.?.id, 0, 0), .text = "init" }, &.{}, .{ .primitive = .void });
     const entry = try cfg_lower_emit.newBlock(self, &fs, "entry");
     fs.cur = entry;
-    for (info.values) |vm| {
-        switch (vm.decl) {
+    for (info.values) |*vm| {
+        switch (vm.*.decl) {
             .const_ => |c| if (c.init != null) {
-                var value: ?*cfg.Value = null;
-                if (vm.module_spec) |spec| {
-                    value = try cfg_lower_path.emitModuleRef(self, &fs, c.span, spec);
-                } else {
-                    value = try cfg_lower_expr.lowerExpr(self, &fs, c.init.?);
-                }
+                // Module-valued members resolve statically and are never
+                // stored (ir.md §7); they arrive at use sites as
+                // `module_ref` through `load_member`.
+                if (vm.*.module_spec != null) continue;
+                const value = try cfg_lower_expr.lowerExpr(self, &fs, c.init.?);
                 if (value) |v| {
                     // A void-typed constant has no observable value and
                     // its value is a phantom (no defining instruction);
                     // storing it would leave a dangling operand, so
                     // nothing is stored for it (frontend.md §4.1, §5.3).
                     if (cfg_lower_emit.isVoid(v.type_)) continue;
-                    _ = try cfg_lower_emit.emit(self, &fs, c.span, .{ .store_member = .{ .slot = vm.slot, .value = v } }, null);
+                    const slot = constSlot(info, vm) orelse continue;
+                    _ = try cfg_lower_emit.emit(self, &fs, c.span, .{ .store_member = .{ .slot = slot, .value = v } }, null);
                 } else {
                     // The constant's initializer is unreachable
                     // (e.g. `builtin.panic`); @init traps there.
@@ -116,7 +145,7 @@ pub fn lowerInit(self: *Lowerer, info: *moduleinfo.ModuleInfo) LowerError!*cfg.I
 /// parameter arrives as a borrowed *destruction view* of the complete
 /// object (Core §9.2): borrow-mode semantics make moving, explicitly
 /// dropping, or returning the view a compile error, and projections of
-/// an affine base arrive borrowed, so ownership cannot leave the hook.
+/// an unique base arrive borrowed, so ownership cannot leave the hook.
 /// The hook function is hidden (`<module>.<Type>.drop`); `drop %v` of
 /// the struct stays one unexpanded instruction (ir.md §6.4) and the
 /// runtime calls this function during destruction (Runtime §6.2).
@@ -127,13 +156,13 @@ pub fn lowerDropHook(self: *Lowerer, info: *moduleinfo.ModuleInfo, s: *const ast
         .span = d.param.span,
         .name = d.param,
         .mode = .borrow,
-        .type_ = .{ .named = s.name.text },
+        .type_ = .{ .named = (moduleinfo.resolveTypeId(self.resolve, info, s.name.text) orelse return self.fail(d.span, "drop hook type unresolved", .{})) },
     };
     var fs = try cfg_lower_func.newFuncState(self, info, .{ .span = d.span, .text = qname }, params, .{ .primitive = .void });
     const entry = try cfg_lower_emit.newBlock(self, &fs, "entry");
     fs.cur = entry;
     try fs.scopes.append(self.arena, .{});
-    // The destruction view arrives borrowed: owns_affine=false so
+    // The destruction view arrives borrowed: owns_unique=false so
     // scope-end destruction never drops the view itself.
     const view = fs.values.items[0];
     try cfg_lower_emit.bindLocal(self, &fs, d.param.text, view, false);

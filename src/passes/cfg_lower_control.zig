@@ -125,7 +125,7 @@ pub fn trapUnreachableJoin(self: *Lowerer, fs: *FuncState, join: *cfg.BasicBlock
 /// are in edge order; a null value (a `trap`-terminated predecessor)
 /// contributes no input (ir.md §4.3). A void join produces no phi.
 ///
-/// Ownership (ir.md §6.3-6.4): an affine value listed as a phi input
+/// Ownership (ir.md §6.3-6.4): an unique value listed as a phi input
 /// is *not* destroyed at the end of its producing block — the phi
 /// result becomes the single owner. The inputs are therefore marked
 /// consumed here (their cleanup tokens disarmed), so the full-expression
@@ -137,7 +137,7 @@ pub fn trapUnreachableJoin(self: *Lowerer, fs: *FuncState, join: *cfg.BasicBlock
 /// type* of the incoming values — identical types join to themselves,
 /// a mix coercible to `any` joins as `any` — and the `T → any` coercion
 /// is materialized on each predecessor edge (`any_pack_copy` for a
-/// duplicable source, `any_pack_move` for an affine source) so the phi
+/// Copy source, `any_pack_move` for an unique source) so the phi
 /// is homogeneous and ownership stays explicit.
 pub fn makeJoinPhi(
     self: *Lowerer,
@@ -175,7 +175,7 @@ pub fn makeJoinPhi(
     if (cfg_lower_emit.isVoid(jt)) return cfg_lower_expr.emitVoid(self, fs, span);
     // Materialize the `T → any` coercion on each predecessor edge whose
     // incoming type differs from the join type (ir.md §4.4). The packed
-    // value replaces the incoming in the phi; an affine source is moved
+    // value replaces the incoming in the phi; an unique source is moved
     // in (consumed, token disarmed) on its own edge.
     var packed_v = try self.arena.alloc(?*cfg.Value, sorted.items.len);
     for (sorted.items, 0..) |inc, i| {
@@ -194,7 +194,7 @@ pub fn makeJoinPhi(
             (try cfg_lower_emit.emitInto(self, fs, edge, span, .{ .const_ = .void }, .{ .primitive = .void })).?
         else
             v;
-        if (src.ownership == .affine) {
+        if (src.ownership == .unique) {
             const p = (try cfg_lower_emit.emitInto(self, fs, edge, span, .{ .any_pack_move = src }, jt)).?;
             cfg_lower_emit.markConsumed(self, fs, src);
             try cfg_lower_emit.cleanupDisableInto(self, fs, edge, span, src);
@@ -286,8 +286,10 @@ pub fn lowerMatch(self: *Lowerer, fs: *FuncState, e: *const ast.MatchExpr) Lower
     const moving = isMoveExpr(e.scrutinee);
     const scrut = (try cfg_lower_expr.lowerExpr(self, fs, e.scrutinee)) orelse return null;
     if (scrut.type_ == .named) {
-        if (moduleinfo.unionDecl(self.resolve, fs.module, scrut.type_.named)) |ud| {
-            return try lowerUnionMatch(self, fs, e, scrut, moving, ud);
+        if (self.resolve.typeNameOf(scrut.type_.named)) |tname| {
+            if (moduleinfo.unionDecl(self.resolve, fs.module, tname)) |ud| {
+                return try lowerUnionMatch(self, fs, e, scrut, moving, ud);
+            }
         }
     }
     return try lowerPatternMatch(self, fs, e, scrut, moving);
@@ -306,7 +308,7 @@ pub fn lowerUnionMatch(
     const tag = (try cfg_lower_emit.emit(self, fs, e.span, .{ .read_tag = scrut }, .{ .primitive = .uint32 })).?;
     // `match (move s)` transfers the whole owner (Core §13.4); the
     // consumption is reflected before `beginCond`, so the scrutinee is
-    // not tracked as a maybe-affine candidate.
+    // not tracked as a maybe-unique candidate.
     if (moving) cfg_lower_emit.markConsumed(self, fs, scrut);
     const track = try cfg_lower_emit.beginCond(self, fs, e.span);
     // Arm blocks keyed by variant tag (Core §11.1: declaration order);
@@ -382,7 +384,7 @@ pub fn bindUnionPattern(self: *Lowerer, fs: *FuncState, pattern: *const ast.Patt
         .wildcard => {},
         .path => |pp| switch (pp.tail) {
             .variant => |vp| {
-                const ud = moduleinfo.unionDecl(self.resolve, fs.module, scrut.type_.named).?;
+                const ud = moduleinfo.unionDecl(self.resolve, fs.module, self.resolve.typeNameOf(scrut.type_.named) orelse unreachable).?;
                 const tag = moduleinfo.variantIndex(ud, vp.name.text) orelse unreachable;
                 const variant = ud.variants[tag];
                 const args = vp.args orelse return; // no payload to bind
@@ -424,7 +426,7 @@ pub fn bindUnionPattern(self: *Lowerer, fs: *FuncState, pattern: *const ast.Patt
             },
             .none => {
                 // Identifier pattern binds the whole scrutinee.
-                try cfg_lower_emit.bindLocal(self, fs, pp.path[pp.path.len - 1].text, scrut, moving and scrut.ownership == .affine and scrut.state == .owned);
+                try cfg_lower_emit.bindLocal(self, fs, pp.path[pp.path.len - 1].text, scrut, moving and scrut.ownership == .unique and scrut.state == .owned);
             },
             else => return self.fail(pp.span, "unsupported pattern shape in a union match", .{}),
         },

@@ -176,7 +176,7 @@ fn rewriteInstr(instr: *cfg.Instr, fwd: *const std.AutoHashMap(*cfg.Value, *cfg.
         .phi => |*x| {
             for (x.incoming) |*inc| inc.value = resolve(fwd, inc.value);
         },
-        .const_, .arg, .module_ref, .fn_ref => {},
+        .const_, .module_ref, .fn_ref => {},
     }
 }
 

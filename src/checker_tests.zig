@@ -195,7 +195,7 @@ test "checker accepts an exhaustive union match" {
     try testing.expectEqual(@as(usize, 0), t.ann.host_bindings.count());
 }
 
-test "checker rejects use of a moved affine value" {
+test "checker rejects use of a moved unique value" {
     try expectDiag(
         \\struct File { fd: int32; drop(file) {} }
         \\fn open() -> File { File{ fd: 1 } }
@@ -229,7 +229,7 @@ test "checker accepts a type-test match over any" {
 // ---------------------------------------------------------------------------
 // checker — ownership: conditional release and state merging (frontend §4.5,
 // Core §10.10): a binding released on some but not all paths through an
-// if/match/and/or becomes *maybe-affine* (still owned on some paths, dead on
+// if/match/and/or becomes *maybe-unique* (still owned on some paths, dead on
 // others — the implementation tracks its runtime liveness), and a binding
 // released on every path is definitely released.
 // ---------------------------------------------------------------------------
@@ -247,7 +247,7 @@ fn countBindingsWithState(t: anytype, want: checker.BindingState) !usize {
 test "checker marks a binding released on only one if branch as maybe" {
     // Core §10.10: `consume(move f)` in the then branch but not the else
     // leaves `f` owned on one normal path and dead on the other — the
-    // binding becomes maybe-affine (no rejection).
+    // binding becomes maybe-unique (no rejection).
     var t = try checkText(
         \\struct File { fd: int32; drop(file) {} }
         \\fn consume(move f: File) -> void {}
@@ -373,7 +373,7 @@ test "checker rejects moving a binding twice" {
 }
 
 test "checker rejects moving a borrowed binding" {
-    // Core §18 *Borrowing*: a borrowed affine value cannot be moved.
+    // Core §18 *Borrowing*: a borrowed unique value cannot be moved.
     try expectDiag(
         \\struct File { fd: int32; drop(file) {} }
         \\fn consume(move f: File) -> void {}
@@ -407,7 +407,7 @@ test "checker accepts a trap path that does not release" {
 
 test "checker marks a release conditional inside a match arm as maybe" {
     // The arm body is itself an if that releases on one path only: the
-    // arm's own merge makes the binding maybe-affine, and the match merge
+    // arm's own merge makes the binding maybe-unique, and the match merge
     // carries it forward.
     var t = try checkText(
         \\struct File { fd: int32; drop(file) {} }
@@ -424,9 +424,9 @@ test "checker marks a release conditional inside a match arm as maybe" {
     try testing.expectEqual(@as(usize, 1), try countBindingsWithState(t, .maybe));
 }
 
-test "checker rejects use of a maybe-affine binding" {
+test "checker rejects use of a maybe-unique binding" {
     // Core §10.10: after a construct that releases a binding on some but
-    // not all paths, the binding is maybe-affine and any use is rejected.
+    // not all paths, the binding is maybe-unique and any use is rejected.
     try expectDiag(
         \\struct File { fd: int32; drop(file) {} }
         \\fn consume(move f: File) -> void {}
@@ -456,15 +456,15 @@ test "checker accepts a construct after a binding was already released" {
 
 // ---------------------------------------------------------------------------
 // checker — ownership transfer and borrow lifetimes (frontend §4.6, Core
-// §10.6, §10.7, §14.6, §18): a plain parameter accepts only duplicable
+// §10.6, §10.7, §14.6, §18): a plain parameter accepts only Copy
 // arguments; a move parameter requires an explicit `move` of an existing
-// affine owner; a borrowed affine value cannot be moved, dropped, returned
+// unique owner; a borrowed unique value cannot be moved, dropped, returned
 // as owned, or stored into an owning location; consumingly destructuring a
 // struct that defines a drop hook is rejected; a function or lambda may not
 // capture a local binding from an enclosing function scope (Core §6.2).
 // ---------------------------------------------------------------------------
 
-test "checker rejects passing an affine value to a plain parameter" {
+test "checker rejects passing an unique value to a plain parameter" {
     try expectDiag(
         \\struct File { fd: int32; drop(file) {} }
         \\fn peek(f: File) -> int32 { f.fd }
@@ -472,10 +472,10 @@ test "checker rejects passing an affine value to a plain parameter" {
         \\    let f = File{ fd: 1 };
         \\    let g = peek(f);
         \\}
-    , "plain parameter accepts only duplicable arguments");
+    , "plain parameter accepts only Copy arguments");
 }
 
-test "checker accepts a duplicable argument to a plain parameter" {
+test "checker accepts a Copy argument to a plain parameter" {
     var t = try checkText(
         \\fn add(a: int32, b: int32) -> int32 { a + b }
         \\fn main() -> int32 { add(1, 2) }
@@ -508,8 +508,8 @@ test "checker accepts an explicit move into a move parameter" {
     try testing.expectEqual(@as(usize, 0), t.ann.host_bindings.count());
 }
 
-test "checker accepts a fresh affine value into a move parameter" {
-    // A fresh affine value transfers ownership implicitly (Core §18).
+test "checker accepts a fresh unique value into a move parameter" {
+    // A fresh unique value transfers ownership implicitly (Core §18).
     var t = try checkText(
         \\struct File { fd: int32; drop(file) {} }
         \\fn consume(move f: File) -> void {}
@@ -530,8 +530,8 @@ test "checker rejects moving a value into a borrow parameter" {
     , "cannot move a value into a borrow parameter");
 }
 
-test "checker borrows an affine payload of a non-consuming match" {
-    // Core §13.4: matching an affine owner through an ordinary expression
+test "checker borrows an unique payload of a non-consuming match" {
+    // Core §13.4: matching an unique owner through an ordinary expression
     // borrows it, so the payload binding is a borrow and cannot be moved.
     try expectDiag(
         \\union U { Some(File), None }
@@ -1108,7 +1108,7 @@ test "checker rejects returning the destruction view from a drop hook" {
 }
 
 test "checker rejects transferring field ownership out of a drop hook" {
-    // The destruction view is borrowed, so an affine field may not be
+    // The destruction view is borrowed, so an unique field may not be
     // moved into a `move` parameter (Core §18 *User drop hook*).
     try expectDiag(
         \\struct Inner { v: int32; drop(i) {} }
@@ -1118,7 +1118,7 @@ test "checker rejects transferring field ownership out of a drop hook" {
     , "cannot move a borrowed value");
 }
 
-test "checker accepts a drop hook that reads duplicable fields" {
+test "checker accepts a drop hook that reads Copy fields" {
     // Reading (not moving) fields of the destruction view is allowed
     // (Core §9.1's `os.close(file.fd)` example).
     var t = try checkText(
@@ -1129,7 +1129,7 @@ test "checker accepts a drop hook that reads duplicable fields" {
     try testing.expectEqual(@as(usize, 0), t.ann.host_bindings.count());
 }
 
-test "checker rejects an affine field as a drop hook result" {
+test "checker rejects an unique field as a drop hook result" {
     // A dotted projection of the borrowed destruction view is itself
     // borrowed, so it may not escape as the hook's result.
     try expectDiag(
@@ -1139,7 +1139,7 @@ test "checker rejects an affine field as a drop hook result" {
     , "cannot return the destruction view");
 }
 
-test "checker rejects returning an affine projection of a borrow parameter" {
+test "checker rejects returning an unique projection of a borrow parameter" {
     // The dotted-path borrow rule applies to ordinary `borrow` parameters
     // too (Core §10.7), not just destruction views.
     try expectDiag(
@@ -1150,8 +1150,8 @@ test "checker rejects returning an affine projection of a borrow parameter" {
     , "cannot return a borrowed value as owned");
 }
 
-test "checker accepts a duplicable projection as a drop hook result" {
-    // A duplicable projection of the destruction view is not borrowed and
+test "checker accepts a Copy projection as a drop hook result" {
+    // A Copy projection of the destruction view is not borrowed and
     // may be returned by the hook (Core §9.1).
     var t = try checkText(
         \\struct File { fd: int32; drop(file) { let r = file.fd; r } }

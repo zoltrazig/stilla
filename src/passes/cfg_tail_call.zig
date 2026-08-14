@@ -14,7 +14,7 @@
 //! a `drop` or observable effect: the call must be the last instruction
 //! of its block — a scope-end `drop` would sit after it — and every
 //! intermediate block in the result chain must contain only phis, so no
-//! affine state is live across the boundary. Two further preconditions
+//! unique state is live across the boundary. Two further preconditions
 //! keep the chain drop sound (§7.2): an intermediate chain block (any
 //! block between the call block and the ret block) must have exactly one
 //! predecessor, so it forwards only the call's result — an extra
@@ -306,7 +306,7 @@ fn instrUses(instr: *const cfg.Instr, v: *const cfg.Value) bool {
         .syscall => |x| for (x.args) |a| {
             if (a == v) break true;
         } else false,
-        .const_, .arg, .module_ref, .fn_ref => false,
+        .const_, .module_ref, .fn_ref => false,
         .phi => false,
     };
 }
@@ -396,6 +396,7 @@ fn rewriteFunc(f: *cfg.IrFunc, allocator: std.mem.Allocator) !void {
             .type_ = p.type_,
             .ownership = p.ownership,
             .state = p.state,
+            .origin = null,
             .def = null,
         };
         try phi_results.append(allocator, pv);
@@ -563,6 +564,6 @@ fn rewriteInstr(instr: *cfg.Instr, renames: *const std.AutoHashMap(*cfg.Value, *
         .phi => |*x| {
             for (x.incoming) |*inc| inc.value = renames.get(inc.value) orelse inc.value;
         },
-        .const_, .arg, .module_ref, .fn_ref => {},
+        .const_, .module_ref, .fn_ref => {},
     }
 }

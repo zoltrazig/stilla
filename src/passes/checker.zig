@@ -101,9 +101,9 @@ pub const Local = struct {
     type_: cfg.Type,
     id: u32,
     state: BindingState = .owned,
-    /// A non-owning view (frontend §4.5): a `borrow` parameter or an affine
+    /// A non-owning view (frontend §4.5): a `borrow` parameter or an unique
     /// binding produced by a non-consuming `match`/`for` (Core §13.4,
-    /// §13.5). Borrowed affine values cannot be moved, dropped, returned as
+    /// §13.5). Borrowed unique values cannot be moved, dropped, returned as
     /// owned, or stored into an owning location (Core §10.7, §18).
     is_borrow: bool = false,
     /// A `using` alias to a module member (Core §2.8). Module members have
@@ -132,13 +132,13 @@ pub const Frame = struct {
     scope: *Scope,
 };
 
-/// Whether a value of type `t` is owned (not duplicable): affine types are
+/// Whether a value of type `t` is owned (not Copy): unique types are
 /// subject to move/drop/conditional-release tracking (Core §18).
-pub fn isAffine(frame: *Frame, t: cfg.Type) bool {
+pub fn isUnique(frame: *Frame, t: cfg.Type) bool {
     return if (t.ownership()) |ow|
-        ow == .affine
+        ow == .unique
     else
-        moduleinfo.ownershipOf(frame.resolve, frame.info, t) == .affine;
+        moduleinfo.ownershipOf(frame.resolve, frame.info, t) == .unique;
 }
 
 /// Record a binding's static ownership state in both the `Local` and the
@@ -193,7 +193,7 @@ pub const Checker = struct {
     /// `funcSignature`'s convention; the lowerer reports resolution errors.
     pub fn resolveTypeOf(self: *Checker, ma: *ModuleAnnotation, info: *moduleinfo.ModuleInfo, t: *const ast.Type) CheckError!cfg.Type {
         if (ma.type_of.get(t)) |rt| return rt;
-        const resolve = moduleinfo.Resolve{ .arena = self.alloc(), .by_specifier = &self.graph.?.by_specifier };
+        const resolve = moduleinfo.Resolve{ .arena = self.alloc(), .by_specifier = &self.graph.?.by_specifier, .type_ids = &self.graph.?.type_interner };
         const rt = moduleinfo.resolveType(resolve, info, t) orelse cfg.Type{ .primitive = .any };
         try ma.type_of.put(self.alloc(), t, rt);
         return rt;

@@ -35,7 +35,7 @@ pub fn lowerFunc(self: *Lowerer, info: *moduleinfo.ModuleInfo, vm: *const module
     // newFuncState); borrow-mode params arrive borrowed (ir.md §6.2).
     for (sig.params, 0..) |p, i| {
         const v = fs.values.items[i];
-        try cfg_lower_emit.bindLocal(self, &fs, p.name.text, v, p.mode != .borrow and cfg_lower_emit.isAffine(self, &fs, v.type_));
+        try cfg_lower_emit.bindLocal(self, &fs, p.name.text, v, p.mode != .borrow and cfg_lower_emit.isUnique(self, &fs, v.type_));
     }
     const body = f.body.?;
     const result = try lowerBlock(self, &fs, body);
@@ -62,12 +62,12 @@ pub fn lowerFunc(self: *Lowerer, info: *moduleinfo.ModuleInfo, vm: *const module
 }
 
 /// Pack a concrete return value into an `any`-typed function result
-/// (Core §11.6, ir.md §4.4): a duplicable source is `any_pack_copy`'d, an
-/// affine source `any_pack_move`'d (consumed, token disarmed). No-op when
+/// (Core §11.6, ir.md §4.4): a Copy source is `any_pack_copy`'d, an
+/// unique source `any_pack_move`'d (consumed, token disarmed). No-op when
 /// the result type already matches the return type.
 pub fn coerceRet(self: *Lowerer, fs: *FuncState, r: *cfg.Value) LowerError!*cfg.Value {
     if (!(fs.ret == .primitive and fs.ret.primitive == .any) or cfg.Type.eql(r.type_, fs.ret)) return r;
-    if (r.ownership == .affine) {
+    if (r.ownership == .unique) {
         const p = (try cfg_lower_emit.emit(self, fs, r.span, .{ .any_pack_move = r }, fs.ret)).?;
         cfg_lower_emit.markConsumed(self, fs, r);
         try cfg_lower_emit.cleanupDisable(self, fs, r.span, r);
@@ -101,9 +101,12 @@ pub fn newFuncState(
         .phi_lists = .empty,
     };
     // Parameter values: %0..%k-1, no defining instruction (ir.md
-    // §5.1); a borrow-mode parameter arrives borrowed.
+    // §5.1); a borrow-mode parameter arrives borrowed with origin
+    // `call` — its root is the caller's argument, valid for the whole
+    // callee (ir.md §6.5).
     for (params) |p| {
-        _ = try cfg_lower_emit.newValue(self, &fs, p.span, p.type_, if (p.mode == .borrow) .borrowed else .owned);
+        const v = try cfg_lower_emit.newValue(self, &fs, p.span, p.type_, if (p.mode == .borrow) .borrowed else .owned);
+        if (p.mode == .borrow) v.origin = .call;
     }
     return fs;
 }

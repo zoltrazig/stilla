@@ -54,7 +54,7 @@ pub fn annotateModule(ck: *checker.Checker, info: *ModuleInfo) CheckError!void {
         .ck = ck,
         .info = info,
         .ma = ma,
-        .resolve = .{ .arena = ck.alloc(), .by_specifier = &ck.graph.?.by_specifier },
+        .resolve = .{ .arena = ck.alloc(), .by_specifier = &ck.graph.?.by_specifier, .type_ids = &ck.graph.?.type_interner },
         .scope = root,
     };
 
@@ -93,15 +93,15 @@ pub fn annotateModule(ck: *checker.Checker, info: *ModuleInfo) CheckError!void {
 
 /// The destruction-view restrictions inside a `drop` hook body (Core
 /// §9.2, §18 *User drop hook*): the hook argument is bound as a borrowed
-/// affine local, so the existing borrowed-value rules reject moving,
+/// unique local, so the existing borrowed-value rules reject moving,
 /// dropping, returning, or escaping it — `move`/`drop` of the view fail
-/// in `markConsumed`, a view (or an affine projection of it) as the block
-/// result fails here, and moving an affine field out (a `move` parameter,
+/// in `markConsumed`, a view (or an unique projection of it) as the block
+/// result fails here, and moving an unique field out (a `move` parameter,
 /// an owning binding/container/field) fails the borrowed-store rules.
 fn checkDropHook(frame: *Frame, s: *const ast.StructDef, d: *const ast.DropDecl) CheckError!void {
     _ = try pushScope(frame, true);
     defer popScope(frame);
-    _ = try bindLocal(frame, d.param.text, cfg.Type{ .named = s.name.text }, true);
+    _ = try bindLocal(frame, d.param.text, cfg.Type{ .named = (moduleinfo.resolveTypeId(frame.resolve, frame.info, s.name.text) orelse return) }, true);
     _ = try checkBlock(frame, d.body);
     if (d.body.result) |*r| {
         if (try isBorrowedExpr(frame, r)) {
@@ -128,7 +128,7 @@ fn checkFuncBody(frame: *Frame, f: *const ast.FuncDef, body: *const ast.Block) C
 
     _ = try checkBlock(frame, body);
 
-    // A borrowed affine value cannot be returned as owned: there is no
+    // A borrowed unique value cannot be returned as owned: there is no
     // user-visible borrow lifetime for it to outlive (Core §10.7, §18).
     if (body.result) |*r| {
         if (try isBorrowedExpr(frame, r)) {
@@ -170,7 +170,7 @@ fn checkLet(frame: *Frame, l: *const ast.LetStmt) CheckError!void {
         break :blk null;
     };
     // A `let` binding owns its initializer, so the initializer may not be
-    // a borrowed affine value (Core §10.7, §18).
+    // a borrowed unique value (Core §10.7, §18).
     if (try isBorrowedExpr(frame, l.init)) {
         return frame.ck.fail(l.init.span(), "cannot store a borrowed value into an owning binding (Core §10.7)", .{});
     }
@@ -253,15 +253,15 @@ fn lookupLocalScope(frame: *Frame, name: []const u8) ?LocalBinding {
     return null;
 }
 
-/// Mark a named binding consumed when it holds an affine value (Core
-/// §10.4, §10.6); a move/drop of a duplicable value is a no-op. Returns
+/// Mark a named binding consumed when it holds an unique value (Core
+/// §10.4, §10.6); a move/drop of a Copy value is a no-op. Returns
 /// the binding's type, or null when the name is not in scope (the lowerer
 /// reports unknown bindings). A borrowed, already-moved, definitely-
-/// released, or maybe-affine binding cannot be moved or dropped (Core
+/// released, or maybe-unique binding cannot be moved or dropped (Core
 /// §18 *Ownership*).
 fn markConsumed(frame: *Frame, name: []const u8, span: ast.Span, action: []const u8, actioned: []const u8) CheckError!?cfg.Type {
     const local = lookupLocal(frame, name) orelse return null;
-    if (!isAffine(frame, local.type_)) return local.type_;
+    if (!isUnique(frame, local.type_)) return local.type_;
     switch (local.state) {
         .owned => {},
         .borrowed => return frame.ck.fail(span, "cannot {s} borrowed binding '{s}'", .{ action, name }),
@@ -273,8 +273,8 @@ fn markConsumed(frame: *Frame, name: []const u8, span: ast.Span, action: []const
     return local.type_;
 }
 
-fn isAffine(frame: *Frame, t: cfg.Type) bool {
-    return checker.isAffine(frame, t);
+fn isUnique(frame: *Frame, t: cfg.Type) bool {
+    return checker.isUnique(frame, t);
 }
 
 // ---------------------------------------------------------------------------
@@ -282,14 +282,14 @@ fn isAffine(frame: *Frame, t: cfg.Type) bool {
 // §13.5, §10.7, §18)
 // ---------------------------------------------------------------------------
 
-fn isAffineType(frame: *Frame, t: ?cfg.Type) bool {
-    return if (t) |tt| isAffine(frame, tt) else false;
+fn isUniqueType(frame: *Frame, t: ?cfg.Type) bool {
+    return if (t) |tt| isUnique(frame, tt) else false;
 }
 
-/// True when an expression evaluates to a borrowed affine value: a `borrow`
+/// True when an expression evaluates to a borrowed unique value: a `borrow`
 /// parameter (or a binding derived from one), a borrowed member/index, or a
 /// conditional/block/move whose results are borrowed. Module members are
-/// never borrowed (execution-context lifetime, Core §2.7). Borrowed affine
+/// never borrowed (execution-context lifetime, Core §2.7). Borrowed unique
 /// values cannot be moved, dropped, returned as owned, or stored into an
 /// owning location (Core §10.7, §18).
 fn isBorrowedExpr(frame: *Frame, e: *const ast.Expr) CheckError!bool {
@@ -298,12 +298,12 @@ fn isBorrowedExpr(frame: *Frame, e: *const ast.Expr) CheckError!bool {
         .path => |*p| {
             if (p.tail != .none) return false;
             if (lookupLocal(frame, p.path[0].text)) |local| {
-                const head_borrowed = isAffine(frame, local.type_) and local.is_borrow;
+                const head_borrowed = isUnique(frame, local.type_) and local.is_borrow;
                 if (p.path.len == 1) return head_borrowed;
                 // A dotted path through a local (`file.inner`) is borrowed
-                // when the head is a borrowed affine binding and the
-                // projection is affine (Core §10.7, §18 *User drop hook*).
-                if (head_borrowed) return isAffineType(frame, frame.ma.expr_of.get(e));
+                // when the head is a borrowed unique binding and the
+                // projection is unique (Core §10.7, §18 *User drop hook*).
+                if (head_borrowed) return isUniqueType(frame, frame.ma.expr_of.get(e));
                 return false;
             }
             // Module-qualified paths have execution-context lifetime.
@@ -311,11 +311,11 @@ fn isBorrowedExpr(frame: *Frame, e: *const ast.Expr) CheckError!bool {
         },
         .member => |*mm| {
             if (try moduleValueOf(frame, mm.object)) |_| return false;
-            return isAffineType(frame, frame.ma.expr_of.get(e));
+            return isUniqueType(frame, frame.ma.expr_of.get(e));
         },
         .index => |*ix| {
             _ = ix;
-            return isAffineType(frame, frame.ma.expr_of.get(e));
+            return isUniqueType(frame, frame.ma.expr_of.get(e));
         },
         .if_ => |*i| {
             if (try isBorrowedExpr(frame, i.cond)) return true;
@@ -350,13 +350,13 @@ fn scrutineeIsMove(frame: *Frame, e: *const ast.Expr) bool {
 }
 
 /// Whether matching/iterating over `e` consumes the whole owner, making the
-/// pattern's affine bindings owners rather than borrows (Core §13.4,
-/// §13.5). True for an explicit `move`, for a duplicable scrutinee, and for
-/// a fresh affine value (any non-path expression); false for an affine
+/// pattern's unique bindings owners rather than borrows (Core §13.4,
+/// §13.5). True for an explicit `move`, for a Copy scrutinee, and for
+/// a fresh unique value (any non-path expression); false for an unique
 /// binding or module member, which is borrowed by the construct.
 fn consumesScrutinee(frame: *Frame, e: *const ast.Expr, t: cfg.Type) bool {
     if (scrutineeIsMove(frame, e)) return true;
-    if (!isAffine(frame, t)) return true;
+    if (!isUnique(frame, t)) return true;
     switch (e.*) {
         .path => |*p| return p.tail != .none,
         else => return true,
@@ -368,7 +368,7 @@ fn consumesScrutinee(frame: *Frame, e: *const ast.Expr, t: cfg.Type) bool {
 /// destructuring is fine. Only reached for consuming scrutinees.
 fn checkDropHookMatch(frame: *Frame, m: *const ast.MatchExpr, scrut_t: cfg.Type) CheckError!void {
     if (scrut_t != .named) return;
-    const sd = moduleinfo.structDecl(frame.resolve, frame.info, scrut_t.named) orelse return;
+    const sd = moduleinfo.structDecl(frame.resolve, frame.info, frame.resolve.typeNameOf(scrut_t.named) orelse return) orelse return;
     if (sd.drop == null) return;
     for (m.arms) |*arm| {
         if (arm.pattern == .path and arm.pattern.path.tail == .struct_) {
@@ -382,19 +382,19 @@ fn checkDropHookMatch(frame: *Frame, m: *const ast.MatchExpr, scrut_t: cfg.Type)
 // ---------------------------------------------------------------------------
 
 /// Check every argument of a call against its parameter's mode. A plain
-/// parameter accepts only duplicable arguments; a `borrow` parameter
+/// parameter accepts only Copy arguments; a `borrow` parameter
 /// rejects `move`; a `move` parameter requires an explicit `move` of an
-/// existing affine owner, rejects borrowed values, and accepts a fresh
-/// affine value as an implicit transfer.
+/// existing unique owner, rejects borrowed values, and accepts a fresh
+/// unique value as an implicit transfer.
 fn checkArgsOwnership(frame: *Frame, c: *const ast.Call, arg_types: []const cfg.Type, sig: cfg.Type) CheckError!void {
     if (sig != .function) return;
     const params = sig.function.params;
     for (c.args, 0..) |*a, i| {
         if (i >= params.len) break;
-        if (!isAffine(frame, arg_types[i])) continue;
+        if (!isUnique(frame, arg_types[i])) continue;
         switch (params[i].mode) {
             .plain => {
-                return frame.ck.fail(a.span(), "plain parameter accepts only duplicable arguments (Core §10.6)", .{});
+                return frame.ck.fail(a.span(), "plain parameter accepts only Copy arguments (Core §10.6)", .{});
             },
             .borrow => {
                 if (scrutineeIsMove(frame, a)) {
@@ -407,8 +407,8 @@ fn checkArgsOwnership(frame: *Frame, c: *const ast.Call, arg_types: []const cfg.
                     .path => |*p| {
                         if (p.tail == .none and p.path.len == 1) {
                             if (lookupLocal(frame, p.path[0].text)) |local| {
-                                if (isAffine(frame, local.type_) and local.state == .owned) {
-                                    return frame.ck.fail(a.span(), "affine value must be moved with 'move' before being passed to a move parameter (Core §18)", .{});
+                                if (isUnique(frame, local.type_) and local.state == .owned) {
+                                    return frame.ck.fail(a.span(), "unique value must be moved with 'move' before being passed to a move parameter (Core §18)", .{});
                                 }
                             }
                         }
@@ -510,10 +510,10 @@ fn inferExprInner(frame: *Frame, e: *const ast.Expr) CheckError!?cfg.Type {
             const tracked = try ownership.begin(frame);
             const scrut_t = (try inferExpr(frame, m.scrutinee)) orelse cfg.Type{ .primitive = .any };
             // `match (move value)` consumes the complete owner; matching an
-            // affine value through an ordinary expression borrows it, and
-            // the arm's affine payload bindings are borrows for the arm
+            // unique value through an ordinary expression borrows it, and
+            // the arm's unique payload bindings are borrows for the arm
             // lifetime (Core §13.4). Only a statically known target
-            // (`move`, or an affine path with no fresh owner) is checked
+            // (`move`, or an unique path with no fresh owner) is checked
             // for the drop-hook restriction.
             const consuming = consumesScrutinee(frame, m.scrutinee, scrut_t);
             if (consuming) try checkDropHookMatch(frame, m, scrut_t);
@@ -585,7 +585,7 @@ fn inferPath(frame: *Frame, p: *const ast.PathExpr) CheckError!?cfg.Type {
         .construct => |*sc| {
             // Struct construction: the path is a type name (Core §8.1).
             // Each field slot is an owning location, so a field value may
-            // not be a borrowed affine value (Core §10.7).
+            // not be a borrowed unique value (Core §10.7).
             for (sc.fields) |*f| {
                 _ = try inferExpr(frame, f.value);
                 if (try isBorrowedExpr(frame, f.value)) {
@@ -628,7 +628,7 @@ fn resolvePath(frame: *Frame, path: []const ast.Ident) CheckError!?cfg.Type {
             return frame.ck.fail(head.span, "lambda may not capture enclosing local binding '{s}' (Core §6.2)", .{found.local.name});
         }
         const local = found.local;
-        if (isAffine(frame, local.type_)) {
+        if (isUnique(frame, local.type_)) {
             const kind: []const u8 = switch (local.state) {
                 .consumed => "moved",
                 .released => "released",
@@ -690,7 +690,8 @@ fn isCapture(frame: *Frame, scope_of_local: *const Scope) bool {
 fn memberTypeOf(frame: *Frame, cur: cfg.Type, seg: ast.Ident) CheckError!?cfg.Type {
     switch (cur) {
         .named => |n| {
-            const sd = moduleinfo.structDecl(frame.resolve, frame.info, n) orelse return null;
+            const qname = frame.resolve.typeNameOf(n) orelse return null;
+            const sd = moduleinfo.structDecl(frame.resolve, frame.info, qname) orelse return null;
             const idx = moduleinfo.fieldIndex(sd, seg.text) orelse return null;
             return try frame.ck.resolveTypeOf(frame.ma, frame.info, &sd.fields[idx].type_);
         },
@@ -705,7 +706,7 @@ fn memberTypeOf(frame: *Frame, cur: cfg.Type, seg: ast.Ident) CheckError!?cfg.Ty
 
 fn namedPath(frame: *Frame, path: []const ast.Ident) CheckError!?cfg.Type {
     const name = type_resolve.joinPath(frame.ck.alloc(), path) orelse return null;
-    return cfg.Type{ .named = name };
+    return cfg.Type{ .named = (moduleinfo.resolveTypeId(frame.resolve, frame.info, name) orelse return null) };
 }
 
 // ---------------------------------------------------------------------------
@@ -845,7 +846,7 @@ fn specializeInstance(
     const decl = target.vm.decl.func;
     const def_module = target.module;
     const def_ma = try ck.moduleAnnotation(def_module);
-    const def_resolve = moduleinfo.Resolve{ .arena = ck.alloc(), .by_specifier = &ck.graph.?.by_specifier };
+    const def_resolve = moduleinfo.Resolve{ .arena = ck.alloc(), .by_specifier = &ck.graph.?.by_specifier, .type_ids = &ck.graph.?.type_interner };
     const sig = switch (target.vm.type_) {
         .function => |f| f,
         else => return ck.fail(target.vm.name.span, "generic declaration has no function signature", .{}),
@@ -895,7 +896,7 @@ fn specializeInstance(
     // deduplicates to the in-flight instance.
     try ck.annotation.instances.append(ck.alloc(), inst);
     if (decl.body != null) {
-        inst.mono = try monomorphize.monomorphizeFunc(ck.alloc(), decl, type_args);
+        inst.mono = try monomorphize.monomorphizeFunc(ck.alloc(), def_resolve, decl, type_args);
         try checkInstanceBody(ck, def_module, def_ma, inst.mono.?);
     }
     return inst;
@@ -921,7 +922,7 @@ fn checkInstanceBody(ck: *checker.Checker, info: *ModuleInfo, ma: *ModuleAnnotat
         .ck = ck,
         .info = info,
         .ma = ma,
-        .resolve = .{ .arena = ck.alloc(), .by_specifier = &ck.graph.?.by_specifier },
+        .resolve = .{ .arena = ck.alloc(), .by_specifier = &ck.graph.?.by_specifier, .type_ids = &ck.graph.?.type_interner },
         .scope = root,
     };
     try checkFuncBody(frame, f, f.body.?);
@@ -933,7 +934,10 @@ fn checkInstanceBody(ck: *checker.Checker, info: *ModuleInfo, ma: *ModuleAnnotat
 fn hasTypeVars(frame: *Frame, t: cfg.Type) bool {
     return switch (t) {
         .primitive, .module, .cleanup => false,
-        .named => |n| moduleinfo.resolveTypeName(frame.resolve, frame.info, n) == null,
+        // Every `.named` is a concrete interned decl; only `.param` marks
+        // an unresolved generic type variable.
+        .named => false,
+        .param => true,
         .list => |inner| hasTypeVars(frame, inner.*),
         .box => |inner| hasTypeVars(frame, inner.*),
         .tuple => |elems| blk: {
@@ -991,7 +995,8 @@ fn resolveMember(frame: *Frame, object: *const ast.Expr, name: []const u8) Check
     const obj_t = (try inferExpr(frame, object)) orelse return null;
     switch (obj_t) {
         .named => |n| {
-            const sd = moduleinfo.structDecl(frame.resolve, frame.info, n) orelse return null;
+            const qname = frame.resolve.typeNameOf(n) orelse return null;
+            const sd = moduleinfo.structDecl(frame.resolve, frame.info, qname) orelse return null;
             const idx = moduleinfo.fieldIndex(sd, name) orelse return null;
             return try frame.ck.resolveTypeOf(frame.ma, frame.info, &sd.fields[idx].type_);
         },
@@ -1037,8 +1042,8 @@ fn moduleValueOf(frame: *Frame, object: *const ast.Expr) CheckError!?*ModuleInfo
 /// patterns bind the variant's payload types; the list-with-rest pattern
 /// binds the head elements and the rest list.
 ///
-/// When `borrow` is set (a non-consuming `match`/`for` over an affine
-/// owner, Core §13.4, §13.5), the affine bindings become borrows: they may
+/// When `borrow` is set (a non-consuming `match`/`for` over an unique
+/// owner, Core §13.4, §13.5), the unique bindings become borrows: they may
 /// be read and passed along, but not moved or dropped.
 fn inferPattern(frame: *Frame, p: *const ast.Pattern, value_t: cfg.Type, borrow: bool) CheckError!void {
     switch (p.*) {
@@ -1049,7 +1054,7 @@ fn inferPattern(frame: *Frame, p: *const ast.Pattern, value_t: cfg.Type, borrow:
         .type_test => |*tt| {
             if (tt.binding) |b| {
                 const t = try frame.ck.resolveTypeOf(frame.ma, frame.info, &tt.type_);
-                _ = try bindLocal(frame, b.text, t, borrow and isAffine(frame, t));
+                _ = try bindLocal(frame, b.text, t, borrow and isUnique(frame, t));
             }
         },
         .tuple => |*tp| {
@@ -1063,18 +1068,18 @@ fn inferPattern(frame: *Frame, p: *const ast.Pattern, value_t: cfg.Type, borrow:
         .path => |*pp| switch (pp.tail) {
             .none => {
                 // A bare identifier pattern binds the whole value.
-                if (pp.path.len == 1) _ = try bindLocal(frame, pp.path[0].text, value_t, borrow and isAffine(frame, value_t));
+                if (pp.path.len == 1) _ = try bindLocal(frame, pp.path[0].text, value_t, borrow and isUnique(frame, value_t));
             },
             .struct_ => |*sp| {
                 if (value_t == .named) {
-                    const sd = moduleinfo.structDecl(frame.resolve, frame.info, value_t.named) orelse return;
+                    const sd = moduleinfo.structDecl(frame.resolve, frame.info, frame.resolve.typeNameOf(value_t.named) orelse return) orelse return;
                     for (sp.fields) |*f| {
                         const idx = moduleinfo.fieldIndex(sd, f.name.text) orelse continue;
                         const field_t = try frame.ck.resolveTypeOf(frame.ma, frame.info, &sd.fields[@intCast(idx)].type_);
                         if (f.pattern) |*fp| {
                             try inferPattern(frame, fp, field_t, borrow);
                         } else {
-                            _ = try bindLocal(frame, f.name.text, field_t, borrow and isAffine(frame, field_t));
+                            _ = try bindLocal(frame, f.name.text, field_t, borrow and isUnique(frame, field_t));
                         }
                     }
                 }
@@ -1101,7 +1106,7 @@ fn inferPattern(frame: *Frame, p: *const ast.Pattern, value_t: cfg.Type, borrow:
         .list => |*lp| {
             const elem_t: cfg.Type = if (value_t == .list) value_t.list.* else cfg.Type{ .primitive = .any };
             for (lp.items) |*it| try inferPattern(frame, it, elem_t, borrow);
-            if (lp.rest) |r| _ = try bindLocal(frame, r.text, value_t, borrow and isAffine(frame, value_t));
+            if (lp.rest) |r| _ = try bindLocal(frame, r.text, value_t, borrow and isUnique(frame, value_t));
         },
     }
 }

@@ -10,7 +10,7 @@
 //! constants or integer identities folds to the constant / operand),
 //! common subexpression elimination (an identical pure computation
 //! earlier in the same block is reused), and copy propagation (a `copy`
-//! of a duplicable value is the value itself). The frontend therefore
+//! of a Copy value is the value itself). The frontend therefore
 //! needs no separate passes for these (frontend.md §4.3); partial
 //! redundancy elimination, dead-block elimination, drop elision, jump
 //! threading, and phi simplification still run as the Pass 8 sequence
@@ -25,20 +25,20 @@ const lower = @import("../lower.zig");
 const FuncState = lower.FuncState;
 
 /// The resolved ownership of a type (named types resolve through the
-/// module graph); `null` (unspecialized) is treated as duplicable.
+/// module graph); `null` (unspecialized) is treated as Copy.
 pub fn ownership(self: *lower.Lowerer, fs: *lower.FuncState, type_: cfg.Type) ?cfg.Ownership {
     return moduleinfo.ownershipOf(self.resolve, fs.module, type_);
 }
 
-pub fn isAffine(self: *lower.Lowerer, fs: *lower.FuncState, type_: cfg.Type) bool {
-    return (ownership(self, fs, type_) orelse cfg.Ownership.duplicable) == .affine;
+pub fn isUnique(self: *lower.Lowerer, fs: *lower.FuncState, type_: cfg.Type) bool {
+    return (ownership(self, fs, type_) orelse cfg.Ownership.copy) == .unique;
 }
 
-/// True when the value must not silently leak: resolved-affine, or a
+/// True when the value must not silently leak: resolved-unique, or a
 /// deferred (generic) ownership that monomorphization may resolve to
-/// affine. Used by the exact-pattern `split_list` remainder drop.
-pub fn mayBeAffine(self: *lower.Lowerer, fs: *lower.FuncState, type_: cfg.Type) bool {
-    return (ownership(self, fs, type_) orelse cfg.Ownership.affine) == .affine;
+/// unique. Used by the exact-pattern `split_list` remainder drop.
+pub fn mayBeUnique(self: *lower.Lowerer, fs: *lower.FuncState, type_: cfg.Type) bool {
+    return (ownership(self, fs, type_) orelse cfg.Ownership.unique) == .unique;
 }
 
 pub fn isVoid(t: cfg.Type) bool {
@@ -57,7 +57,7 @@ pub fn isNever(t: cfg.Type) bool {
 
 /// Emit one instruction. When `result_type` is non-null the
 /// instruction defines a fresh value (tracked for scope-end drops
-/// when affine-owned); null makes it a pure effect (`drop`,
+/// when unique-owned); null makes it a pure effect (`drop`,
 /// `store_member`, void/never calls). Returns null when the current
 /// block is terminated (dead code — no-op).
 pub fn emit(
@@ -80,11 +80,11 @@ pub fn emit(
             // constant (trap-preserving — see `tryFoldOp`).
             op2 = .{ .const_ = c };
         } else if (op2 == .copy) {
-            // Copy propagation: a `copy` of a duplicable value is the
-            // value itself (ir.md §5.4). Affine copies are illegal and
+            // Copy propagation: a `copy` of a Copy value is the
+            // value itself (ir.md §5.4). Unique copies are illegal and
             // deferred-ownership copies are kept (matching the old copy
             // propagation pass's leave-deferred-copies-alone rule).
-            if (ownership(self, fs, op2.copy.type_) == .duplicable) return op2.copy;
+            if (ownership(self, fs, op2.copy.type_) == .copy) return op2.copy;
         } else if (simplifyOp(op2, rt)) |simp| {
             // Arithmetic simplification: integer identities only (float
             // identities are unsound — x−x ≠ 0 for NaN, 0·x ≠ 0 for
@@ -94,7 +94,7 @@ pub fn emit(
                 .const_ => |c| op2 = .{ .const_ = c },
                 .none => {},
             }
-        } else if (ownership(self, fs, rt) == .duplicable) {
+        } else if (ownership(self, fs, rt) == .copy) {
             if (findCse(fs, b, op2)) |canonical| {
                 // CSE: reuse an identical pure computation earlier in
                 // the same block — its result dominates every later use.
@@ -105,8 +105,9 @@ pub fn emit(
     var result: ?*cfg.Value = null;
     if (result_type) |rt| {
         const v = try newValue(self, fs, span, rt, createdState(op2, fs, rt));
+        if (v.state == .borrowed) v.origin = cfg.originOf(op2);
         result = v;
-        if (v.ownership == .affine) try fs.created.append(self.arena, v);
+        if (v.ownership == .unique) try fs.created.append(self.arena, v);
     }
     const instr = try self.arena.create(cfg.Instr);
     if (result) |v| {
@@ -123,7 +124,7 @@ pub fn emit(
 
 /// Emit an atomic destructure op (ir.md §5.3): one instruction consumes
 /// `base` as a whole and defines all of its parts at once, with
-/// consecutive ids in the value table. Every affine result is tracked
+/// consecutive ids in the value table. Every unique result is tracked
 /// for scope-end destruction exactly like an `emit` result. The op's
 /// base-operand consumption is validated by `cfg.validate`; the
 /// lowering additionally calls `markConsumed` / `cleanupDisable` on the
@@ -134,7 +135,7 @@ pub fn emitUnpack(self: *lower.Lowerer, fs: *lower.FuncState, span: ast.Span, op
     for (result_types, 0..) |rt, i| {
         const v = try newValue(self, fs, span, rt, .owned);
         results[i] = v;
-        if (v.ownership == .affine) try fs.created.append(self.arena, v);
+        if (v.ownership == .unique) try fs.created.append(self.arena, v);
     }
     const instr = try self.arena.create(cfg.Instr);
     instr.* = .{ .span = span, .results = results, .op = op };
@@ -145,16 +146,17 @@ pub fn emitUnpack(self: *lower.Lowerer, fs: *lower.FuncState, span: ast.Span, op
 
 /// The created value state of a definition (ir.md §6.1): from the op
 /// schema for the static cases, or derived from the operand for the
-/// `.operand` ops (borrow-mode `arg`; projections whose created state
-/// follows the *result* type — a duplicable member read from an affine
-/// base is a copy, an affine member read is a borrowed view).
+/// `.operand` ops (projections whose created state follows the
+/// *result* type — a Copy member read from an unique base is a copy,
+/// an unique member read is a borrowed view). Parameters are SSA roots
+/// (ir.md §5.1): their state is set when they are seeded, never by an op.
 pub fn createdState(op: cfg.Op, fs: *lower.FuncState, result_type: cfg.Type) cfg.ValueState {
+    _ = fs;
     return switch (cfg.opInfo(std.meta.activeTag(op)).created) {
         .owned => .owned,
         .borrowed => .borrowed,
         .none => .owned, // effects produce no value; unreachable here
         .operand => switch (op) {
-            .arg => |i| if (fs.params[i].mode == .borrow) .borrowed else .owned,
             .read_field, .read_tuple, .read_index, .read_payload => readState(result_type),
             .tail => |v| readState(v.type_),
             else => unreachable,
@@ -164,7 +166,7 @@ pub fn createdState(op: cfg.Op, fs: *lower.FuncState, result_type: cfg.Type) cfg
 
 pub fn readState(t: cfg.Type) cfg.ValueState {
     const ow = t.ownership();
-    return if (ow == null or ow.? == .affine) .borrowed else .owned;
+    return if (ow == null or ow.? == .unique) .borrowed else .owned;
 }
 
 // -----------------------------------------------------------------
@@ -191,8 +193,9 @@ pub fn emitInto(self: *lower.Lowerer, fs: *lower.FuncState, b: *cfg.BasicBlock, 
     var result: ?*cfg.Value = null;
     if (result_type) |rt| {
         const v = try newValue(self, fs, span, rt, createdState(op, fs, rt));
+        if (v.state == .borrowed) v.origin = cfg.originOf(op);
         result = v;
-        if (v.ownership == .affine) try fs.created.append(self.arena, v);
+        if (v.ownership == .unique) try fs.created.append(self.arena, v);
     }
     const instr = try self.arena.create(cfg.Instr);
     if (result) |v| {
@@ -209,7 +212,7 @@ pub fn emitInto(self: *lower.Lowerer, fs: *lower.FuncState, b: *cfg.BasicBlock, 
 
 /// Disarm `v`'s cleanup token after an ownership transfer on the current
 /// path — a `move`, an atomic `unpack_*` / `split_list` destructure, a
-/// move-mode call argument, a phi input, a `ret`, or an affine element
+/// move-mode call argument, a phi input, a `ret`, or an unique element
 /// moved into a `construct`.
 /// The payload is not destroyed here (it transferred); the token must
 /// simply not destroy it at scope end. No-op when `v` has no token (it
@@ -227,16 +230,16 @@ pub fn cleanupDisableInto(self: *lower.Lowerer, fs: *lower.FuncState, b: *cfg.Ba
 }
 
 /// Drop a value (a `drop` effect); the value is dead afterwards.
-/// Dropping a duplicable value does nothing (Core §10.1). A value with a
+/// Dropping a Copy value does nothing (Core §10.1). A value with a
 /// cleanup token — a conditional-release candidate (Core §10.10) — is
 /// destroyed through its token: `drop_cleanup` destroys the payload iff
 /// the token is still armed (the value was not consumed on this path),
-/// then disarms it. The maybe-affine *value* itself is never referenced
+/// then disarms it. The maybe-unique *value* itself is never referenced
 /// after the construct's join (ir.md §6.4).
 pub fn emitDrop(self: *lower.Lowerer, fs: *lower.FuncState, span: ast.Span, v: *cfg.Value) lower.LowerError!void {
-    if (!isAffine(self, fs, v.type_)) return;
+    if (!isUnique(self, fs, v.type_)) return;
     // Borrowed values are views (borrow params, `borrow` ops,
-    // projections of an affine base) and are never drop candidates
+    // projections of an unique base) and are never drop candidates
     // (Core §9.2 destruction view; ir.md §6.4).
     if (v.state == .borrowed) return;
     if (isConsumed(fs, v)) return;
@@ -249,7 +252,7 @@ pub fn emitDrop(self: *lower.Lowerer, fs: *lower.FuncState, span: ast.Span, v: *
     markConsumed(self, fs, v);
 }
 
-/// Drop the affine-owned temporaries created since `start` (reverse
+/// Drop the unique-owned temporaries created since `start` (reverse
 /// creation order, Runtime §6.4), skipping the expression result and
 /// anything already consumed.
 pub fn dropCreatedRange(self: *lower.Lowerer, fs: *lower.FuncState, start: usize, except: ?*cfg.Value) lower.LowerError!void {
@@ -263,21 +266,21 @@ pub fn dropCreatedRange(self: *lower.Lowerer, fs: *lower.FuncState, start: usize
     }
 }
 
-pub fn bindLocal(self: *lower.Lowerer, fs: *lower.FuncState, name: []const u8, value: *cfg.Value, owns_affine: bool) lower.LowerError!void {
+pub fn bindLocal(self: *lower.Lowerer, fs: *lower.FuncState, name: []const u8, value: *cfg.Value, owns_unique: bool) lower.LowerError!void {
     if (fs.scopes.items.len == 0) try fs.scopes.append(self.arena, .{});
     const local = try self.arena.create(lower.Local);
-    local.* = .{ .name = name, .value = value, .owns_affine = owns_affine };
+    local.* = .{ .name = name, .value = value, .owns_unique = owns_unique };
     try fs.scopes.items[fs.scopes.items.len - 1].locals.append(self.arena, local);
     try fs.symbols.put(self.arena, name, local);
     try fs.local_values.put(self.arena, value, {});
-    if (owns_affine) try fs.value_locals.put(self.arena, value, local);
+    if (owns_unique) try fs.value_locals.put(self.arena, value, local);
 }
 
 pub fn lookupLocal(fs: *lower.FuncState, name: []const u8) ?*lower.Local {
     return fs.symbols.get(name);
 }
 
-/// Scope end: drop every live affine-owned local in reverse creation
+/// Scope end: drop every live unique-owned local in reverse creation
 /// order, except the value flowing out of the scope (ir.md §6.4).
 pub fn exitScope(self: *lower.Lowerer, fs: *lower.FuncState, except: ?*cfg.Value) lower.LowerError!void {
     if (fs.scopes.items.len == 0) return;
@@ -287,7 +290,7 @@ pub fn exitScope(self: *lower.Lowerer, fs: *lower.FuncState, except: ?*cfg.Value
         i -= 1;
         const local = scope.locals.items[i];
         if (local.value == except) continue;
-        if (local.owns_affine and !local.consumed) {
+        if (local.owns_unique and !local.consumed) {
             try emitDrop(self, fs, local.value.span, local.value);
             local.consumed = true;
         }
@@ -299,7 +302,7 @@ pub fn exitScope(self: *lower.Lowerer, fs: *lower.FuncState, except: ?*cfg.Value
 // Conditional-release bookkeeping (Core §10.10, ir.md §6.4)
 // -----------------------------------------------------------------
 
-/// The tracked bindings of a conditional construct: the live affine
+/// The tracked bindings of a conditional construct: the live unique
 /// owners that might be consumed on some but not all paths through it.
 /// Each candidate is given a cleanup token at the construct's entry; a
 /// consuming path disarms it (`cleanup_disable`), and the scope-end
@@ -317,8 +320,8 @@ pub const CondBranch = struct {
     released: []bool,
 };
 
-/// Snapshot the affine bindings visible at a conditional construct's
-/// entry (Core §10.10): every live, owned, affine value bound to a local
+/// Snapshot the unique bindings visible at a conditional construct's
+/// entry (Core §10.10): every live, owned, unique value bound to a local
 /// at the current point, in value-id order. Each candidate that does not
 /// already have a token gets one now — a `cleanup_owner` in the current
 /// block, which dominates every branch and the join, so the token is
@@ -329,7 +332,7 @@ pub const CondBranch = struct {
 pub fn beginCond(self: *lower.Lowerer, fs: *lower.FuncState, span: ast.Span) lower.LowerError!CondTrack {
     var cands = std.ArrayListUnmanaged(*cfg.Value).empty;
     for (fs.values.items) |v| {
-        if (v.ownership == .affine and v.state == .owned and !isConsumed(fs, v) and fs.local_values.contains(v)) {
+        if (v.ownership == .unique and v.state == .owned and !isConsumed(fs, v) and fs.local_values.contains(v)) {
             try cands.append(self.arena, v);
         }
     }
@@ -370,10 +373,10 @@ pub fn restoreCond(_: *lower.Lowerer, fs: *lower.FuncState, track: CondTrack) vo
 /// A tracked binding consumed on every completing branch is definitely
 /// released: its scope-end drop is skipped (the token is already
 /// disarmed on every path). Consumed on some but not all branches, the
-/// binding is *maybe-affine*: no join-time state exists — the token's
+/// binding is *maybe-unique*: no join-time state exists — the token's
 /// per-path armed bit *is* the conditional destruction, and the scope-end
 /// `drop_cleanup` destroys the payload only on the paths that kept it.
-/// The maybe-affine value itself has no uses after the join (ir.md §6.4).
+/// The maybe-unique value itself has no uses after the join (ir.md §6.4).
 pub fn joinMaybeFlags(
     self: *lower.Lowerer,
     fs: *lower.FuncState,
@@ -392,7 +395,7 @@ pub fn joinMaybeFlags(
         }
         if (real == 0) continue; // every branch trapped; nothing to merge
         if (!all_released) {
-            // Maybe-affine: the token handles the conditional destruction.
+            // Maybe-unique: the token handles the conditional destruction.
             // The local's consumed flag must stay clear so the scope-end
             // `drop_cleanup` is emitted (ir.md §6.4).
             if (fs.value_locals.get(v)) |l| l.consumed = false;
@@ -449,6 +452,7 @@ pub fn newValue(self: *lower.Lowerer, fs: *lower.FuncState, span: ast.Span, type
         .type_ = type_,
         .ownership = ownership(self, fs, type_),
         .state = state,
+        .origin = null,
         .def = null,
     };
     // The per-function value table is SSA definition order: params
@@ -809,7 +813,7 @@ fn isOneInt(v: *cfg.Value) bool {
 
 /// The canonical value of an identical pure computation earlier in the
 /// current block, or null. The caller has already checked the result is
-/// duplicable; same op + operands ⇒ same result type, so one ownership
+/// Copy; same op + operands ⇒ same result type, so one ownership
 /// check suffices. Consts are never shared (matching the old CSE pass).
 fn findCse(fs: *FuncState, b: *cfg.BasicBlock, op: cfg.Op) ?*cfg.Value {
     for (fs.block_instrs.items[b.id].items) |prior| {

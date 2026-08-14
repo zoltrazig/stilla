@@ -62,7 +62,7 @@ pub fn print(program: *const IrProgram, allocator: std.mem.Allocator) ![]u8 {
     var out = std.ArrayList(u8).empty;
     for (program.modules) |m| {
         try w(&out, allocator, "module \"{s}\" {{\n", .{m.name});
-        for (m.funcs) |f| try printFunc(&out, allocator, f);
+        for (m.funcs) |f| try printFunc(&out, allocator, program.types, f);
         try w(&out, allocator, "}}\n", .{});
     }
     return out.toOwnedSlice(allocator);
@@ -72,16 +72,16 @@ fn w(out: *std.ArrayList(u8), allocator: std.mem.Allocator, comptime fmt: []cons
     try out.print(allocator, fmt, args);
 }
 
-fn printFunc(out: *std.ArrayList(u8), allocator: std.mem.Allocator, f: *const IrFunc) !void {
+fn printFunc(out: *std.ArrayList(u8), allocator: std.mem.Allocator, types: []const []const u8, f: *const IrFunc) !void {
     try w(out, allocator, "    func @{s}(", .{f.name.text});
     for (f.params, 0..) |p, i| {
         if (i > 0) try w(out, allocator, ", ", .{});
         if (p.mode != .plain) try w(out, allocator, "{s} ", .{@tagName(p.mode)});
         try w(out, allocator, "{s}: ", .{p.name.text});
-        try printType(out, allocator, p.type_);
+        try printType(out, allocator, types, p.type_);
     }
     try w(out, allocator, ") -> ", .{});
-    try printType(out, allocator, f.ret);
+    try printType(out, allocator, types, f.ret);
     try w(out, allocator, " {{\n", .{});
     // Blocks print in value-definition order (ascending minimum value id)
     // so the text form's `%N` ids are sequential: the standalone parser
@@ -104,37 +104,44 @@ fn printFunc(out: *std.ArrayList(u8), allocator: std.mem.Allocator, f: *const Ir
         for (b.instrs) |instr| {
             if (instr.synth) continue; // re-inlined at its operand site
             try w(out, allocator, "        ", .{});
-            try printInstr(out, allocator, instr, &block_index);
+            try printInstr(out, allocator, types, instr, &block_index);
             try w(out, allocator, "\n", .{});
         }
         try w(out, allocator, "        ", .{});
-        try printTerminator(out, allocator, b.terminator);
+        try printTerminator(out, allocator, types, b.terminator);
         try w(out, allocator, "\n", .{});
     }
     try w(out, allocator, "    }}\n", .{});
 }
 
-fn printType(out: *std.ArrayList(u8), allocator: std.mem.Allocator, t: Type) !void {
+fn printType(out: *std.ArrayList(u8), allocator: std.mem.Allocator, types: []const []const u8, t: Type) !void {
     switch (t) {
         .primitive => |k| try w(out, allocator, "{s}", .{@tagName(k)}),
-        .named => |s| try w(out, allocator, "{s}", .{s}),
+        .named => |id| {
+            if (id < types.len) {
+                try w(out, allocator, "{s}", .{types[id]});
+            } else {
+                try w(out, allocator, "#{d}", .{id});
+            }
+        },
+        .param => |s| try w(out, allocator, "{s}", .{s}),
         .module => try w(out, allocator, "module", .{}),
         .cleanup => try w(out, allocator, "cleanup", .{}),
         .list => |inner| {
             try w(out, allocator, "list[", .{});
-            try printType(out, allocator, inner.*);
+            try printType(out, allocator, types, inner.*);
             try w(out, allocator, "]", .{});
         },
         .box => |inner| {
             try w(out, allocator, "box[", .{});
-            try printType(out, allocator, inner.*);
+            try printType(out, allocator, types, inner.*);
             try w(out, allocator, "]", .{});
         },
         .tuple => |elems| {
             try w(out, allocator, "tuple[", .{});
             for (elems, 0..) |e, i| {
                 if (i > 0) try w(out, allocator, ", ", .{});
-                try printType(out, allocator, e);
+                try printType(out, allocator, types, e);
             }
             try w(out, allocator, "]", .{});
         },
@@ -143,10 +150,10 @@ fn printType(out: *std.ArrayList(u8), allocator: std.mem.Allocator, t: Type) !vo
             for (ft.params, 0..) |p, i| {
                 if (i > 0) try w(out, allocator, ", ", .{});
                 if (p.mode != .plain) try w(out, allocator, "{s} ", .{@tagName(p.mode)});
-                try printType(out, allocator, p.type_);
+                try printType(out, allocator, types, p.type_);
             }
             try w(out, allocator, ") -> ", .{});
-            try printType(out, allocator, ft.ret.*);
+            try printType(out, allocator, types, ft.ret.*);
         },
     }
 }
@@ -197,7 +204,7 @@ fn opText(op: Op) []const u8 {
     return cfg.opInfo(std.meta.activeTag(op)).text;
 }
 
-fn printInstr(out: *std.ArrayList(u8), allocator: std.mem.Allocator, instr: *const Instr, block_index: *const std.AutoHashMap(*const BasicBlock, u32)) !void {
+fn printInstr(out: *std.ArrayList(u8), allocator: std.mem.Allocator, types: []const []const u8, instr: *const Instr, block_index: *const std.AutoHashMap(*const BasicBlock, u32)) !void {
     // The lhs: one `%id: type` per result, comma-separated — a single
     // result for ordinary ops, several for the atomic destructure ops
     // (ir.md §5.3, §9).
@@ -205,7 +212,7 @@ fn printInstr(out: *std.ArrayList(u8), allocator: std.mem.Allocator, instr: *con
         for (instr.results, 0..) |v, i| {
             if (i > 0) try w(out, allocator, ", ", .{});
             try w(out, allocator, "%{d}: ", .{v.id});
-            try printType(out, allocator, v.type_);
+            try printType(out, allocator, types, v.type_);
         }
         try w(out, allocator, " = ", .{});
     }
@@ -214,7 +221,6 @@ fn printInstr(out: *std.ArrayList(u8), allocator: std.mem.Allocator, instr: *con
             try w(out, allocator, "const ", .{});
             try printConst(out, allocator, c);
         },
-        .arg => |i| try w(out, allocator, "arg #{d}", .{i}),
         .module_ref => |s| try w(out, allocator, "module_ref \"{s}\"", .{s}),
         .fn_ref => |n| try w(out, allocator, "fn_ref @{s}", .{n}),
         .neg, .not_, .num_cast, .any_pack_copy, .any_pack_move, .any_unpack_copy, .any_unpack_move, .cleanup_owner, .copy, .borrow, .move_, .tail, .unpack_struct, .unpack_tuple, .split_list, .read_tag, .read_payload => |v| {
@@ -230,7 +236,7 @@ fn printInstr(out: *std.ArrayList(u8), allocator: std.mem.Allocator, instr: *con
             try w(out, allocator, "type_is ", .{});
             try printOperand(out, allocator, ti.value);
             try w(out, allocator, ", ", .{});
-            try printType(out, allocator, ti.type_);
+            try printType(out, allocator, types, ti.type_);
         },
         .add, .sub, .mul, .div, .rem, .concat, .eq, .ne, .lt, .le, .gt, .ge => |bin| {
             try w(out, allocator, "{s} ", .{opText(instr.op)});
@@ -241,7 +247,7 @@ fn printInstr(out: *std.ArrayList(u8), allocator: std.mem.Allocator, instr: *con
         .load_member => |lm| {
             try w(out, allocator, "load_member ", .{});
             try printOperand(out, allocator, lm.module);
-            try w(out, allocator, ", #{d}", .{lm.slot});
+            try w(out, allocator, ", #{d}", .{lm.member});
         },
         .store_member => |sm| {
             try w(out, allocator, "store_member #{d}, ", .{sm.slot});
@@ -334,7 +340,8 @@ fn printInstr(out: *std.ArrayList(u8), allocator: std.mem.Allocator, instr: *con
     }
 }
 
-fn printTerminator(out: *std.ArrayList(u8), allocator: std.mem.Allocator, term: Terminator) !void {
+fn printTerminator(out: *std.ArrayList(u8), allocator: std.mem.Allocator, types: []const []const u8, term: Terminator) !void {
+    _ = types;
     switch (term) {
         .ret => |v| {
             try w(out, allocator, "ret", .{});

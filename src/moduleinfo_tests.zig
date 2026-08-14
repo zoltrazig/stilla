@@ -411,27 +411,27 @@ test "moduleinfo ownershipOf classifies primitives and containers" {
     const resolve = moduleinfo.resolveOf(t.graph);
     const app = t.graph.module("app").?;
 
-    // Core §10.1: primitives are duplicable except any / hostdata.
-    try testing.expectEqual(cfg.Ownership.duplicable, moduleinfo.ownershipOf(resolve, app, .{ .primitive = .int32 }).?);
-    try testing.expectEqual(cfg.Ownership.duplicable, moduleinfo.ownershipOf(resolve, app, .{ .primitive = .str }).?);
-    try testing.expectEqual(cfg.Ownership.duplicable, moduleinfo.ownershipOf(resolve, app, .{ .primitive = .void }).?);
-    try testing.expectEqual(cfg.Ownership.affine, moduleinfo.ownershipOf(resolve, app, .{ .primitive = .any }).?);
-    try testing.expectEqual(cfg.Ownership.affine, moduleinfo.ownershipOf(resolve, app, .{ .primitive = .hostdata }).?);
-    try testing.expectEqual(cfg.Ownership.duplicable, moduleinfo.ownershipOf(resolve, app, .module).?);
+    // Core §10.1: primitives are Copy except any / hostdata.
+    try testing.expectEqual(cfg.Ownership.copy, moduleinfo.ownershipOf(resolve, app, .{ .primitive = .int32 }).?);
+    try testing.expectEqual(cfg.Ownership.copy, moduleinfo.ownershipOf(resolve, app, .{ .primitive = .str }).?);
+    try testing.expectEqual(cfg.Ownership.copy, moduleinfo.ownershipOf(resolve, app, .{ .primitive = .void }).?);
+    try testing.expectEqual(cfg.Ownership.unique, moduleinfo.ownershipOf(resolve, app, .{ .primitive = .any }).?);
+    try testing.expectEqual(cfg.Ownership.unique, moduleinfo.ownershipOf(resolve, app, .{ .primitive = .hostdata }).?);
+    try testing.expectEqual(cfg.Ownership.copy, moduleinfo.ownershipOf(resolve, app, .module).?);
     var void_ret = cfg.Type{ .primitive = .void };
-    try testing.expectEqual(cfg.Ownership.duplicable, moduleinfo.ownershipOf(resolve, app, .{ .function = .{ .params = &.{}, .ret = &void_ret } }).?);
+    try testing.expectEqual(cfg.Ownership.copy, moduleinfo.ownershipOf(resolve, app, .{ .function = .{ .params = &.{}, .ret = &void_ret } }).?);
 
     // Core §10.3: containers join their components.
     var int32 = cfg.Type{ .primitive = .int32 };
-    try testing.expectEqual(cfg.Ownership.duplicable, moduleinfo.ownershipOf(resolve, app, .{ .list = &int32 }).?);
-    try testing.expectEqual(cfg.Ownership.duplicable, moduleinfo.ownershipOf(resolve, app, .{ .box = &int32 }).?);
+    try testing.expectEqual(cfg.Ownership.copy, moduleinfo.ownershipOf(resolve, app, .{ .list = &int32 }).?);
+    try testing.expectEqual(cfg.Ownership.copy, moduleinfo.ownershipOf(resolve, app, .{ .box = &int32 }).?);
     var any = cfg.Type{ .primitive = .any };
-    try testing.expectEqual(cfg.Ownership.affine, moduleinfo.ownershipOf(resolve, app, .{ .list = &any }).?);
-    try testing.expectEqual(cfg.Ownership.affine, moduleinfo.ownershipOf(resolve, app, .{ .box = &any }).?);
-    var tuple_affine = [_]cfg.Type{ int32, any };
-    try testing.expectEqual(cfg.Ownership.affine, moduleinfo.ownershipOf(resolve, app, .{ .tuple = &tuple_affine }).?);
+    try testing.expectEqual(cfg.Ownership.unique, moduleinfo.ownershipOf(resolve, app, .{ .list = &any }).?);
+    try testing.expectEqual(cfg.Ownership.unique, moduleinfo.ownershipOf(resolve, app, .{ .box = &any }).?);
+    var tuple_unique = [_]cfg.Type{ int32, any };
+    try testing.expectEqual(cfg.Ownership.unique, moduleinfo.ownershipOf(resolve, app, .{ .tuple = &tuple_unique }).?);
     var tuple_dup = [_]cfg.Type{ int32, int32 };
-    try testing.expectEqual(cfg.Ownership.duplicable, moduleinfo.ownershipOf(resolve, app, .{ .tuple = &tuple_dup }).?);
+    try testing.expectEqual(cfg.Ownership.copy, moduleinfo.ownershipOf(resolve, app, .{ .tuple = &tuple_dup }).?);
 }
 
 test "moduleinfo ownershipOf resolves named structs and unions" {
@@ -450,20 +450,20 @@ test "moduleinfo ownershipOf resolves named structs and unions" {
 
     const resolve = moduleinfo.resolveOf(t.graph);
     const app = t.graph.module("app").?;
-    // Core §10.2: a struct with a drop hook is affine.
-    try testing.expectEqual(cfg.Ownership.duplicable, moduleinfo.ownershipOf(resolve, app, .{ .named = "Dup" }).?);
-    try testing.expectEqual(cfg.Ownership.affine, moduleinfo.ownershipOf(resolve, app, .{ .named = "File" }).?);
-    // Core §10.3: a struct with an affine field is affine; a union with
-    // an affine payload variant is affine.
-    try testing.expectEqual(cfg.Ownership.affine, moduleinfo.ownershipOf(resolve, app, .{ .named = "Holds" }).?);
-    try testing.expectEqual(cfg.Ownership.affine, moduleinfo.ownershipOf(resolve, app, .{ .named = "Maybe" }).?);
+    // Core §10.2: a struct with a drop hook is unique.
+    try testing.expectEqual(cfg.Ownership.copy, moduleinfo.ownershipOf(resolve, app, .{ .named = resolve.intern("app.Dup").? }).?);
+    try testing.expectEqual(cfg.Ownership.unique, moduleinfo.ownershipOf(resolve, app, .{ .named = resolve.intern("app.File").? }).?);
+    // Core §10.3: a struct with an unique field is unique; a union with
+    // an unique payload variant is unique.
+    try testing.expectEqual(cfg.Ownership.unique, moduleinfo.ownershipOf(resolve, app, .{ .named = resolve.intern("app.Holds").? }).?);
+    try testing.expectEqual(cfg.Ownership.unique, moduleinfo.ownershipOf(resolve, app, .{ .named = resolve.intern("app.Maybe").? }).?);
 }
 
 test "moduleinfo ownershipOf handles recursive types through indirection" {
     // Core §11.3: recursion is legal only through indirection (box). Core
     // §10.3: a recursive type with no drop hook, such as `Tree`, is
-    // affine — it cannot be copied implicitly, and box[Tree]/list[Tree]
-    // are affine containers (greatest fixpoint).
+    // unique — it cannot be copied implicitly, and box[Tree]/list[Tree]
+    // are unique containers (greatest fixpoint).
     var t = try buildGraph("app", &.{
         .{
             "app",
@@ -476,8 +476,8 @@ test "moduleinfo ownershipOf handles recursive types through indirection" {
 
     const resolve = moduleinfo.resolveOf(t.graph);
     const app = t.graph.module("app").?;
-    try testing.expectEqual(cfg.Ownership.affine, moduleinfo.ownershipOf(resolve, app, .{ .named = "Tree" }).?);
-    // A type cycle that passes only through function types is duplicable
+    try testing.expectEqual(cfg.Ownership.unique, moduleinfo.ownershipOf(resolve, app, .{ .named = resolve.intern("app.Tree").? }).?);
+    // A type cycle that passes only through function types is Copy
     // (Core §10.3: a function type is not an owned component).
     var t2 = try buildGraph("app", &.{
         .{
@@ -491,7 +491,7 @@ test "moduleinfo ownershipOf handles recursive types through indirection" {
 
     const resolve2 = moduleinfo.resolveOf(t2.graph);
     const app2 = t2.graph.module("app").?;
-    try testing.expectEqual(cfg.Ownership.duplicable, moduleinfo.ownershipOf(resolve2, app2, .{ .named = "F" }).?);
+    try testing.expectEqual(cfg.Ownership.copy, moduleinfo.ownershipOf(resolve2, app2, .{ .named = resolve2.intern("app.F").? }).?);
 }
 
 test "moduleinfo resolveType expands aliases and resolves containers" {
@@ -571,7 +571,7 @@ test "moduleinfo inferExprType infers module constant types" {
     try testing.expectEqual(ast.PrimitiveKind.int32, (moduleinfo.inferExprType(resolve, app, app.valueMember("g").?.decl.const_.init.?).?).primitive);
     try testing.expectEqual(ast.PrimitiveKind.bool, (moduleinfo.inferExprType(resolve, app, app.valueMember("h").?.decl.const_.init.?).?).primitive);
     // A call's return type resolves through the callee signature.
-    try testing.expectEqualStrings("P", (moduleinfo.inferExprType(resolve, app, app.valueMember("p").?.decl.const_.init.?).?).named);
+    try testing.expectEqualStrings("app.P", resolve.typeNameOf((moduleinfo.inferExprType(resolve, app, app.valueMember("p").?.decl.const_.init.?).?).named).?);
 }
 
 test "moduleinfo resolvePathMember and resolvePathTarget" {
@@ -724,7 +724,7 @@ test "moduleinfo resolveTypeName follows using aliases for local type members" {
     // through the using alias yields the IR-native named reference
     // (type arguments resolve in the lowering, frontend §4.2).
     const target = moduleinfo.resolveType(resolve, app, &tm.decl.alias.target).?;
-    try testing.expectEqualStrings("Option", target.named);
+    try testing.expectEqualStrings("builtin.Option", resolve.typeNameOf(target.named).?);
 }
 
 test "moduleinfo isHostBinding distinguishes host and source modules" {

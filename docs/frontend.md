@@ -141,12 +141,15 @@ statically knowable **without analyzing function bodies**:
   annotated) and `func_def` names with their *signatures* (Core §2.5).
   Function signatures are resolved monomorphically (Core §6, §12.5);
   generic functions are recorded as templates, not value members
-  (Core §12.4).
+  (Core §12.4). Phase 3 splits value members into the four IR member
+  kinds (ir.md §7): constants occupy storage slots, functions and
+  module-valued constants are static references, and host bindings are
+  syscall targets.
 - **the generated module struct type** — each module is given a
   compiler-generated nominal struct type whose members are the module's
-  runtime value members (Core §2.1). This type is not nameable in source;
-  it is the type of the value produced by `import(...)` and by
-  module-valued const aliases.
+  runtime value members (Core §2.1) — the source of the IR member table
+  (ir.md §7). This type is not nameable in source; it is the type of the
+  value produced by `import(...)` and by module-valued const aliases.
 - **import edges** — every `import("specifier")` found in a module-level
   `const` initializer (Core §2.2). Edges are kept in the order the
   imports appear in source (declaration order, Runtime §2.3).
@@ -248,7 +251,8 @@ pub const ModuleInfo = struct {
 
     // Member tables (all arena-owned).
     types: MemberTable,      // struct_def / union_def / type_def, with generic params
-    values: MemberTable,     // const_def and monomorphic func_def signatures
+    values: MemberTable,     // const_def and monomorphic func_def signatures —
+                             // the source of the IR member table (ir.md §7)
     templates: MemberTable,  // generic func_def / struct_def / union_def / alias
     using_aliases: MemberTable, // resolved path aliases (Core §2.8)
 
@@ -263,8 +267,9 @@ pub const HostBinding = struct {
     name: ast.Ident,
     /// The declaration's resolved monomorphic signature.
     signature: *typeinfo.TypeInfo,
-    /// Index of the binding in its module's member table; stable, so the
-    /// runtime can dispatch syscalls by (module, member_index).
+    /// Index of the binding in its module's member table (a `MemberId`,
+    /// ir.md §7); stable, so the runtime can dispatch syscalls by
+    /// (module, member).
     member_index: u32,
     /// The host implementation, when registered.
     impl: ?*const anyopaque,
@@ -295,7 +300,7 @@ from the graph alone.
 > side tables, §4.4 generic expansion (§12 instances with monomorphized
 > bodies, deduplicated and checked under substitution; host bindings get
 > body-less instances), §4.5 `move`/`drop`/use-after-move binding states and
-> conditional-release state merging through `if`/`match`/`and`/`or`/`for`
+> conditional-release state merging through `if`/`match`/`and`/`or`
 > (Core §10.10), and all of §4.6: type mismatch, match exhaustiveness,
 > type-test, refutable-pattern, non-capture, borrow-lifetime,
 > module-constant init-order, recursive-type, and drop-hook-restriction
@@ -347,12 +352,12 @@ Every syntactic `ast.Type` is resolved to a `typeinfo.TypeInfo`
   (`Option[int32]` → `UnionType` with args, Core §12.1);
 - transparent alias expansion — aliases leave no node (Core §11.2);
 - the primitive types `any` and `hostdata` (Core §11.6, §11.7): `any` is
-  the top type — always affine, carries a runtime type tag, and is
+  the top type — always unique, carries a runtime type tag, and is
   recovered only by `as` or `match` type-test patterns (§4.6);
-  `hostdata` is an opaque affine payload constructible only by the host;
-- ownership classification computed structurally (duplicable vs affine,
+  `hostdata` is an opaque unique payload constructible only by the host;
+- ownership classification computed structurally (Copy vs unique,
   Core §10.1–§10.3) to the **greatest fixpoint** (Core §10.3): a
-  recursive type whose graph cycles through an owned component is affine,
+  recursive type whose graph cycles through an owned component is unique,
   a cycle passing only through function types is not; deferred (`null`)
   while an unspecialized type parameter remains;
 - monomorphic function types with parameter modes preserved (Core §6.3,
@@ -405,24 +410,24 @@ Ownership annotation drives the transfer checks:
 
 - each resolved type carries its structural `Ownership` (§4.2);
 - each local binding carries its ownership state: `is_borrow`
-  (non-owning view: a `borrow` parameter, or an affine binding produced by
-  a non-consuming `match`/`for`, Core §13.4–§13.5), `consumed`
+  (non-owning view: a `borrow` parameter, or an unique binding produced by
+  a non-consuming `match`, Core §13.4), `consumed`
   (ownership transferred by `move`, or destroyed by `drop`), `released` —
   **definitely released**, the state of an enclosing binding after a
   conditional construct released it on every path (Core §10.10) — and
-  `maybe` — **maybe-affine**, released on some but not all normal paths
-  through a conditional construct; a definitely-released or maybe-affine
-  binding is unusable afterward, and only a maybe-affine binding is
+  `maybe` — **maybe-unique**, released on some but not all normal paths
+  through a conditional construct; a definitely-released or maybe-unique
+  binding is unusable afterward, and only a maybe-unique binding is
   conditionally destroyed at scope end (in the IR: through its cleanup
   token — ir.md §6.4);
 - `move name` marks the named binding consumed (Core §10.4);
 - `drop name;` marks it destroyed (Core §9.4);
 - a `borrow` parameter receives a non-owning view and leaves the caller's
   ownership unchanged (Core §10.6);
-- a `move` parameter transfers ownership; passing an existing affine owner
-  requires `move owner` at the call site, while a fresh affine value may
+- a `move` parameter transfers ownership; passing an existing unique owner
+  requires `move owner` at the call site, while a fresh unique value may
   transfer directly (Core §10.6, §18);
-- plain parameters accept only duplicable argument types (Core §10.6).
+- plain parameters accept only Copy argument types (Core §10.6).
 
 ### 4.6 Checks enabled by annotation
 
@@ -434,7 +439,7 @@ the annotation and emits an `ast.Diagnostic` on failure.
 exactly unless the source type is `never`, the required type is `any`, or
 a transparent alias expands to the required type (Core §18 *Typing*);
 coercion to the top type `any` is the sole implicit widening (Core §18
-*Conversion*, §11.6), and an affine source must be `move`d into it;
+*Conversion*, §11.6), and an unique source must be `move`d into it;
 operator typing per Core §16.3 (`int32 + int32 → int32`, `str + str →
 str`, comparisons → `bool`, `as` conversions only `int32 ↔ float32` and
 `any as T` — the invalid-cast case traps at runtime, Runtime §7.2);
@@ -444,24 +449,24 @@ declared const type vs inferred type (Core §5).
 **Match not exhausted** — a `match` over a union must cover every variant
 unless an irrefutable arm exists (Core §13.3, §18 *Match*); a `match`
 over an `any` value must include a wildcard `_` arm, because the tag space
-is open (Core §11.6.2); `let` and `for` require irrefutable patterns —
+is open (Core §11.6.2); `let` requires irrefutable patterns —
 refutable patterns are accepted only by `match`, and type-test patterns
 (`int32 n`, Core §14.7) are refutable and accepted only by `match`, only
 for an `any` scrutinee (Core §18 *Patterns*, §14).
 
 **Ownership transfer issues** — use after move or destruction
-(Core §18 *Ownership*); moving or dropping a borrowed affine value;
+(Core §18 *Ownership*); moving or dropping a borrowed unique value;
 returning/ storing a borrowed value as owned; partial movement from fields
 or indexed elements (whole-owner rule, Core §18 *Whole-owner rule*);
 consuming destructuring of a struct that defines its own `drop` hook
 (Core §14.6); double `move` of the same owner.
 
-**Conditional release** (Core §10.10) — an affine binding released on a
+**Conditional release** (Core §10.10) — an unique binding released on a
 normal path through a conditional construct — `if`/`else`, `match`,
 short-circuit `and`/`or` — may be released on some paths and not others.
 After the construct the binding is
-exactly one of definitely owned, maybe-affine (`maybe` in §4.5), or
-definitely released (`released` in §4.5). A maybe-affine binding is
+exactly one of definitely owned, maybe-unique (`maybe` in §4.5), or
+definitely released (`released` in §4.5). A maybe-unique binding is
 unusable afterward and is destroyed conditionally at scope end: in the
 IR the implementation arms a cleanup token at the construct's entry and
 emits `drop_cleanup` at scope end, destroying the value only if it is
@@ -470,7 +475,7 @@ ir.md §6.4).
 
 **Additional checks that share the same annotation** — the non-capture
 rule for functions and lambdas (Core §6.2), borrow-lifetime restrictions
-(`borrow` never transfers ownership; borrowed affine values cannot be
+(`borrow` never transfers ownership; borrowed unique values cannot be
 moved, dropped, returned as owned, or stored into an owning location,
 Core §18 *Borrowing*), module-constant initialization order — an
 initializer must not transitively call a function that reads a module
@@ -545,8 +550,10 @@ lowering contract.
 
 ### 5.1 IR model
 
-- **`IrModule`** — one per `ModuleInfo`: the module's member storage
-  layout, its init function (§5.5), and its host bindings (§5.6).
+- **`IrModule`** — one per `ModuleInfo`: the module's member table
+  (ir.md §7 — constants as storage slots; functions, module values, and
+  host bindings as static references), its init function (§5.5), and its
+  host bindings (§5.6).
 - **`IrFunc`** — one per runtime function: each monomorphic function
   declaration and each `FuncInstance` (host bindings get no `IrFunc` —
   they are syscalls only). Contains the signature (parameter modes, return
@@ -554,7 +561,7 @@ lowering contract.
 - **`BasicBlock`** — a sequence of value ops terminated by exactly one
   `Terminator`. Blocks are laid out so that fall-through is the common
   case; explicit edges everywhere else.
-- **`Value`** — an SSA-like op with a type and (for affine results) an
+- **`Value`** — an SSA-like op with a type and (for unique results) an
   ownership tag. Stilla's immutable bindings with shadowing are naturally
   SSA (Core §4: "Stilla is therefore SSA-friendly"): every `let` produces
   a fresh value; shadowing is a fresh name, not a reassignment.
@@ -571,16 +578,16 @@ arm selection.
 pub const Value = struct {
     span: ast.Span,
     type_: *typeinfo.TypeInfo,
-    /// Ownership of the produced value (duplicable / affine).
+    /// Ownership of the produced value (Copy / unique).
     ownership: ?typeinfo.Ownership,
     op: Op,
 };
 
 pub const Op = union(enum) {
     const_: ConstValue,          // int / float / string / bool / void
-    arg: u32,                    // function parameter by index
+    arg: u32,                    // superseded: parameters are SSA roots (ir.md §5.1)
     module_ref: *ModuleInfo,     // module value (module-resident, Core §2.3)
-    load_member: LoadMember,     // module member: (module, member_index)
+    load_member: LoadMember,     // module member: (module, member) — ir.md §7
     load_field: LoadField,       // struct member: (base, field_index)
     index: Index,                // list element: (base, index) with bounds check
                                  // (source spelling base@[index], Core §11.5)
@@ -589,7 +596,7 @@ pub const Op = union(enum) {
     logic: Logic,                // and_/or_/not (short-circuit handled by CFG)
     cast: Cast,                  // int32 ↔ float32, and any as T (Core §16.3)
     construct: Construct,        // struct / union variant / tuple / list / box
-    copy: Copy,                  // implicit copy of a duplicable value
+    copy: Copy,                  // implicit copy of a Copy value
     borrow: Borrow,              // non-owning view (borrow parameter, Core §10.6)
     move: Move,                  // ownership transfer (Core §10.4)
     drop: Drop,                  // deterministic destruction (Core §9)
@@ -632,14 +639,15 @@ points.
 
 - **Literals and consts** → `const_`. A `void`-typed result that nothing
   observes — an expression statement, or the void tail of an
-  `if`/`match`/`for` whose value no binding or return reads — is **not**
+  `if`/`match` whose value no binding or return reads — is **not**
   materialized as a `const void` op; only its effects (calls, syscalls,
   drops) are emitted. `void` is a singleton type with no observable value
   and a void return is a bare `ret`, so such a value is always dead; this
   is a lowering rule (Pass 4.1), not an optimizer rewrite.
-- **`path` value expressions** → `arg` (parameter), `module_ref`
-  (module-valued const), `load_member` (module function/const member),
-  `copy`/`borrow` (duplicable vs affine binding use).
+- **`path` value expressions** → the parameter SSA root (ir.md §5.1),
+  `module_ref` (module-valued const), `load_member` (module member
+  lookup — const, function, or module-valued member; ir.md §7),
+  `copy`/`borrow` (Copy vs unique binding use).
 - **Binary ops** → `arithmetic` / `compare` / `logic`. `and` and `or` do
   **not** become a single op — they lower to a `branch_cond` diamond so
   the right operand is evaluated only when required (Runtime §5):
@@ -652,7 +660,7 @@ points.
   (pattern tests compile to discriminant comparisons / payload binds /
   nested tests for list shapes); for an `any` scrutinee, a `switch` on the
   runtime type tag dispatches to type-test arms and a required wildcard
-  `_` arm (Core §11.6.2, §14.7) — duplicable payloads copy out, affine
+  `_` arm (Core §11.6.2, §14.7) — Copy payloads copy out, unique
   payloads borrow (non-consuming) or transfer ownership (consuming);
   arms join at a common exit block; `never` arms end in `trap` and
   contribute no value; the join value is the match result.
@@ -678,12 +686,12 @@ points.
   discriminant + payload, tuple/list elements left to right, `box`
   indirection.
 - **Casts** → `num_cast` for the Core §16.3 numeric pair (`int32 ↔
-  float32`); `any as T` lowers to `any_unpack_copy` (duplicable target,
+  float32`); `any as T` lowers to `any_unpack_copy` (Copy target,
   the `any` stays owned) or `any_unpack_move` (`(move any) as T`, the
   complete `any` is consumed and payload ownership transfers); an invalid
   `any` recovery — a tag mismatch — is a deterministic runtime trap with
   no unwinding (Core §11.6.1, Runtime §7.2), and phase 2 ensures the
-  source is `move`d for an affine target type. Coercions into `any`
+  source is `move`d for an unique target type. Coercions into `any`
   (`any_pack_copy` / `any_pack_move`) are materialized at call arguments,
   `ret` of an `any`-typed function, and the predecessor edges of an `any`
   join (ir.md §4.4).
@@ -694,45 +702,56 @@ points.
 
 Destruction is deterministic (Runtime §6) and phase 3 makes it explicit:
 
-- **scope-end destruction** — every live affine local owner is destroyed
+- **scope-end destruction** — every live unique local owner is destroyed
   when its scope ends during normal control flow (Core §18 *Destruction*);
   because ownership state is static, only **definitely-owned** bindings
   get a `drop` — a definitely-released binding is skipped
   (Core §10.10). The lowering pass inserts `drop` ops at the exit of every
-  block that terminates the scope, including loop back-edges for a `for`
-  body and every `if`/`match` branch;
+  block that terminates the scope — every `if`/`match` branch and the
+  function epilogue (Stilla has no loop construct, Core §13.5);
 - **user drop hook** — destroying a struct that defines `drop` emits the
   hook call followed by reverse-declaration-order field destruction
   (Core §9, Runtime §6.2);
 - **`hostdata` payloads** — destroying a `hostdata` value runs no Stilla
   `drop` hook; it hands the opaque payload to the host for disposal, which
-  phase 3 records as an ordinary `drop` of the affine value
+  phase 3 records as an ordinary `drop` of the unique value
   (Core §11.7, Runtime §3.4, §7.3);
-- **affine temporaries** — temporaries surviving to the end of a full
+- **unique temporaries** — temporaries surviving to the end of a full
   expression are destroyed in reverse creation order (Runtime §6.4): the
   builder records a per-expression temporary stack and emits its `drop`s
   at the expression's end;
 - **`never`/trap paths** — panic and runtime traps skip all destruction
-  (Core §18 *Panic and traps*): a `trap` terminator performs no drops.
+  (Core §18 *Panic and traps*): a `trap` terminator performs no drops;
+- **conditional destruction** — a maybe-unique binding (Core §10.10) is
+  destroyed through its cleanup token (ir.md §6.4): `cleanup_owner` at
+  the construct's entry, `cleanup_disable` on the paths that consume the
+  binding, `drop_cleanup` at scope end. The lowering **canonicalizes**
+  the three post-construct states — definitely owned → plain `drop`,
+  definitely released → nothing, maybe-unique → token — and the three
+  ops stay in the SSA CFG: no expansion into flag stores and branches
+  before validation and optimization; expansion into a frame slot /
+  armed bit is a backend concern, and a runtime interpreting the CFG
+  executes the ops directly (ir.md §6.4, §14).
 
 Destruction is placed *after* phase-2 ownership analysis, which already
-validated that every affine value is destroyed exactly once — phase 3 only
+validated that every unique value is destroyed exactly once — phase 3 only
 materializes it.
 
 ### 5.5 Module init functions
 
 Each `IrModule` gets an **init function** that:
 
-1. instantiates imported modules as required (dependency order = phase-1
-   topological order, Runtime §2.3);
-2. evaluates module constants **strictly in declaration order**
-   (Core §5, Runtime §5) and stores them in module storage slots
-   (the module struct's member layout);
-3. lowers `import("specifier")` initializers to `module_ref` values —
+1. evaluates module constants **strictly in declaration order**
+   (Core §5, Runtime §5) and stores them into the module's constant
+   slots — only constant members are storage (ir.md §7);
+2. lowers `import("specifier")` initializers to `module_ref` values —
    stable references to the (at most once) instantiated module
-   (Runtime §2.1, §2.4), so `const a = import("m"); const b = a;` share
-   storage;
-4. records init order so the runtime can destroy module-owned affine
+   (Runtime §2.1, §2.4), so `const a = import("m"); const b = a;` denote
+   the same instance; module-valued members stay static `ModuleRef`
+   members (ir.md §7) with no slot — imported modules are instantiated by
+   the runtime in dependency order (phase-1 topological order,
+   Runtime §2.3), never by `@init`;
+3. records init order so the runtime can destroy module-owned unique
    constants in **reverse initialization order** during normal teardown
    (Runtime §2.5).
 
@@ -759,8 +778,9 @@ resolved signatures but no `FuncInstance` body; phase 3 applies one rule:
 
 ```zig
 /// A system call: transfer to the host implementation of a binding.
-/// The runtime dispatches on (module, member_index) — stable, because
-/// module member layout is static (Core §2.1, Runtime §2.2).
+/// The runtime dispatches on (module, member) — the member names a
+/// host-binding member of the module's member table (ir.md §7); stable,
+/// because module member layout is static (Core §2.1, Runtime §2.2).
 pub const SysCall = struct {
     span: ast.Span,
     target: SysCallTarget,
@@ -776,7 +796,7 @@ pub const SysCallTarget = union(enum) {
     builtin: BuiltinId,          // enum of Runtime §4 members
     host_module: struct {
         module: *ModuleInfo,     // resolved host-provided module
-        member_index: u32,       // into the module's member table
+        member_index: u32,       // MemberId into the module's member table (ir.md §7)
     },
 };
 ```
@@ -786,6 +806,10 @@ Lowering rules around syscalls:
 - **argument evaluation** — syscall arguments are evaluated exactly like
   call arguments: left to right, once, before the transfer (Runtime §5);
   `move` args are evaluated as moves, `borrow` args as views;
+- **borrowed results** — a binding whose result is a borrowed view
+  (`builtin.peek`, Runtime §4.8) produces a value whose `BorrowOrigin`
+  is the `peek` root (ir.md §6.5): the view is bound to the syscall's
+  boxed argument;
 - **no inlining, no codegen** — the syscall is opaque to the frontend; the
   runtime's `builtin` vtable (`src/builtin.zig`) and host dispatch own the
   implementation (Runtime §3.2, §3.4);
@@ -808,7 +832,7 @@ Rationale: host bindings are the *only* surface where the language meets
 implementation-specific behavior. Making them system calls keeps the CFG
 uniform (every call is a typed edge with a known signature), keeps host
 integration out of the value model, and makes the runtime's dispatch
-trivial: `(module, member_index) → host function`.
+trivial: `(module, member) → host function`.
 
 ### 5.7 Outputs and downstream consumers
 
@@ -817,9 +841,16 @@ trivial: `(module, member_index) → host function`.
 pub const IrProgram = struct {
     modules: []*IrModule,        // phase-1 order
     funcs: []*IrFunc,            // all monomorphic functions + instances
+    types: []cfg.TypeDecl,       // the IR type environment (ir.md §11)
     entry: ?*IrFunc,             // the host-selected entry, when present
 };
 ```
+
+Lowering populates `IrProgram.types` from the phase-1 `ModuleInfo.type`
+members: one IR-native `TypeDecl` per nominal struct/union in use
+(including monomorphic generic specializations), translated from
+typeinfo into IR-native `Type`s — the IR never consumes `typeinfo` types
+(ir.md §11, §15).
 
 Consumers of the CFG:
 
@@ -910,8 +941,8 @@ that consumes the phase-2 annotation.
   - [x] **3.7 Checks** (§4.6) — type mismatch (call args/return/let/
         const/binary/cast), union match exhaustiveness, `any` requires a
         wildcard, type-test patterns only for `any`, refutable patterns in
-        `let`/`for`, non-capture (Core §6.2), borrow lifetimes (borrowed
-        affine values cannot be moved, dropped, returned as owned, or
+        `let`, non-capture (Core §6.2), borrow lifetimes (borrowed
+        unique values cannot be moved, dropped, returned as owned, or
         stored into an owning location — single-name and dotted-path
         projections, Core §10.7), recursive types without indirection
         (three-color DFS over the module's direct storage edges, Core
@@ -919,7 +950,7 @@ that consumes the phase-2 annotation.
         every initializer, including transitive reads through local
         function calls, Core §5), and the drop-hook destruction-view
         restrictions (the hook body is annotated with the view bound as a
-        borrowed affine local, so move/drop/return/field-transfer are
+        borrowed unique local, so move/drop/return/field-transfer are
         rejected; Core §9.2).
   - [x] **3.8 Phase-2 tests** — black-box diagnostics per check in
         `src/checker_tests.zig` (message + span); `stdbundle_tests` runs
@@ -952,8 +983,8 @@ that consumes the phase-2 annotation.
         are unsound: `x−x≠0` for NaN, `0·x≠0` for ±inf/NaN, `0+x≠x` for
         −0.0), common subexpression elimination (an identical pure
         computation earlier in the same block is reused directly — no
-        `copy`; duplicable results only, no commutativity), and copy
-        propagation (a `move` of a duplicable value lowers to the value
+        `copy`; Copy results only, no commutativity), and copy
+        propagation (a `move` of a Copy value lowers to the value
         itself, so the frontend emits no `copy` instructions). Passes
         8.1, 8.2, and 8.4 are folded into the constructor and no longer
         exist as CFG→CFG passes; the remaining Pass 8 sequence is
@@ -964,8 +995,8 @@ that consumes the phase-2 annotation.
       "annotated AST"):
   - [ ] **5.1** consume `Annotation` for borrow/move/drop decisions;
   - [ ] **5.2** emit `borrow` ops — currently never emitted (borrow
-        parameters, non-consuming affine match payloads);
-  - [ ] **5.3** non-consuming affine match payloads: borrow the payload
+        parameters, non-consuming unique match payloads);
+  - [ ] **5.3** non-consuming unique match payloads: borrow the payload
         while the scrutinee is dropped at scope end (phase-2 territory
         today);
   - [ ] **5.4** `::[...]` specialization lowering — the specialized
@@ -992,8 +1023,9 @@ that consumes the phase-2 annotation.
       before the runtime consumes it (frontend.md §5.7). Implemented.
   - [x] **7.1** tail-position detection — a `call` (or `syscall`) whose
         result is immediately `ret`ed, or a `void`/`never` call directly
-        followed by `ret`, in a block with no live affine state afterwards
-        (§5.7 consumers);
+        followed by `ret`, in a block with no live unique state
+        afterwards and no armed cleanup token on the tail edge (§5.7
+        consumers);
   - [x] **7.2** rewrite — replace `call` + `ret` with a `br` back to the
         function's own entry block, re-binding the callee's parameters
         from the call arguments and splicing in phis for the reused
@@ -1010,9 +1042,12 @@ that consumes the phase-2 annotation.
         schedule (Runtime §6) is unchanged because the frame is reused;
         only direct `call`s to a known `IrFunc` are candidates (a call
         through a function *value* has no statically known target);
+        v0.1 is **Copy-only**: loop-carried parameters are all Copy and
+        a move-mode parameter never loops back (ir.md §10.9);
   - [x] **7.4** tests in `frontend_tests.zig` — tail-recursive functions
         lower to loops that preserve semantics; non-tail calls, value
-        calls, and calls with live affine state are left untouched.
+        calls, calls with live unique state, and unique loop-carried
+        parameters (v0.1: stays a call) are left untouched.
 - [ ] **Pass 8 — Mid-level optimizer** (`src/passes/cfg_optimize.zig`,
       re-exported by `lower`) — a driver that runs a fixed sequence of
       semantics-preserving CFG→CFG rewrites over the lowered CFG, after
@@ -1043,7 +1078,7 @@ that consumes the phase-2 annotation.
   - [x] **8.2 common subexpression elimination — on-the-fly at
         construction** (§4.3) — reuse an identical pure computation
         earlier in the same block at its emit site; block-local (the
-        first occurrence dominates), duplicable results only (ir.md
+        first occurrence dominates), Copy results only (ir.md
         §5.4), operands matched positionally (no commutativity); the
         reused value is returned directly, so no `copy` is involved. No
         separate pass;
@@ -1053,28 +1088,28 @@ that consumes the phase-2 annotation.
         the edges that lacked it; candidates are pure, non-trapping ops only
         (comparisons, `not`, `type_is` — hoisting a trapping op onto a
         skipped path would change observable behavior, Runtime §7.2),
-        duplicable results, operands defined in a strict dominator of the
+        Copy results, operands defined in a strict dominator of the
         join; the join's computation is replaced by the phi with the same
         result value, and values are renumbered in text order (ir.md §13);
   - [x] **8.4 copy propagation — on-the-fly at construction** (§4.3) —
-        a `move` of a duplicable value lowers directly to the value (a
-        copy of a duplicable value is the value, ir.md §5.4), so no
+        a `move` of a Copy value lowers directly to the value (a
+        copy of a Copy value is the value, ir.md §5.4), so no
         `copy` instructions reach the IR from the frontend; the
         mid-level pass (`src/passes/cfg_copy_prop.zig`) collapses the
-        copies the checker's state tracking still emits for duplicable
+        copies the checker's state tracking still emits for Copy
         moves (copy-of-copy chains and a copied parameter that is
         directly returned collapse to the value, Core §10.2 — `move` of a
         Copy value may be omitted);
   - [x] **8.4 module/member CSE** (`src/passes/cfg_cse.zig`) — reuse an
         identical `module_ref` earlier in the same block (the module
         handle is a pure constant) and an identical `load_member` of the
-        same module slot (module storage is written only by
+        same module member (module storage is written only by
         `store_member` inside `@init` — cfg_validate rejects stores
-        elsewhere — so a slot's value is stable), duplicable results
+        elsewhere — so a constant member's value is stable), Copy results
         only, clearing the table at a `store_member`; the canonical def
         sits earlier in the block, so it dominates every rewritten use;
   - [x] **8.4 dead-instruction elimination** (`src/passes/cfg_dead_instr.zig`) —
-        remove an instruction whose results are unused, duplicable, and
+        remove an instruction whose results are unused, Copy, and
         produced by a side-effect-free, non-consuming, non-trapping op
         (the guarded `read_payload` of a match arm whose payload is
         unused is the common corpus case); iterated to a fixed point;
@@ -1085,12 +1120,13 @@ that consumes the phase-2 annotation.
         lists and predecessor sets accordingly (ir.md §3);
   - [x] **8.6 drop elision** (`src/passes/cfg_drop_elide.zig`) — remove a
         `drop` whose destruction is provably unobservable — the value is
-        duplicable, or already dead; must never remove a user `drop` hook
-        that performs output (ir.md §14) — implemented; a type with a
-        user hook is always classified affine, so only duplicable drops
-        are elided, and `drop_cleanup` / `cleanup_disable` (whose token's
-        payload is an affine owner) are never elided (equivalence test in
-        `frontend_tests.zig`);
+        Copy, or already dead; must never remove a user `drop` hook
+        that performs output (ir.md §14) and never moves a destruction
+        earlier than its prescribed point (ir.md §6.4) — implemented; a
+        type with a user hook is always classified unique, so only Copy
+        drops are elided, and `drop_cleanup` / `cleanup_disable` (whose
+        token's payload is an unique owner) are never elided
+        (equivalence test in `frontend_tests.zig`);
   - [x] **8.7 phi simplification** (`src/passes/cfg_phi_simplify.zig`) —
         remove single-incoming phis, identical-phis, and self-referential
         trivial phis (braun13cc Algorithm 3: `φ(v, vφ) → v`, with the
@@ -1110,7 +1146,7 @@ that consumes the phase-2 annotation.
         (optimized IR re-parses, ir.md §13) and against the
         observable-behavior contract, including a per-pass equivalence
         test (drop elision must *not* elide a `drop` whose hook may
-        `print` — an affine `hostdata` drop stays). The optimization
+        `print` — an unique `hostdata` drop stays). The optimization
         harness compiles the corpus (`examples/` plus the added
         benchmarks: `ownership.st` with `drop` hooks, `match.st` ADT
         `match`), runs `optimize`, and

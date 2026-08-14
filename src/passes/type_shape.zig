@@ -58,13 +58,13 @@ pub fn variantIndex(ud: *const ast.UnionDef, name: []const u8) ?u32 {
 }
 
 /// Structural ownership of an IR-native type (Core §10.1–§10.3):
-/// primitives and function/module values are duplicable (except `any`),
+/// primitives and function/module values are Copy (except `any`),
 /// containers join their components, named types resolve through the
 /// graph. `null` means the ownership is genuinely deferred (an
 /// unspecialized type parameter). Recursive references contribute
-/// `duplicable` (Core §18: recursion is legal only through indirection,
+/// `Copy` (Core §18: recursion is legal only through indirection,
 /// so the cycle itself is neutral); the caller treats a final `null` as
-/// duplicable.
+/// Copy.
 pub fn ownershipOf(resolve: Resolve, from: *ModuleInfo, t: cfg.Type) ?cfg.Ownership {
     // The visited set is arena-owned; no deinit needed.
     var visited = std.AutoHashMapUnmanaged(*const TypeMember, void).empty;
@@ -78,48 +78,50 @@ fn ownershipVisited(
     visited: *std.AutoHashMapUnmanaged(*const TypeMember, void),
 ) ?cfg.Ownership {
     return switch (t) {
-        .primitive => |k| if (k == .any or k == .hostdata) cfg.Ownership.affine else cfg.Ownership.duplicable,
-        .module, .function, .cleanup => cfg.Ownership.duplicable,
+        .primitive => |k| if (k == .any or k == .hostdata) cfg.Ownership.unique else cfg.Ownership.copy,
+        .module, .function, .cleanup => cfg.Ownership.copy,
+        .param => null, // deferred until monomorphic substitution
         .list, .box => |inner| inner.ownership(),
         .tuple => |elems| blk: {
-            var acc: ?cfg.Ownership = cfg.Ownership.duplicable;
+            var acc: ?cfg.Ownership = cfg.Ownership.copy;
             for (elems) |e| {
-                const ow = ownershipVisited(resolve, from, e, visited) orelse break :blk cfg.Ownership.affine;
-                if (ow == .affine) acc = cfg.Ownership.affine;
+                const ow = ownershipVisited(resolve, from, e, visited) orelse break :blk cfg.Ownership.unique;
+                if (ow == .unique) acc = cfg.Ownership.unique;
             }
             break :blk acc;
         },
-        .named => |name| blk: {
+        .named => |id| blk: {
+            const name = resolve.typeNameOf(id) orelse break :blk null;
             const tm = type_resolve.resolveTypeName(resolve, from, name) orelse break :blk null;
             const final = type_resolve.followAlias(resolve, from, tm) orelse break :blk null;
             break :blk switch (final.decl) {
                 .struct_ => |s| blk2: {
-                    if (visited.contains(final)) break :blk2 cfg.Ownership.duplicable;
+                    if (visited.contains(final)) break :blk2 cfg.Ownership.copy;
                     visited.put(resolve.arena, final, {}) catch break :blk2 null;
-                    if (s.drop != null) break :blk2 cfg.Ownership.affine;
-                    var acc: ?cfg.Ownership = cfg.Ownership.duplicable;
+                    if (s.drop != null) break :blk2 cfg.Ownership.unique;
+                    var acc: ?cfg.Ownership = cfg.Ownership.copy;
                     for (s.fields) |f| {
                         const ft = type_resolve.resolveType(resolve, from, &f.type_) orelse continue;
                         const ow = ownershipVisited(resolve, from, ft, visited) orelse {
-                            acc = cfg.Ownership.affine;
+                            acc = cfg.Ownership.unique;
                             break;
                         };
-                        if (ow == .affine) acc = cfg.Ownership.affine;
+                        if (ow == .unique) acc = cfg.Ownership.unique;
                     }
                     break :blk2 acc;
                 },
                 .union_ => |u| blk2: {
-                    if (visited.contains(final)) break :blk2 cfg.Ownership.duplicable;
+                    if (visited.contains(final)) break :blk2 cfg.Ownership.copy;
                     visited.put(resolve.arena, final, {}) catch break :blk2 null;
-                    var acc: ?cfg.Ownership = cfg.Ownership.duplicable;
+                    var acc: ?cfg.Ownership = cfg.Ownership.copy;
                     for (u.variants) |v| {
                         if (v.types) |types| for (types) |vt| {
                             const t2 = type_resolve.resolveType(resolve, from, &vt) orelse continue;
                             const ow = ownershipVisited(resolve, from, t2, visited) orelse {
-                                acc = cfg.Ownership.affine;
+                                acc = cfg.Ownership.unique;
                                 break;
                             };
-                            if (ow == .affine) acc = cfg.Ownership.affine;
+                            if (ow == .unique) acc = cfg.Ownership.unique;
                         };
                     }
                     break :blk2 acc;

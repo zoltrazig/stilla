@@ -55,11 +55,11 @@ const std = @import("std");
 const ast = @import("ast.zig");
 
 /// Ownership classification of a value type (Core §10.1–§10.3).
-/// `duplicable` values may be implicitly copied; `affine` values may be
+/// `Copy` values may be implicitly copied; `unique` values may be
 /// used at most once and must be destroyed exactly once.
 pub const Ownership = enum {
-    duplicable,
-    affine,
+    copy,
+    unique,
 };
 
 // ---------------------------------------------------------------------------
@@ -69,10 +69,21 @@ pub const Ownership = enum {
 /// An IR-native resolved type (ir.md §4.2, §11). The IR text carries no
 /// type declarations, so `named` types defer ownership to their
 /// declaration, mirroring the checker's `null`-means-deferred convention.
+pub const TypeId = u32;
+
 pub const Type = union(enum) {
     primitive: ast.PrimitiveKind,
-    /// A named struct or union reference, e.g. `File` or `os.File`.
-    named: []const u8,
+    /// A named struct or union reference: a `TypeId` index into the
+    /// program type environment (`IrProgram.types`, ir.md §11). Canonical
+    /// identity is the `TypeId`; the declaration name strings are for
+    /// printing and diagnostics only.
+    named: TypeId,
+    /// A generic type parameter of an enclosing declaration, e.g. the
+    /// `T` of `fn foo[T](x: T) -> T` (Core §12). `null` ownership
+    /// (deferred) until a monomorphic substitution fixes it. Distinct
+    /// from `named` so a type parameter is never confused with a
+    /// nominal struct/union reference.
+    param: []const u8,
     /// The static module type of `module_ref` values (Core §2.3).
     module,
     list: *Type,
@@ -80,33 +91,33 @@ pub const Type = union(enum) {
     tuple: []Type,
     function: FunctionType,
     /// The type of a cleanup token (ir.md §6.4): a compiler-only value
-    /// that schedules the conditional destruction of a maybe-affine
+    /// that schedules the conditional destruction of a maybe-unique
     /// owner. Not a Core type — no source expression, parameter, or
     /// binding ever has this type; only `cleanup_owner` produces it and
     /// only `cleanup_disable` / `drop_cleanup` consume it. Classified
-    /// duplicable so ordinary scope-end machinery never drops it.
+    /// Copy so ordinary scope-end machinery never drops it.
     cleanup,
 
-    /// Structural ownership (ir.md §6.1): primitives are duplicable except
+    /// Structural ownership (ir.md §6.1): primitives are Copy except
     /// the top type `any` and the opaque payload type `hostdata`, which are
-    /// affine (Core §11.6, §11.7); function values and module values are
-    /// duplicable; containers join their components; cleanup tokens are
+    /// unique (Core §11.6, §11.7); function values and module values are
+    /// Copy; containers join their components; cleanup tokens are
     /// scheduler-only values; named types defer (`null`).
     pub fn ownership(self: Type) ?Ownership {
         return switch (self) {
-            .primitive => |k| if (k == .any or k == .hostdata) Ownership.affine else Ownership.duplicable,
-            .module, .cleanup => Ownership.duplicable,
-            .named => null,
+            .primitive => |k| if (k == .any or k == .hostdata) Ownership.unique else Ownership.copy,
+            .module, .cleanup => Ownership.copy,
+            .named, .param => null,
             .list, .box => |inner| inner.ownership(),
             .tuple => |elems| blk: {
-                var acc: ?Ownership = Ownership.duplicable;
+                var acc: ?Ownership = Ownership.copy;
                 for (elems) |e| {
                     const ow = e.ownership() orelse break :blk null;
-                    if (ow == .affine) acc = Ownership.affine;
+                    if (ow == .unique) acc = Ownership.unique;
                 }
                 break :blk acc;
             },
-            .function => Ownership.duplicable,
+            .function => Ownership.copy,
         };
     }
 
@@ -118,7 +129,11 @@ pub const Type = union(enum) {
             },
             .module => b == .module,
             .named => |na| switch (b) {
-                .named => |nb| std.mem.eql(u8, na, nb),
+                .named => |nb| na == nb,
+                else => false,
+            },
+            .param => |pa| switch (b) {
+                .param => |pb| std.mem.eql(u8, pa, pb),
                 else => false,
             },
             .list => |la| switch (b) {
@@ -171,6 +186,14 @@ pub const FunctionType = struct {
 };
 
 // ---------------------------------------------------------------------------
+// Type environment (ir.md §11)
+// ---------------------------------------------------------------------------
+
+// The type environment is a name-only table: one written name per
+// `TypeId` (`Type.named` carries the index), for printing and
+// diagnostics. Struct/union payloads (fields, variants, ownership, drop
+// hooks) are runtime-facing and not modeled in the IR yet.
+// ---------------------------------------------------------------------------
 // CFG data structures (ir.md §11)
 // ---------------------------------------------------------------------------
 
@@ -182,6 +205,24 @@ pub const FunctionType = struct {
 /// it is an edge-sensitive dataflow property computed by the validator
 /// (ir.md §13) and the lowering's consumption bookkeeping.
 pub const ValueState = enum { owned, borrowed };
+
+/// Where a borrowed value's lifetime is anchored (ir.md §6.5): the root
+/// whose availability the validator checks at every use of the view.
+pub const BorrowOrigin = union(enum) {
+    /// The immediate base the view derives from; resolved transitively
+    /// through view chains to the ultimate root — an owned value in the
+    /// current function, the `call` lifetime, or a `peek` owner.
+    root: *Value,
+    /// A borrow-mode parameter: the root is the caller's argument, which
+    /// the callee cannot consume — valid for the whole call (Core §10.7).
+    call,
+    /// A host `peek` result (Runtime §4.8): the borrowed view is bound to
+    /// the producing syscall's boxed argument — the owner whose
+    /// availability gates the view's uses. The argument position is
+    /// implicit (the producing `syscall`'s sole boxed operand), so the
+    /// origin carries no index.
+    peek,
+};
 
 pub const ConstValue = union(enum) {
     int: i64, // int32 / uint32 payload; sign per type
@@ -198,11 +239,14 @@ pub const Value = struct {
     id: u32,
     span: ast.Span,
     type_: Type,
-    /// Ownership class from the type (duplicable / affine), `null` when
+    /// Ownership class from the type (Copy / unique), `null` when
     /// deferred by a named type.
     ownership: ?Ownership,
     /// Created state (owned / borrowed); dead-marking is downstream.
     state: ValueState,
+    /// For a `borrowed` value, the origin anchoring its lifetime (§6.5);
+    /// `null` iff the state is `owned`.
+    origin: ?BorrowOrigin,
     /// The defining instruction, or null for parameters.
     def: ?*Instr,
 };
@@ -226,9 +270,8 @@ pub const Instr = struct {
 /// The 3-address op set of ir.md §5: at most two operands, except the
 /// documented n-ary forms (`construct`, `call`, `syscall`, `phi`).
 pub const Op = union(enum) {
-    // constants, parameters, modules (§5.1)
+    // constants, modules (§5.1) — parameters are SSA roots, not ops
     const_: ConstValue,
-    arg: u32,
     module_ref: []const u8, // module specifier (ir.md §11: *const ModuleInfo)
 
     // function values (§5.5)
@@ -244,13 +287,13 @@ pub const Op = union(enum) {
 
     // typed recovery and top-type conversion (§5.2, §4.4)
     type_is: TypeIs,
-    /// `T → any` of a duplicable source: copies the payload into the
+    /// `T → any` of a Copy source: copies the payload into the
     /// `any`; the source stays owned (Core §11.6).
     any_pack_copy: *Value,
-    /// `T → any` of an affine source: moves the payload into the `any`;
+    /// `T → any` of an unique source: moves the payload into the `any`;
     /// the source is consumed (Core §11.6).
     any_pack_move: *Value,
-    /// `any as T` with a duplicable target: copies the payload out; the
+    /// `any as T` with a Copy target: copies the payload out; the
     /// source `any` stays owned (Core §11.6.1).
     any_unpack_copy: *Value,
     /// `(move any) as T`: consumes the whole `any`; payload ownership
@@ -340,7 +383,7 @@ pub const Consumes = enum { none, op0, op1, both, all };
 
 /// The created state of the result (ir.md §6.1); `.operand` means the
 /// state derives from an operand (borrow-mode `arg`, projections of an
-/// affine base), `.none` for pure effects.
+/// unique base), `.none` for pure effects.
 pub const Created = enum { owned, borrowed, operand, none };
 
 /// One row of the op schema: everything the validator, parser, printer,
@@ -385,9 +428,8 @@ pub const OpInfo = struct {
 /// union without a row here is a compile error.
 pub fn opInfo(tag: OpTag) OpInfo {
     return switch (tag) {
-        // constants, parameters, modules (§5.1)
+        // constants, modules (§5.1)
         .const_ => .{ .text = "const", .arity = .zero, .consumes = .none, .created = .owned, .may_trap = false, .effects = false },
-        .arg => .{ .text = "arg", .arity = .zero, .consumes = .none, .created = .operand, .may_trap = false, .effects = false },
         .module_ref => .{ .text = "module_ref", .arity = .zero, .consumes = .none, .created = .owned, .may_trap = false, .effects = false },
 
         // function values (§5.5)
@@ -440,8 +482,8 @@ pub fn opInfo(tag: OpTag) OpInfo {
         .read_tuple => .{ .text = "read_tuple", .arity = .one, .consumes = .none, .created = .operand, .may_trap = false, .effects = false },
         .read_index => .{ .text = "read_index", .arity = .two, .consumes = .none, .created = .operand, .may_trap = true, .effects = false },
         // A `tail` view's created state follows the *base*'s ownership
-        // (`.operand`): a duplicable list's view is a duplicable value,
-        // an affine list's view is borrowed (matches read_*).
+        // (`.operand`): a Copy list's view is a Copy value,
+        // an unique list's view is borrowed (matches read_*).
         .tail => .{ .text = "tail", .arity = .one, .consumes = .none, .created = .operand, .may_trap = false, .effects = false },
         // Atomic consuming destructures (§5.3): one op, base consumed as
         // a whole, all parts defined at once (multi-result).
@@ -458,6 +500,26 @@ pub fn opInfo(tag: OpTag) OpInfo {
 
         // SSA (§4.3)
         .phi => .{ .text = "phi", .arity = .nary, .consumes = .all, .created = .owned, .may_trap = false, .effects = false },
+    };
+}
+
+/// The borrow origin of a borrowed result (ir.md §6.5): the root whose
+/// availability gates every use of the view. `borrow %a` roots at the
+/// base value; a projection (`read_*` / `tail`) of an unique base roots
+/// at the base; `load_member` of an unique constant member roots at the
+/// module value (module storage is immutable after `@init`, Core §5);
+/// `syscall builtin#peek` roots at its boxed argument. Returns `null`
+/// for `owned` results and for borrows without a tracked local root.
+pub fn originOf(op: Op) ?BorrowOrigin {
+    return switch (op) {
+        .borrow => |a| .{ .root = a },
+        .read_field, .read_tuple => |p| .{ .root = p.base },
+        .read_index => |p| .{ .root = p.base },
+        .read_payload => |p| .{ .root = p },
+        .tail => |v| .{ .root = v },
+        .load_member => |lm| .{ .root = lm.module },
+        .syscall => |sc| if (sc.target == .builtin and sc.target.builtin == .peek) .peek else null,
+        else => null,
     };
 }
 
@@ -537,11 +599,14 @@ pub const Construct = struct {
 
 pub const LoadMember = struct {
     module: *Value, // a module_ref value
-    slot: u32,
+    /// Member index: the member's position in the module's value-member
+    /// declaration order (ir.md §7). The member table that resolves this
+    /// index is runtime-facing and not modeled in the IR.
+    member: u32,
 };
 
 pub const StoreMember = struct {
-    slot: u32,
+    slot: u32, // SlotId: constant members only (§7)
     value: *Value,
 };
 
@@ -836,7 +901,7 @@ pub fn rewriteUses(f: *IrFunc, from: *Value, to: *Value) void {
                     if (inc.value == from) inc.value = to;
                 }
             },
-            .const_, .arg, .module_ref, .fn_ref => {},
+            .const_, .module_ref, .fn_ref => {},
         };
         switch (b.terminator) {
             .ret => |v| {
@@ -858,7 +923,7 @@ pub fn rewriteUses(f: *IrFunc, from: *Value, to: *Value) void {
 
 pub const SlotMeta = struct {
     type_: Type,
-    /// Rank in the module's declaration order (teardown destroys affine
+    /// Rank in the module's declaration order (teardown destroys unique
     /// slots in reverse rank — Runtime §2.5).
     init_order: u32,
 };
@@ -870,14 +935,20 @@ pub const IrModule = struct {
     /// The module init function (a `func @init`), when one is defined.
     init: ?*IrFunc,
     funcs: []*IrFunc,
-    /// Module storage layout, derived from `@init`'s `store_member` ops
-    /// (Runtime §2.2).
+    /// Module storage layout: the constant members only, derived from
+    /// `@init`'s `store_member` ops (Runtime §2.2). Stored in slot order.
     slots: []SlotMeta,
 };
 
 pub const IrProgram = struct {
     modules: []*IrModule, // text order
     funcs: []*IrFunc, // all functions, in module order
+    /// The type environment (ir.md §11): one written name per `TypeId`
+    /// (`Type.named` carries the index), for printing and diagnostics.
+    /// Populated by the frontend lowering (declaration names) and, for
+    /// text-form-parsed programs, by the parser as it interns each
+    /// first-seen name (ir.md §9).
+    types: []const []const u8,
     entry: ?*IrFunc, // host-selected entry, when present
 
     /// Resolve `Call.callee.direct` references (forward references in the

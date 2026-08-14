@@ -73,7 +73,8 @@ pub fn inferExprType(resolve: Resolve, from: *ModuleInfo, e: *const ast.Expr) ?c
             const name = m.name.text;
             break :blk switch (base) {
                 .named => |n| blk2: {
-                    const sd = type_shape.structDecl(resolve, from, n) orelse break :blk2 null;
+                    const qname = resolve.typeNameOf(n) orelse break :blk2 null;
+                    const sd = type_shape.structDecl(resolve, from, qname) orelse break :blk2 null;
                     const idx = type_shape.fieldIndex(sd, name) orelse break :blk2 null;
                     break :blk2 type_resolve.resolveType(resolve, from, &sd.fields[idx].type_);
                 },
@@ -101,7 +102,9 @@ fn inferPathType(resolve: Resolve, from: *ModuleInfo, p: *const ast.PathExpr) ?c
     if (p.tail != .none) {
         // Struct or union-variant construction: the path is a type name.
         const name = type_resolve.joinPath(resolve.arena, p.path) orelse return null;
-        return .{ .named = name };
+        const qt = type_resolve.resolveQualifiedTypeName(resolve, from, name);
+        const id = if (qt) |q| resolve.intern(q.qualified) else resolve.intern(name);
+        return .{ .named = id orelse return null };
     }
     const vm = resolvePathMember(resolve, from, p.path) orelse return null;
     return vm.type_;
@@ -228,8 +231,13 @@ fn callReturnType(resolve: Resolve, from: *ModuleInfo, c: *const ast.Call) ?cfg.
 /// the signature of a generic binding uses such names for its type
 /// parameters (`list[T]`, `fn(move A) -> B`).
 fn isTypeVar(resolve: Resolve, from: *ModuleInfo, t: cfg.Type) bool {
+    _ = resolve;
+    _ = from;
     return switch (t) {
-        .named => |n| type_resolve.resolveTypeName(resolve, from, n) == null,
+        .param => true,
+        // Every `.named` is now a concrete interned decl; only `.param`
+        // denotes a type variable.
+        .named => false,
         else => false,
     };
 }
@@ -320,13 +328,14 @@ fn unifyType(
     env: *std.StringHashMapUnmanaged(cfg.Type),
 ) bool {
     return switch (pat) {
-        .named => |n| {
-            if (type_resolve.resolveTypeName(resolve, from, n) == null) {
-                // A type variable: bind it (consistency-checked).
-                if (env.get(n)) |prev| return cfg.Type.eql(prev, arg);
-                env.put(resolve.arena, n, arg) catch return false;
-                return true;
-            }
+        .param => |n| {
+            // A type parameter: always a type variable (consistency-checked).
+            if (env.get(n)) |prev| return cfg.Type.eql(prev, arg);
+            env.put(resolve.arena, n, arg) catch return false;
+            return true;
+        },
+        .named => {
+            // A concrete interned decl: matches only an equal TypeId (canonical).
             return cfg.Type.eql(pat, arg);
         },
         .list => |pl| return switch (arg) {
@@ -364,7 +373,9 @@ fn unifyType(
 
 fn substType(resolve: Resolve, from: *ModuleInfo, t: cfg.Type, env: *const std.StringHashMapUnmanaged(cfg.Type)) cfg.Type {
     return switch (t) {
-        .named => |n| if (env.get(n)) |r| return r else return t,
+        .param => |n| if (env.get(n)) |r| return r else return t,
+        // `.named` is a concrete TypeId; never bound by the name-keyed env.
+        .named => return t,
         .list => |inner| blk: {
             const sub = substType(resolve, from, inner.*, env);
             if (cfg.Type.eql(sub, inner.*)) break :blk t;

@@ -80,8 +80,11 @@ pub const Diag = struct {
 /// functions occupy member slots like consts.
 pub const ValueMember = struct {
     name: ast.Ident,
-    /// Slot in the module's storage layout (Runtime §2.2); stable, so the
-    /// runtime can dispatch on (module, member_index).
+    /// Member index: position in the module's value-member declaration
+    /// order (Core §2.1 — consts and functions share one member space).
+    /// Stable, so the runtime can dispatch on (module, member_index) and
+    /// the `load_member` operand carries it (ir.md §7). Distinct from the
+    /// storage slot of a constant member (`IrModule.slots`).
     slot: u32,
     /// Resolved type: the const's type, or the function's monomorphic
     /// signature.
@@ -230,6 +233,36 @@ pub const ModuleInfo = struct {
 
 /// The result of phase 1 (frontend §3.6): every module of the program, in
 /// dependency order, with module-level info computed.
+pub const TypeId = u32;
+
+/// The canonical nominal-type interner for one compilation (ir.md §11).
+/// Every concrete struct/union *and* every generic template decl named in
+/// the graph gets a stable `TypeId`; `IrProgram.types` is populated to
+/// match so `IrProgram.types[id]` is the `TypeDecl` behind a `Type.named`
+/// carrying that id. `to_name` lets a `TypeId` resolve back to its
+/// fully-qualified name for checker/diagnostic lookups.
+pub const TypeInterner = struct {
+    arena: std.mem.Allocator,
+    name_to_id: std.StringHashMapUnmanaged(TypeId) = .{},
+    to_name: std.ArrayListUnmanaged([]const u8) = .empty,
+
+    pub fn intern(self: *TypeInterner, name: []const u8) TypeId {
+        if (self.name_to_id.get(name)) |id| return id;
+        const id: TypeId = @intCast(self.to_name.items.len);
+        self.name_to_id.put(self.arena, name, id) catch return 0;
+        self.to_name.append(self.arena, name) catch return 0;
+        return id;
+    }
+
+    pub fn qname(self: *const TypeInterner, id: TypeId) []const u8 {
+        return self.to_name.items[id];
+    }
+
+    pub fn idOf(self: *const TypeInterner, name: []const u8) ?TypeId {
+        return self.name_to_id.get(name);
+    }
+};
+
 pub const ModuleGraph = struct {
     arena: std.mem.Allocator,
     /// Topological order: dependencies before dependents (frontend §3.5).
@@ -238,9 +271,21 @@ pub const ModuleGraph = struct {
     entry: *ModuleInfo,
     /// The first phase-1 diagnostic, when the build failed.
     diag: ?Diag = null,
+    /// Canonical nominal-type interner, shared by the checker and lowering.
+    type_interner: TypeInterner = undefined,
 
     pub fn module(self: *const ModuleGraph, specifier: []const u8) ?*ModuleInfo {
         return self.by_specifier.get(specifier);
+    }
+
+    pub fn internType(self: *ModuleGraph, name: []const u8) TypeId {
+        return self.type_interner.intern(name);
+    }
+
+    /// The fully-qualified name behind a `TypeId`, or null when out of range.
+    pub fn typeName(self: *const ModuleGraph, id: TypeId) ?[]const u8 {
+        if (id >= self.type_interner.to_name.items.len) return null;
+        return self.type_interner.to_name.items[id];
     }
 };
 
@@ -331,9 +376,12 @@ pub const Builder = struct {
     /// diagnostic can still resolve a source location — the graph itself
     /// is null on parse failure, but the source list is not.
     loaded_sources: std.ArrayListUnmanaged(*const ast.Source) = .empty,
+    /// Canonical nominal-type interner, threaded to the graph so type
+    /// resolution during materialization and later phases agree on TypeIds.
+    type_interner: TypeInterner = undefined,
 
     pub fn init(arena: std.mem.Allocator, sources: Sources) Builder {
-        return .{ .arena = arena, .sources = sources };
+        return .{ .arena = arena, .sources = sources, .type_interner = .{ .arena = arena } };
     }
 
     /// Run phase 1 from an entry specifier. On failure `diag` holds the
@@ -382,11 +430,26 @@ pub const Builder = struct {
             .by_specifier = .{},
             .entry = entry_raw.info,
             .diag = self.diag,
+            .type_interner = self.type_interner,
         };
         for (order.items, 0..) |raw, i| {
             try graph.by_specifier.put(self.arena, raw.info.specifier, raw.info);
             raw.info.order = @intCast(i);
         }
+        // Pre-populate the nominal-type interner (ir.md §11): every
+        // struct/union decl, in graph (module, declaration) order, so a
+        // `TypeId` assigned during type resolution later always has a
+        // `TypeDecl` in `IrProgram.types`. Aliases expand and leave no
+        // entry; generic templates are numbered like any other decl so a
+        // raw template reference stays addressable.
+        for (infos) |info| {
+            for (info.types) |*tm| {
+                if (tm.decl == .alias) continue;
+                const qname = try std.fmt.allocPrint(self.arena, "{s}.{s}", .{ info.specifier, tm.name.text });
+                _ = self.type_interner.intern(qname);
+            }
+        }
+        graph.type_interner = self.type_interner;
         return graph;
     }
 
@@ -470,6 +533,8 @@ pub const Builder = struct {
 pub const Resolve = type_resolve.Resolve;
 pub const resolveOf = type_resolve.resolveOf;
 pub const resolveTypeName = type_resolve.resolveTypeName;
+pub const resolveTypeId = type_resolve.resolveTypeId;
+pub const resolveQualifiedTypeName = type_resolve.resolveQualifiedTypeName;
 pub const structDecl = type_shape.structDecl;
 pub const unionDecl = type_shape.unionDecl;
 pub const fieldIndex = type_shape.fieldIndex;

@@ -167,19 +167,19 @@ pub fn emitSyscall(self: *Lowerer, fs: *FuncState, span: ast.Span, target: cfg.S
 
 /// Apply a parameter mode at a call site (Core §10.6, ir.md §8.1), after
 /// materializing the `T → any` coercion when the parameter is typed
-/// `any` and the argument is not (Core §11.6, ir.md §4.4): a duplicable
+/// `any` and the argument is not (Core §11.6, ir.md §4.4): a Copy
 /// source is `any_pack_copy`'d into the `any` (the source stays owned);
-/// an affine source is `any_pack_move`'d, consuming it. The packed `any`
+/// an unique source is `any_pack_move`'d, consuming it. The packed `any`
 /// is itself unique — a plain or `move` parameter takes ownership of it,
 /// a `borrow` parameter borrows the temporary. Then:
 /// plain/borrow pass the value (the callee's `arg` arrives borrowed for
-/// borrow params); move transfers ownership — an existing affine owner
-/// arrives as `move %a`, a fresh affine value directly, and a duplicable
+/// borrow params); move transfers ownership — an existing unique owner
+/// arrives as `move %a`, a fresh unique value directly, and a Copy
 /// value as a `copy`.
 pub fn lowerCallArg(self: *Lowerer, fs: *FuncState, v: *cfg.Value, mode: ast.ParamMode, expected: cfg.Type) LowerError!*cfg.Value {
     if (isAny(expected) and !cfg.Type.eql(v.type_, expected)) {
         const span = v.span;
-        if (v.ownership == .affine) {
+        if (v.ownership == .unique) {
             if (v.state == .borrowed) {
                 return self.fail(span, "cannot move a borrowed value into an 'any'", .{});
             }
@@ -196,7 +196,7 @@ pub fn lowerCallArg(self: *Lowerer, fs: *FuncState, v: *cfg.Value, mode: ast.Par
     return switch (mode) {
         .plain, .borrow => v,
         .move => blk: {
-            if (v.ownership == .affine) {
+            if (v.ownership == .unique) {
                 if (v.state == .borrowed) {
                     return self.fail(v.span, "cannot move a borrowed value", .{});
                 }
@@ -206,11 +206,11 @@ pub fn lowerCallArg(self: *Lowerer, fs: *FuncState, v: *cfg.Value, mode: ast.Par
                     try cfg_lower_emit.cleanupDisable(self, fs, v.span, v);
                     break :blk m;
                 }
-                // A fresh affine value transfers directly (Core §10.5).
+                // A fresh unique value transfers directly (Core §10.5).
                 cfg_lower_emit.markConsumed(self, fs, v);
                 break :blk v;
             }
-            // A duplicable `move` is semantically a copy (ir.md §5.4).
+            // A Copy `move` is semantically a copy (ir.md §5.4).
             break :blk (try cfg_lower_emit.emit(self, fs, v.span, .{ .copy = v }, v.type_)).?;
         },
     };

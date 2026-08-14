@@ -18,6 +18,7 @@ const cfg = @import("../cfg.zig");
 // IR structures (cfg.zig), brought into scope under the bare names the
 // parser uses.
 const Type = cfg.Type;
+const TypeId = cfg.TypeId;
 const Param = cfg.Param;
 const ValueState = cfg.ValueState;
 const ConstValue = cfg.ConstValue;
@@ -38,6 +39,7 @@ const SysCallTarget = cfg.SysCallTarget;
 const SysCall = cfg.SysCall;
 const Phi = cfg.Phi;
 const PhiIn = cfg.PhiIn;
+const BorrowOrigin = cfg.BorrowOrigin;
 const Terminator = cfg.Terminator;
 const Switch = cfg.Switch;
 const SwitchArm = cfg.SwitchArm;
@@ -64,7 +66,6 @@ const ParseError = error{ Syntax, OutOfMemory };
 
 const OpName = enum {
     const_,
-    arg,
     module_ref,
     fn_ref,
     neg,
@@ -156,31 +157,47 @@ pub const Parser = struct {
     f_ret: Type = .{ .primitive = .void },
     f_params: []Param = &.{},
     f_values: std.ArrayList(*Value) = .empty,
-    f_symbols: std.StringHashMap(*Value),
+    f_symbols: std.StringHashMap(*Value) = undefined,
     f_blocks: std.ArrayList(*BasicBlock) = .empty,
     f_block_instrs: std.ArrayList(std.ArrayList(*Instr)) = .empty,
-    f_block_names: std.StringHashMap(u32),
+    f_block_names: std.StringHashMap(u32) = undefined,
     f_cur: ?*BasicBlock = null,
     /// Closing brace token of the current function, for error spans.
     f_brace: Token = undefined,
     next_func_id: u32 = 0,
 
+    // Program-level type environment (ir.md §11): the text form names
+    // structs/unions by string, so the parser interns each first-seen
+    // name into a stable `TypeId` and records the written name so
+    // printing round-trips it (ir.md §11; the text form carries no
+    // struct/union decls).
+    type_ids: std.StringHashMap(u32) = undefined,
+    types: std.ArrayList([]const u8) = .empty,
+    type_ids_ready: bool = false,
+
     pub fn init(allocator: std.mem.Allocator) Parser {
         return .{
             .arena = std.heap.ArenaAllocator.init(allocator),
             .lex = cfg_lex.Lexer.init(allocator),
-            .f_symbols = std.StringHashMap(*Value).init(allocator),
-            .f_block_names = std.StringHashMap(u32).init(allocator),
         };
     }
 
     pub fn deinit(self: *Parser) void {
+        // All working memory (bulk + every managed container) is
+        // arena-owned; one `arena.deinit` frees it all.
         self.arena.deinit();
         self.lex.deinit();
     }
 
     /// Parse one IR text program.
     pub fn parse(self: *Parser, text: []const u8) ParseError!IrProgram {
+        // The managed containers live on the parser arena, address-stable
+        // only once the parser is placed; initialize them here on first
+        // parse so a single `arena.deinit` frees everything.
+        if (!self.type_ids_ready) {
+            self.type_ids = std.StringHashMap(u32).init(self.arena.allocator());
+            self.type_ids_ready = true;
+        }
         self.text = text;
         self.tokens = self.lex.tokenize(text) catch |err| {
             // A lexical error surfaces through the parser's diag, as
@@ -295,6 +312,9 @@ pub const Parser = struct {
         program.* = .{
             .modules = try self.arena.allocator().dupe(*IrModule, modules.items),
             .funcs = try self.arena.allocator().dupe(*IrFunc, funcs.items),
+            // The text form carries no type declarations; typed names are
+            // interned into the name table as they are parsed (ir.md §11).
+            .types = try self.arena.allocator().dupe([]const u8, self.types.items),
             .entry = null,
         };
         try program.resolveDirectCalls(self.arena.allocator());
@@ -382,6 +402,7 @@ pub const Parser = struct {
 
         for (self.f_params, 0..) |p, idx| {
             const v = try self.newValue(p.span, p.type_, if (p.mode == .borrow) .borrowed else .owned);
+            if (p.mode == .borrow) v.origin = .call;
             try self.f_symbols.put(p.name.text, v);
             _ = idx;
         }
@@ -447,6 +468,7 @@ pub const Parser = struct {
                     .type_ = undefined,
                     .ownership = null,
                     .state = .owned,
+                    .origin = null,
                     .def = null,
                 };
                 try self.f_values.append(self.arena.allocator(), v);
@@ -595,7 +617,8 @@ pub const Parser = struct {
             v.span = name_tok.span;
             v.type_ = type_;
             v.ownership = type_.ownership();
-            v.state = createdState(op, self.f_params, type_);
+            v.state = createdState(op, type_);
+            if (v.state == .borrowed) v.origin = cfg.originOf(op);
             results[i] = v;
         }
         _ = try self.emit(name_toks.items[0].span, op, results);
@@ -710,15 +733,15 @@ pub const Parser = struct {
 
     /// The created state of a defined value (ir.md §6.1): from the op
     /// schema for static cases, or derived from the result for the
-    /// `.operand` ops (borrow-mode `arg`, projections — a duplicable
-    /// member read is a copy, an affine member read a borrowed view).
-    fn createdState(op: Op, params: []const Param, result_type: Type) ValueState {
+    /// `.operand` ops (projections — a Copy member read is a copy,
+    /// an unique member read a borrowed view). Parameters are SSA roots
+    /// (ir.md §5.1), so their state is not computed here.
+    fn createdState(op: Op, result_type: Type) ValueState {
         return switch (cfg.opInfo(std.meta.activeTag(op)).created) {
             .owned => .owned,
             .borrowed => .borrowed,
             .none => .owned, // effects produce no value; unreachable here
             .operand => switch (op) {
-                .arg => |i| if (params[i].mode == .borrow) .borrowed else .owned,
                 .read_field, .read_tuple, .read_index, .read_payload => readState(result_type),
                 .tail => |v| readState(v.type_),
                 else => unreachable,
@@ -728,19 +751,12 @@ pub const Parser = struct {
 
     fn readState(t: Type) ValueState {
         const ow = t.ownership();
-        return if (ow == null or ow.? == .affine) .borrowed else .owned;
+        return if (ow == null or ow.? == .unique) .borrowed else .owned;
     }
 
     fn parseOpOperands(self: *Parser, name: OpName) ParseError!Op {
         switch (name) {
             .const_ => return .{ .const_ = try self.parseConst() },
-            .arg => {
-                const i = try self.parseTagNumber();
-                if (i >= self.f_params.len) {
-                    return self.fail(self.cur(), "arg index #{d} out of range ({d} parameters)", .{ i, self.f_params.len });
-                }
-                return .{ .arg = i };
-            },
             .module_ref => return .{ .module_ref = try self.expectString("module specifier") },
             .fn_ref => {
                 const t = self.cur();
@@ -795,7 +811,7 @@ pub const Parser = struct {
                 const m = try self.parseOperand();
                 try self.expectComma();
                 const slot = try self.parseTagNumber();
-                return .{ .load_member = .{ .module = m, .slot = slot } };
+                return .{ .load_member = .{ .module = m, .member = slot } };
             },
             .store_member => return self.fail(self.cur(), "'store_member' produces no value; write it as a bare statement", .{}),
             .construct => {
@@ -954,7 +970,9 @@ pub const Parser = struct {
             return self.fail(t, "expected {s} (a string), found '{s}'", .{ what, describe(t) });
         }
         _ = self.advance();
-        return t.text;
+        // String tokens are lex-arena-owned (freed with the lexer); dupe
+        // into the parser arena so the program outlives the token stream.
+        return self.arena.allocator().dupe(u8, t.text) catch unreachable;
     }
 
     /// `#N` — a statically known index or union tag.
@@ -1040,6 +1058,7 @@ pub const Parser = struct {
             .type_ = type_,
             .ownership = type_.ownership(),
             .state = state,
+            .origin = null,
             .def = null,
         };
         try self.f_values.append(self.arena.allocator(), v);
@@ -1078,7 +1097,8 @@ pub const Parser = struct {
     fn synthConstString(self: *Parser, t: Token) ParseError!*Value {
         const v = try self.newValue(t.span, .{ .primitive = .str }, .owned);
         var one = [_]*Value{v};
-        const instr = try self.emit(t.span, .{ .const_ = .{ .string = t.text } }, &one);
+        const s = self.arena.allocator().dupe(u8, t.text) catch unreachable;
+        const instr = try self.emit(t.span, .{ .const_ = .{ .string = s } }, &one);
         instr.synth = true;
         return v;
     }
@@ -1105,7 +1125,10 @@ pub const Parser = struct {
             },
             .string => {
                 _ = self.advance();
-                return .{ .string = t.text };
+                // Dupe into the parser arena: the token buffer is transient
+                // (freed after parse), but the program keeps its literals.
+                const s = try self.arena.allocator().dupe(u8, t.text);
+                return .{ .string = s };
             },
             .ident => {
                 if (std.mem.eql(u8, t.text, "true")) {
@@ -1134,6 +1157,18 @@ pub const Parser = struct {
         const p = try self.arena.allocator().create(Type);
         p.* = t;
         return p;
+    }
+
+    /// Intern a named struct/union from IR text: returns its stable `TypeId`,
+    /// recording the written name on first sight (ir.md §11; the text form
+    /// carries no fields/ownership, so the entry is name-only and prints
+    /// back identically).
+    fn internTypeName(self: *Parser, text: []const u8) TypeId {
+        if (self.type_ids.get(text)) |id| return id;
+        const id: TypeId = @intCast(self.types.items.len);
+        self.type_ids.put(text, id) catch return 0;
+        self.types.append(self.arena.allocator(), text) catch return 0;
+        return id;
     }
 
     fn parseType(self: *Parser) ParseError!Type {
@@ -1202,8 +1237,10 @@ pub const Parser = struct {
             } };
         }
         // Any other identifier (possibly dotted) is a named struct/union
-        // reference; ownership defers to its declaration.
-        return .{ .named = text };
+        // reference; ownership defers to its declaration. The text form
+        // carries no decls, so intern the name and record it so
+        // `types[id]` round-trips (ir.md §11).
+        return .{ .named = self.internTypeName(text) };
     }
 };
 // ---------------------------------------------------------------------------
@@ -1214,11 +1251,17 @@ pub const Parser = struct {
 /// round-trip white-box tests (`src/passes/cfg_print.zig`) parse what
 /// they print.
 pub fn parseText(text: []const u8) !struct { arena: std.heap.ArenaAllocator, program: IrProgram } {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    errdefer arena.deinit();
-    var p = Parser.init(arena.allocator());
+    // One arena owns the parser memory (including the interned types and
+    // type_ids); the caller frees it via arena.deinit. The Parser is not
+    // deinit-ed here so its arena is handed back to the caller, exactly
+    // as the program it produced.
+    var p = Parser.init(std.testing.allocator);
+    errdefer p.deinit();
     const program = try p.parse(text);
-    return .{ .arena = arena, .program = program };
+    // Release the transient token buffer; literals were duped into the
+    // parser arena, and identifiers point back into the source `text`.
+    p.lex.deinit();
+    return .{ .arena = p.arena, .program = program };
 }
 
 test "cfg parses a straight-line function" {
@@ -1515,9 +1558,8 @@ test "cfg parses type_is tests and hostdata primitives" {
     try std.testing.expect(c == f.values[0]);
 }
 test "cfg reports undefined values" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    var p = Parser.init(arena.allocator());
+    var p = Parser.init(std.testing.allocator);
+    defer p.deinit();
     const res = p.parse(
         \\module "test" {
         \\func @f() -> void {
@@ -1532,9 +1574,8 @@ test "cfg reports undefined values" {
     try std.testing.expect(std.mem.indexOf(u8, p.diag.?.message, "undefined value") != null);
 }
 test "cfg rejects a block without a terminator" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    var p = Parser.init(arena.allocator());
+    var p = Parser.init(std.testing.allocator);
+    defer p.deinit();
     const res = p.parse(
         \\module "test" {
         \\func @f() -> void {
@@ -1547,9 +1588,8 @@ test "cfg rejects a block without a terminator" {
     try std.testing.expect(std.mem.indexOf(u8, p.diag.?.message, "missing a terminator") != null);
 }
 test "cfg rejects a phi whose incoming order mismatches predecessors" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    var p = Parser.init(arena.allocator());
+    var p = Parser.init(std.testing.allocator);
+    defer p.deinit();
     const res = p.parse(
         \\module "test" {
         \\func @f() -> int32 {
@@ -1572,9 +1612,8 @@ test "cfg rejects a phi whose incoming order mismatches predecessors" {
     try std.testing.expect(std.mem.indexOf(u8, p.diag.?.message, "does not match predecessors") != null);
 }
 test "cfg rejects store_member outside @init" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    var p = Parser.init(arena.allocator());
+    var p = Parser.init(std.testing.allocator);
+    defer p.deinit();
     const res = p.parse(
         \\module "test" {
         \\func @f() -> void {
@@ -1663,9 +1702,8 @@ test "cfg parses an undefined-value report" {
     try std.testing.expectEqual(@as(usize, 2), t.program.funcs.len);
 }
 test "cfg rejects an unknown opcode" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    var p = Parser.init(arena.allocator());
+    var p = Parser.init(std.testing.allocator);
+    defer p.deinit();
     const text =
         \\module "m" {
         \\    func @m.f() -> void {
@@ -1680,9 +1718,8 @@ test "cfg rejects an unknown opcode" {
 }
 test "cfg rejects an undefined operand" {
     // Values must be defined before use; %9 is never defined.
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    var p = Parser.init(arena.allocator());
+    var p = Parser.init(std.testing.allocator);
+    defer p.deinit();
     const text =
         \\module "m" {
         \\    func @m.f() -> void {
@@ -1696,9 +1733,8 @@ test "cfg rejects an undefined operand" {
     try std.testing.expectError(error.Syntax, result);
 }
 test "cfg rejects a missing func terminator" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    var p = Parser.init(arena.allocator());
+    var p = Parser.init(std.testing.allocator);
+    defer p.deinit();
     const text =
         \\module "m" {
         \\    func @m.f() -> void {

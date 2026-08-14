@@ -20,10 +20,10 @@
 //! - **Typing** — the statically checkable operand/result type rules:
 //!   numeric ops over same-typed numerics, `concat` over `str`, casts
 //!   over the Core §16.3 pair, `any`-ops over `any`, projections over
-//!   their shapes, `copy` never over an affine operand, `drop` never
-//!   over a duplicable value, cleanup ops over cleanup tokens.
+//!   their shapes, `copy` never over an unique operand, `drop` never
+//!   over a Copy value, cleanup ops over cleanup tokens.
 //! - **Ownership dataflow** — an edge-sensitive forward analysis over
-//!   affine values (`Available` / `Consumed` / `MaybeConsumed`, merged
+//!   unique values (`Available` / `Consumed` / `MaybeConsumed`, merged
 //!   at joins): a consuming op (move, take, drop, move-mode argument,
 //!   phi input, `ret`, `any_pack_move`, `any_unpack_move`) requires its
 //!   operand *available*; a value in `MaybeConsumed` state has no uses
@@ -39,7 +39,7 @@ const ast = @import("../ast.zig");
 
 /// The per-value availability state along a path (ir.md §13 Ownership):
 /// alive (owned), consumed (dead on this path), or consumed on some
-/// paths and alive on others after a join (maybe-affine, Core §10.10).
+/// paths and alive on others after a join (maybe-unique, Core §10.10).
 const AState = enum { available, consumed, maybe };
 
 const StateMap = std.AutoHashMap(*const cfg.Value, AState);
@@ -181,10 +181,10 @@ fn validateFunc(f: *const cfg.IrFunc, allocator: std.mem.Allocator) !?[]const u8
     // authoritative — not the merged join state).
     const exits = try allocator.alloc(StateMap, n);
     for (exits) |*e| e.* = StateMap.init(allocator);
-    // Seed: entry-block parameter values (affine, non-borrow mode).
+    // Seed: entry-block parameter values (unique, non-borrow mode).
     for (f.params, 0..) |p, i| {
         const v = f.values[i];
-        if (v.state == .owned and v.ownership != .duplicable and p.mode != .borrow) {
+        if (v.state == .owned and v.ownership != .copy and p.mode != .borrow) {
             try entries[0].put(v, .available);
         }
     }
@@ -219,7 +219,7 @@ fn validateFunc(f: *const cfg.IrFunc, allocator: std.mem.Allocator) !?[]const u8
                 return msg(allocator, "function @{s}: terminator of block '{s}' targets a block outside the function", .{ f.name.text, b.name });
             };
             // Every first-seen successor is enqueued once, so a block
-            // with no affine state still propagates reachability; the
+            // with no unique state still propagates reachability; the
             // fixpoint re-enqueues only on state change.
             const first = !reachable[si];
             reachable[si] = true;
@@ -254,9 +254,9 @@ fn validateFunc(f: *const cfg.IrFunc, allocator: std.mem.Allocator) !?[]const u8
                 if (reachable[ep]) {
                     if (try checkUse(f, inc.pred, instr, inc.value, dom, allocator)) |m| return m;
                 }
-                if (inc.value.ownership != .duplicable) try st.put(inc.value, .consumed);
+                if (inc.value.ownership != .copy) try st.put(inc.value, .consumed);
             }
-            if (instr.results[0].ownership != .duplicable) try st.put(instr.results[0], .available);
+            if (instr.results[0].ownership != .copy) try st.put(instr.results[0], .available);
         }
         for (b.instrs) |instr| {
             if (instr.op == .phi) continue;
@@ -288,7 +288,7 @@ fn msg(allocator: std.mem.Allocator, comptime fmt: []const u8, args: anytype) !?
     return @as(?[]const u8, try std.fmt.allocPrint(allocator, fmt, args));
 }
 
-/// The state map after walking `b` from its entry state: affine results
+/// The state map after walking `b` from its entry state: unique results
 /// become available, consumed operands become consumed. The transfer is
 /// deterministic, so the exit map is a fresh copy of the entry map plus
 /// the instruction effects.
@@ -299,7 +299,7 @@ fn exitState(b: *const cfg.BasicBlock, entry: StateMap, allocator: std.mem.Alloc
     for (b.instrs) |instr| {
         try transfer(instr, &st);
         for (instr.results) |r| {
-            if (r.ownership != .duplicable) try st.put(r, .available);
+            if (r.ownership != .copy) try st.put(r, .available);
         }
     }
     return st;
@@ -328,7 +328,7 @@ fn transfer(instr: *const cfg.Instr, st: *StateMap) !void {
 
 fn consume(st: *StateMap, v: ?*const cfg.Value) !void {
     if (v) |val| {
-        if (val.ownership != .duplicable) try st.put(val, .consumed);
+        if (val.ownership != .copy) try st.put(val, .consumed);
     }
 }
 
@@ -376,7 +376,7 @@ fn mergeState(out: *StateMap, in: StateMap, allocator: std.mem.Allocator) !bool 
 
 /// Check that a value is available on a specific arriving edge (the
 /// pred block's exit state) — used for phi inputs. Borrowed and
-/// duplicable values are untracked.
+/// Copy values are untracked.
 fn checkEdgeAvailable(
     f: *const cfg.IrFunc,
     b: *const cfg.BasicBlock,
@@ -387,12 +387,12 @@ fn checkEdgeAvailable(
     allocator: std.mem.Allocator,
 ) !?[]const u8 {
     _ = instr;
-    if (v.state == .borrowed or v.ownership == .duplicable) return null;
+    if (v.state == .borrowed or v.ownership == .copy) return null;
     if (edge.get(v)) |s| {
         switch (s) {
             .available => {},
             .consumed => return msg(allocator, "function @{s}: {s} %{d} is consumed on its arriving edge into block '{s}'", .{ f.name.text, what, v.id, b.name }),
-            .maybe => return msg(allocator, "function @{s}: {s} %{d} is maybe-affine on its arriving edge into block '{s}'", .{ f.name.text, what, v.id, b.name }),
+            .maybe => return msg(allocator, "function @{s}: {s} %{d} is maybe-unique on its arriving edge into block '{s}'", .{ f.name.text, what, v.id, b.name }),
         }
     }
     return null;
@@ -411,20 +411,20 @@ fn checkConsumedOperand(
     const val = v orelse return null;
     // Borrowed views can never be consumed (the per-op checks below
     // report the specific violation); skip the availability lattice for
-    // them and for duplicable values.
-    if (val.state == .borrowed or val.ownership == .duplicable) return null;
+    // them and for Copy values.
+    if (val.state == .borrowed or val.ownership == .copy) return null;
     if (st.get(val)) |s| {
         switch (s) {
             .available => {},
             .consumed => return msg(allocator, "function @{s}: '{s}' consumes already-consumed value %{d} in block '{s}'", .{ f.name.text, cfg.opInfo(std.meta.activeTag(instr.op)).text, val.id, b.name }),
-            .maybe => return msg(allocator, "function @{s}: '{s}' consumes maybe-affine value %{d} in block '{s}' (unusable after a conditional construct, ir.md §6.4)", .{ f.name.text, cfg.opInfo(std.meta.activeTag(instr.op)).text, val.id, b.name }),
+            .maybe => return msg(allocator, "function @{s}: '{s}' consumes maybe-unique value %{d} in block '{s}' (unusable after a conditional construct, ir.md §6.4)", .{ f.name.text, cfg.opInfo(std.meta.activeTag(instr.op)).text, val.id, b.name }),
         }
     }
     return null;
 }
 
 /// Check that a value is available at a use site (not consumed on this
-/// path, not maybe). Borrowed and duplicable values are untracked.
+/// path, not maybe). Borrowed and Copy values are untracked.
 fn checkAvailable(
     f: *const cfg.IrFunc,
     b: *const cfg.BasicBlock,
@@ -435,12 +435,12 @@ fn checkAvailable(
     allocator: std.mem.Allocator,
 ) !?[]const u8 {
     _ = instr;
-    if (v.state == .borrowed or v.ownership == .duplicable) return null;
+    if (v.state == .borrowed or v.ownership == .copy) return null;
     if (st.get(v)) |s| {
         switch (s) {
             .available => {},
             .consumed => return msg(allocator, "function @{s}: {s} uses already-consumed value %{d} in block '{s}'", .{ f.name.text, what, v.id, b.name }),
-            .maybe => return msg(allocator, "function @{s}: {s} uses maybe-affine value %{d} in block '{s}' (unusable after a conditional construct, ir.md §6.4)", .{ f.name.text, what, v.id, b.name }),
+            .maybe => return msg(allocator, "function @{s}: {s} uses maybe-unique value %{d} in block '{s}' (unusable after a conditional construct, ir.md §6.4)", .{ f.name.text, what, v.id, b.name }),
         }
     }
     return null;
@@ -508,15 +508,15 @@ fn checkInstr(
     const ops = try collectOperands(instr, allocator);
     for (ops) |v| {
         if (try checkUse(f, b, instr, v, dom, allocator)) |m| return m;
+        // Borrow provenance (ir.md §6.5): a borrowed view's root must be
+        // Available on this path.
+        if (v.state == .borrowed) {
+            if (try checkBorrowRoot(f, b, v, st.*, allocator)) |m| return m;
+        }
     }
 
     // ---- Typing + static ownership rules (per op) ----
     switch (instr.op) {
-        .arg => |i| {
-            if (i >= f.params.len) {
-                return msg(allocator, "function @{s}: arg #{d} out of range ({d} parameters)", .{ f.name.text, i, f.params.len });
-            }
-        },
         .const_, .module_ref, .fn_ref => {},
         .neg => |v| {
             if (!isNumeric(v.type_)) return typeErr(allocator, f, b, info.text, v.type_);
@@ -550,7 +550,7 @@ fn checkInstr(
             if (!cfg.Type.eql(x.a.type_, x.b.type_) or !isBool(instr.results[0].type_)) return typeErr(allocator, f, b, info.text, x.a.type_);
         },
         .copy => |v| {
-            if (v.ownership == .affine) return typeErr(allocator, f, b, "copy", v.type_);
+            if (v.ownership == .unique) return typeErr(allocator, f, b, "copy", v.type_);
         },
         .borrow => |v| {
             if (!cfg.Type.eql(v.type_, instr.results[0].type_)) return typeErr(allocator, f, b, "borrow", v.type_);
@@ -561,8 +561,8 @@ fn checkInstr(
             }
         },
         .drop_ => |v| {
-            if (v.ownership == .duplicable) {
-                return msg(allocator, "function @{s}: drop of duplicable value %{d} in block '{s}' (the frontend never emits it)", .{ f.name.text, v.id, b.name });
+            if (v.ownership == .copy) {
+                return msg(allocator, "function @{s}: drop of Copy value %{d} in block '{s}' (the frontend never emits it)", .{ f.name.text, v.id, b.name });
             }
             if (v.state == .borrowed) {
                 return msg(allocator, "function @{s}: drop of borrowed value %{d} in block '{s}' (Core §10.7)", .{ f.name.text, v.id, b.name });
@@ -625,9 +625,9 @@ fn checkInstr(
                 const mode: ast.ParamMode = if (i < params.len) params[i].mode else .plain;
                 if (mode == .move) {
                     if (try checkAvailable(f, b, instr, a, st.*, "move-mode argument", allocator)) |m| return m;
-                    if (a.ownership != .duplicable) try st.put(a, .consumed);
+                    if (a.ownership != .copy) try st.put(a, .consumed);
                 } else {
-                    if (a.ownership != .duplicable and a.state != .borrowed) {
+                    if (a.ownership != .copy and a.state != .borrowed) {
                         if (st.get(a)) |s| {
                             if (s != .available) {
                                 return msg(allocator, "function @{s}: argument %{d} is {s} in block '{s}'", .{ f.name.text, a.id, @tagName(s), b.name });
@@ -651,12 +651,12 @@ fn checkInstr(
     // ---- Dataflow transfer for this instruction ----
     try transfer(instr, st);
     for (instr.results) |r| {
-        if (r.ownership != .duplicable) try st.put(r, .available);
+        if (r.ownership != .copy) try st.put(r, .available);
     }
     return null;
 }
 
-/// The terminator checks: `ret` consumes its affine value (never a
+/// The terminator checks: `ret` consumes its unique value (never a
 /// borrowed view; type-matched to the return type, modulo `never`), and
 /// every terminator operand is dominated by its definition.
 fn checkTerminator(f: *const cfg.IrFunc, b: *const cfg.BasicBlock, dom: [][]bool, st: *StateMap, allocator: std.mem.Allocator) !?[]const u8 {
@@ -673,7 +673,7 @@ fn checkTerminator(f: *const cfg.IrFunc, b: *const cfg.BasicBlock, dom: [][]bool
                     return msg(allocator, "function @{s}: ret value %{d} of type {any} does not match return type {any}", .{ f.name.text, val.id, val.type_, f.ret });
                 }
             }
-            if (val.ownership != .duplicable) {
+            if (val.ownership != .copy) {
                 if (st.get(val)) |s| {
                     if (s != .available) {
                         return msg(allocator, "function @{s}: ret of non-available value %{d} in block '{s}'", .{ f.name.text, val.id, b.name });
@@ -684,9 +684,15 @@ fn checkTerminator(f: *const cfg.IrFunc, b: *const cfg.BasicBlock, dom: [][]bool
         .branch, .trap => {},
         .branch_cond => |bc| {
             if (try checkUse(f, b, null, bc.cond, dom, allocator)) |m| return m;
+            if (bc.cond.state == .borrowed) {
+                if (try checkBorrowRoot(f, b, bc.cond, st.*, allocator)) |m| return m;
+            }
         },
         .@"switch" => |sw| {
             if (try checkUse(f, b, null, sw.disc, dom, allocator)) |m| return m;
+            if (sw.disc.state == .borrowed) {
+                if (try checkBorrowRoot(f, b, sw.disc, st.*, allocator)) |m| return m;
+            }
         },
     }
     return null;
@@ -695,7 +701,7 @@ fn checkTerminator(f: *const cfg.IrFunc, b: *const cfg.BasicBlock, dom: [][]bool
 /// The value-operand count of an op (the 3-address arity, ir.md §4.2).
 fn valueOperandCount(op: cfg.Op) usize {
     return switch (op) {
-        .const_, .arg, .module_ref, .fn_ref => 0,
+        .const_, .module_ref, .fn_ref => 0,
         .neg, .not_, .num_cast, .any_pack_copy, .any_pack_move, .any_unpack_copy, .any_unpack_move, .cleanup_owner, .cleanup_disable, .drop_cleanup, .copy, .borrow, .move_, .tail, .unpack_struct, .unpack_tuple, .unpack_variant, .split_list, .read_tag, .read_payload, .drop_ => 1,
         .type_is => 1,
         .load_member => 1,
@@ -736,7 +742,7 @@ fn collectOperands(instr: *const cfg.Instr, allocator: std.mem.Allocator) ![]*co
         },
         .syscall => |s| for (s.args) |a| try out.append(allocator, a),
         .phi => {},
-        .const_, .arg, .module_ref, .fn_ref => {},
+        .const_, .module_ref, .fn_ref => {},
     }
     return out.toOwnedSlice(allocator);
 }
@@ -751,6 +757,61 @@ fn calleeParams(c: cfg.Call) []const cfg.Param {
             else => &.{},
         },
     };
+}
+
+/// The ultimate borrow root (ir.md §6.5): follow a borrowed value's
+/// origin chain to the root whose availability gates its uses — an owned
+/// value, the `call` lifetime, or a `peek` owner. A Copy root makes
+/// the availability check vacuous (Copy values are never consumed).
+const UltimateRoot = union(enum) {
+    value: *const cfg.Value,
+    call,
+    peek,
+};
+
+fn ultimateRoot(v: *const cfg.Value) UltimateRoot {
+    if (v.ownership == .copy) return .{ .value = v }; // vacuous root
+    const origin = v.origin orelse return .{ .value = v }; // owned / no origin
+    switch (origin) {
+        .call => return .call,
+        .peek => return .peek,
+        .root => |base| {
+            // Resolve transitively through the view chain: a base that is
+            // itself borrowed resolves to its own root; an owned base stops.
+            if (base.state == .owned) return .{ .value = base };
+            return ultimateRoot(base);
+        },
+    }
+}
+
+/// ir.md §6.5: every use of a borrowed value requires its ultimate root
+/// to be Available at the use point. A `call` root needs no check inside
+/// the callee (the caller's argument is valid for the whole call, Core
+/// §10.7); a `peek` root is bound to the producing syscall's argument;
+/// a Copy root makes the check vacuous. An owned unique root must not be
+/// consumed on the reaching path.
+fn checkBorrowRoot(
+    f: *const cfg.IrFunc,
+    b: *const cfg.BasicBlock,
+    v: *const cfg.Value,
+    st: StateMap,
+    allocator: std.mem.Allocator,
+) !?[]const u8 {
+    switch (ultimateRoot(v)) {
+        .call => return null,
+        .peek => return null,
+        .value => |rv| {
+            if (rv.ownership == .copy) return null;
+            if (st.get(rv)) |s| {
+                switch (s) {
+                    .available => {},
+                    .consumed => return msg(allocator, "function @{s}: use of borrowed value %{d} after its root %{d} was consumed in block '{s}' (ir.md §6.5)", .{ f.name.text, v.id, rv.id, b.name }),
+                    .maybe => return msg(allocator, "function @{s}: use of borrowed value %{d} whose root %{d} is maybe-unique in block '{s}' (ir.md §6.5)", .{ f.name.text, v.id, rv.id, b.name }),
+                }
+            }
+            return null;
+        },
+    }
 }
 
 /// The dominance check for one use: the definition's block must dominate

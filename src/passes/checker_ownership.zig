@@ -3,14 +3,14 @@
 //! conditional construct (if/else, match, short-circuit `and`/`or`, or a
 //! `for` loop) and the construct's evaluated branches. Out: the
 //! `BindingState.released` and `BindingState.maybe` transitions that mark
-//! enclosing affine bindings after the construct.
+//! enclosing unique bindings after the construct.
 //!
 //! Core §10.10: when a branch of a conditional construct releases an
-//! affine binding (`move`, `drop`, or consuming destructure), every normal
+//! unique binding (`move`, `drop`, or consuming destructure), every normal
 //! path through the construct must release it by the construct's end,
 //! unless it was already released before the construct was entered. After
-//! the construct each enclosing affine binding is therefore definitely
-//! owned, definitely released, or *maybe-affine* (released on some but not
+//! the construct each enclosing unique binding is therefore definitely
+//! owned, definitely released, or *maybe-unique* (released on some but not
 //! all normal paths). A definitely-released binding is unusable
 //! (use-after-move, Core §18) and is not auto-destroyed at scope end; a
 //! maybe binding is also unusable, but the implementation tracks at
@@ -38,7 +38,7 @@ pub const Path = struct {
     normal: bool,
 };
 
-/// Collect the affine locals visible at a conditional-construct entry:
+/// Collect the unique locals visible at a conditional-construct entry:
 /// every binding in the scope chain whose type is owned. Bindings created
 /// inside the construct (branch locals, arm patterns, loop variables) are
 /// not enclosing bindings and are not tracked.
@@ -49,7 +49,7 @@ pub fn begin(frame: *Frame) CheckError![]*Local {
         var it = sc.locals.valueIterator();
         while (it.next()) |lptr| {
             const local: *Local = lptr.*;
-            if (isAffine(frame, local.type_)) try tracked.append(frame.ck.alloc(), local);
+            if (isUnique(frame, local.type_)) try tracked.append(frame.ck.alloc(), local);
         }
         s = sc.parent;
     }
@@ -102,7 +102,7 @@ pub fn noopPath(frame: *Frame, tracked: []*Local) CheckError!Path {
 
 /// Merge a conditional construct's paths (Core §10.10). A tracked binding
 /// released on every normal path becomes definitely released; released on
-/// some but not all normal paths becomes *maybe-affine* (unusable
+/// some but not all normal paths becomes *maybe-unique* (unusable
 /// afterward, conditionally destroyed at runtime); otherwise it is
 /// restored to its entry state.
 pub fn merge(frame: *Frame, tracked: []*Local, entry: []BindingState, paths: []const Path, span: ast.Span) CheckError!void {
@@ -145,8 +145,8 @@ fn exprIsNever(frame: *Frame, e: *const ast.Expr) bool {
     return t == .primitive and t.primitive == .never;
 }
 
-/// Whether a value of type `t` is owned (not duplicable); affine types are
+/// Whether a value of type `t` is owned (not Copy); unique types are
 /// subject to move/drop/conditional-release tracking (Core §18).
-fn isAffine(frame: *Frame, t: cfg.Type) bool {
-    return checker.isAffine(frame, t);
+fn isUnique(frame: *Frame, t: cfg.Type) bool {
+    return checker.isUnique(frame, t);
 }

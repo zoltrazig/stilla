@@ -80,8 +80,10 @@ pub fn emitModuleRef(self: *Lowerer, fs: *FuncState, span: ast.Span, specifier: 
     return v;
 }
 
-/// `load_member %module, #slot` with module identity carried through
-/// for module-valued members.
+/// `load_member %module, #member` with module identity carried through
+/// for module-valued members. The operand is the member index (an index
+/// into the module's member table, ir.md §7), distinct from the storage
+/// slot of a constant member.
 pub fn lowerMemberLoad(
     self: *Lowerer,
     fs: *FuncState,
@@ -89,7 +91,7 @@ pub fn lowerMemberLoad(
     module_value: *cfg.Value,
     vm: *const moduleinfo.ValueMember,
 ) LowerError!?*cfg.Value {
-    const v = try cfg_lower_emit.emit(self, fs, span, .{ .load_member = .{ .module = module_value, .slot = vm.slot } }, vm.type_);
+    const v = try cfg_lower_emit.emit(self, fs, span, .{ .load_member = .{ .module = module_value, .member = vm.slot } }, vm.type_);
     if (vm.module_spec) |spec| {
         if (v) |vv| {
             if (self.graph.module(spec)) |target| try self.module_of.put(self.arena, vv, target);
@@ -114,7 +116,8 @@ pub fn memberLoad(self: *Lowerer, fs: *FuncState, span: ast.Span, base: *cfg.Val
         return lowerMemberLoad(self, fs, span, base, vm);
     }
     switch (base.type_) {
-        .named => |type_name| {
+        .named => |td| {
+            const type_name = self.resolve.typeNameOf(td) orelse return null;
             const sd = moduleinfo.structDecl(self.resolve, fs.module, type_name) orelse
                 return self.fail(span, "'{s}' is not a struct type", .{type_name});
             const idx = moduleinfo.fieldIndex(sd, name) orelse

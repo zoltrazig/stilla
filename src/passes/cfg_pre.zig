@@ -28,8 +28,8 @@
 //! defined in a *strict dominator* of the join (or be parameters): they
 //! are available at the join's head and on every predecessor, so the
 //! inserted copies and the phi are well-formed, and the value's def stays
-//! in a block that dominates every use. Only duplicable results are
-//! hoisted; reusing an affine value across several edges would change the
+//! in a block that dominates every use. Only Copy results are
+//! hoisted; reusing an unique value across several edges would change the
 //! destruction schedule (ir.md §6.4).
 //!
 //! The join's computation is deleted and a phi is inserted at the block
@@ -105,7 +105,7 @@ fn dominators(f: *cfg.IrFunc, allocator: std.mem.Allocator) ![][]bool {
     return dom;
 }
 
-/// The hoistable computations of `b`: pure, non-trapping, duplicable, with
+/// The hoistable computations of `b`: pure, non-trapping, Copy, with
 /// operands available at the block head. Snapshot: the pass rewrites
 /// `b.instrs` in place while iterating.
 fn candidatesOf(
@@ -117,7 +117,7 @@ fn candidatesOf(
     var out = std.ArrayList(*cfg.Instr).empty;
     for (b.instrs) |instr| {
         if (instr.results.len == 0) continue;
-        if (instr.results[0].ownership != .duplicable) continue;
+        if (instr.results[0].ownership != .copy) continue;
         if (!isCandidate(instr)) continue;
         if (!operandsDominate(f, b, instr, dom)) continue;
         try out.append(allocator, instr);
@@ -283,6 +283,7 @@ fn insertAtEnd(p: *cfg.BasicBlock, cand: *const cfg.Instr, allocator: std.mem.Al
         .type_ = cand.results[0].type_,
         .ownership = cand.results[0].ownership,
         .state = .owned,
+        .origin = null,
         .def = ninstr,
     };
     const old = p.instrs;

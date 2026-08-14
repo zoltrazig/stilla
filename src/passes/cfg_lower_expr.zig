@@ -1,7 +1,7 @@
 //! Pass: expression lowering — literals, constructs, unary/binary
 //! operators, casts, and moves (`expression`, Core §6, §8, §11). In:
 //! Lowerer + FuncState + ast.Expr / ast.Call, module graph. Out: the CFG
-//! value of the expression, with affine temporaries dropped at the
+//! value of the expression, with unique temporaries dropped at the
 //! full-expression boundary (ir.md §6.4).
 
 const std = @import("std");
@@ -20,7 +20,7 @@ const Lowerer = lower.Lowerer;
 const FuncState = lower.FuncState;
 const LowerError = lower.LowerError;
 
-/// Lower one expression, dropping its affine temporaries at the end
+/// Lower one expression, dropping its unique temporaries at the end
 /// (full-expression boundary, Runtime §6.4). Returns null when the
 /// expression terminated the block (never / trap).
 pub fn lowerExpr(self: *Lowerer, fs: *FuncState, e: *const ast.Expr) LowerError!?*cfg.Value {
@@ -69,7 +69,7 @@ pub fn emitConst(self: *Lowerer, fs: *FuncState, span: ast.Span, value: cfg.Cons
 /// instruction operand. The result is therefore a phantom — a value with
 /// no defining instruction and no value-table entry — and the lowerer
 /// emits no `const void` op for it. `emitDrop`/`exitScope`/`discardValue`
-/// treat it as duplicable and skip it, so nothing downstream dereferences
+/// treat it as Copy and skip it, so nothing downstream dereferences
 /// the missing definition.
 pub fn emitVoid(self: *Lowerer, fs: *FuncState, span: ast.Span) LowerError!?*cfg.Value {
     _ = fs;
@@ -81,8 +81,9 @@ pub fn emitVoid(self: *Lowerer, fs: *FuncState, span: ast.Span) LowerError!?*cfg
         .id = std.math.maxInt(u32),
         .span = span,
         .type_ = .{ .primitive = .void },
-        .ownership = .duplicable,
+        .ownership = .copy,
         .state = .owned,
+        .origin = null,
         .def = null,
     };
     return v;
@@ -110,10 +111,10 @@ pub fn lowerStructConstruct(self: *Lowerer, fs: *FuncState, p: *const ast.PathEx
     for (sd.fields, 0..) |f, i| {
         if (!seen[i]) return self.fail(p.span, "missing field '{s}' in '{s}'", .{ f.name.text, name });
     }
-    const result = try cfg_lower_emit.emit(self, fs, p.span, .{ .construct = .{ .tag = null, .args = args } }, .{ .named = name });
-    // Affine field values move into the constructed value.
+    const result = try cfg_lower_emit.emit(self, fs, p.span, .{ .construct = .{ .tag = null, .args = args } }, .{ .named = moduleinfo.resolveTypeId(self.resolve, fs.module, name) orelse return null });
+    // Unique field values move into the constructed value.
     for (args) |a| {
-        if (a.ownership == .affine and !cfg_lower_emit.isConsumed(fs, a)) {
+        if (a.ownership == .unique and !cfg_lower_emit.isConsumed(fs, a)) {
             cfg_lower_emit.markConsumed(self, fs, a);
             try cfg_lower_emit.cleanupDisable(self, fs, p.span, a);
         }
@@ -135,9 +136,9 @@ pub fn lowerVariantConstruct(self: *Lowerer, fs: *FuncState, p: *const ast.PathE
             try args.append(self.arena, v);
         }
     }
-    const result = try cfg_lower_emit.emit(self, fs, p.span, .{ .construct = .{ .tag = tag, .args = args.items } }, .{ .named = name });
+    const result = try cfg_lower_emit.emit(self, fs, p.span, .{ .construct = .{ .tag = tag, .args = args.items } }, .{ .named = moduleinfo.resolveTypeId(self.resolve, fs.module, name) orelse return null });
     for (args.items) |a| {
-        if (a.ownership == .affine and !cfg_lower_emit.isConsumed(fs, a)) {
+        if (a.ownership == .unique and !cfg_lower_emit.isConsumed(fs, a)) {
             cfg_lower_emit.markConsumed(self, fs, a);
             try cfg_lower_emit.cleanupDisable(self, fs, p.span, a);
         }
@@ -155,7 +156,7 @@ pub fn lowerTuple(self: *Lowerer, fs: *FuncState, t: *const ast.TupleExpr) Lower
     }
     const result = try cfg_lower_emit.emit(self, fs, t.span, .{ .construct = .{ .tag = null, .args = args.items } }, .{ .tuple = elems.items });
     for (args.items) |a| {
-        if (a.ownership == .affine and !cfg_lower_emit.isConsumed(fs, a)) {
+        if (a.ownership == .unique and !cfg_lower_emit.isConsumed(fs, a)) {
             cfg_lower_emit.markConsumed(self, fs, a);
             try cfg_lower_emit.cleanupDisable(self, fs, t.span, a);
         }
@@ -175,7 +176,7 @@ pub fn lowerList(self: *Lowerer, fs: *FuncState, l: *const ast.ListExpr) LowerEr
     inner.* = elem_type;
     const result = try cfg_lower_emit.emit(self, fs, l.span, .{ .construct = .{ .tag = null, .args = args.items } }, .{ .list = inner });
     for (args.items) |a| {
-        if (a.ownership == .affine and !cfg_lower_emit.isConsumed(fs, a)) {
+        if (a.ownership == .unique and !cfg_lower_emit.isConsumed(fs, a)) {
             cfg_lower_emit.markConsumed(self, fs, a);
             try cfg_lower_emit.cleanupDisable(self, fs, l.span, a);
         }
@@ -239,14 +240,14 @@ pub fn lowerMove(self: *Lowerer, fs: *FuncState, m: *const ast.MoveExpr) LowerEr
     if (v.state == .borrowed) {
         return self.fail(m.span, "cannot move borrowed binding '{s}'", .{m.name.text});
     }
-    if (v.ownership == .affine) {
+    if (v.ownership == .unique) {
         const moved = (try cfg_lower_emit.emit(self, fs, m.span, .{ .move_ = v }, v.type_)).?;
         cfg_lower_emit.markConsumed(self, fs, v);
         try cfg_lower_emit.cleanupDisable(self, fs, m.span, v);
         local.consumed = true;
         return moved;
     }
-    // Duplicable `move` lowers to a copy (ir.md §5.4).
+    // Copy `move` lowers to a copy (ir.md §5.4).
     return try cfg_lower_emit.emit(self, fs, m.span, .{ .copy = v }, v.type_);
 }
 
@@ -256,13 +257,13 @@ pub fn lowerCast(self: *Lowerer, fs: *FuncState, c: *const ast.Cast) LowerError!
     const target = try self.resolveType(fs, &c.target);
     const src = v.type_;
     if (src == .primitive and src.primitive == .any) {
-        // `any` recovery (Core §11.6.1): an affine target requires a
-        // moved source; a duplicable target copies the payload out and
+        // `any` recovery (Core §11.6.1): an unique target requires a
+        // moved source; a Copy target copies the payload out and
         // leaves the `any` owned. The source's `move` (when written) was
         // already lowered by `lowerExpr` on the operand — the unpack
         // consumes the *moved* `any`.
-        if (cfg_lower_emit.isAffine(self, fs, target) and !moving) {
-            return self.fail(c.span, "cannot recover an affine payload from an 'any' without moving it; write (move a) as T", .{});
+        if (cfg_lower_emit.isUnique(self, fs, target) and !moving) {
+            return self.fail(c.span, "cannot recover an unique payload from an 'any' without moving it; write (move a) as T", .{});
         }
         const op: cfg.Op = if (moving) .{ .any_unpack_move = v } else .{ .any_unpack_copy = v };
         const r = try cfg_lower_emit.emit(self, fs, c.span, op, target);
@@ -277,10 +278,10 @@ pub fn lowerCast(self: *Lowerer, fs: *FuncState, c: *const ast.Cast) LowerError!
     return try cfg_lower_emit.emit(self, fs, c.span, .{ .num_cast = v }, target);
 }
 
-/// A statement discards its value: affine-owned results are dropped
+/// A statement discards its value: unique-owned results are dropped
 /// here (ir.md §6.4, temporaries of a full expression).
 pub fn discardValue(self: *Lowerer, fs: *FuncState, v: *cfg.Value) LowerError!void {
-    if (v.ownership == .affine and !cfg_lower_emit.isConsumed(fs, v)) {
+    if (v.ownership == .unique and !cfg_lower_emit.isConsumed(fs, v)) {
         try cfg_lower_emit.emitDrop(self, fs, v.span, v);
     }
 }
@@ -322,7 +323,7 @@ fn lowerLambda(self: *Lowerer, fs: *FuncState, lam: *const ast.Lambda) LowerErro
     try lfs.scopes.append(self.arena, .{});
     for (lfs.params, 0..) |p, i| {
         const v = lfs.values.items[i];
-        try cfg_lower_emit.bindLocal(self, &lfs, p.name.text, v, p.mode != .borrow and cfg_lower_emit.isAffine(self, &lfs, v.type_));
+        try cfg_lower_emit.bindLocal(self, &lfs, p.name.text, v, p.mode != .borrow and cfg_lower_emit.isUnique(self, &lfs, v.type_));
     }
     const result = try cfg_lower_func.lowerBlock(self, &lfs, lam.body);
     try cfg_lower_emit.exitScope(self, &lfs, result);
