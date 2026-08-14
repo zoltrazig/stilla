@@ -34,6 +34,13 @@ pub fn isAffine(self: *lower.Lowerer, fs: *lower.FuncState, type_: cfg.Type) boo
     return (ownership(self, fs, type_) orelse cfg.Ownership.duplicable) == .affine;
 }
 
+/// True when the value must not silently leak: resolved-affine, or a
+/// deferred (generic) ownership that monomorphization may resolve to
+/// affine. Used by the exact-pattern `split_list` remainder drop.
+pub fn mayBeAffine(self: *lower.Lowerer, fs: *lower.FuncState, type_: cfg.Type) bool {
+    return (ownership(self, fs, type_) orelse cfg.Ownership.affine) == .affine;
+}
+
 pub fn isVoid(t: cfg.Type) bool {
     return switch (t) {
         .primitive => |k| k == .void,
@@ -102,10 +109,38 @@ pub fn emit(
         if (v.ownership == .affine) try fs.created.append(self.arena, v);
     }
     const instr = try self.arena.create(cfg.Instr);
-    instr.* = .{ .span = span, .result = result, .op = op2 };
+    if (result) |v| {
+        const results = try self.arena.alloc(*cfg.Value, 1);
+        results[0] = v;
+        instr.* = .{ .span = span, .results = results, .op = op2 };
+        v.def = instr;
+    } else {
+        instr.* = .{ .span = span, .results = &.{}, .op = op2 };
+    }
     try fs.block_instrs.items[b.id].append(self.arena, instr);
-    if (result) |v| v.def = instr;
     return result;
+}
+
+/// Emit an atomic destructure op (ir.md §5.3): one instruction consumes
+/// `base` as a whole and defines all of its parts at once, with
+/// consecutive ids in the value table. Every affine result is tracked
+/// for scope-end destruction exactly like an `emit` result. The op's
+/// base-operand consumption is validated by `cfg.validate`; the
+/// lowering additionally calls `markConsumed` / `cleanupDisable` on the
+/// base so the checker-side binding state stays in sync.
+pub fn emitUnpack(self: *lower.Lowerer, fs: *lower.FuncState, span: ast.Span, op: cfg.Op, result_types: []const cfg.Type) lower.LowerError![]*cfg.Value {
+    const b = fs.cur orelse return &.{};
+    const results = try self.arena.alloc(*cfg.Value, result_types.len);
+    for (result_types, 0..) |rt, i| {
+        const v = try newValue(self, fs, span, rt, .owned);
+        results[i] = v;
+        if (v.ownership == .affine) try fs.created.append(self.arena, v);
+    }
+    const instr = try self.arena.create(cfg.Instr);
+    instr.* = .{ .span = span, .results = results, .op = op };
+    try fs.block_instrs.items[b.id].append(self.arena, instr);
+    for (results) |v| v.def = instr;
+    return results;
 }
 
 /// The created value state of a definition (ir.md §6.1): from the op
@@ -160,15 +195,22 @@ pub fn emitInto(self: *lower.Lowerer, fs: *lower.FuncState, b: *cfg.BasicBlock, 
         if (v.ownership == .affine) try fs.created.append(self.arena, v);
     }
     const instr = try self.arena.create(cfg.Instr);
-    instr.* = .{ .span = span, .result = result, .op = op };
+    if (result) |v| {
+        const results = try self.arena.alloc(*cfg.Value, 1);
+        results[0] = v;
+        instr.* = .{ .span = span, .results = results, .op = op };
+        v.def = instr;
+    } else {
+        instr.* = .{ .span = span, .results = &.{}, .op = op };
+    }
     try fs.block_instrs.items[b.id].append(self.arena, instr);
-    if (result) |v| v.def = instr;
     return result;
 }
 
 /// Disarm `v`'s cleanup token after an ownership transfer on the current
-/// path — a `move`, a `take_*` destructure, a move-mode call argument, a
-/// phi input, a `ret`, or an affine element moved into a `construct`.
+/// path — a `move`, an atomic `unpack_*` / `split_list` destructure, a
+/// move-mode call argument, a phi input, a `ret`, or an affine element
+/// moved into a `construct`.
 /// The payload is not destroyed here (it transferred); the token must
 /// simply not destroy it at scope end. No-op when `v` has no token (it
 /// was never a conditional-release candidate, ir.md §6.4).
@@ -771,9 +813,9 @@ fn isOneInt(v: *cfg.Value) bool {
 /// check suffices. Consts are never shared (matching the old CSE pass).
 fn findCse(fs: *FuncState, b: *cfg.BasicBlock, op: cfg.Op) ?*cfg.Value {
     for (fs.block_instrs.items[b.id].items) |prior| {
-        if (prior.result == null) continue;
+        if (prior.results.len == 0) continue;
         if (!isCandidate(prior)) continue;
-        if (cfg.identical(prior.op, op)) return prior.result.?;
+        if (cfg.identical(prior.op, op)) return prior.results[0];
     }
     return null;
 }
@@ -784,7 +826,7 @@ fn findCse(fs: *FuncState, b: *cfg.BasicBlock, op: cfg.Op) ?*cfg.Value {
 /// `copy` are never shared. In-block reuse is safe even for ops that may
 /// trap — the reuse site executes exactly when the original would.
 fn isCandidate(instr: *const cfg.Instr) bool {
-    if (instr.result == null) return false;
+    if (instr.results.len == 0) return false;
     return cseOk(std.meta.activeTag(instr.op));
 }
 
@@ -822,6 +864,16 @@ fn cseOk(tag: cfg.OpTag) bool {
 
 comptime {
     for (std.meta.tags(cfg.OpTag)) |tag| {
-        if (cseOk(tag)) std.debug.assert(!cfg.opInfo(tag).effects);
+        if (cseOk(tag)) {
+            const info = cfg.opInfo(tag);
+            // A CSE candidate must be side-effect-free and non-consuming:
+            // a consuming op (move, unpack_*, split_list, any_pack_move,
+            // ...) changes ownership state and can never be shared. This
+            // is the schema-driven exclusion — the schema's `consumes`
+            // row automatically keeps every consuming op out of the
+            // candidate set.
+            std.debug.assert(!info.effects);
+            std.debug.assert(info.consumes == .none);
+        }
     }
 }

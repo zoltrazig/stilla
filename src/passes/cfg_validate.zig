@@ -199,12 +199,6 @@ fn validateFunc(f: *const cfg.IrFunc, allocator: std.mem.Allocator) !?[]const u8
     for (f.blocks, 0..) |b, i| {
         if (!reachable[i]) continue; // unreachable: semantic checks skipped
         var st = entries[i];
-        // The bases of an in-progress `take_*` destructure run (ir.md
-        // §5.3): the frontend emits all takes of one destructure
-        // consecutively, and the base is dead only after its final take.
-        // A take of an already-taken base continues the run; any other
-        // use of a run base is a violation.
-        var take_bases = std.AutoHashMap(*const cfg.Value, void).init(allocator);
         // Phi group first (block head). Each incoming is checked against
         // its arriving edge's exit state (ir.md §6.3: the phi transfers
         // ownership of the value that actually arrived).
@@ -212,8 +206,8 @@ fn validateFunc(f: *const cfg.IrFunc, allocator: std.mem.Allocator) !?[]const u8
             if (instr.op != .phi) break;
             const phi = instr.op.phi;
             for (phi.incoming) |inc| {
-                if (!cfg.Type.eql(instr.result.?.type_, inc.value.type_)) {
-                    return msg(allocator, "function @{s}: phi in '{s}' joins value %{d} of type {any} into {any}", .{ f.name.text, b.name, inc.value.id, inc.value.type_, instr.result.?.type_ });
+                if (!cfg.Type.eql(instr.results[0].type_, inc.value.type_)) {
+                    return msg(allocator, "function @{s}: phi in '{s}' joins value %{d} of type {any} into {any}", .{ f.name.text, b.name, inc.value.id, inc.value.type_, instr.results[0].type_ });
                 }
                 const ep = blkIndex(&index_of, inc.pred) orelse unreachable;
                 if (try checkEdgeAvailable(f, b, instr, inc.value, exits[ep], "phi input", allocator)) |m| return m;
@@ -226,11 +220,11 @@ fn validateFunc(f: *const cfg.IrFunc, allocator: std.mem.Allocator) !?[]const u8
                 }
                 if (inc.value.ownership != .duplicable) try st.put(inc.value, .consumed);
             }
-            if (instr.result.?.ownership != .duplicable) try st.put(instr.result.?, .available);
+            if (instr.results[0].ownership != .duplicable) try st.put(instr.results[0], .available);
         }
         for (b.instrs) |instr| {
             if (instr.op == .phi) continue;
-            if (try checkInstr(f, b, instr, dom, &st, &take_bases, allocator)) |m| return m;
+            if (try checkInstr(f, b, instr, dom, &st, allocator)) |m| return m;
         }
         if (try checkTerminator(f, b, dom, &st, allocator)) |m| return m;
     }
@@ -268,7 +262,7 @@ fn exitState(b: *const cfg.BasicBlock, entry: StateMap, allocator: std.mem.Alloc
     while (it.next()) |e| try st.put(e.key_ptr.*, e.value_ptr.*);
     for (b.instrs) |instr| {
         try transfer(instr, &st);
-        if (instr.result) |r| {
+        for (instr.results) |r| {
             if (r.ownership != .duplicable) try st.put(r, .available);
         }
     }
@@ -304,10 +298,11 @@ fn consume(st: *StateMap, v: ?*const cfg.Value) !void {
 
 fn operand0(op: cfg.Op) ?*const cfg.Value {
     return switch (op) {
-        .neg, .not_, .num_cast, .any_pack_copy, .any_pack_move, .any_unpack_copy, .any_unpack_move, .cleanup_owner, .cleanup_disable, .drop_cleanup, .copy, .borrow, .move_, .tail, .take_tail, .read_tag, .read_payload, .take_payload, .drop_ => |v| v,
+        .neg, .not_, .num_cast, .any_pack_copy, .any_pack_move, .any_unpack_copy, .any_unpack_move, .cleanup_owner, .cleanup_disable, .drop_cleanup, .copy, .borrow, .move_, .tail, .unpack_struct, .unpack_tuple, .split_list, .read_tag, .read_payload, .drop_ => |v| v,
+        .unpack_variant => |uv| uv.base,
         .type_is => |x| x.value,
         .load_member => |x| x.module,
-        .read_field, .take_field, .read_tuple, .take_tuple => |x| x.base,
+        .read_field, .read_tuple => |x| x.base,
         .store_member => |x| x.value,
         else => null,
     };
@@ -315,7 +310,7 @@ fn operand0(op: cfg.Op) ?*const cfg.Value {
 
 fn operand1(op: cfg.Op) ?*const cfg.Value {
     return switch (op) {
-        .read_index, .take_index => |x| x.index,
+        .read_index => |x| x.index,
         else => null,
     };
 }
@@ -423,7 +418,6 @@ fn checkInstr(
     instr: *const cfg.Instr,
     dom: [][]bool,
     st: *StateMap,
-    take_bases: *std.AutoHashMap(*const cfg.Value, void),
     allocator: std.mem.Allocator,
 ) !?[]const u8 {
     const info = cfg.opInfo(std.meta.activeTag(instr.op));
@@ -440,6 +434,24 @@ fn checkInstr(
         return msg(allocator, "function @{s}: '{s}' in block '{s}' has {d} value operands, expected {s}", .{ f.name.text, info.text, b.name, count, @tagName(info.arity) });
     }
 
+    // ---- Result count (schema) ----
+    // Single-result ops define exactly 0 (pure effects) or 1 value; the
+    // atomic destructure ops (`.multi`) define one or more.
+    if (info.multi) {
+        if (instr.results.len < 1) {
+            return msg(allocator, "function @{s}: '{s}' in block '{s}' defines no results (an atomic destructure defines at least one)", .{ f.name.text, info.text, b.name });
+        }
+    } else {
+        // `call`/`syscall` may legitimately define no result (a void
+        // return); every other single-result op defines exactly 0
+        // (pure effects) or 1.
+        const may_omit = instr.op == .call or instr.op == .syscall;
+        const expect: usize = if (info.created == .none) 0 else 1;
+        if (instr.results.len != expect and !(may_omit and instr.results.len == 0)) {
+            return msg(allocator, "function @{s}: '{s}' in block '{s}' defines {d} results, expected {d}", .{ f.name.text, info.text, b.name, instr.results.len, expect });
+        }
+    }
+
     // ---- Availability of consumed operands (schema) ----
     // The ops whose ownership effect is fixed (move, take, drop,
     // any_pack_move, any_unpack_move, store_member) require their operand
@@ -447,11 +459,11 @@ fn checkInstr(
     // their own cases (they depend on the signature).
     switch (info.consumes) {
         .none => {},
-        .op0 => if (try checkConsumedOperand2(f, b, instr, operand0(instr.op), st.*, take_bases, allocator)) |m| return m,
-        .op1 => if (try checkConsumedOperand2(f, b, instr, operand1(instr.op), st.*, take_bases, allocator)) |m| return m,
+        .op0 => if (try checkConsumedOperand(f, b, instr, operand0(instr.op), st.*, allocator)) |m| return m,
+        .op1 => if (try checkConsumedOperand(f, b, instr, operand1(instr.op), st.*, allocator)) |m| return m,
         .both => {
-            if (try checkConsumedOperand2(f, b, instr, operand0(instr.op), st.*, take_bases, allocator)) |m| return m;
-            if (try checkConsumedOperand2(f, b, instr, operand1(instr.op), st.*, take_bases, allocator)) |m| return m;
+            if (try checkConsumedOperand(f, b, instr, operand0(instr.op), st.*, allocator)) |m| return m;
+            if (try checkConsumedOperand(f, b, instr, operand1(instr.op), st.*, allocator)) |m| return m;
         },
         .all => {}, // phi: checked at the block head, edge-sensitively
     }
@@ -477,21 +489,21 @@ fn checkInstr(
             if (!isBool(v.type_)) return typeErr(allocator, f, b, "not", v.type_);
         },
         .num_cast => |v| {
-            if (!isNumeric(v.type_) or !isNumeric(instr.result.?.type_)) {
+            if (!isNumeric(v.type_) or !isNumeric(instr.results[0].type_)) {
                 return typeErr(allocator, f, b, "num_cast", v.type_);
             }
         },
         .type_is => |x| {
-            if (!isAny(x.value.type_) or !isBool(instr.result.?.type_)) return typeErr(allocator, f, b, "type_is", x.value.type_);
+            if (!isAny(x.value.type_) or !isBool(instr.results[0].type_)) return typeErr(allocator, f, b, "type_is", x.value.type_);
         },
         .any_pack_copy, .any_pack_move => |v| {
-            if (!isAny(instr.result.?.type_)) return typeErr(allocator, f, b, info.text, v.type_);
+            if (!isAny(instr.results[0].type_)) return typeErr(allocator, f, b, info.text, v.type_);
         },
         .any_unpack_copy, .any_unpack_move => |v| {
             if (!isAny(v.type_)) return typeErr(allocator, f, b, info.text, v.type_);
         },
         .add, .sub, .mul, .div, .rem => |x| {
-            if (!isNumeric(x.a.type_) or !cfg.Type.eql(x.a.type_, x.b.type_) or !cfg.Type.eql(x.a.type_, instr.result.?.type_)) {
+            if (!isNumeric(x.a.type_) or !cfg.Type.eql(x.a.type_, x.b.type_) or !cfg.Type.eql(x.a.type_, instr.results[0].type_)) {
                 return typeErr(allocator, f, b, info.text, x.a.type_);
             }
         },
@@ -499,13 +511,13 @@ fn checkInstr(
             if (!isStr(x.a.type_) or !isStr(x.b.type_)) return typeErr(allocator, f, b, "concat", x.a.type_);
         },
         .eq, .ne, .lt, .le, .gt, .ge => |x| {
-            if (!cfg.Type.eql(x.a.type_, x.b.type_) or !isBool(instr.result.?.type_)) return typeErr(allocator, f, b, info.text, x.a.type_);
+            if (!cfg.Type.eql(x.a.type_, x.b.type_) or !isBool(instr.results[0].type_)) return typeErr(allocator, f, b, info.text, x.a.type_);
         },
         .copy => |v| {
             if (v.ownership == .affine) return typeErr(allocator, f, b, "copy", v.type_);
         },
         .borrow => |v| {
-            if (!cfg.Type.eql(v.type_, instr.result.?.type_)) return typeErr(allocator, f, b, "borrow", v.type_);
+            if (!cfg.Type.eql(v.type_, instr.results[0].type_)) return typeErr(allocator, f, b, "borrow", v.type_);
         },
         .move_ => |v| {
             if (v.state == .borrowed) {
@@ -521,7 +533,7 @@ fn checkInstr(
             }
         },
         .cleanup_owner => |v| {
-            if (instr.result.?.type_ != .cleanup) return typeErr(allocator, f, b, "cleanup_owner", v.type_);
+            if (instr.results[0].type_ != .cleanup) return typeErr(allocator, f, b, "cleanup_owner", v.type_);
         },
         .cleanup_disable, .drop_cleanup => |v| {
             if (v.type_ != .cleanup) {
@@ -538,25 +550,36 @@ fn checkInstr(
             }
         },
         .construct => {},
-        .read_field, .take_field, .read_tuple, .take_tuple => {},
-        .read_index, .take_index => |x| {
+        .read_field, .read_tuple => {},
+        .read_index => |x| {
             if (x.base.type_ != .list) return typeErr(allocator, f, b, info.text, x.base.type_);
         },
-        .tail, .take_tail => |v| {
-            if (v.type_ != .list or instr.result.?.type_ != .list) return typeErr(allocator, f, b, info.text, v.type_);
+        .tail => |v| {
+            if (v.type_ != .list or instr.results[0].type_ != .list) return typeErr(allocator, f, b, info.text, v.type_);
+        },
+        // Atomic destructures: the base must be owned (a consuming op of
+        // a borrowed view violates Core §10.7). The result types come
+        // from the pattern's declaration, which the IR does not carry —
+        // the checker guarantees them at the source boundary (ir.md §13
+        // gap note). `unpack_variant` additionally carries its tag so a
+        // backend need not recover it from the switch context.
+        .unpack_struct, .unpack_tuple, .split_list => |v| {
+            if (v.state == .borrowed) {
+                return msg(allocator, "function @{s}: {s} of borrowed value %{d} in block '{s}' (Core §10.7)", .{ f.name.text, info.text, v.id, b.name });
+            }
+        },
+        .unpack_variant => |uv| {
+            if (uv.base.state == .borrowed) {
+                return msg(allocator, "function @{s}: unpack_variant of borrowed value %{d} in block '{s}' (Core §10.7)", .{ f.name.text, uv.base.id, b.name });
+            }
         },
         .read_tag => |v| {
             _ = v;
-            if (instr.result.?.type_ != .primitive or instr.result.?.type_.primitive != .uint32) {
-                return typeErr(allocator, f, b, "read_tag", instr.result.?.type_);
+            if (instr.results[0].type_ != .primitive or instr.results[0].type_.primitive != .uint32) {
+                return typeErr(allocator, f, b, "read_tag", instr.results[0].type_);
             }
         },
         .read_payload => {},
-        .take_payload => |v| {
-            if (v.state == .borrowed) {
-                return msg(allocator, "function @{s}: take_payload of borrowed value %{d} in block '{s}' (Core §10.7)", .{ f.name.text, v.id, b.name });
-            }
-        },
         .call => |c| {
             // Move-mode arguments consume; borrow/plain pass views. For a
             // direct call the callee's signature gives the modes; a value
@@ -591,56 +614,10 @@ fn checkInstr(
 
     // ---- Dataflow transfer for this instruction ----
     try transfer(instr, st);
-    if (isTakeOp(instr.op)) {
-        if (operand0(instr.op)) |base| {
-            if (base.ownership != .duplicable) try take_bases.put(base, {});
-        }
-    }
-    if (instr.result) |r| {
+    for (instr.results) |r| {
         if (r.ownership != .duplicable) try st.put(r, .available);
     }
     return null;
-}
-
-fn isTakeOp(op: cfg.Op) bool {
-    return switch (op) {
-        .take_field, .take_tuple, .take_index, .take_tail, .take_payload => true,
-        else => false,
-    };
-}
-
-/// The consumed-operand check, with the multi-take destructure idiom:
-/// a `take_*` whose base was already consumed by an earlier `take_*` in
-/// the same block continues the run (ir.md §5.3 — the base is dead only
-/// after its final take).
-fn checkConsumedOperand2(
-    f: *const cfg.IrFunc,
-    b: *const cfg.BasicBlock,
-    instr: *const cfg.Instr,
-    v: ?*const cfg.Value,
-    st: StateMap,
-    take_bases: *std.AutoHashMap(*const cfg.Value, void),
-    allocator: std.mem.Allocator,
-) !?[]const u8 {
-    const val = v orelse return null;
-    if (isTakeOp(instr.op)) {
-        if (take_bases.contains(val)) {
-            if (st.get(val)) |s| {
-                if (s != .consumed) {
-                    return msg(allocator, "function @{s}: take of value %{d} in block '{s}' whose state is {s}", .{ f.name.text, val.id, b.name, @tagName(s) });
-                }
-            }
-            return null;
-        }
-        // A take of a base consumed by a non-take op is a double
-        // consumption; fall through to the standard check.
-        if (st.get(val)) |s| {
-            if (s == .consumed) {
-                return msg(allocator, "function @{s}: '{s}' consumes already-consumed value %{d} in block '{s}'", .{ f.name.text, cfg.opInfo(std.meta.activeTag(instr.op)).text, val.id, b.name });
-            }
-        }
-    }
-    return checkConsumedOperand(f, b, instr, v, st, allocator);
 }
 
 /// The terminator checks: `ret` consumes its affine value (never a
@@ -683,12 +660,12 @@ fn checkTerminator(f: *const cfg.IrFunc, b: *const cfg.BasicBlock, dom: [][]bool
 fn valueOperandCount(op: cfg.Op) usize {
     return switch (op) {
         .const_, .arg, .module_ref, .fn_ref => 0,
-        .neg, .not_, .num_cast, .any_pack_copy, .any_pack_move, .any_unpack_copy, .any_unpack_move, .cleanup_owner, .cleanup_disable, .drop_cleanup, .copy, .borrow, .move_, .tail, .take_tail, .read_tag, .read_payload, .take_payload, .drop_ => 1,
+        .neg, .not_, .num_cast, .any_pack_copy, .any_pack_move, .any_unpack_copy, .any_unpack_move, .cleanup_owner, .cleanup_disable, .drop_cleanup, .copy, .borrow, .move_, .tail, .unpack_struct, .unpack_tuple, .unpack_variant, .split_list, .read_tag, .read_payload, .drop_ => 1,
         .type_is => 1,
         .load_member => 1,
         .store_member => 1,
-        .read_field, .take_field, .read_tuple, .take_tuple => 1,
-        .read_index, .take_index => 2,
+        .read_field, .read_tuple => 1,
+        .read_index => 2,
         .add, .sub, .mul, .div, .rem, .concat, .eq, .ne, .lt, .le, .gt, .ge => 2,
         .construct => |c| c.args.len,
         .call => |c| c.args.len,
@@ -702,12 +679,13 @@ fn collectOperands(instr: *const cfg.Instr, allocator: std.mem.Allocator) ![]*co
     var out = std.ArrayList(*const cfg.Value).empty;
     errdefer out.deinit(allocator);
     switch (instr.op) {
-        .neg, .not_, .num_cast, .any_pack_copy, .any_pack_move, .any_unpack_copy, .any_unpack_move, .cleanup_owner, .cleanup_disable, .drop_cleanup, .copy, .borrow, .move_, .tail, .take_tail, .read_tag, .read_payload, .take_payload, .drop_ => |v| try out.append(allocator, v),
+        .neg, .not_, .num_cast, .any_pack_copy, .any_pack_move, .any_unpack_copy, .any_unpack_move, .cleanup_owner, .cleanup_disable, .drop_cleanup, .copy, .borrow, .move_, .tail, .unpack_struct, .unpack_tuple, .split_list, .read_tag, .read_payload, .drop_ => |v| try out.append(allocator, v),
+        .unpack_variant => |uv| try out.append(allocator, uv.base),
         .type_is => |x| try out.append(allocator, x.value),
         .load_member => |x| try out.append(allocator, x.module),
         .store_member => |x| try out.append(allocator, x.value),
-        .read_field, .take_field, .read_tuple, .take_tuple => |x| try out.append(allocator, x.base),
-        .read_index, .take_index => |x| {
+        .read_field, .read_tuple => |x| try out.append(allocator, x.base),
+        .read_index => |x| {
             try out.append(allocator, x.base);
             try out.append(allocator, x.index);
         },

@@ -78,7 +78,8 @@ fn foldProgram(program: *cfg.IrProgram) void {
     for (program.funcs) |f| {
         for (f.blocks) |b| {
             for (b.instrs) |instr| {
-                const rt = if (instr.result) |r| r.type_ else continue;
+                if (instr.results.len == 0) continue;
+                const rt = instr.results[0].type_;
                 if (cfg_lower_emit.tryFoldOp(instr.op, rt)) |c| instr.op = .{ .const_ = c };
             }
         }
@@ -960,10 +961,11 @@ test "frontend lowers list indexing with read_index" {
     try testing.expect(std.mem.indexOf(u8, out, "read_index") != null);
 }
 
-test "frontend lowers consuming list-pattern destructuring with take_index" {
+test "frontend lowers consuming list-pattern destructuring with split_list" {
     // Core §18 (whole-owner rule): destructuring an owned list with
     // `let [head, ..rest] = move xs` consumes the collection as a whole;
-    // each affine element becomes an owner (`take_index`).
+    // one atomic `split_list` defines the item and the owned rest (ir.md
+    // §5.3) — each affine element becomes an owner.
     var c = try compileText("app", &.{
         .{
             "app",
@@ -984,7 +986,7 @@ test "frontend lowers consuming list-pattern destructuring with take_index" {
     };
     const out = try irText(&program);
     defer testing.allocator.free(out);
-    try testing.expect(std.mem.indexOf(u8, out, "take_index") != null);
+    try testing.expect(std.mem.indexOf(u8, out, " = split_list %") != null);
     try testing.expect(std.mem.indexOf(u8, out, " = move %") != null);
 }
 
@@ -1455,10 +1457,11 @@ test "frontend emits unary and comparison ops" {
     try testing.expect(std.mem.indexOf(u8, out, " = ne %") != null);
 }
 
-test "frontend lowers ownership-transfer take ops" {
-    // Core §14.6 / ir.md §5.4: a consuming destructure takes each
-    // projection (`take_payload`, `take_field`, `take_tuple`) and a list
-    // pattern's rest binds a borrowed `tail` view (Core §14.5).
+test "frontend lowers ownership-transfer destructures" {
+    // Core §14.6 / ir.md §5.4: a consuming destructure is one atomic
+    // multi-result op per kind — `unpack_variant` (tag-carrying),
+    // `unpack_struct`, `unpack_tuple`, `split_list` — and a non-consuming
+    // list pattern's rest binds a borrowed `tail` view (Core §14.5).
     var c = try compileText("app", &.{
         .{
             "app",
@@ -1489,9 +1492,9 @@ test "frontend lowers ownership-transfer take ops" {
 
     const out = try irText(&c.program.?);
     defer testing.allocator.free(out);
-    try testing.expect(std.mem.indexOf(u8, out, " = take_payload %") != null);
-    try testing.expect(std.mem.indexOf(u8, out, " = take_field %") != null);
-    try testing.expect(std.mem.indexOf(u8, out, " = take_tuple %") != null);
+    try testing.expect(std.mem.indexOf(u8, out, " = unpack_variant %") != null);
+    try testing.expect(std.mem.indexOf(u8, out, " = unpack_struct %") != null);
+    try testing.expect(std.mem.indexOf(u8, out, " = unpack_tuple %") != null);
     try testing.expect(std.mem.indexOf(u8, out, " = tail %") != null);
 }
 
@@ -2413,9 +2416,9 @@ test "Pass 8.3 hoists a partially redundant comparison into a join phi" {
     };
     try testing.expectEqual(@as(usize, 2), phi.incoming.len);
     try testing.expect(phi.incoming[0].pred == pos);
-    try testing.expect(phi.incoming[0].value == pos.instrs[0].result.?);
+    try testing.expect(phi.incoming[0].value == pos.instrs[0].results[0]);
     try testing.expect(phi.incoming[1].pred == neg);
-    try testing.expect(phi.incoming[1].value == neg.instrs[0].result.?);
+    try testing.expect(phi.incoming[1].value == neg.instrs[0].results[0]);
 }
 
 test "Pass 8.3 joins a fully redundant computation without inserting" {
@@ -2452,8 +2455,8 @@ test "Pass 8.3 joins a fully redundant computation without inserting" {
         else => return error.UnexpectedOp,
     };
     try testing.expectEqual(@as(usize, 2), phi.incoming.len);
-    try testing.expect(phi.incoming[0].value == blocks[1].instrs[0].result.?);
-    try testing.expect(phi.incoming[1].value == blocks[2].instrs[0].result.?);
+    try testing.expect(phi.incoming[0].value == blocks[1].instrs[0].results[0]);
+    try testing.expect(phi.incoming[1].value == blocks[2].instrs[0].results[0]);
 }
 
 test "Pass 8.3 leaves a fully unavailable computation alone" {
@@ -2612,8 +2615,8 @@ test "Pass 8.3 hoists unary non-trapping ops" {
         else => return error.UnexpectedOp,
     };
     try testing.expectEqual(@as(usize, 2), nphi.incoming.len);
-    try testing.expect(nphi.incoming[0].value == blocks[1].instrs[0].result.?);
-    try testing.expect(nphi.incoming[1].value == blocks[2].instrs[0].result.?);
+    try testing.expect(nphi.incoming[0].value == blocks[1].instrs[0].results[0]);
+    try testing.expect(nphi.incoming[1].value == blocks[2].instrs[0].results[0]);
 
     // tjoin: the `type_is` becomes a phi too.
     const tjoin = blocks[6];
@@ -2623,8 +2626,8 @@ test "Pass 8.3 hoists unary non-trapping ops" {
         else => return error.UnexpectedOp,
     };
     try testing.expectEqual(@as(usize, 2), tphi.incoming.len);
-    try testing.expect(tphi.incoming[0].value == blocks[4].instrs[0].result.?);
-    try testing.expect(tphi.incoming[1].value == blocks[5].instrs[0].result.?);
+    try testing.expect(tphi.incoming[0].value == blocks[4].instrs[0].results[0]);
+    try testing.expect(tphi.incoming[1].value == blocks[5].instrs[0].results[0]);
 }
 
 test "Pass 8.3 handles a self-loop back edge" {
@@ -2659,10 +2662,10 @@ test "Pass 8.3 handles a self-loop back edge" {
     };
     try testing.expectEqual(@as(usize, 2), phi.incoming.len);
     try testing.expect(phi.incoming[0].pred == blocks[0]);
-    try testing.expect(phi.incoming[0].value == blocks[0].instrs[0].result.?);
+    try testing.expect(phi.incoming[0].value == blocks[0].instrs[0].results[0]);
     try testing.expect(phi.incoming[1].pred == body);
     try testing.expect(body.instrs[1].op == .lt);
-    try testing.expect(phi.incoming[1].value == body.instrs[1].result.?);
+    try testing.expect(phi.incoming[1].value == body.instrs[1].results[0]);
 }
 
 test "Pass 8.3 optimized IR round-trips through the standalone cfg parser" {
@@ -2841,8 +2844,8 @@ test "Pass 8.5 prunes phi incoming lists and predecessor sets" {
     };
     try testing.expectEqual(@as(usize, 1), phi.incoming.len);
     try testing.expect(phi.incoming[0].pred == blocks[1]);
-    try testing.expect(phi.incoming[0].value == blocks[1].instrs[0].result.?);
-    try testing.expect(join.terminator.ret.? == join.instrs[0].result.?);
+    try testing.expect(phi.incoming[0].value == blocks[1].instrs[0].results[0]);
+    try testing.expect(join.terminator.ret.? == join.instrs[0].results[0]);
 }
 
 test "Pass 8.5 removes a whole unreachable chain" {
@@ -3340,9 +3343,12 @@ test "Pass 8.9 optimization harness: corpus compile, optimize, and measure" {
         }
 
         // TCO legitimately trades a tail call for a loop with parameter
-        // phis, so the invariant is on non-phi instructions and on blocks.
+        // phis, so the invariant is on non-phi instructions. Blocks may
+        // grow by exactly one: a consuming empty-case arm (the `[]` split
+        // of a moved list) cannot fold into the loop header, which the
+        // header's addition makes reachable as a separate block.
         try testing.expect(after_nonphi <= before_nonphi);
-        try testing.expect(after_blocks <= before_blocks);
+        try testing.expect(after_blocks <= before_blocks + 1);
 
         var p = cfg.Parser.init(testing.allocator);
         defer p.deinit();

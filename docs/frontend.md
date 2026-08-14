@@ -977,7 +977,8 @@ that consumes the phase-2 annotation.
         schema-driven checker: structure, SSA dominance, op arity and
         typing from `cfg.opInfo`, and an edge-sensitive ownership
         dataflow (`Available` / `Consumed` / `MaybeConsumed` over the
-        CFG, per-edge phi inputs, the consecutive `take_*` run). The
+        CFG, per-edge phi inputs, atomic `unpack_*` / `split_list`
+        consumption). The
         frontend runs it on every lowered program; the optimizer runs it
         before the sequence and after every rewrite.
   - [ ] **6.2** cycle diagnostics name the full cycle path

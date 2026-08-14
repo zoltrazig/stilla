@@ -207,15 +207,18 @@ pub const Value = struct {
     def: ?*Instr,
 };
 
-/// One instruction: defines `result` unless it is a pure effect (`drop`,
-/// `store_member`, or a `void`/effect `call` / `syscall`).
+/// One instruction: defines `results` (one value for single-result ops,
+/// several for the atomic destructure ops `unpack_struct` / `unpack_tuple` /
+/// `unpack_variant` / `split_list`, ir.md §5.3) unless it is a pure effect
+/// (`drop`, `store_member`, `cleanup_disable`, `drop_cleanup`, or a
+/// `void`/effect `call` / `syscall`).
 ///
 /// `synth` marks constants materialized from inline literals in operand
 /// position (ir.md §9): the printer re-inlines them so their ids never
 /// leak into the text form.
 pub const Instr = struct {
     span: ast.Span,
-    result: ?*Value,
+    results: []*Value,
     op: Op,
     synth: bool = false,
 };
@@ -291,19 +294,19 @@ pub const Op = union(enum) {
     // aggregates and projections (§5.3)
     construct: Construct, // n-ary
     read_field: Proj,
-    take_field: Proj,
     read_tuple: Proj,
-    take_tuple: Proj,
     read_index: Index,
-    take_index: Index,
     /// `[head, ..tail]`: a borrowed sublist view (Core §14.5).
     tail: *Value,
-    /// Consuming `..tail`: the owned remaining list (Core §14.6). The
-    /// base is consumed as a whole by the destructure (§5.3).
-    take_tail: *Value,
+    /// Atomic consuming destructures (§5.3): one op consumes the base as
+    /// a whole and defines all of its parts (multi-result). No
+    /// half-consumed base states exist.
+    unpack_struct: *Value, // struct pattern: all field values
+    unpack_tuple: *Value, // tuple pattern: all element values
+    unpack_variant: UnpackVariant, // union arm: the variant's payload values
+    split_list: *Value, // list pattern: item values, then the rest
     read_tag: *Value,
     read_payload: *Value,
-    take_payload: *Value,
 
     // calls (§8)
     call: Call, // n-ary
@@ -316,6 +319,7 @@ pub const Op = union(enum) {
 pub const Bin = struct { a: *Value, b: *Value };
 pub const Proj = struct { base: *Value, index: u32 };
 pub const Index = struct { base: *Value, index: *Value };
+pub const UnpackVariant = struct { base: *Value, tag: u32 };
 
 // ---------------------------------------------------------------------------
 // Op schema (ir.md §5, §13) — the single machine-readable contract
@@ -363,6 +367,11 @@ pub const OpInfo = struct {
     /// syscalls, drops, store_member, cleanup_disable): such ops are
     /// never CSE'd, moved, or elided.
     effects: bool,
+    /// True when the op defines more than one result value (the atomic
+    /// destructure ops). The text form prints a comma-separated lhs and
+    /// the parser/validator accept any count ≥ 1; single-result ops have
+    /// exactly 0 or 1 results per `created`.
+    multi: bool = false,
 
     /// True when the op is a candidate for pure-computation rewriting
     /// (CSE within a block is safe for may-trap ops; PRE is not).
@@ -428,19 +437,20 @@ pub fn opInfo(tag: OpTag) OpInfo {
         // aggregates and projections (§5.3)
         .construct => .{ .text = "construct", .arity = .nary, .consumes = .none, .created = .owned, .may_trap = false, .effects = false },
         .read_field => .{ .text = "read_field", .arity = .one, .consumes = .none, .created = .operand, .may_trap = false, .effects = false },
-        .take_field => .{ .text = "take_field", .arity = .one, .consumes = .op0, .created = .owned, .may_trap = false, .effects = false },
         .read_tuple => .{ .text = "read_tuple", .arity = .one, .consumes = .none, .created = .operand, .may_trap = false, .effects = false },
-        .take_tuple => .{ .text = "take_tuple", .arity = .one, .consumes = .op0, .created = .owned, .may_trap = false, .effects = false },
         .read_index => .{ .text = "read_index", .arity = .two, .consumes = .none, .created = .operand, .may_trap = true, .effects = false },
-        .take_index => .{ .text = "take_index", .arity = .two, .consumes = .op0, .created = .owned, .may_trap = true, .effects = false },
         // A `tail` view's created state follows the *base*'s ownership
         // (`.operand`): a duplicable list's view is a duplicable value,
         // an affine list's view is borrowed (matches read_*).
         .tail => .{ .text = "tail", .arity = .one, .consumes = .none, .created = .operand, .may_trap = false, .effects = false },
-        .take_tail => .{ .text = "take_tail", .arity = .one, .consumes = .op0, .created = .owned, .may_trap = false, .effects = false },
+        // Atomic consuming destructures (§5.3): one op, base consumed as
+        // a whole, all parts defined at once (multi-result).
+        .unpack_struct => .{ .text = "unpack_struct", .arity = .one, .consumes = .op0, .created = .owned, .may_trap = false, .effects = false, .multi = true },
+        .unpack_tuple => .{ .text = "unpack_tuple", .arity = .one, .consumes = .op0, .created = .owned, .may_trap = false, .effects = false, .multi = true },
+        .unpack_variant => .{ .text = "unpack_variant", .arity = .one, .consumes = .op0, .created = .owned, .may_trap = false, .effects = false, .multi = true },
+        .split_list => .{ .text = "split_list", .arity = .one, .consumes = .op0, .created = .owned, .may_trap = true, .effects = false, .multi = true },
         .read_tag => .{ .text = "read_tag", .arity = .one, .consumes = .none, .created = .owned, .may_trap = false, .effects = false },
         .read_payload => .{ .text = "read_payload", .arity = .one, .consumes = .none, .created = .operand, .may_trap = false, .effects = false },
-        .take_payload => .{ .text = "take_payload", .arity = .one, .consumes = .op0, .created = .owned, .may_trap = false, .effects = false },
 
         // calls (§8)
         .call => .{ .text = "call", .arity = .nary, .consumes = .none, .created = .owned, .may_trap = true, .effects = true },
@@ -730,11 +740,13 @@ pub const BlockOrder = struct {
 };
 
 /// The smallest defined-value id in a block; null when the block defines
-/// no values (only a terminator).
+/// no values (only a terminator). Multi-result instructions anchor on
+/// their first result.
 pub fn minValueId(b: *const BasicBlock) ?u32 {
     var min: ?u32 = null;
     for (b.instrs) |instr| {
-        if (instr.result) |r| {
+        if (instr.results.len > 0) {
+            const r = instr.results[0];
             if (min == null or r.id < min.?) min = r.id;
         }
     }
@@ -743,7 +755,7 @@ pub fn minValueId(b: *const BasicBlock) ?u32 {
 
 /// Renumber `f`'s values in the canonical print order (ir.md §4.1, §13):
 /// parameters first (`%0..%k-1`), then each block in print order, each
-/// instruction's result in instruction order — and rebuild the per-function
+/// instruction's results in instruction order — and rebuild the per-function
 /// value table to match. Idempotent; call after a pass adds or removes
 /// values so ids and the table stay in text order.
 pub fn renumberValues(f: *IrFunc, allocator: std.mem.Allocator) !void {
@@ -757,7 +769,7 @@ pub fn renumberValues(f: *IrFunc, allocator: std.mem.Allocator) !void {
     var next: u32 = @intCast(f.params.len);
     for (order) |b| {
         for (b.instrs) |instr| {
-            if (instr.result) |v| {
+            for (instr.results) |v| {
                 v.id = next;
                 next += 1;
                 try values.append(allocator, v);

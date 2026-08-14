@@ -92,19 +92,18 @@ const OpName = enum {
     borrow,
     move_,
     tail,
-    take_tail,
     load_member,
     store_member,
     construct,
     read_field,
-    take_field,
     read_tuple,
-    take_tuple,
     read_index,
-    take_index,
+    unpack_struct,
+    unpack_tuple,
+    unpack_variant,
+    split_list,
     read_tag,
     read_payload,
-    take_payload,
     call,
     syscall,
     phi,
@@ -553,35 +552,53 @@ pub const Parser = struct {
         if (self.f_cur == null) {
             return self.fail(self.cur(), "instruction appears after the block's terminator", .{});
         }
-        const name_tok = self.advance(); // %name
-        try self.expect(.colon, "':'");
-        const type_ = try self.parseType();
+        // The lhs: one or more `%name: type` pairs. The op's schema row
+        // decides whether multiple results are legal (`OpInfo.multi`,
+        // ir.md §5.3 — only the atomic destructure ops define more than
+        // one value).
+        var name_toks = std.ArrayList(Token).empty;
+        var types = std.ArrayList(Type).empty;
+        while (true) {
+            const name_tok = self.advance(); // %name
+            try self.expect(.colon, "':'");
+            try types.append(self.arena.allocator(), try self.parseType());
+            try name_toks.append(self.arena.allocator(), name_tok);
+            if (!self.eat(.comma)) break;
+        }
         try self.expect(.equals, "'='");
         const op_tok = self.cur();
         if (op_tok.kind != .ident) {
             return self.fail(op_tok, "expected an instruction name, found '{s}'", .{describe(op_tok)});
         }
         const opname = op_names.get(op_tok.text) orelse {
-            if (std.mem.eql(u8, op_tok.text, "drop") or std.mem.eql(u8, op_tok.text, "store_member")) {
+            if (std.mem.eql(u8, op_tok.text, "drop") or std.mem.eql(u8, op_tok.text, "store_member") or std.mem.eql(u8, op_tok.text, "cleanup_disable") or std.mem.eql(u8, op_tok.text, "drop_cleanup")) {
                 return self.fail(op_tok, "'{s}' produces no value; write it as a bare statement", .{op_tok.text});
             }
             return self.fail(op_tok, "unknown instruction '{s}'", .{op_tok.text});
         };
         _ = self.advance();
+        const info = cfg.opInfo(std.meta.stringToEnum(cfg.OpTag, @tagName(opname)).?);
+        if (name_toks.items.len != 1 and !info.multi) {
+            return self.fail(op_tok, "'{s}' defines {d} results; only the atomic destructure ops define more than one", .{ info.text, name_toks.items.len });
+        }
         var op = try self.parseOpOperands(opname);
-        if (std.meta.activeTag(op) == .syscall) op.syscall.ret = type_;
-        // Resolve the pre-registered placeholder: numeric def names are
+        if (std.meta.activeTag(op) == .syscall) op.syscall.ret = types.items[0];
+        // Resolve the pre-registered placeholders: numeric def names are
         // positional (validated to equal the running id at registration),
         // symbolic names via the symbol table.
-        const v = if (isAllDigits(name_tok.text))
-            self.f_values.items[@intCast(std.fmt.parseInt(u32, name_tok.text, 10) catch unreachable)]
-        else
-            self.f_symbols.get(name_tok.text) orelse unreachable;
-        v.span = name_tok.span;
-        v.type_ = type_;
-        v.ownership = type_.ownership();
-        v.state = createdState(op, self.f_params, type_);
-        _ = try self.emit(name_tok.span, op, v);
+        const results = try self.arena.allocator().alloc(*Value, name_toks.items.len);
+        for (name_toks.items, types.items, 0..) |name_tok, type_, i| {
+            const v = if (isAllDigits(name_tok.text))
+                self.f_values.items[@intCast(std.fmt.parseInt(u32, name_tok.text, 10) catch unreachable)]
+            else
+                self.f_symbols.get(name_tok.text) orelse unreachable;
+            v.span = name_tok.span;
+            v.type_ = type_;
+            v.ownership = type_.ownership();
+            v.state = createdState(op, self.f_params, type_);
+            results[i] = v;
+        }
+        _ = try self.emit(name_toks.items[0].span, op, results);
     }
 
     /// Statement starting with a bare identifier: an effect instruction or
@@ -593,21 +610,21 @@ pub const Parser = struct {
             _ = self.advance();
             if (self.f_cur == null) return self.fail(t, "instruction appears after the block's terminator", .{});
             const v = try self.parseOperand();
-            _ = try self.emit(t.span, .{ .drop_ = v }, null);
+            _ = try self.emit(t.span, .{ .drop_ = v }, &.{});
             return;
         }
         if (std.mem.eql(u8, text, "cleanup_disable")) {
             _ = self.advance();
             if (self.f_cur == null) return self.fail(t, "instruction appears after the block's terminator", .{});
             const v = try self.parseOperand();
-            _ = try self.emit(t.span, .{ .cleanup_disable = v }, null);
+            _ = try self.emit(t.span, .{ .cleanup_disable = v }, &.{});
             return;
         }
         if (std.mem.eql(u8, text, "drop_cleanup")) {
             _ = self.advance();
             if (self.f_cur == null) return self.fail(t, "instruction appears after the block's terminator", .{});
             const v = try self.parseOperand();
-            _ = try self.emit(t.span, .{ .drop_cleanup = v }, null);
+            _ = try self.emit(t.span, .{ .drop_cleanup = v }, &.{});
             return;
         }
         if (std.mem.eql(u8, text, "store_member")) {
@@ -619,7 +636,7 @@ pub const Parser = struct {
             const slot = try self.parseTagNumber();
             try self.expectComma();
             const v = try self.parseOperand();
-            _ = try self.emit(t.span, .{ .store_member = .{ .slot = slot, .value = v } }, null);
+            _ = try self.emit(t.span, .{ .store_member = .{ .slot = slot, .value = v } }, &.{});
             return;
         }
         if (std.mem.eql(u8, text, "syscall")) {
@@ -627,14 +644,14 @@ pub const Parser = struct {
             if (self.f_cur == null) return self.fail(t, "instruction appears after the block's terminator", .{});
             var sc = try self.parseSyscall();
             sc.ret = .{ .primitive = .void };
-            _ = try self.emit(t.span, .{ .syscall = sc }, null);
+            _ = try self.emit(t.span, .{ .syscall = sc }, &.{});
             return;
         }
         if (std.mem.eql(u8, text, "call")) {
             _ = self.advance();
             if (self.f_cur == null) return self.fail(t, "instruction appears after the block's terminator", .{});
             const c = try self.parseCall();
-            _ = try self.emit(t.span, .{ .call = c }, null);
+            _ = try self.emit(t.span, .{ .call = c }, &.{});
             return;
         }
         if (std.mem.eql(u8, text, "ret")) {
@@ -751,10 +768,17 @@ pub const Parser = struct {
             .borrow => return .{ .borrow = try self.parseOperand() },
             .move_ => return .{ .move_ = try self.parseOperand() },
             .tail => return .{ .tail = try self.parseOperand() },
-            .take_tail => return .{ .take_tail = try self.parseOperand() },
+            .unpack_struct => return .{ .unpack_struct = try self.parseOperand() },
+            .unpack_tuple => return .{ .unpack_tuple = try self.parseOperand() },
+            .unpack_variant => {
+                const base = try self.parseOperand();
+                try self.expectComma();
+                const tag = try self.parseTagNumber();
+                return .{ .unpack_variant = .{ .base = base, .tag = tag } };
+            },
+            .split_list => return .{ .split_list = try self.parseOperand() },
             .read_tag => return .{ .read_tag = try self.parseOperand() },
             .read_payload => return .{ .read_payload = try self.parseOperand() },
-            .take_payload => return .{ .take_payload = try self.parseOperand() },
             .add => return .{ .add = try self.parseBin() },
             .sub => return .{ .sub = try self.parseBin() },
             .mul => return .{ .mul = try self.parseBin() },
@@ -789,11 +813,8 @@ pub const Parser = struct {
                 return .{ .construct = .{ .tag = tag, .args = try self.arena.allocator().dupe(*Value, args.items) } };
             },
             .read_field => return .{ .read_field = try self.parseProj() },
-            .take_field => return .{ .take_field = try self.parseProj() },
             .read_tuple => return .{ .read_tuple = try self.parseProj() },
-            .take_tuple => return .{ .take_tuple = try self.parseProj() },
             .read_index => return .{ .read_index = try self.parseIndex() },
-            .take_index => return .{ .take_index = try self.parseIndex() },
             .call => return .{ .call = try self.parseCall() },
             .syscall => return .{ .syscall = try self.parseSyscall() },
             .phi => return .{ .phi = try self.parsePhi() },
@@ -1025,12 +1046,12 @@ pub const Parser = struct {
         return v;
     }
 
-    fn emit(self: *Parser, span: ast.Span, op: Op, result: ?*Value) ParseError!*Instr {
+    fn emit(self: *Parser, span: ast.Span, op: Op, results: []*Value) ParseError!*Instr {
         const blk = self.f_cur orelse unreachable;
         const instr = try self.arena.allocator().create(Instr);
-        instr.* = .{ .span = span, .result = result, .op = op };
+        instr.* = .{ .span = span, .results = results, .op = op };
         try self.f_block_instrs.items[blk.id].append(self.arena.allocator(), instr);
-        if (result) |v| v.def = instr;
+        for (results) |v| v.def = instr;
         return instr;
     }
 
@@ -1048,21 +1069,24 @@ pub const Parser = struct {
                 return self.fail(t, "invalid integer literal '{s}'", .{t.text}) };
         }
         const v = try self.newValue(t.span, type_, .owned);
-        const instr = try self.emit(t.span, .{ .const_ = c }, v);
+        var one = [_]*Value{v};
+        const instr = try self.emit(t.span, .{ .const_ = c }, &one);
         instr.synth = true;
         return v;
     }
 
     fn synthConstString(self: *Parser, t: Token) ParseError!*Value {
         const v = try self.newValue(t.span, .{ .primitive = .str }, .owned);
-        const instr = try self.emit(t.span, .{ .const_ = .{ .string = t.text } }, v);
+        var one = [_]*Value{v};
+        const instr = try self.emit(t.span, .{ .const_ = .{ .string = t.text } }, &one);
         instr.synth = true;
         return v;
     }
 
     fn synthConstBool(self: *Parser, t: Token) ParseError!*Value {
         const v = try self.newValue(t.span, .{ .primitive = .bool }, .owned);
-        const instr = try self.emit(t.span, .{ .const_ = .{ .bool = std.mem.eql(u8, t.text, "true") } }, v);
+        var one = [_]*Value{v};
+        const instr = try self.emit(t.span, .{ .const_ = .{ .bool = std.mem.eql(u8, t.text, "true") } }, &one);
         instr.synth = true;
         return v;
     }
@@ -1220,14 +1244,14 @@ test "cfg parses a straight-line function" {
         .add => |b| b,
         else => unreachable,
     };
-    try std.testing.expectEqual(@as(u32, 2), f.blocks[0].instrs[0].result.?.id);
+    try std.testing.expectEqual(@as(u32, 2), f.blocks[0].instrs[0].results[0].id);
     try std.testing.expect(bin.a == f.values[0]);
     try std.testing.expect(bin.b == f.values[1]);
     const ret = switch (f.blocks[0].terminator) {
         .ret => |r| r,
         else => unreachable,
     };
-    try std.testing.expect(ret.? == f.blocks[0].instrs[0].result.?);
+    try std.testing.expect(ret.? == f.blocks[0].instrs[0].results[0]);
 }
 test "cfg parses a conditional branch with a phi join" {
     var t = try parseText(
@@ -1280,7 +1304,7 @@ test "cfg parses a conditional branch with a phi join" {
         .ret => |r| r,
         else => unreachable,
     };
-    try std.testing.expect(ret.? == join.instrs[0].result.?);
+    try std.testing.expect(ret.? == join.instrs[0].results[0]);
 }
 test "cfg parses a loop header phi with a back edge" {
     var t = try parseText(
@@ -1593,7 +1617,7 @@ test "cfg parses copy, borrow, move, and drop ownership ops" {
     try std.testing.expect(b.instrs[1].op == .borrow);
     try std.testing.expect(b.instrs[2].op == .move_);
     try std.testing.expect(b.instrs[3].op == .drop_);
-    try std.testing.expect(b.instrs[3].result == null);
+    try std.testing.expect(b.instrs[3].results.len == 0);
 }
 test "cfg parses module_ref and member loads" {
     var t = try parseText(

@@ -110,8 +110,10 @@ terminator ::= "ret" value?                  -- return; bare "ret" for void
   order (`%0, %1, …`); the text form also permits symbolic names (`%sum`)
   for readability.
 - **Instruction** — a unit of computation. An instruction either *defines*
-  a value (then its result is that value's single definition) or is a
-  **pure effect** with no result: `drop` and `store_member`.
+  one or more values (a single result for ordinary ops; several for the
+  atomic destructure ops `unpack_*` / `split_list`, §5.3) or is a
+  **pure effect** with no results: `drop`, `store_member`,
+  `cleanup_disable`, `drop_cleanup`.
 - **Use** — a reference to a value as an operand. SSA requires that every
   non-phi use of a value is **dominated** by its definition; a phi's
   operands are defined in the corresponding predecessor blocks.
@@ -125,7 +127,8 @@ value   ::= "%" ident | "%" number
 ### 4.2 The three-address property, precisely
 
 For every *defining* instruction except `construct`, `call`, `syscall`,
-and `phi`, the operand count is at most two:
+and `phi`, the operand count is at most two; the atomic destructure ops
+are the only multi-*result* instructions:
 
 ```
 %r = op %a           -- unary
@@ -237,10 +240,16 @@ Projections come in two access kinds:
 - **read** — non-consuming: copies the component for duplicable bases,
   produces a **borrowed view** for affine bases (member reads, borrowed
   matches, Core §10.7, §13.4);
-- **take** — consuming: extracts the component *as an owner*; the base is
-  wholly consumed (destructuring with `move`, Core §14.6, §18
-  *Whole-owner rule*). The frontend emits all `take` ops of one
-  destructure consecutively; the base is dead after its final `take`.
+- **unpack** — consuming destructure: **atomic and multi-result**. One op
+  consumes the base *as a whole* and defines all of its parts at once
+  (destructuring with `move`, Core §14.6, §18 *Whole-owner rule*) — no
+  half-consumed base states exist. The results are the struct fields in
+  declaration order, the tuple elements, the variant's payload values
+  (tag-carrying, see below), or the list items followed by the owned
+  rest. An exact list pattern (`[a, b]`, no `..rest`) defines only the
+  items; the consumed remainder is dropped immediately (the whole list
+  is still consumed). A `[]` arm of a consuming match defines nothing
+  and still consumes the base.
 
 | op | form | produces |
 | --- | --- | --- |
@@ -248,13 +257,16 @@ Projections come in two access kinds:
 | `construct` | `%d = construct #tag %a, …` | union variant with discriminant `#tag` (Core §11.1) |
 | `construct` | `%d = construct %a, %b` | tuple (Core §11.4) |
 | `construct` | `%d = construct %a, %b, …` | list literal (Core §11.5) |
-| `read_field` / `take_field` | `%d = read_field %b, #i` | struct field `i` |
-| `read_tuple` / `take_tuple` | `%d = read_tuple %t, #i` | tuple element `i` |
-| `read_index` | `%d = read_index %l, %i` | list element; bounds check traps (Runtime §7.2) |
-| `take_index` | `%d = take_index %l, %i` | list element, consuming pattern destructuring |
+| `read_field` | `%d = read_field %b, #i` | struct field `i`, borrowed view |
+| `read_tuple` | `%d = read_tuple %t, #i` | tuple element `i`, borrowed view |
+| `read_index` | `%d = read_index %l, %i` | list element, borrowed view; bounds check traps (Runtime §7.2) |
 | `tail` | `%d = tail %l` | borrowed sublist view (`[head, ..tail]`, Core §14.5) |
+| `unpack_struct` | `%a: T, %b: U = unpack_struct %s` | all struct fields (consumes `%s`) |
+| `unpack_tuple` | `%a: T, %b: U = unpack_tuple %t` | all tuple elements (consumes `%t`) |
+| `unpack_variant` | `%p: T = unpack_variant %u, #k` | the payload of variant `#k` (consumes `%u`); the tag is carried for backend self-containment — the arm's `switch` dispatch already guaranteed the variant |
+| `split_list` | `%a: T, %b: T, %r: list[T] = split_list %l` | list items then the owned rest (consumes `%l`; may trap on a short list, Runtime §7.2) |
 | `read_tag` | `%d = read_tag %u` | union discriminant, as a tag index |
-| `read_payload` / `take_payload` | `%d = read_payload %u` | payload of the active variant |
+| `read_payload` | `%d = read_payload %u` | payload of the active variant, borrowed view |
 
 `builtin.box`, `builtin.peek`, and `builtin.unbox` are **not** IR ops:
 they are host bindings and lower to `syscall` (Core §3, Runtime §4.7–§4.8,
@@ -348,7 +360,7 @@ its cleanup token (§6.4), which references the token, never the value.
 | `read_*` / `tail` | base `owned`/`borrowed` (affine) → base unchanged | `borrowed` | |
 | `read_tag` / `read_payload` | scrutinee unchanged | `owned` (tag) / per above (payload) | |
 | `move` | `%a` consumed | `owned` | |
-| `take_*` | base consumed after its final `take` in the destructure | `owned` | §5.3 |
+| `unpack_*` / `split_list` | base consumed as a whole; results owned | `owned` | §5.3 |
 | `any_pack_move` / `any_unpack_move` | operand consumed | `owned` | the `T → any` / `any → T` ownership transfers (§4.4) |
 | `call` arg, plain/borrow | unchanged | — | borrow params take a view; no ownership change (Core §10.6) |
 | `call` arg, move | consumed | — | ownership transfers (Core §10.6) |
@@ -361,11 +373,11 @@ its cleanup token (§6.4), which references the token, never the value.
 validator in simplified form, §13):
 
 - an affine `owned` value is consumed at most once per path (one of:
-  `move`, `drop`, `take_*`, a move-mode call argument, a phi, `ret`);
+  `move`, `drop`, `unpack_*` / `split_list`, a move-mode call argument, a phi, `ret`);
 - after consumption there are no further uses on that path;
-- a `borrowed` value is never `move`'d, `drop`'d, `take_*`'d, stored, or
-  returned (Core §10.7) — its uses are reads, borrows, and borrow-mode
-  arguments only;
+- a `borrowed` value is never `move`'d, `drop`'d, `unpack_*`'d / `split_list`'d,
+  stored, or returned (Core §10.7) — its uses are reads, borrows, and
+  borrow-mode arguments only;
 - a duplicable value may be used any number of times.
 
 ### 6.3 Phi and ownership
@@ -566,10 +578,11 @@ op      ::= "const" literal
           | ("add"|"sub"|"mul"|"div"|"rem"|"concat"|"eq"|"ne"|"lt"|"le"|"gt"|"ge") value "," value
           | "type_is" value "," type
           | "load_member" value "," number
-          | ("read_field"|"take_field"|"read_tuple"|"take_tuple") value "," number
-          | ("read_index"|"take_index") value "," value
-          | ("tail" | "take_tail") value
-          | ("read_tag"|"read_payload"|"take_payload") value
+          | ("read_field"|"read_tuple") value "," number
+          | "read_index" value "," value
+          | ("tail" | "unpack_struct" | "unpack_tuple" | "split_list") value
+          | "unpack_variant" value "," number
+          | ("read_tag"|"read_payload") value
           | "construct" ("#" tag)? value ("," value)*
           | "call" ("@" ident | value) ("," value)*
           | "syscall" target ("," value)*
@@ -695,7 +708,7 @@ join:
 `_`, literal, tuple, struct, and list patterns lower to the same
 primitives: `eq` + `br_cond` for literals, `read_*` projections and
 discriminant tests for shapes, `tail`/`read_index` for `[head, ..tail]`
-(Core §14). A `match (move value)` binds payloads with `take_payload` and
+(Core §14). A `match (move value)` binds payloads with `unpack_variant` (tag-carrying) and
 the scrutinee is wholly consumed (Core §13.4).
 
 A `match` over an `any` value with **type-test** patterns does *not*
@@ -986,10 +999,12 @@ pub const Value = struct {
 
 pub const ValueState = enum { owned, borrowed };
 
-/// One instruction. Defines `result` unless it is a pure effect.
+/// One instruction: defines `results` (one value for single-result ops,
+/// several for the atomic destructure ops `unpack_*` / `split_list`,
+/// §5.3) unless it is a pure effect.
 pub const Instr = struct {
     span: ast.Span,
-    result: ?*Value,
+    results: []*Value,
     op: Op,
 };
 
@@ -1036,13 +1051,17 @@ pub const Op = union(enum) {
 
     // aggregates and projections (§5.3)
     construct: Construct,           // n-ary
-    read_field: Proj,   take_field: Proj,
-    read_tuple: Proj,   take_tuple: Proj,
-    read_index: Index,  take_index: Index,
+    read_field: Proj,
+    read_tuple: Proj,
+    read_index: Index,
     tail: *Value,                   // borrowed sublist view (§5.3)
-    take_tail: *Value,              // owned remaining list (consumes)
+    // atomic multi-result consuming destructures (§5.3)
+    unpack_struct: *Value,
+    unpack_tuple: *Value,
+    unpack_variant: UnpackVariant,  // { base: *Value, tag: u32 }
+    split_list: *Value,
     read_tag: *Value,
-    read_payload: *Value, take_payload: *Value,
+    read_payload: *Value,
 
     // calls (§8)
     call: Call,                     // n-ary
@@ -1186,11 +1205,11 @@ points (frontend.md §5.3). The mapping:
 | `a as T` | `num_cast` (numeric pair) or `any_unpack_copy` / `any_unpack_move` (Core §16, §11.6.1) |
 | coercion to `any` | `copy` (duplicable) or `move` (affine) at the boundary (§4.4) |
 | `let name = expr` | evaluate `expr`, bind result as a fresh value |
-| `let pattern = expr` | destructure: `read_*`/`take_*` projections (§5.3, §6.2) |
+| `let pattern = expr` | destructure: `read_*` views or the atomic `unpack_*` / `split_list` (§5.3, §6.2) |
 | `if` | `br_cond` then/else, join phi; no `else` → `void` join |
 | `match` (union) | `read_tag` + `switch`; per-arm payload binds; join phi (§10.4) |
 | `match` (other patterns) | `eq`/`br_cond` chains, projections, `tail` |
-| `match (move s)` | `take_payload` binds; scrutinee wholly consumed (§13.4) |
+| `match (move s)` | `unpack_variant` binds (tag-carrying); scrutinee wholly consumed (§13.4) |
 | `move name` | `move` (or `copy` for duplicable); old value dead (Core §10.4, §10.6) |
 | `drop name;` | `drop` (Core §9.4) |
 | member access / index | `read_field` / `read_index` (bounds check traps) |
@@ -1258,11 +1277,11 @@ cannot drift. The check set:
 
 **Ownership (edge-sensitive dataflow)**
 
-- a `borrowed` value is never `move`'d, `drop`'d, `take_*`'d, stored, or
-  returned; never passed to a move-mode parameter (Core §10.7);
-- `copy`/`move`/`drop`/`take_*`/`any_pack_move`/`any_unpack_move`/phi/
-  `ret` operands that are affine are `owned` (never `borrowed`, never
-  already consumed in that instruction);
+- a `borrowed` value is never `move`'d, `drop`'d, `unpack_*`'d / `split_list`'d,
+  stored, or returned; never passed to a move-mode parameter (Core §10.7);
+- `copy`/`move`/`drop`/`unpack_*`/`split_list`/`any_pack_move`/
+  `any_unpack_move`/phi/`ret` operands that are affine are `owned`
+  (never `borrowed`, never already consumed in that instruction);
 - a forward analysis over the CFG tracks each affine value as
   `Available` / `Consumed` / `MaybeConsumed` per program point, merging
   at joins (`Available ⊔ Consumed = MaybeConsumed`): a consuming op
@@ -1270,9 +1289,9 @@ cannot drift. The check set:
   at all (its destruction is scheduled through its cleanup token, §6.4);
   a phi input is checked against its **arriving edge's** exit state, so
   the loop-carried phis of tail-call optimization validate per edge;
-- the `take_*` ops of one consuming destructure form a consecutive run
-  (ir.md §5.3): a take of a base already taken earlier in the same block
-  continues the run, and the base is dead only after its final take;
+- a destructure consumes its base atomically (`unpack_*` / `split_list`,
+  ir.md §5.3): one op, base `Available` on arrival and `Consumed`
+  afterwards — there is no partial-consumption state to track;
 - `drop` of a duplicable value is absent (the frontend never emits it);
   `cleanup_disable` / `drop_cleanup` operands are cleanup tokens;
 - borrow-mode `arg` is the only way a parameter arrives `borrowed`.
@@ -1285,7 +1304,7 @@ cannot drift. The check set:
   and the IR carries no callee signatures or union declarations):
   call-argument types against the callee's signature, syscall argument
   modes, and `switch` arm exhaustiveness over a union's variants;
-- `read_index`/`take_index` bases are lists; `read_tag` bases are unions;
+- `read_index` bases are lists; `read_tag` bases are unions;
 - no `ret` of a `borrowed` value.
 
 ## 14. Consumers and future work
@@ -1320,7 +1339,7 @@ requires that a value coerced to `any` carries its payload.
 | frontend.md | ir.md |
 | --- | --- |
 | §5.1 IR model | §3, §4 |
-| §5.2 `Value`/`Op`/`BasicBlock`/`Terminator`/`IrFunc` sketch | §5, §11 — superseded: instructions split into `Instr` (result + op), values carry `ValueState`, phis added, n-ary exceptions documented |
+| §5.2 `Value`/`Op`/`BasicBlock`/`Terminator`/`IrFunc` sketch | §5, §11 — superseded: instructions split into `Instr` (results + op), values carry `ValueState`, phis added, the atomic multi-result destructures documented |
 | §5.3 lowering rules | §12 |
 | §5.4 destruction placement | §6.4 |
 | §5.5 module init | §7 |

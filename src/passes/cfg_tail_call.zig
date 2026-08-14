@@ -78,8 +78,8 @@ fn findTailCalls(f: *cfg.IrFunc, allocator: std.mem.Allocator) ![]TailCall {
             const c = instr.op.call;
             if (c.callee != .direct) continue;
             if (c.callee.direct.func != f) continue; // self-recursion only
-            const chain = if (instr.result) |r|
-                try resultChain(f, b, r, allocator)
+            const chain = if (instr.results.len > 0)
+                try resultChain(f, b, instr.results[0], allocator)
             else
                 try voidChain(b, instr, allocator);
             if (chain) |ch| {
@@ -207,7 +207,7 @@ fn phiResult(b: *const cfg.BasicBlock, pred: *const cfg.BasicBlock, v: *const cf
     for (b.instrs) |instr| {
         if (instr.op != .phi) continue;
         for (instr.op.phi.incoming) |inc| {
-            if (inc.pred == pred and inc.value == v) return instr.result;
+            if (inc.pred == pred and inc.value == v) return instr.results[0];
         }
     }
     return null;
@@ -260,7 +260,8 @@ fn collectUses(f: *cfg.IrFunc, v: *cfg.Value, allocator: std.mem.Allocator) !std
 /// caller).
 fn instrUses(instr: *const cfg.Instr, v: *const cfg.Value) bool {
     return switch (instr.op) {
-        .neg, .not_, .num_cast, .any_pack_copy, .any_pack_move, .any_unpack_copy, .any_unpack_move, .cleanup_owner, .cleanup_disable, .drop_cleanup, .copy, .borrow, .move_, .tail, .take_tail, .read_tag, .read_payload, .take_payload, .drop_ => |x| x == v,
+        .neg, .not_, .num_cast, .any_pack_copy, .any_pack_move, .any_unpack_copy, .any_unpack_move, .cleanup_owner, .cleanup_disable, .drop_cleanup, .copy, .borrow, .move_, .tail, .unpack_struct, .unpack_tuple, .split_list, .read_tag, .read_payload, .drop_ => |x| x == v,
+        .unpack_variant => |uv| uv.base == v,
         .type_is => |x| x.value == v,
         .add, .sub, .mul, .div, .rem, .concat, .eq, .ne, .lt, .le, .gt, .ge => |x| x.a == v or x.b == v,
         .load_member => |x| x.module == v,
@@ -268,8 +269,8 @@ fn instrUses(instr: *const cfg.Instr, v: *const cfg.Value) bool {
         .construct => |x| for (x.args) |a| {
             if (a == v) break true;
         } else false,
-        .read_field, .take_field, .read_tuple, .take_tuple => |x| x.base == v,
-        .read_index, .take_index => |x| x.base == v or x.index == v,
+        .read_field, .read_tuple => |x| x.base == v,
+        .read_index => |x| x.base == v or x.index == v,
         .call => |x| if (x.callee == .value) x.callee.value == v else for (x.args) |a| {
             if (a == v) break true;
         } else false,
@@ -374,9 +375,11 @@ fn rewriteFunc(f: *cfg.IrFunc, allocator: std.mem.Allocator) !void {
             incoming[j + 1] = .{ .value = renames.get(arg) orelse arg, .pred = t.block };
         }
         const instr = try allocator.create(cfg.Instr);
+        const results = try allocator.alloc(*cfg.Value, 1);
+        results[0] = phi_results.items[i];
         instr.* = .{
             .span = f.params[i].span,
-            .result = phi_results.items[i],
+            .results = results,
             .op = .{ .phi = .{ .incoming = incoming } },
         };
         phi_results.items[i].def = instr;
@@ -453,9 +456,10 @@ fn rewriteBlock(b: *cfg.BasicBlock, renames: *const std.AutoHashMap(*cfg.Value, 
 /// Rewrite the value operands of `instr` in place.
 fn rewriteInstr(instr: *cfg.Instr, renames: *const std.AutoHashMap(*cfg.Value, *cfg.Value)) void {
     switch (instr.op) {
-        .neg, .not_, .num_cast, .any_pack_copy, .any_pack_move, .any_unpack_copy, .any_unpack_move, .cleanup_owner, .cleanup_disable, .drop_cleanup, .copy, .borrow, .move_, .tail, .take_tail, .read_tag, .read_payload, .take_payload, .drop_ => |*v| {
+        .neg, .not_, .num_cast, .any_pack_copy, .any_pack_move, .any_unpack_copy, .any_unpack_move, .cleanup_owner, .cleanup_disable, .drop_cleanup, .copy, .borrow, .move_, .tail, .unpack_struct, .unpack_tuple, .split_list, .read_tag, .read_payload, .drop_ => |*v| {
             v.* = renames.get(v.*) orelse v.*;
         },
+        .unpack_variant => |*uv| uv.base = renames.get(uv.base) orelse uv.base,
         .type_is => |*x| x.value = renames.get(x.value) orelse x.value,
         .add, .sub, .mul, .div, .rem, .concat, .eq, .ne, .lt, .le, .gt, .ge => |*x| {
             x.a = renames.get(x.a) orelse x.a;
@@ -466,8 +470,8 @@ fn rewriteInstr(instr: *cfg.Instr, renames: *const std.AutoHashMap(*cfg.Value, *
         .construct => |*x| {
             for (x.args) |*a| a.* = renames.get(a.*) orelse a.*;
         },
-        .read_field, .take_field, .read_tuple, .take_tuple => |*x| x.base = renames.get(x.base) orelse x.base,
-        .read_index, .take_index => |*x| {
+        .read_field, .read_tuple => |*x| x.base = renames.get(x.base) orelse x.base,
+        .read_index => |*x| {
             x.base = renames.get(x.base) orelse x.base;
             x.index = renames.get(x.index) orelse x.index;
         },

@@ -198,9 +198,15 @@ fn opText(op: Op) []const u8 {
 }
 
 fn printInstr(out: *std.ArrayList(u8), allocator: std.mem.Allocator, instr: *const Instr, block_index: *const std.AutoHashMap(*const BasicBlock, u32)) !void {
-    if (instr.result) |v| {
-        try w(out, allocator, "%{d}: ", .{v.id});
-        try printType(out, allocator, v.type_);
+    // The lhs: one `%id: type` per result, comma-separated — a single
+    // result for ordinary ops, several for the atomic destructure ops
+    // (ir.md §5.3, §9).
+    if (instr.results.len > 0) {
+        for (instr.results, 0..) |v, i| {
+            if (i > 0) try w(out, allocator, ", ", .{});
+            try w(out, allocator, "%{d}: ", .{v.id});
+            try printType(out, allocator, v.type_);
+        }
         try w(out, allocator, " = ", .{});
     }
     switch (instr.op) {
@@ -211,9 +217,14 @@ fn printInstr(out: *std.ArrayList(u8), allocator: std.mem.Allocator, instr: *con
         .arg => |i| try w(out, allocator, "arg #{d}", .{i}),
         .module_ref => |s| try w(out, allocator, "module_ref \"{s}\"", .{s}),
         .fn_ref => |n| try w(out, allocator, "fn_ref @{s}", .{n}),
-        .neg, .not_, .num_cast, .any_pack_copy, .any_pack_move, .any_unpack_copy, .any_unpack_move, .cleanup_owner, .copy, .borrow, .move_, .tail, .take_tail, .read_tag, .read_payload, .take_payload => |v| {
+        .neg, .not_, .num_cast, .any_pack_copy, .any_pack_move, .any_unpack_copy, .any_unpack_move, .cleanup_owner, .copy, .borrow, .move_, .tail, .unpack_struct, .unpack_tuple, .split_list, .read_tag, .read_payload => |v| {
             try w(out, allocator, "{s} ", .{opText(instr.op)});
             try printOperand(out, allocator, v);
+        },
+        .unpack_variant => |uv| {
+            try w(out, allocator, "unpack_variant ", .{});
+            try printOperand(out, allocator, uv.base);
+            try w(out, allocator, ", #{d}", .{uv.tag});
         },
         .type_is => |ti| {
             try w(out, allocator, "type_is ", .{});
@@ -245,12 +256,12 @@ fn printInstr(out: *std.ArrayList(u8), allocator: std.mem.Allocator, instr: *con
                 try printOperand(out, allocator, arg);
             }
         },
-        .read_field, .take_field, .read_tuple, .take_tuple => |p| {
+        .read_field, .read_tuple => |p| {
             try w(out, allocator, "{s} ", .{opText(instr.op)});
             try printOperand(out, allocator, p.base);
             try w(out, allocator, ", #{d}", .{p.index});
         },
-        .read_index, .take_index => |ix| {
+        .read_index => |ix| {
             try w(out, allocator, "{s} ", .{opText(instr.op)});
             try printOperand(out, allocator, ix.base);
             try w(out, allocator, ", ", .{});
@@ -427,8 +438,8 @@ test "cfg round-trips construct, tail, and read/take projections" {
         \\        %1: int32 = const 1
         \\        %2: list[int32] = construct %1, %1
         \\        %3: int32 = read_index %2, %1
-        \\        %4: int32 = take_index %2, %1
-        \\        %5: list[int32] = tail %2
+        \\        %4: int32, %5: list[int32] = split_list %2
+        \\        %6: list[int32] = tail %2
         \\        ret %3
         \\    }
         \\}
@@ -440,7 +451,8 @@ test "cfg round-trips construct, tail, and read/take projections" {
     defer std.testing.allocator.free(out);
     try std.testing.expect(std.mem.indexOf(u8, out, "construct") != null);
     try std.testing.expect(std.mem.indexOf(u8, out, "read_index") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out, "take_index") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "split_list") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "%4: int32, %5: list[int32] = split_list %2") != null);
     try std.testing.expect(std.mem.indexOf(u8, out, "tail ") != null);
 }
 test "cfg round-trips call, syscall, and type_is" {

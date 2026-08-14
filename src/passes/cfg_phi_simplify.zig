@@ -61,11 +61,11 @@ fn simplifyFunc(f: *cfg.IrFunc, allocator: std.mem.Allocator) !void {
         changed = false;
         for (f.blocks) |b| {
             for (b.instrs) |instr| {
-                if (instr.result == null or instr.op != .phi) continue;
+                if (instr.results.len == 0 or instr.op != .phi) continue;
                 const phi = &instr.op.phi;
-                if (fwd.contains(instr.result.?)) continue;
-                if (trivialSource(&fwd, instr.result.?, phi)) |src| {
-                    try fwd.put(instr.result.?, src);
+                if (fwd.contains(instr.results[0])) continue;
+                if (trivialSource(&fwd, instr.results[0], phi)) |src| {
+                    try fwd.put(instr.results[0], src);
                     changed = true;
                 }
             }
@@ -147,9 +147,10 @@ fn rewriteBlock(b: *cfg.BasicBlock, fwd: *const std.AutoHashMap(*cfg.Value, *cfg
 /// Rewrite the value operands of `instr` in place.
 fn rewriteInstr(instr: *cfg.Instr, fwd: *const std.AutoHashMap(*cfg.Value, *cfg.Value)) void {
     switch (instr.op) {
-        .neg, .not_, .num_cast, .any_pack_copy, .any_pack_move, .any_unpack_copy, .any_unpack_move, .cleanup_owner, .cleanup_disable, .drop_cleanup, .copy, .borrow, .move_, .tail, .take_tail, .read_tag, .read_payload, .take_payload, .drop_ => |*v| {
+        .neg, .not_, .num_cast, .any_pack_copy, .any_pack_move, .any_unpack_copy, .any_unpack_move, .cleanup_owner, .cleanup_disable, .drop_cleanup, .copy, .borrow, .move_, .tail, .unpack_struct, .unpack_tuple, .split_list, .read_tag, .read_payload, .drop_ => |*v| {
             v.* = resolve(fwd, v.*);
         },
+        .unpack_variant => |*uv| uv.base = resolve(fwd, uv.base),
         .type_is => |*x| x.value = resolve(fwd, x.value),
         .add, .sub, .mul, .div, .rem, .concat, .eq, .ne, .lt, .le, .gt, .ge => |*x| {
             x.a = resolve(fwd, x.a);
@@ -160,8 +161,8 @@ fn rewriteInstr(instr: *cfg.Instr, fwd: *const std.AutoHashMap(*cfg.Value, *cfg.
         .construct => |*x| {
             for (x.args) |*a| a.* = resolve(fwd, a.*);
         },
-        .read_field, .take_field, .read_tuple, .take_tuple => |*x| x.base = resolve(fwd, x.base),
-        .read_index, .take_index => |*x| {
+        .read_field, .read_tuple => |*x| x.base = resolve(fwd, x.base),
+        .read_index => |*x| {
             x.base = resolve(fwd, x.base);
             x.index = resolve(fwd, x.index);
         },
@@ -184,9 +185,9 @@ fn rewriteInstr(instr: *cfg.Instr, fwd: *const std.AutoHashMap(*cfg.Value, *cfg.
 fn removePhis(b: *cfg.BasicBlock, fwd: *const std.AutoHashMap(*cfg.Value, *cfg.Value), allocator: std.mem.Allocator) !void {
     var out = std.ArrayList(*cfg.Instr).empty;
     for (b.instrs) |instr| {
-        if (instr.result) |r| {
-            if (fwd.contains(r)) continue;
-        }
+        // Only phis are ever forwarded, and a phi has exactly one
+        // result; a forwarded phi is dead.
+        if (instr.op == .phi and instr.results.len > 0 and fwd.contains(instr.results[0])) continue;
         try out.append(allocator, instr);
     }
     b.instrs = try out.toOwnedSlice(allocator);

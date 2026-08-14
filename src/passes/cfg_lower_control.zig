@@ -372,9 +372,11 @@ pub fn armVariantTag(self: *Lowerer, fs: *FuncState, ud: *const ast.UnionDef, pa
 }
 
 /// Bind the patterns of a union-match arm: a variant pattern binds
-/// its payload (`take_payload` for a consuming match, `read_payload`
-/// otherwise); an identifier pattern binds the whole scrutinee
-/// (borrowed for a non-consuming match, Core §13.4).
+/// its payload (`unpack_variant` for a consuming match — one atomic op
+/// defines the variant's payload values, tag-carrying for backend
+/// self-containment, ir.md §5.3 — `read_payload` otherwise); an
+/// identifier pattern binds the whole scrutinee (borrowed for a
+/// non-consuming match, Core §13.4).
 pub fn bindUnionPattern(self: *Lowerer, fs: *FuncState, pattern: *const ast.Pattern, scrut: *cfg.Value, moving: bool) LowerError!void {
     switch (pattern.*) {
         .wildcard => {},
@@ -387,32 +389,37 @@ pub fn bindUnionPattern(self: *Lowerer, fs: *FuncState, pattern: *const ast.Patt
                 const types = variant.types orelse return;
                 if (types.len == 1) {
                     const payload_type = try self.resolveType(fs, &types[0]);
-                    const payload = (if (moving)
-                        try cfg_lower_emit.emit(self, fs, vp.name.span, .{ .take_payload = scrut }, payload_type)
-                    else
-                        try cfg_lower_emit.emit(self, fs, vp.name.span, .{ .read_payload = scrut }, payload_type)) orelse return;
-                    if (args.len == 1) {
-                        try cfg_lower_pattern.bindPattern(self, fs, &args[0], payload, payload.state == .owned);
+                    if (moving) {
+                        const payload = (try cfg_lower_emit.emitUnpack(self, fs, vp.name.span, .{ .unpack_variant = .{ .base = scrut, .tag = @intCast(tag) } }, &.{payload_type}))[0];
+                        if (args.len == 1) {
+                            try cfg_lower_pattern.bindPattern(self, fs, &args[0], payload, payload.state == .owned);
+                        } else {
+                            return self.fail(vp.name.span, "variant '{s}' has a single payload; expected one pattern", .{vp.name.text});
+                        }
                     } else {
-                        return self.fail(vp.name.span, "variant '{s}' has a single payload; expected one pattern", .{vp.name.text});
+                        const payload = (try cfg_lower_emit.emit(self, fs, vp.name.span, .{ .read_payload = scrut }, payload_type)) orelse return;
+                        if (args.len == 1) {
+                            try cfg_lower_pattern.bindPattern(self, fs, &args[0], payload, payload.state == .owned);
+                        } else {
+                            return self.fail(vp.name.span, "variant '{s}' has a single payload; expected one pattern", .{vp.name.text});
+                        }
                     }
                 } else {
-                    // A tuple payload destructures element-wise.
+                    // A tuple payload destructures element-wise: one
+                    // `unpack_variant` defines every payload element.
                     var payload_elems = std.ArrayListUnmanaged(cfg.Type).empty;
                     for (types) |*t| try payload_elems.append(self.arena, try self.resolveType(fs, t));
-                    const tuple_type: cfg.Type = .{ .tuple = payload_elems.items };
-                    const payload = (if (moving)
-                        try cfg_lower_emit.emit(self, fs, vp.name.span, .{ .take_payload = scrut }, tuple_type)
-                    else
-                        try cfg_lower_emit.emit(self, fs, vp.name.span, .{ .read_payload = scrut }, tuple_type)) orelse return;
-                    for (args, 0..) |*argp, i| {
-                        const proj = (if (moving)
-                            try cfg_lower_emit.emit(self, fs, argp.span(), .{ .take_tuple = .{ .base = payload, .index = @intCast(i) } }, payload_elems.items[i])
-                        else
-                            try cfg_lower_emit.emit(self, fs, argp.span(), .{ .read_tuple = .{ .base = payload, .index = @intCast(i) } }, payload_elems.items[i])) orelse continue;
-                        try cfg_lower_pattern.bindPattern(self, fs, argp, proj, proj.state == .owned);
+                    if (moving) {
+                        const payloads = try cfg_lower_emit.emitUnpack(self, fs, vp.name.span, .{ .unpack_variant = .{ .base = scrut, .tag = @intCast(tag) } }, payload_elems.items);
+                        for (args, payloads) |*argp, proj| try cfg_lower_pattern.bindPattern(self, fs, argp, proj, proj.state == .owned);
+                    } else {
+                        const tuple_type: cfg.Type = .{ .tuple = payload_elems.items };
+                        const payload = (try cfg_lower_emit.emit(self, fs, vp.name.span, .{ .read_payload = scrut }, tuple_type)) orelse return;
+                        for (args, 0..) |*argp, i| {
+                            const proj = (try cfg_lower_emit.emit(self, fs, argp.span(), .{ .read_tuple = .{ .base = payload, .index = @intCast(i) } }, payload_elems.items[i])) orelse continue;
+                            try cfg_lower_pattern.bindPattern(self, fs, argp, proj, proj.state == .owned);
+                        }
                     }
-                    if (moving) cfg_lower_emit.markConsumed(self, fs, payload);
                 }
             },
             .none => {

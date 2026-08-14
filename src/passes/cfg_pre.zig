@@ -116,8 +116,8 @@ fn candidatesOf(
 ) ![]*cfg.Instr {
     var out = std.ArrayList(*cfg.Instr).empty;
     for (b.instrs) |instr| {
-        if (instr.result == null) continue;
-        if (instr.result.?.ownership != .duplicable) continue;
+        if (instr.results.len == 0) continue;
+        if (instr.results[0].ownership != .duplicable) continue;
         if (!isCandidate(instr)) continue;
         if (!operandsDominate(f, b, instr, dom)) continue;
         try out.append(allocator, instr);
@@ -227,9 +227,9 @@ fn eliminate(
         var found: ?*cfg.Value = null;
         for (p.instrs) |pi| {
             if (pi == cand) continue;
-            if (pi.result == null) continue;
+            if (pi.results.len == 0) continue;
             if (cfg.identical(pi.op, cand.op)) {
-                found = pi.result;
+                found = pi.results[0];
                 break;
             }
         }
@@ -243,7 +243,7 @@ fn eliminate(
     // end of every other predecessor.
     const incoming = try allocator.alloc(cfg.PhiIn, b.preds.len);
     for (b.preds, 0..) |p, i| {
-        const value = available[i] orelse (try insertAtEnd(p, cand, allocator)).result.?;
+        const value = available[i] orelse (try insertAtEnd(p, cand, allocator)).results[0];
         incoming[i] = .{ .value = value, .pred = p };
     }
 
@@ -251,8 +251,10 @@ fn eliminate(
     // keeps its def; the join block keeps its instruction count (one phi
     // in, one computation out).
     const phi = try allocator.create(cfg.Instr);
-    phi.* = .{ .span = cand.span, .result = cand.result, .op = .{ .phi = .{ .incoming = incoming } } };
-    cand.result.?.def = phi;
+    const one = try allocator.alloc(*cfg.Value, 1);
+    one[0] = cand.results[0];
+    phi.* = .{ .span = cand.span, .results = one, .op = .{ .phi = .{ .incoming = incoming } } };
+    cand.results[0].def = phi;
 
     const new_instrs = try allocator.alloc(*cfg.Instr, b.instrs.len);
     var cand_index: usize = 0;
@@ -272,12 +274,14 @@ fn eliminate(
 fn insertAtEnd(p: *cfg.BasicBlock, cand: *const cfg.Instr, allocator: std.mem.Allocator) !*cfg.Instr {
     const ninstr = try allocator.create(cfg.Instr);
     const nval = try allocator.create(cfg.Value);
-    ninstr.* = .{ .span = cand.span, .result = nval, .op = cand.op };
+    const one = try allocator.alloc(*cfg.Value, 1);
+    one[0] = nval;
+    ninstr.* = .{ .span = cand.span, .results = one, .op = cand.op };
     nval.* = .{
         .id = 0, // placeholder; renumber fixes it in text order
         .span = cand.span,
-        .type_ = cand.result.?.type_,
-        .ownership = cand.result.?.ownership,
+        .type_ = cand.results[0].type_,
+        .ownership = cand.results[0].ownership,
         .state = .owned,
         .def = ninstr,
     };

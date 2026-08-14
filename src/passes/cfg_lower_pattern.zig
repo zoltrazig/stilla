@@ -71,10 +71,10 @@ pub fn patternHasTypeTest(p: *const ast.Pattern) bool {
 
 /// Bind the names a pattern introduces. `base_owned` is true when the
 /// destructure *takes* (`let p = move x`, `match (move s)`, a
-/// consuming `for`): projections are `take_*` and the base is
-/// consumed as a whole after its final projection (Core §14.6, §18
-/// *Whole-owner rule*). Otherwise projections are `read_*` (borrowed
-/// views of affine bases, ir.md §5.3).
+/// consuming `for`): the base is consumed as a whole by one atomic
+/// `unpack_*` / `split_list` op and all parts are defined at once (Core
+/// §14.6, §18 *Whole-owner rule*, ir.md §5.3). Otherwise projections
+/// are `read_*` (borrowed views of affine bases).
 pub fn bindPattern(self: *Lowerer, fs: *FuncState, pattern: *const ast.Pattern, base: *cfg.Value, base_owned: bool) LowerError!void {
     switch (pattern.*) {
         .wildcard => {
@@ -128,23 +128,38 @@ pub fn destructureStruct(self: *Lowerer, fs: *FuncState, pp: *const ast.PathPatt
     const name = try cfg_lower_path.joinPath(self, pp.path);
     const sd = moduleinfo.structDecl(self.resolve, fs.module, name) orelse
         return self.fail(sp.span, "unknown struct type '{s}'", .{name});
-    for (sp.fields) |*fp| {
-        const idx = moduleinfo.fieldIndex(sd, fp.name.text) orelse
-            return self.fail(fp.name.span, "struct '{s}' has no field '{s}'", .{ name, fp.name.text });
-        const field_type = try self.resolveType(fs, &sd.fields[idx].type_);
-        const proj = (if (base_owned)
-            try cfg_lower_emit.emit(self, fs, fp.name.span, .{ .take_field = .{ .base = base, .index = idx } }, field_type)
-        else
-            try cfg_lower_emit.emit(self, fs, fp.name.span, .{ .read_field = .{ .base = base, .index = idx } }, field_type)) orelse continue;
-        if (fp.pattern) |*p2| {
-            try bindPattern(self, fs, p2, proj, proj.state == .owned);
-        } else {
-            try cfg_lower_emit.bindLocal(self, fs, fp.name.text, proj, proj.state == .owned and proj.ownership == .affine);
-        }
-    }
     if (base_owned) {
+        // Atomic destructure (ir.md §5.3): one `unpack_struct` consumes
+        // the base as a whole and defines every field value at once — no
+        // half-consumed base states exist.
+        const field_types = try self.arena.alloc(cfg.Type, sp.fields.len);
+        for (sp.fields, 0..) |*fp, i| {
+            const idx = moduleinfo.fieldIndex(sd, fp.name.text) orelse
+                return self.fail(fp.name.span, "struct '{s}' has no field '{s}'", .{ name, fp.name.text });
+            field_types[i] = try self.resolveType(fs, &sd.fields[idx].type_);
+        }
+        const results = try cfg_lower_emit.emitUnpack(self, fs, sp.span, .{ .unpack_struct = base }, field_types);
         cfg_lower_emit.markConsumed(self, fs, base);
         try cfg_lower_emit.cleanupDisable(self, fs, base.span, base);
+        for (sp.fields, results) |*fp, proj| {
+            if (fp.pattern) |*p2| {
+                try bindPattern(self, fs, p2, proj, proj.state == .owned);
+            } else {
+                try cfg_lower_emit.bindLocal(self, fs, fp.name.text, proj, proj.state == .owned and proj.ownership == .affine);
+            }
+        }
+    } else {
+        for (sp.fields) |*fp| {
+            const idx = moduleinfo.fieldIndex(sd, fp.name.text) orelse
+                return self.fail(fp.name.span, "struct '{s}' has no field '{s}'", .{ name, fp.name.text });
+            const field_type = try self.resolveType(fs, &sd.fields[idx].type_);
+            const proj = (try cfg_lower_emit.emit(self, fs, fp.name.span, .{ .read_field = .{ .base = base, .index = idx } }, field_type)) orelse continue;
+            if (fp.pattern) |*p2| {
+                try bindPattern(self, fs, p2, proj, proj.state == .owned);
+            } else {
+                try cfg_lower_emit.bindLocal(self, fs, fp.name.text, proj, proj.state == .owned and proj.ownership == .affine);
+            }
+        }
     }
 }
 
@@ -154,16 +169,16 @@ pub fn destructureTuple(self: *Lowerer, fs: *FuncState, tp: *const ast.TuplePatt
         else => return self.fail(tp.span, "tuple pattern requires a tuple value", .{}),
     };
     if (tp.elems.len > elems.len) return self.fail(tp.span, "tuple pattern has too many elements", .{});
-    for (tp.elems, 0..) |*el, i| {
-        const proj = (if (base_owned)
-            try cfg_lower_emit.emit(self, fs, el.span(), .{ .take_tuple = .{ .base = base, .index = @intCast(i) } }, elems[i])
-        else
-            try cfg_lower_emit.emit(self, fs, el.span(), .{ .read_tuple = .{ .base = base, .index = @intCast(i) } }, elems[i])) orelse continue;
-        try bindPattern(self, fs, el, proj, proj.state == .owned);
-    }
     if (base_owned) {
+        const results = try cfg_lower_emit.emitUnpack(self, fs, tp.span, .{ .unpack_tuple = base }, elems[0..tp.elems.len]);
         cfg_lower_emit.markConsumed(self, fs, base);
         try cfg_lower_emit.cleanupDisable(self, fs, base.span, base);
+        for (tp.elems, results) |*el, proj| try bindPattern(self, fs, el, proj, proj.state == .owned);
+    } else {
+        for (tp.elems, 0..) |*el, i| {
+            const proj = (try cfg_lower_emit.emit(self, fs, el.span(), .{ .read_tuple = .{ .base = base, .index = @intCast(i) } }, elems[i])) orelse continue;
+            try bindPattern(self, fs, el, proj, proj.state == .owned);
+        }
     }
 }
 
@@ -172,29 +187,49 @@ pub fn destructureList(self: *Lowerer, fs: *FuncState, lp: *const ast.ListPatter
         .list => |inner| inner.*,
         else => return self.fail(lp.span, "list pattern requires a list value", .{}),
     };
-    for (lp.items, 0..) |*item, i| {
-        const idx = (try cfg_lower_expr.emitConst(self, fs, item.span(), .{ .int = @intCast(i) }, .{ .primitive = .int32 })).?;
-        const proj = (if (base_owned)
-            try cfg_lower_emit.emit(self, fs, item.span(), .{ .take_index = .{ .base = base, .index = idx } }, elem_type)
-        else
-            try cfg_lower_emit.emit(self, fs, item.span(), .{ .read_index = .{ .base = base, .index = idx } }, elem_type)) orelse continue;
-        try bindPattern(self, fs, item, proj, proj.state == .owned);
-    }
-    if (lp.rest) |rest| {
-        // `..rest` binds the remaining list: a borrowed sublist view in a
-        // non-consuming match, an owned remainder in a consuming one
-        // (Core §14.5, §14.6).
-        const inner = try self.arena.create(cfg.Type);
-        inner.* = elem_type;
-        const tail = (if (base_owned)
-            try cfg_lower_emit.emit(self, fs, rest.span, .{ .take_tail = base }, .{ .list = inner })
-        else
-            try cfg_lower_emit.emit(self, fs, rest.span, .{ .tail = base }, .{ .list = inner })) orelse return;
-        try cfg_lower_emit.bindLocal(self, fs, rest.text, tail, tail.state == .owned and tail.ownership == .affine);
-    }
     if (base_owned) {
+        // Atomic destructure (ir.md §5.3): one `split_list` consumes the
+        // base as a whole and defines the item values, then the owned
+        // rest. An exact pattern (`[a, b]`, no rest) drops the remainder
+        // immediately — the whole list is still consumed.
+        var types = std.ArrayListUnmanaged(cfg.Type).empty;
+        try types.appendNTimes(self.arena, elem_type, lp.items.len);
+        const tail_type = try self.arena.create(cfg.Type);
+        tail_type.* = .{ .list = try self.arena.create(cfg.Type) };
+        tail_type.list.* = elem_type;
+        try types.append(self.arena, tail_type.*);
+        const results = try cfg_lower_emit.emitUnpack(self, fs, lp.span, .{ .split_list = base }, types.items);
         cfg_lower_emit.markConsumed(self, fs, base);
         try cfg_lower_emit.cleanupDisable(self, fs, base.span, base);
+        for (lp.items, results[0..lp.items.len]) |*item, proj| try bindPattern(self, fs, item, proj, proj.state == .owned);
+        if (lp.rest) |rest| {
+            try cfg_lower_emit.bindLocal(self, fs, rest.text, results[results.len - 1], results[results.len - 1].state == .owned and results[results.len - 1].ownership == .affine);
+        } else if (results.len > 0) {
+            // Exact pattern (ir.md §5.3): the remainder is dead; destroy
+            // it now. The drop fires for affine and deferred (generic)
+            // element types — a generic remainder may resolve to affine
+            // at monomorphization and must not leak; a provably
+            // duplicable remainder (e.g. list[int32]) needs no drop.
+            const rest_v = results[results.len - 1];
+            if (cfg_lower_emit.mayBeAffine(self, fs, rest_v.type_) and rest_v.state == .owned and !cfg_lower_emit.isConsumed(fs, rest_v)) {
+                _ = try cfg_lower_emit.emit(self, fs, lp.span, .{ .drop_ = rest_v }, null);
+                cfg_lower_emit.markConsumed(self, fs, rest_v);
+            }
+        }
+    } else {
+        for (lp.items, 0..) |*item, i| {
+            const idx = (try cfg_lower_expr.emitConst(self, fs, item.span(), .{ .int = @intCast(i) }, .{ .primitive = .int32 })).?;
+            const proj = (try cfg_lower_emit.emit(self, fs, item.span(), .{ .read_index = .{ .base = base, .index = idx } }, elem_type)) orelse continue;
+            try bindPattern(self, fs, item, proj, proj.state == .owned);
+        }
+        if (lp.rest) |rest| {
+            // `..rest` binds the remaining list: a borrowed sublist view in
+            // a non-consuming match (Core §14.5).
+            const inner = try self.arena.create(cfg.Type);
+            inner.* = elem_type;
+            const tail = (try cfg_lower_emit.emit(self, fs, rest.span, .{ .tail = base }, .{ .list = inner })) orelse return;
+            try cfg_lower_emit.bindLocal(self, fs, rest.text, tail, tail.state == .owned and tail.ownership == .affine);
+        }
     }
 }
 
