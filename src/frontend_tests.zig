@@ -1096,6 +1096,232 @@ test "frontend applies the any-parameter exception with move discipline" {
     try testing.expect(std.mem.indexOf(u8, c2.diag.?.message, "'any' parameter") != null);
 }
 
+fn expectCompiles(entry: []const u8, texts: []const struct { []const u8, []const u8 }) !void {
+    var c = try compileText(entry, texts);
+    defer c.deinit();
+    if (c.program == null) {
+        const msg = if (c.diag) |d| d.message else "no diagnostic";
+        std.debug.print("spec example failed to compile: {s}\n", .{msg});
+        return error.SpecExampleFailed;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Spec-example conformance: the normative examples of the spec documents
+// (Core, Runtime, StdLib), assembled into compilable programs. Each example
+// is the exact source from the spec (wrapped in `fn main` where the spec
+// shows a fragment), so a regression here means the specs and the frontend
+// have drifted.
+// ---------------------------------------------------------------------------
+
+test "spec examples compile: Core 2.8 using value alias" {
+    // `using string.upper as up; up(text)` resolves to the member.
+    try expectCompiles("app", &.{
+        .{
+            "app",
+            \\const string = import("string");
+            \\using string.upper as up;
+            \\fn shout(text: str) -> str { up(text) }
+            \\fn main() -> void { let _ = shout("hi"); }
+        },
+    });
+}
+
+test "spec examples compile: Core 6.1 no implicit receiver" {
+    try expectCompiles("app", &.{
+        .{
+            "app",
+            \\struct Counter {
+            \\    value: int32;
+            \\    next: fn(borrow Counter) -> int32;
+            \\}
+            \\fn main() -> int32 {
+            \\    let counter = Counter{
+            \\        value: 10,
+            \\        next: fn(borrow c: Counter) -> int32 { c.value + 1 }
+            \\    };
+            \\    counter.next(counter)
+            \\}
+        },
+    });
+}
+
+test "spec examples compile: Core 10.8 box peek unbox" {
+    // Runtime §4.5/§4.6; Core §10.8. The example uses a concrete `Tree`
+    // with int32 payloads, as written in the spec.
+    try expectCompiles("app", &.{
+        .{
+            "app",
+            \\const builtin = import("builtin");
+            \\union Tree { Empty, Node(box[Tree], int32, box[Tree]) }
+            \\fn contains(borrow tree: Tree, v: int32) -> bool {
+            \\    match (tree) {
+            \\        Tree::Empty => false,
+            \\        Tree::Node(left, x, right) =>
+            \\            if (v == x) { true }
+            \\            else if (v < x) { contains(builtin.peek(left), v) }
+            \\            else { contains(builtin.peek(right), v) }
+            \\    }
+            \\}
+            \\fn main() -> void {}
+        },
+    });
+}
+
+test "spec examples compile: Core 11.6 any" {
+    try expectCompiles("app", &.{
+        .{
+            "app",
+            \\const builtin = import("builtin");
+            \\struct File { fd: int32; drop(f) { builtin.print("x"); } }
+            \\fn open_file(path: str) -> File { File{ fd: 1 } }
+            \\fn main() -> void {
+            \\    let a: any = 42;
+            \\    let b: any = "hello";
+            \\    let c: any = open_file("f");
+            \\}
+        },
+    });
+}
+
+test "spec examples compile: Core 11.6.1 recovery by as" {
+    try expectCompiles("app", &.{
+        .{
+            "app",
+            \\fn main() -> int32 {
+            \\    let a: any = 42;
+            \\    let b = a as int32;
+            \\    b
+            \\}
+        },
+    });
+}
+
+test "spec examples compile: Core 11.6.2 type-test match" {
+    try expectCompiles("app", &.{
+        .{
+            "app",
+            \\const builtin = import("builtin");
+            \\fn main() -> void {
+            \\    let a: any = 42;
+            \\    match (a) {
+            \\        int32 n => builtin.print(builtin.str(n)),
+            \\        str s => builtin.print(s),
+            \\        _ => builtin.print("other")
+            \\    };
+            \\}
+        },
+    });
+}
+
+test "spec examples compile: Core 12 generics" {
+    // §12.1 declarations, §12.2 inferred call, §12.3 explicit call.
+    try expectCompiles("app", &.{
+        .{
+            "app",
+            \\struct Pair[A, B] { first: A; second: B; }
+            \\fn identity[T](move value: T) -> T { move value }
+            \\type PairList[T] = list[tuple[T, T]];
+            \\fn main() -> void {
+            \\    let p = Pair{ first: 1, second: "x" };
+            \\    let v = identity(42);
+            \\    let w = identity::[int32](43);
+            \\    let _ = p; let _ = v; let _ = w;
+            \\}
+        },
+    });
+}
+
+test "spec examples compile: Core 13.3 match" {
+    try expectCompiles("app", &.{
+        .{
+            "app",
+            \\const builtin = import("builtin");
+            \\union Result { Ok(str), Err(str) }
+            \\fn main() -> void {
+            \\    let result = Result::Ok("done");
+            \\    let message = match (result) {
+            \\        Result::Ok(value) => "ok: " + builtin.str(value),
+            \\        Result::Err(error) => "error: " + error
+            \\    };
+            \\    builtin.print(message);
+            \\}
+        },
+    });
+}
+
+test "spec examples compile: Core 17 file module" {
+    // The `os` module is a hypothetical host module, supplied here.
+    try expectCompiles("app", &.{
+        .{ "os", "fn open(path: str) -> int32;\nfn create(path: str) -> int32;\nfn close(fd: int32) -> void;" },
+        .{
+            "app",
+            \\const os = import("os");
+            \\const builtin = import("builtin");
+            \\struct File {
+            \\    fd: int32;
+            \\    path: str;
+            \\    drop(file) { os.close(file.fd); }
+            \\}
+            \\fn open(path: str) -> File { File{ fd: os.open(path), path: path } }
+            \\fn create(path: str) -> File { File{ fd: os.create(path), path: path } }
+            \\fn inspect(borrow file: File) -> void { builtin.print(file.path); }
+            \\fn main() -> void {
+            \\    let handle = open("data.txt");
+            \\    inspect(handle);
+            \\    drop handle;
+            \\}
+        },
+    });
+}
+
+test "spec examples compile: StdLib 4 math and Runtime 4 box" {
+    try expectCompiles("app", &.{
+        .{
+            "app",
+            \\const math = import("math");
+            \\const builtin = import("builtin");
+            \\fn main() -> float32 {
+            \\    let radius = 2.0;
+            \\    let area = math.pi * math.pow(radius, 2.0);
+            \\    let diagonal = math.sqrt(3.0 * 3.0 + 4.0 * 4.0);
+            \\    area + diagonal
+            \\}
+        },
+    });
+    // Runtime §4.5/§4.6: box, peek, unbox.
+    try expectCompiles("app", &.{
+        .{
+            "app",
+            \\const builtin = import("builtin");
+            \\fn main() -> int32 {
+            \\    let b = builtin.box(42);
+            \\    let n = builtin.peek(b);
+            \\    let u = builtin.unbox(move b);
+            \\    n + u
+            \\}
+        },
+    });
+}
+
+test "spec examples compile: StdLib 7 iter" {
+    try expectCompiles("app", &.{
+        .{
+            "app",
+            \\const iter = import("iter");
+            \\const builtin = import("builtin");
+            \\fn main() -> void {
+            \\    let total = iter.fold(
+            \\        builtin.range(1, 10),
+            \\        0,
+            \\        fn(move acc: int32, borrow x: int32) -> int32 { acc + x }
+            \\    );
+            \\    builtin.print(builtin.str(total));
+            \\}
+        },
+    });
+}
+
 test "frontend rejects missing, duplicate, and unknown struct fields" {
     // Core §8.1: all fields must be supplied exactly once; unknown fields
     // and duplicate fields are frontend.compile-time errors.

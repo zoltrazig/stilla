@@ -165,9 +165,18 @@ fn checkLet(frame: *Frame, l: *const ast.LetStmt) CheckError!void {
     // it against the initializer (frontend §4.6, Core §5).
     if (l.type_ != null) _ = try frame.ck.resolveTypeOf(frame.ma, frame.info, &l.type_.?);
     const t: ?cfg.Type = blk: {
-        if (try inferExpr(frame, l.init)) |it| break :blk it;
-        if (l.type_ != null) break :blk try frame.ck.resolveTypeOf(frame.ma, frame.info, &l.type_.?);
-        break :blk null;
+        // A declared `any` type makes the binding `any` (Core §11.6): the
+        // top-type coercion is materialized at the let, so type-test
+        // patterns and `as` recovery see a genuine `any` value. The
+        // initializer is still inferred and annotated (its type feeds
+        // `validateLet`'s compatibility check).
+        const it = try inferExpr(frame, l.init);
+        if (l.type_ != null) {
+            const dt = try frame.ck.resolveTypeOf(frame.ma, frame.info, &l.type_.?);
+            if (dt == .primitive and dt.primitive == .any) break :blk dt;
+            if (it == null) break :blk dt;
+        }
+        break :blk it;
     };
     // A `let` binding owns its initializer, so the initializer may not be
     // a borrowed unique value (Core §10.7, §18). An irrefutable

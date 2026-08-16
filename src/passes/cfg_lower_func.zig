@@ -151,7 +151,24 @@ pub fn lowerLet(self: *Lowerer, fs: *FuncState, ls: *const ast.LetStmt) LowerErr
     }
     const moving = cfg_lower_expr.isMoveExpr(ls.init);
     const init_val = (try cfg_lower_expr.lowerExpr(self, fs, ls.init)) orelse return;
-    try cfg_lower_pattern.bindPattern(self, fs, &ls.pattern, init_val, moving);
+    // A declared `any` binding materializes the top-type coercion at the
+    // let (Core §11.6): a Copy source is any_pack_copy'd, a unique source
+    // any_pack_move'd — the same pack the call boundary emits (ir.md §4.4).
+    var bound = init_val;
+    if (ls.type_) |*dt| {
+        const declared = try self.resolveType(fs, dt);
+        if (declared == .primitive and declared.primitive == .any and !cfg.Type.eql(init_val.type_, declared)) {
+            const span = init_val.span;
+            if (init_val.ownership == .unique) {
+                cfg_lower_emit.markConsumed(self, fs, init_val);
+                try cfg_lower_emit.cleanupDisable(self, fs, span, init_val);
+                bound = (try cfg_lower_emit.emit(self, fs, span, .{ .any_pack_move = init_val }, declared)).?;
+            } else {
+                bound = (try cfg_lower_emit.emit(self, fs, span, .{ .any_pack_copy = init_val }, declared)).?;
+            }
+        }
+    }
+    try cfg_lower_pattern.bindPattern(self, fs, &ls.pattern, bound, moving);
 }
 
 /// Lower a `drop` statement: look up the binding, reject borrowed values,

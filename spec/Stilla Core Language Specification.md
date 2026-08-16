@@ -1500,10 +1500,13 @@ carries no runtime type tag, so it cannot be an `any` payload.
 ```stilla
 let a: any = 42;                    // Copy int32, copied in
 let b: any = "hello";               // Copy str, copied in
-let c: any = move open_file("f");   // unique File, moved in
+let c: any = open_file("f");        // unique File, moved in (fresh value)
 ```
 
-The coercion is implicit. A Copy source value is copied into the `any`; a unique source value must be moved — an existing unique owner requires explicit `move` at the coercion site — and its ownership transfers into the `any`.
+The coercion is implicit. A Copy source value is copied into the `any`; a
+unique source value must be moved — an existing unique owner requires
+explicit `move` at the coercion site, while a fresh unique expression
+transfers implicitly (§10.5) — and its ownership transfers into the `any`.
 
 `any` is **unique** (§10.3): because it may hold a unique value, an `any` value may be used at most once, must be destroyed exactly once, and is not implicitly copyable. `any` therefore does not appear in the Copy list of §10.1, and containers of `any` — `list[any]`, `box[any]`, `tuple[..., any]` — are unique.
 
@@ -1539,7 +1542,7 @@ Ownership follows the target type, statically:
 A `match` may test an `any` value with **type-test patterns**:
 
 ```stilla
-match a {
+match (a) {
     int32 n => ...,
     str s => ...,
     File f => ...,
@@ -1548,6 +1551,8 @@ match a {
 ```
 
 A type-test pattern is a concrete type name, optionally followed by a binding identifier (§14.7). It matches when the runtime tag equals that type. Because the tag space is open — any program may define new types — a `match` over an `any` value must include a wildcard `_` arm.
+
+(The scrutinee is parenthesized per §13.3.)
 
 Binding mode follows §13.4:
 
@@ -1686,19 +1691,19 @@ let f = identity;
 
 is invalid.
 
-This is valid:
+A generic function is specialized at each call site — inferred from the
+argument types (§12.2) or written explicitly (§12.3):
 
 ```stilla
-let f = identity::[int32];
+let v = identity::[int32](42);
 ```
 
-and `f` has the monomorphic type:
-
-```stilla
-fn(move int32) -> int32
-```
-
-For a Copy `int32`, the `move` mode has no observable ownership effect, but it remains part of the function type.
+The explicit specialization denotes the monomorphic call; in v1.3 the
+specialized function is invoked at a call site, and binding a specialized
+generic as a standalone function value (`let f = identity::[int32];`) is
+not part of the v1.3 surface — the frontend lowers generic templates
+unspecialized, so a specialized generic value has no IR representation
+(§18 *Generics*).
 
 Generic functions stored in modules follow the same rule: `module.generic_name` may participate in compile-time call inference or explicit specialization, but only a concrete specialization becomes a runtime function value.
 
@@ -2406,6 +2411,16 @@ Unless explicitly stated otherwise, subexpressions are evaluated exactly once fr
 
 Recursive value types must contain indirection on every recursive storage cycle, and their ownership classification follows the greatest-fixpoint rule of §10.3.
 
+Iteration is expressed as self-recursion; a conforming implementation must reuse the caller's frame for a direct self-recursive call in tail position (§13.5, ir.md §14.7), so self-recursive iteration does not grow the stack. Mutual recursion and non-tail recursion may grow the stack, bounded by implementation-defined resources.
+
+## Teardown
+
+A unique module constant whose type defines a `drop` hook must not read —
+directly or through any transitively called function — a module constant
+declared later than the constant being destroyed, because teardown
+destroys constants in reverse declaration order and a later constant is
+already destroyed when the hook runs (§5, Runtime §2.5).
+
 ## Modules
 
 Each resolved module is instantiated at most once per execution context (Runtime §2.1).
@@ -2453,6 +2468,9 @@ Every runtime function value is monomorphic.
 An unspecialized generic function is not a runtime value.
 
 Inferred or explicit specialization must produce a concrete function before runtime use.
+
+A specialized generic is invoked at a call site; binding a specialized
+generic as a standalone function value is outside v1.3 (§12.4).
 
 `value::[Types]` is compile-time specialization syntax, not runtime dispatch.
 

@@ -33,6 +33,21 @@ pub fn lowerPathValue(self: *Lowerer, fs: *FuncState, p: *const ast.PathExpr) Lo
             const self_ref = (try selfModuleRef(self, fs, path[0].span)).?;
             return lowerMemberLoad(self, fs, path[0].span, self_ref, vm);
         }
+        // A `using` alias of a module value member (Core §2.8) resolves to
+        // the member: `using string.upper as up; up(text)` is a
+        // `load_member` of `string.upper`.
+        for (fs.module.using_aliases) |a| {
+            if (!std.mem.eql(u8, a.name, n)) continue;
+            switch (a.target) {
+                .value => |mr| {
+                    const mod = self.graph.module(mr.module) orelse continue;
+                    const vm = mod.valueMember(mr.name) orelse continue;
+                    const mod_ref = try emitModuleRef(self, fs, path[0].span, mr.module);
+                    return lowerMemberLoad(self, fs, path[0].span, mod_ref.?, vm);
+                },
+                .module, .type => continue,
+            }
+        }
         return self.fail(p.span, "unknown name '{s}'", .{n});
     }
     // A dotted path whose first segment is a local value walks the
