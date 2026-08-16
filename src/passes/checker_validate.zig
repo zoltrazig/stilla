@@ -209,6 +209,12 @@ fn validateCast(frame: *Frame, c: *const ast.Cast) CheckError!void {
     try validateExpr(frame, c.operand);
     const src = frame.ma.expr_of.get(c.operand) orelse return;
     const dst = frame.ma.type_of.get(&c.target) orelse return;
+    // `hostdata` is tagless (Core §11.7): no cast is defined from or to
+    // it. In particular `any as hostdata` is invalid — a tagless payload
+    // cannot be named as a recovery target (Core §11.6, §11.6.1).
+    if (dst == .primitive and dst.primitive == .hostdata) {
+        return frame.ck.fail(c.span, "invalid cast: 'hostdata' has no cast (Core §11.7)", .{});
+    }
     if (isNeverOrAny(src)) return;
     if (isNumeric(src) and isNumeric(dst)) return;
     return frame.ck.fail(c.span, "invalid cast", .{});
@@ -1002,7 +1008,11 @@ const InitOrder = struct {
 /// type `never` coerces to anything and anything coerces to the top type
 /// `any` (the sole implicit widening, Core §11.6).
 fn compatible(expected: cfg.Type, actual: cfg.Type) bool {
-    if (expected == .primitive and expected.primitive == .any) return true;
+    // Coercion to the top type `any` is the sole implicit widening
+    // (Core §11.6) — except that `hostdata` does not coerce to `any`
+    // (Core §11.6, §11.7): a tagless payload cannot be an `any` value.
+    if (expected == .primitive and expected.primitive == .any)
+        return !(actual == .primitive and actual.primitive == .hostdata);
     if (actual == .primitive and actual.primitive == .never) return true;
     if (cfg.Type.eql(expected, actual)) return true;
     return compatibleRecur(expected, actual);

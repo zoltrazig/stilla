@@ -229,7 +229,7 @@ The host may register host-provided modules (§3.1) and may directly invoke any 
 
 An `any` value (Core §11.6) is a type-erased payload with a runtime type tag: the tag is deterministic and comparable and identifies the concrete payload type. Stilla inspects the tag only through the two typed-recovery operations, `as` (Core §11.6.1) and `match` type-test patterns (Core §11.6.2). Destruction of an `any` destroys the payload by the payload type's own destruction rules. An `any` argument to or result from a host binding is transferred as that opaque tagged payload.
 
-A `hostdata` value (Core §11.7) is an opaque, type-erased payload with no runtime type tag: its runtime representation is implementation- and host-defined, and Stilla performs no inspection or recovery on it. A payload leaves `hostdata` only when the complete value is passed to a host binding or destroyed. When Stilla destroys a `hostdata` value on normal control flow, the host is responsible for disposing of the opaque payload; such disposal is host cleanup and must not be described as execution of a Stilla `drop` hook. A `hostdata` argument to or result from a host binding is transferred as that opaque payload.
+A `hostdata` value (Core §11.7) is an opaque, type-erased payload with no runtime type tag: its runtime representation is implementation- and host-defined, and Stilla performs no inspection or recovery on it. A `hostdata` value never appears as an `any` payload (Core §11.6): the top type's tag space covers the tagged value types only. A payload leaves `hostdata` only when the complete value is passed to a host binding or destroyed. When Stilla destroys a `hostdata` value on normal control flow, the host is responsible for disposing of the opaque payload; such disposal is host cleanup and must not be described as execution of a Stilla `drop` hook. A `hostdata` argument to or result from a host binding is transferred as that opaque payload.
 
 ---
 
@@ -708,7 +708,7 @@ canonical struct instance
 exception unwinding
 ```
 
-An `any` value (Core §11.6) carries a deterministic runtime type tag identifying its concrete payload type; Stilla inspects the tag only through the `as` cast (Core §11.6.1) and `match` type-test patterns (Core §11.6.2). A `hostdata` value (Core §11.7) is a type-erased opaque payload with no runtime type tag and no runtime inspection; it leaves Stilla only via host handoff or via host disposal on destruction (§3.4).
+An `any` value (Core §11.6) carries a deterministic runtime type tag identifying its concrete payload type; Stilla inspects the tag only through the `as` cast (Core §11.6.1) and `match` type-test patterns (Core §11.6.2). A `hostdata` value (Core §11.7) is a type-erased opaque payload with no runtime type tag and no runtime inspection; it leaves Stilla only via host handoff or via host disposal on destruction, and never appears as an `any` payload (§3.4).
 
 The central rules of the language (stated fully in Core §1.3) are:
 

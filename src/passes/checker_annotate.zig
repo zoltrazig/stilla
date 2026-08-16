@@ -498,7 +498,7 @@ fn inferExprInner(frame: *Frame, e: *const ast.Expr) CheckError!?cfg.Type {
                 const else_t = (try inferExpr(frame, else_e)) orelse cfg.Type{ .primitive = .void };
                 const else_path = try ownership.pathOf(frame, tracked, entry, ownership.exprCompletesNormally(frame, else_e));
                 try ownership.merge(frame, tracked, entry, &.{ then_path, else_path }, i.span);
-                return unify(then_t, else_t);
+                return try joinBranches(frame, i.span, then_t, else_t);
             }
             // An `if` without an `else` has an implicit else path that
             // releases nothing (Core §10.10).
@@ -523,7 +523,7 @@ fn inferExprInner(frame: *Frame, e: *const ast.Expr) CheckError!?cfg.Type {
             for (m.arms, 0..) |*arm, ai| {
                 _ = try inferPattern(frame, &arm.pattern, scrut_t, !consuming);
                 const at = (try inferExpr(frame, arm.body)) orelse cfg.Type{ .primitive = .void };
-                result = if (result) |r| unify(r, at) else at;
+                result = if (result) |r| try joinBranches(frame, m.span, r, at) else at;
                 paths[ai] = try ownership.pathOf(frame, tracked, entry, ownership.exprCompletesNormally(frame, arm.body));
                 try ownership.restore(frame, tracked, entry);
             }
@@ -1113,9 +1113,21 @@ fn inferPattern(frame: *Frame, p: *const ast.Pattern, value_t: cfg.Type, borrow:
 
 /// Unify the types of two branch/arm results: `never` coerces to the other,
 /// equal types keep their shape, anything else widens to `any`.
-fn unify(a: cfg.Type, b: cfg.Type) cfg.Type {
+/// Join the branch types of an `if`/`match` (Core §13.2). Equal types
+/// join to themselves, `never` contributes nothing, and a mixed join
+/// widens to `any` — except that `hostdata` does not coerce to `any`
+/// (Core §11.6, §11.7), so a mixed join involving `hostdata` is a
+/// compile-time error.
+fn joinBranches(frame: *Frame, span: ast.Span, a: cfg.Type, b: cfg.Type) CheckError!cfg.Type {
     if (a == .primitive and a.primitive == .never) return b;
     if (b == .primitive and b.primitive == .never) return a;
     if (cfg.Type.eql(a, b)) return a;
+    if (isHostdata(a) or isHostdata(b)) {
+        return frame.ck.fail(span, "'hostdata' does not coerce to 'any' (Core §11.6, §11.7); a branch of type 'hostdata' cannot join a branch of another type", .{});
+    }
     return cfg.Type{ .primitive = .any };
+}
+
+fn isHostdata(t: cfg.Type) bool {
+    return t == .primitive and t.primitive == .hostdata;
 }

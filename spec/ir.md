@@ -135,7 +135,7 @@ The `T → any` coercion of a mixed join is **not** implicit at the phi: the low
 Conversions are explicit instructions: `num_cast` for the numeric pair (`int32 ↔ float32`), and the four `any`-ops (`any_pack_copy` / `any_pack_move` / `any_unpack_copy` / `any_unpack_move`) for the top type. The remaining coercions are implicit and materialized at specific points:
 
 - **`never` → T** — a call whose result type is `never` is always immediately followed by `trap`; a `trap` block contributes no value to a phi.
-- **T → `any`** — at call boundaries (arguments to `any`-typed parameters, `ret` of an `any`-typed function) and on the predecessor edges of an `any` join. A Copy source is `any_pack_copy`'d into the `any` (the source stays owned); a unique source is `any_pack_move`'d (the source is consumed). Both are ordinary instructions emitted by the lowering.
+- **T → `any`** — at call boundaries (arguments to `any`-typed parameters, `ret` of an `any`-typed function) and on the predecessor edges of an `any` join. A Copy source is `any_pack_copy`'d into the `any` (the source stays owned); a unique source is `any_pack_move`'d (the source is consumed). Both are ordinary instructions emitted by the lowering. `hostdata` is never a source: it does not coerce to `any` (Core §11.6, §11.7).
 - **`any` → T recovery** — `a as T` for a Copy `T` lowers to `any_unpack_copy` (payload copied out, the `any` stays owned); `(move a) as T` — the only legal recovery of a unique payload — lowers to `any_unpack_move`, consuming the complete `any` and transferring payload ownership to the result.
 
 ---

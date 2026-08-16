@@ -857,6 +857,39 @@ test "frontend compiles the StdLib array/hashmap container examples" {
     try testing.expect(std.mem.indexOf(u8, out, "syscall hashmap#insert") != null);
 }
 
+test "frontend rejects every hostdata/any coercion and cast" {
+    // Core §11.6, §11.6.1, §11.7: `hostdata` does not coerce to `any`
+    // and no cast is defined from or to it. Each of these must be a
+    // compile-time error, not a silent pack or an `any_unpack`.
+    var c1 = try compileText("app", &.{
+        .{ "app", "fn f(a: any) -> hostdata { (move a) as hostdata }\nfn main() -> void {}" },
+    });
+    defer c1.deinit();
+    try testing.expect(c1.program == null);
+    try testing.expect(std.mem.indexOf(u8, c1.diag.?.message, "has no cast") != null);
+
+    var c2 = try compileText("app", &.{
+        .{ "app", "fn make_hd() -> hostdata;\nfn g() -> any { make_hd() }\nfn main() -> void {}" },
+    });
+    defer c2.deinit();
+    try testing.expect(c2.program == null);
+    try testing.expect(std.mem.indexOf(u8, c2.diag.?.message, "return type mismatch") != null);
+
+    var c3 = try compileText("app", &.{
+        .{ "app", "fn make_hd() -> hostdata;\nfn main() -> void { let a: any = make_hd(); }" },
+    });
+    defer c3.deinit();
+    try testing.expect(c3.program == null);
+    try testing.expect(std.mem.indexOf(u8, c3.diag.?.message, "let type mismatch") != null);
+
+    var c4 = try compileText("app", &.{
+        .{ "app", "fn make_hd() -> hostdata;\nfn pick(c: bool, h: hostdata) -> any { if (c) { h } else { \"hi\" } }\nfn main() -> void {}" },
+    });
+    defer c4.deinit();
+    try testing.expect(c4.program == null);
+    try testing.expect(std.mem.indexOf(u8, c4.diag.?.message, "does not coerce to 'any'") != null);
+}
+
 test "frontend rejects missing, duplicate, and unknown struct fields" {
     // Core §8.1: all fields must be supplied exactly once; unknown fields
     // and duplicate fields are frontend.compile-time errors.

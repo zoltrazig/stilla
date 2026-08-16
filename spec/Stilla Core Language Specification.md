@@ -1447,7 +1447,11 @@ An indexed unique element is borrowed and cannot be independently moved.
 
 ## 11.6 The top type `any`
 
-`any` is the language's **top type**: every value type `T` coerces to `any`. The bottom type `never` has no values and coerces to every type; `any` is the inverse — it accepts every type and coerces to no other type (§18 *Typing*).
+`any` is the language's **top type**: every value type `T` — except
+`hostdata` (§11.7) — coerces to `any`. The bottom type `never` has no
+values and coerces to every type; `any` is the inverse — it accepts every
+tagged value type and coerces to no other type (§18 *Typing*). `hostdata`
+carries no runtime type tag, so it cannot be an `any` payload.
 
 `any` may hold a value of any type:
 
@@ -1486,7 +1490,7 @@ Ownership follows the target type, statically:
 
 - if `T` is Copy (§10.1), the payload is copied out and the source `any` remains definitely owned; the same value may be recovered again;
 - if `T` is unique, the source must be moved: `(move a) as T`. The complete `any` is consumed (§10.4), ownership of the payload transfers to the result, and the source becomes definitely released (§10.10);
-- `hostdata` is unique, so `(move a) as hostdata` is the only recovery that yields a `hostdata` value.
+- `hostdata` never appears in an `any` payload — it does not coerce to `any` (§11.6, §11.7) — so `as hostdata` is never a valid recovery.
 
 ## 11.6.2 Recovery by `match`
 
@@ -1514,7 +1518,7 @@ Type-test patterns may reference generic parameters; under monomorphization (§1
 
 `hostdata` is a distinct nominal type carrying an **opaque, host-defined payload**. It is unrelated to `any` (§11.6): a `hostdata` value is created only by a host binding and leaves Stilla only by being handed back to the host or by destruction.
 
-Only the host constructs `hostdata` values, through host functions and module members (§2.6, Runtime §3.1). No Stilla value coerces into `hostdata`, and `hostdata` is not a top type.
+Only the host constructs `hostdata` values, through host functions and module members (§2.6, Runtime §3.1). No Stilla value coerces into `hostdata`, `hostdata` does not coerce into `any` (§11.6) or into any other type, and `hostdata` is not a top type.
 
 Stilla defines no operation on `hostdata` other than moving, borrowing, storing, passing along, and handing to the host. No member access, indexing, operator, cast, pattern, equality, or hash is defined on `hostdata`, and it coerces to no other type (§16.3).
 
@@ -2218,7 +2222,9 @@ Function arguments and return values must match exactly unless the source type i
 
 No implicit numeric or `str` conversions exist.
 
-Coercion to the top type `any` is the sole implicit widening (§11.6).
+Coercion to the top type `any` is the sole implicit widening (§11.6), and
+`hostdata` does not participate: no value coerces into `hostdata`, and
+`hostdata` does not coerce into `any` (§11.7).
 
 ## Closures
 
