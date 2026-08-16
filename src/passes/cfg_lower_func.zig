@@ -7,6 +7,7 @@
 const std = @import("std");
 const ast = @import("../ast.zig");
 const cfg = @import("../cfg.zig");
+const checker = @import("checker.zig");
 const moduleinfo = @import("../moduleinfo.zig");
 const lower = @import("../lower.zig");
 const cfg_lower_program = @import("cfg_lower_program.zig");
@@ -38,27 +39,54 @@ pub fn lowerFunc(self: *Lowerer, info: *moduleinfo.ModuleInfo, vm: *const module
         try cfg_lower_emit.bindLocal(self, &fs, p.name.text, v, p.mode != .borrow and cfg_lower_emit.isUnique(self, &fs, v.type_));
     }
     const body = f.body.?;
-    const result = try lowerBlock(self, &fs, body);
-    try cfg_lower_emit.exitScope(self, &fs, result);
+    return try lowerFuncBody(self, &fs, body);
+}
+
+/// Lower one used specialization of a generic function: the monomorphized
+/// body clone, annotated under the concrete substitution (frontend §4.4),
+/// named `{module}.{fn}.{id}`. Generic templates are never lowered — the
+/// IR receives only specialized, monomorphic functions (Core §12, §12.4).
+pub fn lowerInstance(self: *Lowerer, info: *moduleinfo.ModuleInfo, inst: *checker.FuncInstance) LowerError!*cfg.IrFunc {
+    const mono = inst.mono orelse
+        return self.fail(inst.decl.name.span, "host-binding generic has no body to lower", .{});
+    const sig = inst.signature.function;
+    const qname = try std.fmt.allocPrint(self.arena, "{s}.{d}", .{ try cfg_lower_program.qualifiedName(self, info.specifier, inst.decl.name.text), inst.id });
+    var fs = try newFuncState(self, info, .{ .span = mono.name.span, .text = qname }, sig.params, sig.ret.*);
+    const entry = try cfg_lower_emit.newBlock(self, &fs, "entry");
+    fs.cur = entry;
+    try fs.scopes.append(self.arena, .{});
+    for (sig.params, 0..) |p, i| {
+        const v = fs.values.items[i];
+        try cfg_lower_emit.bindLocal(self, &fs, p.name.text, v, p.mode != .borrow and cfg_lower_emit.isUnique(self, &fs, v.type_));
+    }
+    return try lowerFuncBody(self, &fs, mono.body.?);
+}
+
+/// Lower a function body into a fresh FuncState and finish the function
+/// (returns, the `T → any` return coercion, and terminators). Shared by
+/// `lowerFunc` and `lowerInstance`.
+fn lowerFuncBody(self: *Lowerer, fs: *FuncState, body: *const ast.Block) LowerError!*cfg.IrFunc {
+    const result = try lowerBlock(self, fs, body);
+    try cfg_lower_emit.exitScope(self, fs, result);
     if (result) |r| {
         if (cfg_lower_emit.isVoid(r.type_)) {
-            try cfg_lower_emit.setTerminator(self, &fs, .{ .ret = null });
+            try cfg_lower_emit.setTerminator(self, fs, .{ .ret = null });
         } else {
             // The `T → any` return coercion (Core §11.6, ir.md §4.4): a
             // concrete result returned from an `any`-typed function is
             // packed on the return edge like any other call boundary.
-            const rv = try coerceRet(self, &fs, r);
-            cfg_lower_emit.markConsumed(self, &fs, rv);
-            try cfg_lower_emit.cleanupDisable(self, &fs, rv.span, rv);
-            try cfg_lower_emit.setTerminator(self, &fs, .{ .ret = rv });
+            const rv = try coerceRet(self, fs, r);
+            cfg_lower_emit.markConsumed(self, fs, rv);
+            try cfg_lower_emit.cleanupDisable(self, fs, rv.span, rv);
+            try cfg_lower_emit.setTerminator(self, fs, .{ .ret = rv });
         }
     } else {
         // The body terminated (trap); the last block's terminator
         // stands. If the body somehow ended without a terminator,
         // emit a bare ret to keep the CFG well-formed.
-        if (fs.cur != null) try cfg_lower_emit.setTerminator(self, &fs, .{ .ret = null });
+        if (fs.cur != null) try cfg_lower_emit.setTerminator(self, fs, .{ .ret = null });
     }
-    return cfg_lower_validate.finishFunc(self, &fs);
+    return cfg_lower_validate.finishFunc(self, fs);
 }
 
 /// Pack a concrete return value into an `any`-typed function result

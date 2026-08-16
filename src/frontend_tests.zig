@@ -147,6 +147,8 @@ test "frontend rejects an import cycle" {
     try testing.expect(c.graph == null);
     try testing.expect(c.diag != null);
     try testing.expect(std.mem.indexOf(u8, c.diag.?.message, "import cycle") != null);
+    // Pass 6.2: the diagnostic names the full cycle, not just one module.
+    try testing.expect(std.mem.indexOf(u8, c.diag.?.message, "a imports b imports a") != null);
     // The cycle diagnostic points at the re-entering import expression, not
     // the module start (regression: it used to be span 0, the entry 1:1).
     try testing.expect(c.diag.?.span.start != 0);
@@ -626,8 +628,9 @@ test "frontend allows a moved unique any cast" {
 }
 
 test "frontend rejects an unique type-test recovery from a borrowed any" {
-    // Core §11.6.1: an unique payload may be recovered only from a moved
-    // `any` (`match (move a)`); a borrowed `any` yields only borrows.
+    // Core §11.6.2: a unique payload can be recovered only from a moved
+    // `any` (`match (move a)`); a non-consuming match over `any` binds
+    // only Copy payload types.
     var c = try compileText("app", &.{
         .{
             "app",
@@ -1215,21 +1218,89 @@ test "spec examples compile: Core 11.6.2 type-test match" {
 }
 
 test "spec examples compile: Core 12 generics" {
-    // §12.1 declarations, §12.2 inferred call, §12.3 explicit call.
+    // §12.1 declarations, §12.2 inferred call, §12.3 explicit call,
+    // §12.4 an explicit specialization as a first-class monomorphic value.
     try expectCompiles("app", &.{
         .{
             "app",
             \\struct Pair[A, B] { first: A; second: B; }
             \\fn identity[T](move value: T) -> T { move value }
             \\type PairList[T] = list[tuple[T, T]];
-            \\fn main() -> void {
+            \\fn main() -> int32 {
             \\    let p = Pair{ first: 1, second: "x" };
             \\    let v = identity(42);
             \\    let w = identity::[int32](43);
-            \\    let _ = p; let _ = v; let _ = w;
+            \\    let f = identity::[int32];
+            \\    f(v) + w
             \\}
         },
     });
+}
+
+test "frontend lowers only monomorphic functions: instances, not templates" {
+    // Core §12, frontend §4.4: the IR carries one monomorphic function per
+    // used specialization (`{module}.{fn}.{id}`) with concrete signatures;
+    // the unspecialized template never appears, and no `.param` type
+    // survives. Calls target the instances; recursion inside a generic
+    // stays a self-loop under tail-call optimization.
+    var c = try compileText("app", &.{
+        .{
+            "app",
+            \\const iter = import("iter");
+            \\const builtin = import("builtin");
+            \\fn main() -> int32 {
+            \\    iter.fold(builtin.range(1, 10), 0, fn(move a: int32, borrow x: int32) -> int32 { a + x })
+            \\}
+        },
+    });
+    defer c.deinit();
+    const out = try irText(&c.program.?);
+    defer testing.allocator.free(out);
+    // The specialized functions have concrete signatures; the generic
+    // template is absent.
+    try testing.expect(std.mem.indexOf(u8, out, "func @iter.fold.0(borrow values: list[int32]") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "func @iter.fold_with.1(borrow values: list[int32]") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "func @iter.fold(") == null);
+    // Calls target the instances; no type-parameter survives in the text.
+    try testing.expect(std.mem.indexOf(u8, out, "call @iter.fold.0") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "list[T]") == null);
+    try testing.expect(std.mem.indexOf(u8, out, ": T ") == null);
+}
+
+test "frontend distinguishes generic instantiations and types payloads" {
+    // Core §12.1/§12.3: `Option[int32]` and `Option[str]` are distinct
+    // instantiations; a payload read is typed by the instantiation, and a
+    // payload-type mismatch is a compile error (not silently accepted).
+    var c = try compileText("app", &.{
+        .{
+            "app",
+            \\const builtin = import("builtin");
+            \\using builtin.Option;
+            \\fn main() -> int32 {
+            \\    let a: Option[int32] = Option::Some(42);
+            \\    match (a) { Option::Some(v) => v, Option::None => 0 }
+            \\}
+        },
+    });
+    defer c.deinit();
+    const out = try irText(&c.program.?);
+    defer testing.allocator.free(out);
+    try testing.expect(std.mem.indexOf(u8, out, "Option[int32]") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "= read_payload") != null);
+
+    // The payload-type mismatch is caught: Option::Some(42) is
+    // Option[int32], not Option[str].
+    var c2 = try compileText("app", &.{
+        .{
+            "app",
+            \\const builtin = import("builtin");
+            \\using builtin.Option;
+            \\fn main() -> void { let x: Option[str] = Option::Some(42); }
+        },
+    });
+    defer c2.deinit();
+    try testing.expect(c2.program == null);
+    try testing.expect(std.mem.indexOf(u8, c2.diag.?.message, "let type mismatch") != null);
 }
 
 test "spec examples compile: Core 13.3 match" {
@@ -1550,21 +1621,22 @@ test "frontend rejects an unspecialized generic used as a value" {
 
 test "frontend accepts an explicitly specialized generic as a value" {
     // Core §12.4: `identity::[int32]` is a first-class monomorphic function
-    // value of type `fn(move int32) -> int32`; the checker accepts it and
-    // records a specialization. Lowering a specialized value is Pass 5.4
-    // (future work), so the frontend still stops in the lowerer — but the
-    // diagnostic must NOT come from the checker's unspecialized-generic rule.
+    // value of type `fn(move int32) -> int32`; the checker records the
+    // specialization and the lowering emits a `fn_ref` to the instance's
+    // monomorphic function (`{module}.{fn}.{id}`).
     var c = try compileText("app", &.{
         .{
             "app",
             \\fn identity[T](move value: T) -> T { move value }
-            \\fn main() -> void { let f = identity::[int32]; }
+            \\fn main() -> int32 { let f = identity::[int32]; f(42) }
         },
     });
     defer c.deinit();
-    try testing.expect(c.program == null);
-    try testing.expect(c.diag != null);
-    try testing.expect(std.mem.indexOf(u8, c.diag.?.message, "cannot be used as a value") != null);
+    try testing.expect(c.program != null);
+    const out = try irText(&c.program.?);
+    defer testing.allocator.free(out);
+    try testing.expect(std.mem.indexOf(u8, out, "fn_ref @app.identity.0") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "func @app.identity.0(") != null);
 }
 
 test "frontend lowers an explicitly specialized generic call" {

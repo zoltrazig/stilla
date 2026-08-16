@@ -106,7 +106,7 @@ pub fn compile(allocator: std.mem.Allocator, options: Options) CompileError!Comp
     };
 
     // Phase 3: CFG lowering.
-    var lowerer = lower.Lowerer.init(arena_alloc, graph, options.entry_fn, options.entry_fn_explicit);
+    var lowerer = lower.Lowerer.init(arena_alloc, graph, options.entry_fn, options.entry_fn_explicit, &ck.annotation);
     var program = lower.lowerProgram(&lowerer) catch |err| switch (err) {
         error.Diagnostic => {
             return Compilation{

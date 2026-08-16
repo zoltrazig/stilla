@@ -5,6 +5,7 @@ const std = @import("std");
 const ast = @import("../ast.zig");
 const cfg = @import("../cfg.zig");
 const moduleinfo = @import("../moduleinfo.zig");
+const type_resolve = @import("type_resolve.zig");
 const lower = @import("../lower.zig");
 const cfg_lower_expr = @import("cfg_lower_expr.zig");
 const cfg_lower_emit = @import("cfg_lower_emit.zig");
@@ -13,10 +14,10 @@ const Lowerer = lower.Lowerer;
 const FuncState = lower.FuncState;
 const LowerError = lower.LowerError;
 
-pub fn lowerPath(self: *Lowerer, fs: *FuncState, p: *const ast.PathExpr) LowerError!?*cfg.Value {
+pub fn lowerPath(self: *Lowerer, fs: *FuncState, e: *const ast.Expr, p: *const ast.PathExpr) LowerError!?*cfg.Value {
     return switch (p.tail) {
-        .construct => |sc| try cfg_lower_expr.lowerStructConstruct(self, fs, p, &sc),
-        .variant => |ve| try cfg_lower_expr.lowerVariantConstruct(self, fs, p, &ve),
+        .construct => |sc| try cfg_lower_expr.lowerStructConstruct(self, fs, e, p, &sc),
+        .variant => |ve| try cfg_lower_expr.lowerVariantConstruct(self, fs, e, p, &ve),
         .none => try lowerPathValue(self, fs, p),
     };
 }
@@ -132,12 +133,16 @@ pub fn memberLoad(self: *Lowerer, fs: *FuncState, span: ast.Span, base: *cfg.Val
     }
     switch (base.type_) {
         .named => |td| {
-            const type_name = self.resolve.typeNameOf(td) orelse return null;
+            const type_name = self.resolve.typeNameOf(td.id) orelse return null;
             const sd = moduleinfo.structDecl(self.resolve, fs.module, type_name) orelse
                 return self.fail(span, "'{s}' is not a struct type", .{type_name});
             const idx = moduleinfo.fieldIndex(sd, name) orelse
                 return self.fail(span, "struct '{s}' has no field '{s}'", .{ type_name, name });
-            const field_type = try self.resolveType(fs, &sd.fields[idx].type_);
+            const resolved = try self.resolveType(fs, &sd.fields[idx].type_);
+            // A generic instantiation's field type substitutes the
+            // declaration's type parameters (`p.first` of a
+            // `Pair[int32, str]` is `int32`).
+            const field_type = type_resolve.substParams(self.arena, sd.type_params, td.args, resolved);
             return cfg_lower_emit.emit(self, fs, span, .{ .read_field = .{ .base = base, .index = idx } }, field_type);
         },
         .tuple => |elems| {

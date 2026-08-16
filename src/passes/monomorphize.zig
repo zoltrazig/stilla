@@ -351,7 +351,15 @@ fn cloneMatchArms(arena: std.mem.Allocator, sub: Substitution, arms: []const ast
 fn cfgTypeToAst(arena: std.mem.Allocator, resolve: moduleinfo.Resolve, t: cfg.Type, span: ast.Span) error{OutOfMemory}!ast.Type {
     return switch (t) {
         .primitive => |k| .{ .primitive = .{ .span = span, .kind = k } },
-        .named => |id| .{ .named = .{ .span = span, .path = try splitPath(arena, resolve.typeNameOf(id) orelse ""), .type_args = null } },
+        .named => |n| .{
+            .named = .{
+                .span = span,
+                .path = try splitPath(arena, resolve.typeNameOf(n.id) orelse ""),
+                // The instantiation's arguments are re-emitted so the clone
+                // re-resolves to the same instantiation (Core §12.1).
+                .type_args = try cfgTypesToAst(arena, resolve, n.args, span),
+            },
+        },
         .param => |p| blk: {
             const one = try arena.alloc(ast.Ident, 1);
             one[0] = .{ .span = span, .text = p };

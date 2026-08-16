@@ -15,21 +15,25 @@
 //! directly and share the `Lowerer` context, the `Local`/`Scope`/
 //! `FuncState` types, and the optimizer entry points below.
 //!
-//! The IR-native types of `cfg` are used directly; expression and local
-//! types are derived structurally from the AST and the module graph (the
-//! checker's `typeinfo` annotation is phase-2 work, so this lowering is a
-//! structural one: it emits what the source shape dictates).
+//! The IR-native types of `cfg` are used directly. The lowerer consumes
+//! the phase-2 `checker.Annotation` (`Lowerer.ann`) for concrete
+//! signatures and instantiated generic types; expression and local types
+//! are otherwise derived structurally from the AST and the module graph.
 //!
-//! Known gaps (all owned by phase 2 in the long run): generic Stilla
-//! functions are not monomorphized (generic *host bindings* are
-//! specialized at the call site for their signatures); lambda values are
+//! Generic Stilla functions are monomorphized in phase 2 (a used
+//! specialization is a `checker.FuncInstance` with a checked monomorphized
+//! body) and each used specialization is lowered as its own monomorphic
+//! `IrFunc` (`cfg_lower_func.lowerInstance` — the IR receives only
+//! specialized, monomorphic programs, Core §12); host-binding generics
+//! get a body-less instance and lower to `syscall`. Lambda values are
 //! lowered to synthesized `IrFunc`s referenced by `fn_ref` (ir.md §5.5);
-//! type inference for generic instantiations (`Option[File]`) defers
-//! ownership to the declaration.
+//! ownership for generic instantiations (`Option[File]`) resolves through
+//! the declared type.
 
 const std = @import("std");
 const ast = @import("ast.zig");
 const cfg = @import("cfg.zig");
+const checker = @import("passes/checker.zig");
 const moduleinfo = @import("moduleinfo.zig");
 const cfg_lower_program = @import("passes/cfg_lower_program.zig");
 const cfg_optimize = @import("passes/cfg_optimize.zig");
@@ -105,6 +109,10 @@ pub const Lowerer = struct {
     arena: std.mem.Allocator,
     graph: *moduleinfo.ModuleGraph,
     resolve: moduleinfo.Resolve,
+    /// The phase-2 annotation: per-module side tables (types, ownership,
+    /// generic `FuncInstance`s) the lowering reads for concrete signatures
+    /// and instantiated types (frontend §4.7, §5.7).
+    ann: ?*checker.Annotation = null,
     /// Which module a module-typed SSA value refers to (`module_ref`
     /// values and module-valued member loads).
     module_of: std.AutoHashMapUnmanaged(*cfg.Value, *moduleinfo.ModuleInfo) = .empty,
@@ -122,11 +130,12 @@ pub const Lowerer = struct {
     /// unique across the whole program's IR text).
     next_lambda_id: u32 = 0,
 
-    pub fn init(arena: std.mem.Allocator, graph: *moduleinfo.ModuleGraph, entry_fn: ?[]const u8, entry_fn_explicit: bool) Lowerer {
+    pub fn init(arena: std.mem.Allocator, graph: *moduleinfo.ModuleGraph, entry_fn: ?[]const u8, entry_fn_explicit: bool, ann: ?*checker.Annotation) Lowerer {
         return .{
             .arena = arena,
             .graph = graph,
             .resolve = moduleinfo.resolveOf(graph),
+            .ann = ann,
             .diag = null,
             .entry_fn = entry_fn,
             .entry_fn_explicit = entry_fn_explicit,
@@ -134,6 +143,16 @@ pub const Lowerer = struct {
     }
 
     // No deinit: `module_of` is arena-owned.
+
+    /// The checker's annotated type of an expression (frontend §4.3): the
+    /// instantiated type of a construction, the resolved type of a use
+    /// site. Null when the annotation is unavailable (or the expression
+    /// was not annotated — e.g. inside an unspecialized generic template).
+    pub fn annotatedType(self: *Lowerer, fs: *FuncState, e: *const ast.Expr) ?cfg.Type {
+        const a = self.ann orelse return null;
+        const ma = a.per_module.get(fs.module.specifier) orelse return null;
+        return ma.expr_of.get(e);
+    }
 
     /// pass-internal: type resolution helper shared with the passes.
     pub fn resolveType(self: *Lowerer, fs: *FuncState, t: *const ast.Type) LowerError!cfg.Type {

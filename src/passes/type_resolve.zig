@@ -288,7 +288,8 @@ fn resolveTypeDepth(resolve: Resolve, from: *ModuleInfo, t: *const ast.Type, dep
                 else => {
                     const qt = resolveQualifiedTypeName(resolve, from, name) orelse break :blk null;
                     const id = resolve.intern(qt.qualified) orelse break :blk .{ .param = name };
-                    break :blk .{ .named = id };
+                    const args = resolveTypeArgs(resolve, from, &n, depth) orelse break :blk null;
+                    break :blk .{ .named = .{ .id = id, .args = args } };
                 },
             }
         },
@@ -331,5 +332,89 @@ fn resolveTypeDepth(resolve: Resolve, from: *ModuleInfo, t: *const ast.Type, dep
                 .ret = ret_ptr,
             } };
         },
+    };
+}
+
+/// Resolve the written type arguments of a named type reference
+/// (`Option[int32]` → `[int32]`; empty when none are written). The
+/// arguments are resolved recursively, so they may themselves be
+/// instantiations (`Option[list[File]]`) or type parameters (in generic
+/// signatures: `Array[T]` → `[.param "T"]`).
+fn resolveTypeArgs(resolve: Resolve, from: *ModuleInfo, n: *const ast.NamedType, depth: u32) ?[]cfg.Type {
+    const written = n.type_args orelse return &.{};
+    const out = resolve.arena.alloc(cfg.Type, written.len) catch return null;
+    for (written, 0..) |*w, i| {
+        out[i] = resolveTypeDepth(resolve, from, w, depth + 1) orelse return null;
+    }
+    return out;
+}
+
+/// Substitute a type's `.param` occurrences through a
+/// (declaration-params → instantiation-args) environment: the fields and
+/// payloads of a generic struct/union reference the declaration's type
+/// parameters, and resolving them through the instantiation replaces each
+/// `.param` with its argument (`Option[int32]`'s `Some` payload becomes
+/// `int32`). Parameters not present in `params` are left unresolved.
+pub fn substParams(
+    arena: std.mem.Allocator,
+    params: []const ast.Ident,
+    args: []const cfg.Type,
+    t: cfg.Type,
+) cfg.Type {
+    return switch (t) {
+        .param => |p| blk: {
+            for (params, args) |prm, arg| {
+                if (std.mem.eql(u8, p, prm.text)) break :blk arg;
+            }
+            break :blk t;
+        },
+        .named => |n| blk: {
+            if (n.args.len == 0) break :blk t;
+            const out = arena.alloc(cfg.Type, n.args.len) catch break :blk t;
+            for (n.args, 0..) |a, i| out[i] = substParams(arena, params, args, a);
+            break :blk .{ .named = .{ .id = n.id, .args = out } };
+        },
+        .list => |inner| blk: {
+            const sub = substParams(arena, params, args, inner.*);
+            if (cfg.Type.eql(sub, inner.*)) break :blk t;
+            const ptr = arena.create(cfg.Type) catch break :blk t;
+            ptr.* = sub;
+            break :blk .{ .list = ptr };
+        },
+        .box => |inner| blk: {
+            const sub = substParams(arena, params, args, inner.*);
+            if (cfg.Type.eql(sub, inner.*)) break :blk t;
+            const ptr = arena.create(cfg.Type) catch break :blk t;
+            ptr.* = sub;
+            break :blk .{ .box = ptr };
+        },
+        .tuple => |elems| blk: {
+            var changed = false;
+            const out = arena.alloc(cfg.Type, elems.len) catch break :blk t;
+            for (elems, 0..) |e, i| {
+                out[i] = substParams(arena, params, args, e);
+                if (!cfg.Type.eql(out[i], e)) changed = true;
+            }
+            break :blk if (changed) .{ .tuple = out } else t;
+        },
+        .function => |f| blk: {
+            var changed = false;
+            const params_out = arena.alloc(cfg.Param, f.params.len) catch break :blk t;
+            for (f.params, 0..) |*p, i| {
+                params_out[i] = .{
+                    .span = p.span,
+                    .name = p.name,
+                    .mode = p.mode,
+                    .type_ = substParams(arena, params, args, p.type_),
+                };
+                if (!cfg.Type.eql(params_out[i].type_, p.type_)) changed = true;
+            }
+            const ret_ptr = arena.create(cfg.Type) catch break :blk t;
+            ret_ptr.* = substParams(arena, params, args, f.ret.*);
+            if (!cfg.Type.eql(ret_ptr.*, f.ret.*)) changed = true;
+            if (!changed) break :blk t;
+            break :blk .{ .function = .{ .params = params_out, .ret = ret_ptr } };
+        },
+        .primitive, .module, .cleanup => t,
     };
 }

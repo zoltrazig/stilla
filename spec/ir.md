@@ -132,10 +132,10 @@ The `T → any` coercion of a mixed join is **not** implicit at the phi: the low
 
 ## 4.4 Coercions
 
-Conversions are explicit instructions: `num_cast` for the numeric pair (`int32 ↔ float32`), and the four `any`-ops (`any_pack_copy` / `any_pack_move` / `any_unpack_copy` / `any_unpack_move`) for the top type. The remaining coercions are implicit and materialized at specific points:
+Conversions are explicit instructions: `num_cast` for the Core §16.3 cast set — the `int32 ↔ float32` pair plus the integer-family conversions (`int32 as byte`, `byte as int32`, `int32 as uint32`, `uint32 as int32`) — and the four `any`-ops (`any_pack_copy` / `any_pack_move` / `any_unpack_copy` / `any_unpack_move`) for the top type. The remaining coercions are implicit and materialized at specific points:
 
 - **`never` → T** — a call whose result type is `never` is always immediately followed by `trap`; a `trap` block contributes no value to a phi.
-- **T → `any`** — at call boundaries (arguments to `any`-typed parameters, `ret` of an `any`-typed function) and on the predecessor edges of an `any` join. A Copy source is `any_pack_copy`'d into the `any` (the source stays owned); a unique source is `any_pack_move`'d (the source is consumed). Both are ordinary instructions emitted by the lowering. `hostdata` is never a source: it does not coerce to `any` (Core §11.6, §11.7).
+- **T → `any`** — at call boundaries (arguments to `any`-typed parameters, `ret` of an `any`-typed function) and on the predecessor edges of an `any` join. A Copy source is `any_pack_copy`'d into the `any` (the source stays owned); a unique source is `any_pack_move`'d (the source is consumed). Both are ordinary instructions emitted by the lowering. `hostdata` is never a source: it does not coerce to `any` (the Core specification).
 - **`any` → T recovery** — `a as T` for a Copy `T` lowers to `any_unpack_copy` (payload copied out, the `any` stays owned); `(move a) as T` — the only legal recovery of a unique payload — lowers to `any_unpack_move`, consuming the complete `any` and transferring payload ownership to the result.
 
 ---
@@ -168,9 +168,9 @@ Operand types and trap behavior (overflow, divide-by-zero, invalid `any` recover
 
 | op | form | produces |
 | --- | --- | --- |
-| `neg` | `%d = neg %a` | same numeric type; traps on `int32` minimum negation; `uint32` negation is two's-complement and never traps (Core §16.3) |
+| `neg` | `%d = neg %a` | same numeric type; traps on `int32` minimum negation; `uint32` negation is two's-complement and never traps (the Core specification) |
 | `not` | `%d = not %a` | `bool` (source `!`) |
-| `num_cast` | `%d = num_cast %a` | the other numeric type; the numeric pair (`int32 ↔ float32`) only; `float32 → int32` traps on NaN, ±inf, or out-of-range |
+| `num_cast` | `%d = num_cast %a` | the target numeric type; the Core §16.3 cast set (`int32 ↔ float32`, `int32 ↔ byte`, `int32 ↔ uint32`, `byte → int32`, `uint32 → int32`); `float32 → int32` traps on NaN, ±inf, or out-of-range; `int32 → byte` traps outside `[0, 255]`, `int32 → uint32` traps on a negative value, `uint32 → int32` traps above the `int32` maximum, `byte → int32` never traps (the Runtime specification) |
 | `type_is` | `%d = type_is %a, T` | `bool` — runtime tag test against type `T` (a type-test arm of a `match` over an `any`) |
 | `any_pack_copy` | `%d = any_pack_copy %a` | `any` — `T → any` of a Copy source; the source stays owned |
 | `any_pack_move` | `%d = any_pack_move %a` | `any` — `T → any` of a unique source; the source is consumed |
@@ -239,10 +239,10 @@ Module members are modeled by a per-module **member table**: the module's runtim
 | --- | --- | --- |
 | `load_member` | `%d = load_member %m, #i` | member `#i` of `%m`: a storage read for a constant member, a function value (`fn_ref`) for a function member, a module value (`module_ref`) for a module-valued member |
 
-A host constant (a `const` declaration without an initializer, Core §2.6)
+A host constant (a `const` declaration without an initializer, the Core specification)
 is a `ConstSlot` member: `load_member` reads its slot as with any constant
 member, but `@init` never writes it and no `store_member` targets it — the
-host supplies the value at instantiation (§7).
+host supplies the value at instantiation (Module storage and the member table).
 | `store_member` | `store_member #i, %v` | effect; writes constant slot `#i` of the *current* module — legal only inside `@init`, and only for constant members |
 
 ## 5.7 Phi and terminators
@@ -377,7 +377,7 @@ The only program-addressable memory in the IR is **module storage**: the statica
 ModuleMember =
     ConstSlot(slot_id)       -- runtime constant: occupies storage slot slot_id.
                              --   A *host constant* (a `const` declaration
-                             --   without an initializer, Core §2.6) is a
+                             --   without an initializer, the Core specification) is a
                              --   ConstSlot that `@init` never writes and no
                              --   `store_member` targets; the host supplies
                              --   the value at instantiation.
@@ -601,6 +601,7 @@ type    ::= "int32" | "uint32" | "float32" | "bool" | "str" | "byte"
           | "any" | "hostdata" | "void" | "never"   -- primitives
           | "module" | "cleanup"                    -- special types
           | ident                                   -- named type, dotted paths allowed
+          | ident "[" type ("," type)* "]"         -- generic instantiation (Option[int32])
           | "list" "[" type "]" | "box" "[" type "]"
           | "tuple" "[" type ("," type)* "]"
           | "fn" "(" ("borrow" | "move")? type ("," ("borrow" | "move")? type)* ")" "->" type
@@ -648,7 +649,7 @@ The frontend walks the annotated, monomorphic AST with a builder that appends in
 | binary arithmetic / comparison | one `add`…`ge` |
 | `!` | `not` |
 | `and` / `or` | `br_cond` diamond, join phi |
-| `a as T` | `num_cast` (numeric pair) or `any_unpack_copy` / `any_unpack_move` |
+| `a as T` | `num_cast` (the Core §16.3 cast set) or `any_unpack_copy` / `any_unpack_move` |
 | coercion to `any` | `any_pack_copy` (Copy) or `any_pack_move` (unique) at the boundary |
 | `let name = expr` | evaluate `expr`, bind result as a fresh value |
 | `let pattern = expr` | destructure: `read_*` views or the atomic `unpack_*` / `split_list` |
@@ -711,7 +712,7 @@ These invariants are the contract every producer of the IR must uphold — the f
 
 **Semantics**
 
-- `div`/`rem` and `num_cast` operand types are numeric; `num_cast` is the `int32 ↔ float32` pair only;
+- `div`/`rem` operand types are numeric; `num_cast` operands and result range over the Core §16.3 cast set (`int32 ↔ float32`, `int32 ↔ byte`, `int32 ↔ uint32`, `byte → int32`, `uint32 → int32`);
 - call arguments match the callee's signature in types and modes (direct callee: the function's params; value callee: the function-type signature), and the result is typed as the signature's return; syscall arguments match the syscall's signature;
 - `read_index` bases are lists; `read_tag` bases are unions;
 - no `ret` of a `borrowed` value.

@@ -1239,8 +1239,20 @@ pub const Parser = struct {
         // Any other identifier (possibly dotted) is a named struct/union
         // reference; ownership defers to its declaration. The text form
         // carries no decls, so intern the name and record it so
-        // `types[id]` round-trips (ir.md §11).
-        return .{ .named = self.internTypeName(text) };
+        // `types[id]` round-trips (ir.md §11). A trailing `[...]` is the
+        // instantiation's type arguments (`Option[int32]`).
+        var args: []Type = &.{};
+        if (self.at(.lbracket)) {
+            var arg_list = std.ArrayList(Type).empty;
+            try self.expect(.lbracket, "'['");
+            while (!self.at(.rbracket)) {
+                try arg_list.append(self.arena.allocator(), try self.parseType());
+                if (!self.eat(.comma)) break;
+            }
+            try self.expect(.rbracket, "]'");
+            args = try self.arena.allocator().dupe(Type, arg_list.items);
+        }
+        return .{ .named = .{ .id = self.internTypeName(text), .args = args } };
     }
 };
 // ---------------------------------------------------------------------------

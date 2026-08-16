@@ -8,6 +8,7 @@ const std = @import("std");
 const ast = @import("../ast.zig");
 const cfg = @import("../cfg.zig");
 const moduleinfo = @import("../moduleinfo.zig");
+const type_resolve = @import("type_resolve.zig");
 const lower = @import("../lower.zig");
 const cfg_lower_expr = @import("cfg_lower_expr.zig");
 const cfg_lower_path = @import("cfg_lower_path.zig");
@@ -136,7 +137,7 @@ pub fn destructureStruct(self: *Lowerer, fs: *FuncState, pp: *const ast.PathPatt
         for (sp.fields, 0..) |*fp, i| {
             const idx = moduleinfo.fieldIndex(sd, fp.name.text) orelse
                 return self.fail(fp.name.span, "struct '{s}' has no field '{s}'", .{ name, fp.name.text });
-            field_types[i] = try self.resolveType(fs, &sd.fields[idx].type_);
+            field_types[i] = type_resolve.substParams(self.arena, sd.type_params, base.type_.named.args, try self.resolveType(fs, &sd.fields[idx].type_));
         }
         const results = try cfg_lower_emit.emitUnpack(self, fs, sp.span, .{ .unpack_struct = base }, field_types);
         cfg_lower_emit.markConsumed(self, fs, base);
@@ -152,7 +153,7 @@ pub fn destructureStruct(self: *Lowerer, fs: *FuncState, pp: *const ast.PathPatt
         for (sp.fields) |*fp| {
             const idx = moduleinfo.fieldIndex(sd, fp.name.text) orelse
                 return self.fail(fp.name.span, "struct '{s}' has no field '{s}'", .{ name, fp.name.text });
-            const field_type = try self.resolveType(fs, &sd.fields[idx].type_);
+            const field_type = type_resolve.substParams(self.arena, sd.type_params, base.type_.named.args, try self.resolveType(fs, &sd.fields[idx].type_));
             const proj = (try cfg_lower_emit.emit(self, fs, fp.name.span, .{ .read_field = .{ .base = base, .index = idx } }, field_type)) orelse continue;
             if (fp.pattern) |*p2| {
                 try bindPattern(self, fs, p2, proj, proj.state == .owned);

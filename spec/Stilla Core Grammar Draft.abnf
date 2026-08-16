@@ -35,8 +35,8 @@
 ;   Whitespace and comments separate tokens and are otherwise discarded
 ;   before syntactic parsing.
 ;
-; Cross-references to "Core spec n.n" refer to the companion
-;   "Stilla Core Language Specification".
+; Cross-references to the companion documents refer to them as a whole:
+;   "the Core specification" and "the Runtime specification".
 ;
 ; LL(1) parsing notes
 ; -------------------
@@ -52,7 +52,7 @@
 ;        "specialization-suffix" applies only after other primary forms.
 ;     3. pattern: an identifier at pattern start is parsed as a type-path; an
 ;        identifier immediately following that type-path (with optional
-;        type-args) marks a type-test pattern binding (Core spec 14.7), and a
+;        type-args) marks a type-test pattern binding (the Core specification), and a
 ;        "list", "box", "tuple", "fn", or primitive-type keyword at pattern
 ;        start likewise begins a "type-test-pattern" directly.
 ;     4. path-segment: the token after "." or "::" is read as a member name
@@ -133,12 +133,12 @@ void-literal    = "(" ")"
 ; The removed historical words "def", "gen", "delete", "for", and "in"
 ; have no special syntactic meaning: the v1.3 core language has no loop
 ; construct, and repetition is expressed with ordinary recursive function
-; calls (Core §13.5).
+; calls (the Core specification).
 ; The collection type names "array" and "hashmap" are not reserved words. The module name "builtin" is not a reserved word
-; either: it is an ordinary importable standard-library module (Core §3).
+; either: it is an ordinary importable standard-library module (the Core specification).
 ; Reserved words are recognized lexically, before syntactic parsing.
-;   The following type name "hostdata" is a primitive type (Core spec 11.7):
-;   it is reserved and appears in "primitive-type".
+; The primitive type "hostdata" (the Core specification) is reserved and appears in
+; both the reserved list above and "primitive-type".
 
 
 ; ----------------------------------------------------------------------------
@@ -161,7 +161,7 @@ module-item =
 ; Path aliases
 ; ----------------------------------------------------------------------------
 ; A "using" declaration introduces a compile-time alias for a path in the
-; current scope (Core spec 2.8). Without "as", the alias takes the final
+; current scope (the Core specification). Without "as", the alias takes the final
 ; segment of the path. The alias is scoped: at module level it is visible to
 ; the end of the module; inside a block it is visible to the end of that
 ; block. It is not a runtime member and does not appear on the module struct.
@@ -180,9 +180,9 @@ using-decl =
 ; ----------------------------------------------------------------------------
 ; Static semantics restrict module-resident generated struct values to
 ; module-level "const" bindings and restrict "import-expression" to this
-; initializer position (Core spec 2.2).
+; initializer position (the Core specification).
 ; The second form — "const identifier : type ;" — is a host constant
-; (Core spec 2.6): a declaration without an initializer whose value the
+; (the Core specification): a declaration without an initializer whose value the
 ; host provides at load/instantiation time; it requires the type
 ; annotation because there is no initializer to infer from.
 
@@ -200,7 +200,7 @@ const-def =
 ; A "borrow" parameter is non-owning. A "move" parameter is owning.
 ; Function types are monomorphic. Generic parameters are permitted on named
 ; function declarations but not on lambdas or function types.
-; The second form — "fn ... ;" — is a host binding (Core spec 2.6): a
+; The second form — "fn ... ;" — is a host binding (the Core specification): a
 ; declaration without a Stilla body whose implementation the host
 ; provides; calls to it lower to runtime system calls and its body is
 ; never lowered.
@@ -249,7 +249,7 @@ function-param-type =
 ; ----------------------------------------------------------------------------
 ; Generic parameters
 ; ----------------------------------------------------------------------------
-; Generic syntax is compile-time syntax (Core spec 12).
+; Generic syntax is compile-time syntax (the Core specification).
 
 type-params =
     "["
@@ -296,7 +296,7 @@ named-type =
 ; A path segment is normally an identifier, but a reserved word
 ; (lexically pre-identified; see "Reserved words") is also accepted as a
 ; segment after "." and "::", so that members named by reserved words —
-; e.g. "builtin.str" and "builtin.box" (Core spec 3) — parse. This is a
+; e.g. "builtin.str" and "builtin.box" (the Core specification) — parse. This is a
 ; documented parser rule (LL(1) parsing note 4): the token after "." or
 ; "::" is read as a member name whether or not it is reserved. The same
 ; rule applies to the first segment of a "type-path" when the path names
@@ -319,7 +319,7 @@ box-type =
     "]"
 
 ; The empty tuple type "tuple[]" is not a type: the empty tuple "()" is
-; the unique value of type "void" (Core spec 11.4). A single-element
+; the unique value of type "void" (the Core specification). A single-element
 ; tuple type "tuple[int32]" is valid and distinct from "int32".
 
 tuple-type =
@@ -625,7 +625,7 @@ import-expression =
 ; ----------------------------------------------------------------------------
 ; All fields must be supplied exactly once.
 ; Field initializers are evaluated in written source order. Field order does
-; not affect the struct's destruction order (Runtime spec 6.2).
+; not affect the struct's destruction order (the Runtime specification).
 ; Syntactically this is the "{" alternative of "path-tail" following a
 ; type-path with optional type arguments.
 
@@ -696,7 +696,7 @@ match-arm =
 ; Patterns
 ; ----------------------------------------------------------------------------
 ; Static semantics divide these forms into irrefutable and refutable
-; patterns (Core spec 14).
+; patterns (the Core specification).
 
 pattern =
       wildcard-pattern
@@ -732,14 +732,13 @@ literal-pattern =
 ; ----------------------------------------------------------------------------
 ; Type-test patterns
 ; ----------------------------------------------------------------------------
-; A "type-test-pattern" matches an "any" value by its runtime type tag (Core
-; spec 11.6.2, 14.7). It is a concrete type name optionally followed by a
+; A "type-test-pattern" matches an "any" value by its runtime type tag (the Core specification). It is a concrete type name optionally followed by a
 ; binding identifier. Keyword-led forms are parsed here. An identifier-led
 ; form ("File f", "Option[int32] o") is parsed as a "path-pattern" whose
 ; "pattern-tail" is the binding identifier (LL(1) parsing note 3).
 ; Static semantics reject "any", "never", and "hostdata" as test types: the
-; test type must be concrete (Core spec 14.7), and no pattern is defined on
-; "hostdata" (Core spec 11.7).
+; test type must be concrete (the Core specification), and no pattern is defined on
+; "hostdata" (the Core specification).
 
 type-test-pattern =
     type-test-type
@@ -776,7 +775,7 @@ tuple-pattern =
 ; An identifier-leading pattern is parsed uniformly as "path-pattern": a path
 ; followed by a construction brace is a "struct-pattern"; a path followed by
 ; ":: identifier" is a "union-pattern"; a path followed by a binding
-; identifier is a "type-test-pattern" (Core spec 14.7); otherwise the
+; identifier is a "type-test-pattern" (the Core specification); otherwise the
 ; identifier is an "identifier-pattern". Patterns have no indexing, so "["
 ; after a path in pattern position is always "type-args".
 

@@ -44,6 +44,13 @@ pub const FuncInstance = struct {
     type_args: []cfg.Type,
     signature: cfg.Type,
     mono: ?*const ast.FuncDef = null,
+    /// The module that declares the generic function (the instance's
+    /// monomorphized body is annotated and lowered against it).
+    module: *moduleinfo.ModuleInfo,
+    /// The instance's index in `Annotation.instances`, in creation order:
+    /// a deterministic, collision-free suffix for the instance's IR
+    /// function name (`{module}.{fn}.{id}`, ir.md §11).
+    id: u32,
 };
 
 /// Phase-2 side tables for one module (frontend §4.7 `ModuleAnnotation`).

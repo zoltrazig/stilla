@@ -50,7 +50,7 @@ This document — the **Core specification** — defines the Stilla v1.3 syntax 
 
 The boundary between the two documents is drawn at the point where a program transitions from a static artifact into a running execution context.
 
-The remainder of this specification states those rules precisely. Sections 2 through 17 explain the model; section 18 is the normative requirement (the formal static semantics). The normative lexical and syntactic grammar is defined in the standalone [`Stilla Core Grammar Draft.abnf`](Stilla%20Core%20Grammar%20Draft.abnf).
+The remainder of this specification states those rules precisely. The body of the specification explains the model; the final section, **Formal Static Semantics**, is the normative requirement. The normative lexical and syntactic grammar is defined in the standalone [`Stilla Core Grammar Draft.abnf`](Stilla%20Core%20Grammar%20Draft.abnf).
 
 ### 1.2 Design principles
 
@@ -103,18 +103,18 @@ The language rests on a small number of central rules. They are stated here once
 
 > **Termination rule.** Normal control flow destroys deterministically; panic terminates without unwinding and hands cleanup to the embedding host.
 
-The runtime consequences of the termination rule are defined in Runtime §7.
+The runtime consequences of the termination rule are defined in the Runtime specification.
 
 ### 1.4 Deliberate omissions
 
 Stilla deliberately omits the following mechanisms; they are not part of the language and are called out throughout the specification:
 
-- a tracing garbage collector — resources are owned and destroyed deterministically (§10, §9);
-- an implicit receiver — no method-style `receiver.foo()` sugar (§6.1);
-- inheritance — data is expressed with nominal structs and unions (§7, §11);
-- mutable global state — all bindings are immutable (§4, §5);
-- a general associated-function or static-method mechanism — construction and helpers are ordinary functions (§8);
-- exception-style unwinding on panic — a panic terminates the execution context without running `drop` hooks (Runtime §7).
+- a tracing garbage collector — resources are owned and destroyed deterministically (Ownership, Destruction);
+- an implicit receiver — no method-style `receiver.foo()` sugar (No implicit receiver);
+- inheritance — data is expressed with nominal structs and unions (Structs, Algebraic Data Types);
+- mutable global state — all bindings are immutable (Bindings, Module Constants);
+- a general associated-function or static-method mechanism — construction and helpers are ordinary functions (Construction);
+- exception-style unwinding on panic — a panic terminates the execution context without running `drop` hooks (the Runtime specification).
 
 A panic or runtime trap is therefore not normal control flow. It terminates the current Stilla execution context without language-level unwinding; control of cleanup then belongs to the embedding host.
 
@@ -122,39 +122,39 @@ A panic or runtime trap is therefore not normal control flow. It terminates the 
 
 These terms are used throughout the specification.
 
-- **module** — a source file compiled into one implicit immutable struct value (§2).
-- **module value / module-resident** — a value of a compiler-generated module type; it may appear only in module-level `const` bindings (§2.3).
-- **binding** — a name bound to an immutable value. `let` creates local bindings (§4); `const` creates module constants (§5).
-- **Copy** — a capability held by some types: a Copy value may be implicitly copied, such as `int32` or `str`; dropping a Copy value does nothing (§10.1).
-- **unique** — a value without the Copy capability: it may be used at most once and must be destroyed exactly once; it is not implicitly copyable (§10.2).
-- **owner** — a binding or location that holds a value; every value has ownership (§10).
-- **maybe-unique** — a unique binding released on some but not all normal paths through a conditional construct; it is unusable after the join, and its destruction is guarded by an implementation-maintained liveness state (§10.10).
-- **borrow** — a non-owning, read-only view of a value; it never transfers ownership (§10.6).
-- **move** — explicit ownership transfer of a complete local owner (§10.4).
-- **drop** — deterministic destruction: a user `drop` hook (§9.1), an explicit `drop` statement (§9.4), or automatic destruction when a scope ends (§9.5).
-- **nominal type** — a type defined by a `struct` or `union` declaration; it is distinct from every other type even if shape-identical (§7, §11).
-- **monomorphic function** — a function value whose parameter and return types are fully concrete; there are no runtime generic function values (§12).
-- **specialization** — compile-time expansion of generic code to concrete types (§12).
-- **top type** — `any`, the type every value type coerces to; its counterpart is the bottom type `never`, which has no values and coerces to every type (§11.6, §13.2).
-- **destruction view** — the special borrowed view of a value seen inside its own `drop` hook (§9.2).
+- **module** — a source file compiled into one implicit immutable struct value (Files, Modules, and Namespaces).
+- **module value / module-resident** — a value of a compiler-generated module type; it may appear only in module-level `const` bindings (Module values are module-scope only).
+- **binding** — a name bound to an immutable value. `let` creates local bindings (Bindings); `const` creates module constants (Module Constants).
+- **Copy** — a capability held by some types: a Copy value may be implicitly copied, such as `int32` or `str`; dropping a Copy value does nothing (Copy capability).
+- **unique** — a value without the Copy capability: it may be used at most once and must be destroyed exactly once; it is not implicitly copyable (Unique values).
+- **owner** — a binding or location that holds a value; every value has ownership (Ownership).
+- **maybe-unique** — a unique binding released on some but not all normal paths through a conditional construct; it is unusable after the join, and its destruction is guarded by an implementation-maintained liveness state (Conditional release).
+- **borrow** — a non-owning, read-only view of a value; it never transfers ownership (Parameter modes).
+- **move** — explicit ownership transfer of a complete local owner (Ownership transfer with `move`).
+- **drop** — deterministic destruction: a user `drop` hook (`drop` lifecycle declaration), an explicit `drop` statement (Explicit destruction), or automatic destruction when a scope ends (Automatic destruction).
+- **nominal type** — a type defined by a `struct` or `union` declaration; it is distinct from every other type even if shape-identical (Structs, Algebraic Data Types).
+- **monomorphic function** — a function value whose parameter and return types are fully concrete; there are no runtime generic function values (Generics).
+- **specialization** — compile-time expansion of generic code to concrete types (Generics).
+- **top type** — `any`, the type every value type coerces to; its counterpart is the bottom type `never`, which has no values and coerces to every type (The top type `any`, `if`).
+- **destruction view** — the special borrowed view of a value seen inside its own `drop` hook (Destruction view).
 - **full expression** — an expression that is not a subexpression of a
   larger expression: a statement-level expression, a binding or constant
   initializer, an argument, a field initializer, a match-arm body, or a
   block's final expression. Unique temporaries are destroyed at the end
-  of the innermost enclosing full expression (Runtime §6.4).
+  of the innermost enclosing full expression (the Runtime specification).
 
-Runtime-side terms (execution context, module storage, teardown, host) are defined in Runtime §1.4.
+Runtime-side terms (execution context, module storage, teardown, host) are defined in the Runtime specification.
 
 ### 1.6 How this specification is organized
 
-- **§2–§3 — Modules.** Every file is an implicit immutable module value; imports are statically resolved; the `builtin` module is imported like any other standard-library module. Module instantiation and the host contract are defined in the Runtime specification.
-- **§4–§8 — Bindings and values.** Locals (`let`), module constants (`const`), functions, structs, and construction.
-- **§9–§12 — Ownership and types.** Destruction, the ownership model, algebraic data types, and compile-time generics. Destruction timing and order are defined in the Runtime specification.
-- **§13–§16 — The expression layer.** Control flow, patterns, operators, and member access. Evaluation order is defined in the Runtime specification.
-- **§17 — Example.** A worked resource module.
-- **§18 — Normative requirements.** The formal static semantics and the grammar.
+- **Modules.** Every file is an implicit immutable module value; imports are statically resolved; the `builtin` module is imported like any other standard-library module. Module instantiation and the host contract are defined in the Runtime specification.
+- **Bindings and values.** Locals (`let`), module constants (`const`), functions, structs, and construction.
+- **Ownership and types.** Destruction, the ownership model, algebraic data types, and compile-time generics. Destruction timing and order are defined in the Runtime specification.
+- **The expression layer.** Control flow, patterns, operators, and member access. Evaluation order is defined in the Runtime specification.
+- **Example.** A worked resource module.
+- **Normative requirements.** The formal static semantics and the grammar.
 
-The companion **Runtime specification** covers: the execution context (§R1), module instantiation (§R2), the host environment (§R3), the required `builtin` interface (§R4), evaluation order (§R5), destruction at runtime (§R6), termination and traps (§R7), and the core runtime model (§R8).
+The companion **Runtime specification** covers: the execution context, module instantiation, the host environment, the required `builtin` interface, evaluation order, destruction at runtime, termination and traps, and the core runtime model.
 
 ---
 
@@ -190,7 +190,7 @@ A source file is therefore both a compilation unit and the definition of one mod
 
 Each resolved module has its own compiler-generated **nominal struct type**. There is no separate runtime `module` type category: layout, immutability, and `.` member access use the same value/member model as structs. The generated type is not directly nameable or constructible in Stilla source.
 
-The compiler additionally marks values of these generated module structs as **module-resident**, which imposes the placement restrictions in §2.3. Ordinary source-defined struct values remain first-class values.
+The compiler additionally marks values of these generated module structs as **module-resident**, which imposes the placement restrictions stated in **Module values are module-scope only**. Ordinary source-defined struct values remain first-class values.
 
 Stilla has no independent runtime `namespace` construct.
 
@@ -217,7 +217,7 @@ fn main() -> void {
 }
 ```
 
-`import("calc")` produces a stable reference to the module instance for the current execution context (Runtime §2.4).
+`import("calc")` produces a stable reference to the module instance for the current execution context (the Runtime specification).
 
 Therefore:
 
@@ -274,7 +274,7 @@ Import cycles are rejected in Stilla v1.3.
 
 The standard library is specified separately.
 
-The load-time resolution process is defined in Runtime §2.6.
+The load-time resolution process is defined in the Runtime specification.
 
 ## 2.5 Runtime and type members
 
@@ -309,9 +309,9 @@ its constant members may be **host constants** — `const` declarations
 without an initializer (Grammar `const-def`, second form). The host
 supplies the implementation or value: a host binding is callable only as a
 runtime system call, its body is never lowered, and a host constant is
-read as a runtime value the host provides at instantiation (Runtime §3.1).
+read as a runtime value the host provides at instantiation (the Runtime specification).
 Standard-library modules use the same forms for their host-implemented
-members (Standard Library §1).
+members (the Standard Library).
 
 Conceptually:
 
@@ -326,7 +326,7 @@ This structural illustration does not make module values ordinary first-class st
 
 Source modules, standard-library modules, and host modules use the same `.` member-access syntax.
 
-The host-side registration and integration contract is defined in Runtime §3.1.
+The host-side registration and integration contract is defined in the Runtime specification.
 
 ## 2.7 Nested libraries
 
@@ -339,9 +339,8 @@ const math = import("math");
 const string = import("string");
 ```
 
-Here `math` is the standard-library `math` module (Standard Library
-document, §4), and `string` is the standard-library `string` module
-(Standard Library document, §5).
+Here `math` is the standard-library `math` module (the Standard Library), and `string` is the standard-library `string` module
+(the Standard Library).
 
 Consumer:
 
@@ -365,7 +364,7 @@ The expression:
 std.math.sqrt
 ```
 
-is chained value-member access (§15).
+is chained value-member access (Member Access and `::`).
 
 No nested runtime namespace mechanism is required.
 
@@ -400,7 +399,7 @@ A `using` declaration:
   the enclosing module or block, and is not visible to sibling or outer
   scopes;
 - may shadow an outer binding, and may itself be shadowed, with the same
-  rules as `let` (§4);
+  rules as `let` (Bindings);
 - is a compile-time binding: it does not create a runtime member, is not
   present on the module struct, and cannot be assigned, moved, or dropped;
 - requires the path to resolve; a path alias for an unresolved path is a
@@ -424,8 +423,7 @@ Here `up` is the alias of `string.upper` within the module.
 
 # 3. The `builtin` Module
 
-`builtin` is an ordinary importable standard-library module (Standard
-Library §1). A program brings it into scope like any other module:
+`builtin` is an ordinary importable standard-library module (the Standard Library). A program brings it into scope like any other module:
 
 ```stilla
 const builtin = import("builtin");
@@ -465,13 +463,13 @@ builtin.print(...)
 builtin.len(...)
 ```
 
-The required signatures and behavioral contracts of these helpers are defined in Runtime §4.
+The required signatures and behavioral contracts of these helpers are defined in the Runtime specification.
 
 ---
 
 # 4. Bindings
 
-This section covers **local** bindings. Module-level constant bindings use `const` (§5). Local `let` bindings never become module members.
+This section covers **local** bindings. Module-level constant bindings use `const` (Module Constants). Local `let` bindings never become module members.
 
 Local bindings use:
 
@@ -509,7 +507,7 @@ Stilla is therefore SSA-friendly, although the source language is not itself an 
 
 # 5. Module Constants
 
-Module-level constant bindings use `const` — the module-scope counterpart of the local `let` binding (§4). A `const` is the only binding form that can name a module value (§2.3).
+Module-level constant bindings use `const` — the module-scope counterpart of the local `let` binding (Bindings). A `const` is the only binding form that can name a module value (Module values are module-scope only).
 
 Module-level immutable runtime members use:
 
@@ -526,13 +524,13 @@ const calc = import("calc");
 
 A module constant:
 
-- is initialized when its module is instantiated (Runtime §2.3);
+- is initialized when its module is instantiated (the Runtime specification);
 - cannot be reassigned;
 - becomes a runtime member of the module when its value is a runtime value.
 
-A module binding whose value has module type is subject to the module-scope restrictions in §2.3.
+A module binding whose value has module type is subject to the module-scope restrictions stated in **Module values are module-scope only**.
 
-Module constant initializers are evaluated strictly in declaration order (Runtime §5).
+Module constant initializers are evaluated strictly in declaration order (the Runtime specification).
 
 An initializer may reference:
 
@@ -544,13 +542,13 @@ An initializer may reference:
 
 It may not reference a later module constant.
 
-A module constant initializer must not transitively call a function that reads a module constant declared later than the initializer; such a program is rejected at compile time. This preserves the guarantee that module constants are read only after initialization (Runtime §2.3).
+A module constant initializer must not transitively call a function that reads a module constant declared later than the initializer; such a program is rejected at compile time. This preserves the guarantee that module constants are read only after initialization (the Runtime specification).
 
-A unique non-module constant is owned by the module execution context. It cannot be explicitly moved or explicitly dropped by source code and is destroyed during normal module/context teardown (Runtime §2.5).
+A unique non-module constant is owned by the module execution context. It cannot be explicitly moved or explicitly dropped by source code and is destroyed during normal module/context teardown (the Runtime specification).
 
 The initialization-order restriction applies symmetrically at teardown:
 teardown destroys unique constants in **reverse** declaration order
-(Runtime §2.5), so a later constant is already destroyed when an earlier
+(the Runtime specification), so a later constant is already destroyed when an earlier
 constant's `drop` hook runs. A unique module constant whose type defines a
 `drop` hook — the hook and every function it transitively calls — must
 not read a module constant declared later than the constant being
@@ -577,7 +575,7 @@ fn add(
 }
 ```
 
-A monomorphic top-level function is a function-valued runtime member of the current module. An unspecialized generic function is a compile-time template (§12).
+A monomorphic top-level function is a function-valued runtime member of the current module. An unspecialized generic function is a compile-time template (Generics).
 
 If the module is imported as:
 
@@ -712,11 +710,11 @@ A recursive function must explicitly declare its return type.
 
 ## 6.5 Order and recursion
 
-Functions and lambdas are **order-independent** within the module in which they are declared: a function body may reference any module-level function, including functions declared later in the same source file. Direct and **mutual recursion** are permitted. Because functions are non-capturing (§6.2) and are represented as monomorphic code references, a function reference does not depend on module-constant initialization order (§5).
+Functions and lambdas are **order-independent** within the module in which they are declared: a function body may reference any module-level function, including functions declared later in the same source file. Direct and **mutual recursion** are permitted. Because functions are non-capturing (Non-capturing functions) and are represented as monomorphic code references, a function reference does not depend on module-constant initialization order (Module Constants).
 
-Every function participating in a recursion cycle — direct or mutual — must declare its return type explicitly (§6.4).
+Every function participating in a recursion cycle — direct or mutual — must declare its return type explicitly (Return values).
 
-A function type is a finite code-reference type. A struct or union may contain a function field whose type mentions the enclosing type; the function type breaks the storage cycle (§11.3) and does not make the enclosing type unique on that account (§10.3).
+A function type is a finite code-reference type. A struct or union may contain a function field whose type mentions the enclosing type; the function type breaks the storage cycle (Recursive types) and does not make the enclosing type unique on that account (Composite ownership).
 
 ---
 
@@ -874,7 +872,7 @@ Visibility control and opaque source-defined structs are outside the scope of St
 
 # 9. Destruction
 
-This section states the compile-time constraints of destruction: how a `drop` hook is declared, what code may do inside it, and what an explicit `drop` may target. The runtime sequence of destruction — ordering, timing, and teardown — is defined in Runtime §6.
+This section states the compile-time constraints of destruction: how a `drop` hook is declared, what code may do inside it, and what an explicit `drop` may target. The runtime sequence of destruction — ordering, timing, and teardown — is defined in the Runtime specification.
 
 ## 9.1 `drop` lifecycle declaration
 
@@ -930,7 +928,7 @@ A destruction view may:
 - borrow unique fields;
 - apply `builtin.peek` to a boxed field;
 - access ordinary members;
-- call functions whose relevant parameters are declared `borrow` (§10.6);
+- call functions whose relevant parameters are declared `borrow` (Parameter modes);
 
 A destruction view may not:
 
@@ -945,7 +943,7 @@ Partial movement from a destruction view is forbidden.
 
 ## 9.3 Destruction order
 
-The order in which a struct value is destroyed at runtime is defined in Runtime §6.2: the user `drop` hook runs first, then unique fields are destroyed in reverse declaration order, then the complete value is marked destroyed.
+The order in which a struct value is destroyed at runtime is defined in the Runtime specification: the user `drop` hook runs first, then unique fields are destroyed in reverse declaration order, then the complete value is marked destroyed.
 
 ## 9.4 Explicit destruction
 
@@ -985,19 +983,19 @@ It cannot directly target:
 
 This restriction avoids partial-destruction state.
 
-The destruction sequence performed by an explicit `drop` at runtime is defined in Runtime §6.5.
+The destruction sequence performed by an explicit `drop` at runtime is defined in the Runtime specification.
 
 ## 9.5 Automatic destruction
 
 During normal control flow, a unique local owner that has not been moved or explicitly dropped is automatically destroyed when its scope ends.
 
-The destruction order — reverse creation order — is defined in Runtime §6.1.
+The destruction order — reverse creation order — is defined in the Runtime specification.
 
 ## 9.6 Structural destruction
 
 Values containing unique components are destroyed structurally.
 
-The precise ordering for each container form — struct fields, tuple elements, list elements, union payloads, `box[T]`, and module-owned unique constants — and the rule that only the active union variant is destroyed, are defined in Runtime §6.3.
+The precise ordering for each container form — struct fields, tuple elements, list elements, union payloads, `box[T]`, and module-owned unique constants — and the rule that only the active union variant is destroyed, are defined in the Runtime specification.
 
 ---
 
@@ -1014,7 +1012,7 @@ In addition, the type checker tracks non-owning **borrowed views** of values.
 
 A borrow is never an owner and never participates in destruction.
 
-This section states the static (compile-time) ownership model. Every value has ownership: some types have the **Copy** capability (§10.1), and a value without Copy is **unique** (§10.2). The timing of runtime destruction — scope exit, full-expression temporaries, and module teardown — is defined in Runtime §6.
+This section states the static (compile-time) ownership model. Every value has ownership: some types have the **Copy** capability (Copy capability), and a value without Copy is **unique** (Unique values). The timing of runtime destruction — scope exit, full-expression temporaries, and module teardown — is defined in the Runtime specification.
 
 ## 10.1 Copy capability
 
@@ -1033,13 +1031,13 @@ fn(...)
 
 A Copy value may be copied implicitly.
 
-Copy is a capability: a Copy value may be copied implicitly; a value without Copy is unique (§10.2); `drop` of a Copy value does nothing.
+Copy is a capability: a Copy value may be copied implicitly; a value without Copy is unique (Unique values); `drop` of a Copy value does nothing.
 
 Immutable strings may use reference-counted sharing.
 
-All first-class function values are monomorphic (§12).
+All first-class function values are monomorphic (Generics).
 
-The top type `any` is **not** Copy: because it may hold a value of any type — including a unique value — `any` is always unique (§11.6). The type `hostdata` is **not** Copy: it wraps a host-owned opaque payload and is always unique (§11.7).
+The top type `any` is **not** Copy: because it may hold a value of any type — including a unique value — `any` is always unique (The top type `any`). The type `hostdata` is **not** Copy: it wraps a host-owned opaque payload and is always unique (The `hostdata` type).
 
 ## 10.2 Unique values
 
@@ -1066,7 +1064,7 @@ For example, `tuple[A, B]` is unique if either `A` or `B` is unique.
 
 A union is unique if any variant payload can contain a unique value.
 
-The top type `any` is unique for the same structural reason: it may hold a value of any type, including a unique value (§11.6).
+The top type `any` is unique for the same structural reason: it may hold a value of any type, including a unique value (The top type `any`).
 
 For containers:
 
@@ -1081,7 +1079,7 @@ An implementation may use reference-counted sharing for Copy `list[T]` and `box[
 
 A non-Copy list or box has unique source-language ownership.
 
-**Recursive classification.** The rules of §10.2–§10.3 define a monotone system of equations over
+**Recursive classification.** The rules of **Copy capability** and **Unique values** define a monotone system of equations over
 types. For a type whose type graph is cyclic, the equations have multiple solutions; Stilla v1.3
 resolves the ambiguity to the **greatest fixpoint**. A recursive occurrence reached through an owned
 component is classified as unique. A type is Copy only if its classification is well-founded
@@ -1089,17 +1087,17 @@ without treating any recursive back-edge as unique.
 
 Consequences:
 
-- A recursive type with no `drop` hook, such as `Tree` in §11.1, is **unique**: it cannot be
+- A recursive type with no `drop` hook, such as `Tree` in **Named unions**, is **unique**: it cannot be
   copied implicitly, and `box[Tree]` / `list[Tree]` are unique containers.
 - The reference-counting sharing freedom of this section applies only to Copy containers,
   which under this rule are never recursive.
 - A function type is not an owned component: it contains no payload and is always Copy
-  (§10.1). A type cycle that passes only through function types — for example
+  (Copy capability). A type cycle that passes only through function types — for example
   `struct F { call: fn(F) -> int32 }` — does not make the type unique and is not recursive storage
-  (§11.3).
+  (Recursive types).
 
 Implementations must resolve the classification to the greatest fixpoint; the choice is observable
-(§10.4) and is therefore normative. A worklist algorithm over the strongly connected components of
+(Ownership transfer with `move`) and is therefore normative. A worklist algorithm over the strongly connected components of
 the type graph is a conforming method.
 
 ## 10.4 Ownership transfer with `move`
@@ -1109,7 +1107,7 @@ Consuming a binding `x` of type `T` either duplicates or transfers its value:
 ```text
 consume x:
     Copy(T)   => duplicate value, x remains live
-    !Copy(T)  => transfer ownership, x becomes dead (definitely released, §10.10)
+    !Copy(T)  => transfer ownership, x becomes dead (definitely released; see **Conditional release**)
 ```
 
 `move` is the consume operator: `move x` consumes `x`.
@@ -1134,7 +1132,7 @@ Stilla v1.3 does not support partial move from:
 
 Syntactically, `move` names a complete local binding.
 
-To extract owned components, the complete owner must first be consumed by destructuring (§14.6).
+To extract owned components, the complete owner must first be consumed by destructuring (Ownership and destructuring).
 
 ## 10.5 Fresh unique values
 
@@ -1173,7 +1171,7 @@ A plain parameter accepts only a Copy argument type. The argument is passed by o
 
 Passing a unique value to a plain parameter is a compile-time error.
 
-The top type `any` is the sole exception (§11.6): a plain parameter of type `any` accepts any argument type. A Copy argument is coerced into the `any` and may be copied; a unique argument must be written with explicit `move` at the call site, and its ownership transfers into the `any`.
+The top type `any` is the sole exception (The top type `any`): a plain parameter of type `any` accepts any argument type. A Copy argument is coerced into the `any` and may be copied; a unique argument must be written with explicit `move` at the call site, and its ownership transfers into the `any`.
 
 ### Borrow parameters
 
@@ -1311,36 +1309,36 @@ Partial movement through a borrowed box is forbidden.
 
 ## 10.9 Unique temporaries
 
-When a unique temporary is destroyed at runtime — at the end of the containing full expression, in reverse creation order, unless interrupted by panic — is defined in Runtime §6.4.
+When a unique temporary is destroyed at runtime — at the end of the containing full expression, in reverse creation order, unless interrupted by panic — is defined in the Runtime specification.
 
 ## 10.10 Conditional release
 
-A **conditional construct** is an `if`/`else` expression (§13.2), a `match` expression (§13.3), or a short-circuit `and`/`or` operand (§16.2).
+A **conditional construct** is an `if`/`else` expression (`if`), a `match` expression (`match`), or a short-circuit `and`/`or` operand (Evaluation order).
 
-Let `v` be a unique local binding whose scope encloses a conditional construct `C`. If any normal-control-flow path through `C` **releases** `v` — by `move` (§10.4), explicit `drop` (§9.4), or a consuming destructure of its whole owner (§14.6) — and some other normal path does not, then `v` is **maybe-unique**: it may not be used, borrowed, moved, or dropped afterward (compile-time error, §10.2 use-after-move), and its scope-end destruction is conditional — the implementation tracks at runtime whether the binding was already released and destroys it only if it is still alive.
+Let `v` be a unique local binding whose scope encloses a conditional construct `C`. If any normal-control-flow path through `C` **releases** `v` — by `move` (Ownership transfer with `move`), explicit `drop` (Explicit destruction), or a consuming destructure of its whole owner (Ownership and destructuring) — and some other normal path does not, then `v` is **maybe-unique**: it may not be used, borrowed, moved, or dropped afterward (compile-time error, use-after-move; see **Unique values**), and its scope-end destruction is conditional — the implementation tracks at runtime whether the binding was already released and destroys it only if it is still alive.
 
 Consequently, after a conditional construct `C`, every unique binding whose scope encloses `C` is either **definitely owned**, **maybe-unique**, or **definitely released**:
 
 - a definitely-owned binding behaves normally: it may be borrowed, moved, dropped, or automatically destroyed at scope end;
 - a maybe-unique binding is released on some but not all normal-control-flow paths: it may not be used, borrowed, moved, or dropped afterward, and its scope-end destruction is conditional — the implementation tracks whether the binding was already released and destroys it only if it is still alive;
-- a definitely-released binding was released on every normal path: it may not be used, borrowed, moved, or dropped afterward, and is not automatically destroyed at scope end; any such use is a compile-time error (§10.2, use-after-move).
+- a definitely-released binding was released on every normal path: it may not be used, borrowed, moved, or dropped afterward, and is not automatically destroyed at scope end; any such use is a compile-time error (use-after-move; see **Unique values**).
 
 For a maybe-unique binding, the runtime liveness flag is introduced only when the implementation cannot statically establish that the binding was released on every path (e.g. a binding released in one arm of an `if` but not the other).
 
 Notes:
 
 - A consuming match `match (move v)` releases `v` on every path and is unconditional; this rule governs only moves of *enclosing* bindings that occur inside arm bodies.
-- Borrowing does not participate: a borrow never releases (§10.6, §10.7).
-- Panic and trap paths are not normal control flow (Runtime §7) and neither satisfy nor violate the release requirement; no destruction runs as a consequence of termination.
+- Borrowing does not participate: a borrow never releases (Parameter modes, Borrow lifetime rule).
+- Panic and trap paths are not normal control flow (the Runtime specification) and neither satisfy nor violate the release requirement; no destruction runs as a consequence of termination.
 
 ## 10.11 Implicit consumption positions
 
-`move` is the explicit consume operator (§10.4), but ownership is
+`move` is the explicit consume operator (Ownership transfer with `move`), but ownership is
 transferred implicitly in **consuming positions** — positions that require
 an owned value:
 
 - a move-mode call argument — a fresh unique expression transfers
-  directly; an existing local owner requires `move` (§10.6);
+  directly; an existing local owner requires `move` (Parameter modes);
 - a struct, union-variant, tuple, or list literal slot — a fresh unique
   expression is owned by the constructed value; an existing local owner
   requires `move`;
@@ -1349,15 +1347,15 @@ an owned value:
 - a function's final expression when the return type is unique — the
   value is returned by ownership, and an existing local owner in final
   position transfers implicitly, because the binding ends with the
-  return (§6.4);
+  return (Return values);
 - a coercion of a unique value to `any` — the pack consumes the source
-  (§11.6).
+  (The top type `any`).
 
 In every consuming position, an existing unique local owner is
 transferred only with an explicit `move`; a fresh unique expression
-transfers implicitly (§10.5); and a borrowed value never transfers
-(§10.7). Storing an existing unique owner without `move` is a compile-time
-error (§18 *Ownership*).
+transfers implicitly (Fresh unique values); and a borrowed value never transfers
+(Borrow lifetime rule). Storing an existing unique owner without `move` is a compile-time
+error (Formal Static Semantics, *Ownership*).
 
 ---
 
@@ -1438,9 +1436,9 @@ Stilla v1.3 has no anonymous struct or anonymous union type syntax.
 
 Recursive inline storage is forbidden.
 
-Every recursive storage cycle must pass through indirection such as `box[T]`, `list[T]`, or a function type (§10.3).
+Every recursive storage cycle must pass through indirection such as `box[T]`, `list[T]`, or a function type (Composite ownership).
 
-The unique classification of recursive types follows the greatest-fixpoint rule of §10.3.
+The unique classification of recursive types follows the greatest-fixpoint rule of **Composite ownership**.
 
 ## 11.4 Tuple
 
@@ -1490,9 +1488,9 @@ An indexed unique element is borrowed and cannot be independently moved.
 ## 11.6 The top type `any`
 
 `any` is the language's **top type**: every value type `T` — except
-`hostdata` (§11.7) — coerces to `any`. The bottom type `never` has no
+`hostdata` (The `hostdata` type) — coerces to `any`. The bottom type `never` has no
 values and coerces to every type; `any` is the inverse — it accepts every
-tagged value type and coerces to no other type (§18 *Typing*). `hostdata`
+tagged value type and coerces to no other type (Formal Static Semantics, *Typing*). `hostdata`
 carries no runtime type tag, so it cannot be an `any` payload.
 
 `any` may hold a value of any type:
@@ -1506,16 +1504,16 @@ let c: any = open_file("f");        // unique File, moved in (fresh value)
 The coercion is implicit. A Copy source value is copied into the `any`; a
 unique source value must be moved — an existing unique owner requires
 explicit `move` at the coercion site, while a fresh unique expression
-transfers implicitly (§10.5) — and its ownership transfers into the `any`.
+transfers implicitly (Fresh unique values) — and its ownership transfers into the `any`.
 
-`any` is **unique** (§10.3): because it may hold a unique value, an `any` value may be used at most once, must be destroyed exactly once, and is not implicitly copyable. `any` therefore does not appear in the Copy list of §10.1, and containers of `any` — `list[any]`, `box[any]`, `tuple[..., any]` — are unique.
+`any` is **unique** (Composite ownership): because it may hold a unique value, an `any` value may be used at most once, must be destroyed exactly once, and is not implicitly copyable. `any` therefore does not appear in the Copy list of **Copy capability**, and containers of `any` — `list[any]`, `box[any]`, `tuple[..., any]` — are unique.
 
-An `any` value carries a **runtime type tag** recording its concrete payload type (Runtime §8). The tag is deterministic and comparable; Stilla inspects it only through the two typed-recovery operations of §11.6.1 and §11.6.2. No member access, indexing, operator, or equality is defined on `any` (§16.3), and `any` does not coerce to any other type (§18 *Typing*). Destruction of an `any` value destroys the tagged payload by the payload type's own destruction rules (Core §9, Runtime §6).
+An `any` value carries a **runtime type tag** recording its concrete payload type (the Runtime specification). The tag is deterministic and comparable; Stilla inspects it only through the two typed-recovery operations of **Recovery by `as`** and **Recovery by `match`**. No member access, indexing, operator, or equality is defined on `any` (Core operator typing and numeric conversion), and `any` does not coerce to any other type (Formal Static Semantics, *Typing*). Destruction of an `any` value destroys the tagged payload by the payload type's own destruction rules (Core specification, Runtime specification).
 
 The primary uses are:
 
 - **heterogeneous data** — unique containers such as `box[any]` and `list[any]` can carry values of different types together;
-- **typed recovery** — `as` (§11.6.1) and `match` type-test patterns (§11.6.2) recover a payload as a specific type, trapping on mismatch;
+- **typed recovery** — `as` (Recovery by `as`) and `match` type-test patterns (Recovery by `match`) recover a payload as a specific type, trapping on mismatch;
 - **opaque pass-through** — a Stilla program may receive, store, and forward `any` values without inspecting them.
 
 ## 11.6.1 Recovery by `as`
@@ -1526,16 +1524,16 @@ An `any` value may be recovered by an `as` cast naming a concrete type:
 let b = a as int32;
 ```
 
-The target type `T` must be a concrete Stilla type other than `any` and `never`; in generic code the target is the specialization of `T` (§12). The cast reads the runtime tag:
+The target type `T` must be a concrete Stilla type other than `any` and `never`; in generic code the target is the specialization of `T` (Generics). The cast reads the runtime tag:
 
 - if the payload type is `T`, the payload is extracted;
-- otherwise the program traps: **invalid `any` cast** (Runtime §7.2). The trap terminates without unwinding (§7.1), so no partial ownership state remains.
+- otherwise the program traps: **invalid `any` cast** (the Runtime specification). The trap terminates without unwinding (the Runtime specification), so no partial ownership state remains.
 
 Ownership follows the target type, statically:
 
-- if `T` is Copy (§10.1), the payload is copied out and the source `any` remains definitely owned; the same value may be recovered again;
-- if `T` is unique, the source must be moved: `(move a) as T`. The complete `any` is consumed (§10.4), ownership of the payload transfers to the result, and the source becomes definitely released (§10.10);
-- `hostdata` never appears in an `any` payload — it does not coerce to `any` (§11.6, §11.7) — so `as hostdata` is never a valid recovery.
+- if `T` is Copy (Copy capability), the payload is copied out and the source `any` remains definitely owned; the same value may be recovered again;
+- if `T` is unique, the source must be moved: `(move a) as T`. The complete `any` is consumed (Ownership transfer with `move`), ownership of the payload transfers to the result, and the source becomes definitely released (Conditional release);
+- `hostdata` never appears in an `any` payload — it does not coerce to `any` (The top type `any`, The `hostdata` type) — so `as hostdata` is never a valid recovery.
 
 ## 11.6.2 Recovery by `match`
 
@@ -1545,33 +1543,33 @@ A `match` may test an `any` value with **type-test patterns**:
 match (a) {
     int32 n => ...,
     str s => ...,
-    File f => ...,
+    float32 f => ...,
     _ => ...          // required
 }
 ```
 
-A type-test pattern is a concrete type name, optionally followed by a binding identifier (§14.7). It matches when the runtime tag equals that type. Because the tag space is open — any program may define new types — a `match` over an `any` value must include a wildcard `_` arm.
+A type-test pattern is a concrete type name, optionally followed by a binding identifier (Type-test pattern). It matches when the runtime tag equals that type. Because the tag space is open — any program may define new types — a `match` over an `any` value must include a wildcard `_` arm.
 
-(The scrutinee is parenthesized per §13.3.)
+(The scrutinee is parenthesized per **`match`**.)
 
-Binding mode follows §13.4:
+Binding mode follows **Borrowing and consuming matches**:
 
-- in a non-consuming match `match (a)`, the scrutinee is borrowed: Copy arm bindings are copies, and unique arm bindings are borrows usable only within the selected arm;
+- in a non-consuming match `match (a)`, the scrutinee is borrowed: arm bindings are copies of Copy payloads, and a unique payload cannot be extracted from a borrowed `any` — recovering a unique payload requires the consuming form, `match (move a)`;
 - in a consuming match `match (move a)`, the complete `any` is transferred: Copy arm bindings are copies, unique arm bindings are owners of the extracted payload, and the wildcard arm discards the payload.
 
-Type-test patterns may reference generic parameters; under monomorphization (§12) they resolve to concrete tags.
+Type-test patterns may reference generic parameters; under monomorphization (Generics) they resolve to concrete tags.
 
 ## 11.7 The `hostdata` type
 
-`hostdata` is a distinct nominal type carrying an **opaque, host-defined payload**. It is unrelated to `any` (§11.6): a `hostdata` value is created only by a host binding and leaves Stilla only by being handed back to the host or by destruction.
+`hostdata` is a distinct nominal type carrying an **opaque, host-defined payload**. It is unrelated to `any` (The top type `any`): a `hostdata` value is created only by a host binding and leaves Stilla only by being handed back to the host or by destruction.
 
-Only the host constructs `hostdata` values, through host functions and module members (§2.6, Runtime §3.1). No Stilla value coerces into `hostdata`, `hostdata` does not coerce into `any` (§11.6) or into any other type, and `hostdata` is not a top type.
+Only the host constructs `hostdata` values, through host functions and module members (**Host-provided modules**; the Runtime specification). No Stilla value coerces into `hostdata`, `hostdata` does not coerce into `any` (The top type `any`) or into any other type, and `hostdata` is not a top type.
 
-Stilla defines no operation on `hostdata` other than moving, borrowing, storing, passing along, and handing to the host. No member access, indexing, operator, cast, pattern, equality, or hash is defined on `hostdata`, and it coerces to no other type (§16.3).
+Stilla defines no operation on `hostdata` other than moving, borrowing, storing, passing along, and handing to the host. No member access, indexing, operator, cast, pattern, equality, or hash is defined on `hostdata`, and it coerces to no other type (Core operator typing and numeric conversion).
 
-`hostdata` is **unique** (§10.3): a `hostdata` value may be used at most once, must be destroyed exactly once, and is not implicitly copyable. `hostdata` does not appear in the Copy list of §10.1, and containers of `hostdata` — `list[hostdata]`, `box[hostdata]`, `tuple[..., hostdata]` — are unique.
+`hostdata` is **unique** (Composite ownership): a `hostdata` value may be used at most once, must be destroyed exactly once, and is not implicitly copyable. `hostdata` does not appear in the Copy list of **Copy capability**, and containers of `hostdata` — `list[hostdata]`, `box[hostdata]`, `tuple[..., hostdata]` — are unique.
 
-Destruction of a `hostdata` value — automatic (Core §9.5), explicit `drop` (Core §9.4), or container destruction — returns the opaque payload to the host for disposal (Runtime §3.4, §7.3); this is host cleanup, not execution of a Stilla `drop` hook.
+Destruction of a `hostdata` value — automatic (the Core specification), explicit `drop` (the Core specification), or container destruction — returns the opaque payload to the host for disposal (the Runtime specification); this is host cleanup, not execution of a Stilla `drop` hook.
 
 The primary uses are:
 
@@ -1636,13 +1634,12 @@ The compiler first infers a concrete specialization and then type-checks the res
 The inference is **structural over the types of the call's argument
 expressions**: `list[T]`, `box[T]`, `tuple[...]`, and function types are
 matched componentwise. A type argument is not recovered from the value of
-a generic named type: a parameter such as `a: Array[T]` (Standard Library
-§2) carries `T` only inside the named type's argument list, and a value of
+a generic named type: a parameter such as `a: Array[T]` (the Standard Library) carries `T` only inside the named type's argument list, and a value of
 that named type exposes no instantiation information, so `T` cannot be
-inferred there and must be written explicitly with `::[...]` (§12.3).
+inferred there and must be written explicitly with `::[...]` (Explicit specialization).
 There is likewise no inference from an expected result type in v1.3: a
 generic call with no type-carrying argument — for example
-`hashmap.empty()` (Standard Library §3) — requires explicit type
+`hashmap.empty()` (the Standard Library) — requires explicit type
 arguments.
 
 Conceptually:
@@ -1668,9 +1665,8 @@ identity::[int32](42)
 The syntax `::[...]` is compile-time specialization syntax. It does not perform a runtime postfix operation.
 
 Explicit specialization is required whenever inference cannot determine a
-type argument from the argument expressions (§12.2) — for example
-`array.get::[int32](a, 2)` and `hashmap.empty::[str, int32]()` (Standard
-Library §2, §3).
+type argument from the argument expressions (Inferred specialization) — for example
+`array.get::[int32](a, 2)` and `hashmap.empty::[str, int32]()` (the Standard Library).
 
 Type specialization uses:
 
@@ -1692,18 +1688,23 @@ let f = identity;
 is invalid.
 
 A generic function is specialized at each call site — inferred from the
-argument types (§12.2) or written explicitly (§12.3):
+argument types (Inferred specialization) or written explicitly (Explicit specialization) — and an explicit
+specialization in value position is a first-class monomorphic function
+value:
 
 ```stilla
 let v = identity::[int32](42);
+let f = identity::[int32];
 ```
 
-The explicit specialization denotes the monomorphic call; in v1.3 the
-specialized function is invoked at a call site, and binding a specialized
-generic as a standalone function value (`let f = identity::[int32];`) is
-not part of the v1.3 surface — the frontend lowers generic templates
-unspecialized, so a specialized generic value has no IR representation
-(§18 *Generics*).
+`f` has the monomorphic type:
+
+```stilla
+fn(move int32) -> int32
+```
+
+For a Copy `int32`, the `move` mode has no observable ownership effect, but
+it remains part of the function type.
 
 Generic functions stored in modules follow the same rule: `module.generic_name` may participate in compile-time call inference or explicit specialization, but only a concrete specialization becomes a runtime function value.
 
@@ -1756,7 +1757,7 @@ Example:
 }
 ```
 
-A block may contain `using` declarations (§2.8); an alias declared inside a
+A block may contain `using` declarations (Path aliases with `using`); an alias declared inside a
 block is visible only within that block.
 
 ## 13.2 `if`
@@ -1778,7 +1779,7 @@ Parentheses are mandatory.
 
 This removes ambiguity between control-flow bodies and struct construction.
 
-Both branches must have the same type, except that `never` may coerce to any type and any type may coerce to the top type `any` (§11.6); the `if` expression then has the wider of the two types.
+Both branches must have the same type, except that `never` may coerce to any type and any type may coerce to the top type `any` (The top type `any`); the `if` expression then has the wider of the two types.
 
 Without `else`, the expression must have type `void`.
 
@@ -1820,7 +1821,7 @@ Point{ x, y }
 Option::Some(x)
 []
 [head, ..tail]
-int32 n           // type-test pattern (§11.6.2, §14.7)
+int32 n           // type-test pattern (Recovery by `match`, Type-test pattern)
 ```
 
 ## 13.4 Borrowing and consuming matches
@@ -1853,14 +1854,13 @@ This never performs a partial move from the original binding: the original bindi
 
 ## 13.5 Iteration
 
-The core language defines no iteration construct. Repetition is expressed with ordinary recursive function calls (§6.5); a library may provide iteration helpers as ordinary module functions (§8), invoked like any other call. The core language has no special knowledge of such helpers.
+The core language defines no iteration construct. Repetition is expressed with ordinary recursive function calls (Order and recursion); a library may provide iteration helpers as ordinary module functions (Construction), invoked like any other call. The core language has no special knowledge of such helpers.
 
 A conforming implementation **must** reuse the caller's frame for a direct
 self-recursive call in tail position (tail-call optimization), so
 iteration expressed as self-recursion does not grow the stack. Mutual
 recursion and non-tail recursion may grow the stack, bounded by
-implementation-defined resources (the frontend performs this optimization;
-ir.md §14.7).
+implementation-defined resources (the frontend performs this optimization; see `ir.md`).
 
 ---
 
@@ -1996,7 +1996,7 @@ is illegal.
 
 ## 14.7 Type-test pattern
 
-A type-test pattern matches an `any` value (§11.6.2):
+A type-test pattern matches an `any` value (Recovery by `match`):
 
 ```stilla
 int32 n
@@ -2007,7 +2007,7 @@ tuple[int32, str] t
 _              // the required wildcard for `any`
 ```
 
-The pattern is a concrete type name, optionally followed by a binding identifier. It matches when the runtime tag equals that type. It is refutable and is accepted only by `match` (§13.3), and only for a scrutinee of type `any`. Under monomorphization (§12) generic parameters resolve to concrete tags. A `match` over an `any` value must include a wildcard `_` arm (§11.6.2).
+The pattern is a concrete type name, optionally followed by a binding identifier. It matches when the runtime tag equals that type. It is refutable and is accepted only by `match` (`match`), and only for a scrutinee of type `any`. A test type with a unique payload may be bound only in a consuming match, `match (move a)` (Recovery by `match`). Under monomorphization (Generics) generic parameters resolve to concrete tags. A `match` over an `any` value must include a wildcard `_` arm (Recovery by `match`).
 
 ---
 
@@ -2146,7 +2146,7 @@ a < b and b < c
 
 ## 16.2 Evaluation order
 
-Stilla uses a single deterministic evaluation-order rule; it is defined in Runtime §5:
+Stilla uses a single deterministic evaluation-order rule; it is defined in the Runtime specification:
 
 > **Unless a construct explicitly states otherwise, subexpressions are evaluated exactly once from left to right in source order.**
 
@@ -2164,15 +2164,15 @@ Core arithmetic is defined as follows:
 - `== !=` are required for `byte`, `int32`, `uint32`, `float32`, `bool`, and `str`.
 
 Integer `/` truncates toward zero. Integer `div` and `rem` by zero trap
-(Runtime §7.2). `int32` arithmetic traps on overflow; `uint32` arithmetic
+(the Runtime specification). `int32` arithmetic traps on overflow; `uint32` arithmetic
 is performed modulo 2³² and never traps on overflow or underflow
-(Runtime §7.2). Unary `-` on `int32` traps on the minimum value; on
+(the Runtime specification). Unary `-` on `int32` traps on the minimum value; on
 `uint32` it computes the two's-complement negation (`0 - x`), which never
-traps (Runtime §7.2). Float arithmetic follows IEEE 754 (Runtime §7.2).
+traps (the Runtime specification). Float arithmetic follows IEEE 754 (the Runtime specification).
 
 The Stilla v1.3 core does not define equality for `any`, functions, structs, unions, tuples, lists, boxes, or modules. Libraries may provide explicit equality helpers.
 
-No operator is defined on `hostdata` (§11.7), and none is defined on `any` other than `as` and `match` type-testing (§11.6): an `any` value can be moved, borrowed, stored, passed along, handed to the host, recovered by `as`, and tested by `match`.
+No operator is defined on `hostdata` (The `hostdata` type), and none is defined on `any` other than `as` and `match` type-testing (The top type `any`): an `any` value can be moved, borrowed, stored, passed along, handed to the host, recovered by `as`, and tested by `match`.
 
 Core `as` conversions are:
 
@@ -2183,7 +2183,7 @@ int32 as byte
 byte as int32
 int32 as uint32
 uint32 as int32
-any as T        // T a concrete type, T ≠ any, never, hostdata (Core §11.6.1)
+any as T        // T a concrete type, T ≠ any, never, hostdata (the Core specification)
 ```
 
 No other core conversion is implied by `as`.
@@ -2193,11 +2193,11 @@ An integer literal has type `int32`, and a float literal has type
 `uint32` literal form and no implicit numeric conversion; a `byte` or
 `uint32` value is written with an explicit conversion, for example
 `104 as byte` or `7 as uint32`. Conversion from `int32` traps when the
-value is outside the target's range (Runtime §7.2).
+value is outside the target's range (the Runtime specification).
 
-`as` is not extended to `hostdata`: no cast is defined from or to `hostdata` (§11.7).
+`as` is not extended to `hostdata`: no cast is defined from or to `hostdata` (The `hostdata` type).
 
-The runtime behavior of these operations — IEEE 754 representation and arithmetic, floating equality, overflow and division traps, and invalid-cast traps — is defined in Runtime §7.2.
+The runtime behavior of these operations — IEEE 754 representation and arithmetic, floating equality, overflow and division traps, and invalid-cast traps — is defined in the Runtime specification.
 
 ---
 
@@ -2286,17 +2286,17 @@ A new local binding may shadow an existing binding.
 
 ## Typing
 
-Function arguments and return values must match exactly unless the source type is `never`, the required type is the top type `any`, or a transparent `type` alias expands to the required type (§11.6).
+Function arguments and return values must match exactly unless the source type is `never`, the required type is the top type `any`, or a transparent `type` alias expands to the required type (The top type `any`).
 
-`any` carries a runtime type tag identifying its payload type; recovery requires naming the type explicitly, via `a as T` (§11.6.1) or a `match` type-test pattern (§11.6.2). Stilla defines no equality on `any`. `hostdata` is opaque and tagless; no cast, pattern, or equality is defined on it (§11.7).
+`any` carries a runtime type tag identifying its payload type; recovery requires naming the type explicitly, via `a as T` (Recovery by `as`) or a `match` type-test pattern (Recovery by `match`). Stilla defines no equality on `any`. `hostdata` is opaque and tagless; no cast, pattern, or equality is defined on it (The `hostdata` type).
 
 ## Conversion
 
 No implicit numeric or `str` conversions exist.
 
-Coercion to the top type `any` is the sole implicit widening (§11.6), and
+Coercion to the top type `any` is the sole implicit widening (The top type `any`), and
 `hostdata` does not participate: no value coerces into `hostdata`, and
-`hostdata` does not coerce into `any` (§11.7).
+`hostdata` does not coerce into `any` (The `hostdata` type).
 
 ## Closures
 
@@ -2304,12 +2304,12 @@ A function or lambda may not reference local bindings belonging to an enclosing 
 
 ## Functions
 
-Functions are order-independent within a module; direct and mutual recursion are permitted (§6.5). Every function in a recursion cycle declares its return type explicitly. Module constant initialization must not transitively read a later-declared module constant (§5).
+Functions are order-independent within a module; direct and mutual recursion are permitted (Order and recursion). Every function in a recursion cycle declares its return type explicitly. Module constant initialization must not transitively read a later-declared module constant (Module Constants).
 
 ## Path aliases
 
 A `using` declaration introduces a scoped compile-time alias for a path
-(§2.8): it is visible from its declaration point to the end of the
+(Path aliases with `using`): it is visible from its declaration point to the end of the
 enclosing module or block, may shadow and be shadowed like `let`, is not a
 runtime member, and requires its path to resolve.
 
@@ -2318,6 +2318,8 @@ runtime member, and requires its path to resolve.
 A match over a union must be exhaustive.
 
 A non-consuming match of a unique value borrows the scrutinee and produces borrowed unique bindings.
+
+Recovering a unique payload from an `any` requires a consuming match, `match (move a)` (Recovery by `match`).
 
 A `match (move owner)` consumes the complete owner and may produce owning payload bindings, except that a struct defining its own `drop` hook cannot be consumingly destructured into fields.
 
@@ -2333,9 +2335,9 @@ A unique owner may be borrowed any number of times, moved at most once, and dest
 
 Use after move or destruction is a compile-time error.
 
-If a binding is released on some but not all normal paths through a conditional construct, it becomes **maybe-unique** and is unusable after the join; its automatic destruction is guarded by its runtime liveness state (§10.10). A definitely-released binding is unusable and is not automatically destroyed at scope end.
+If a binding is released on some but not all normal paths through a conditional construct, it becomes **maybe-unique** and is unusable after the join; its automatic destruction is guarded by its runtime liveness state (Conditional release). A definitely-released binding is unusable and is not automatically destroyed at scope end.
 
-Consuming positions (§10.11): a struct, union-variant, tuple, or list
+Consuming positions (Implicit consumption positions): a struct, union-variant, tuple, or list
 literal slot, a `let` binding with an identifier pattern, and a move-mode
 call argument transfer ownership implicitly for a fresh unique expression;
 an existing unique local owner in any consuming position must be moved
@@ -2362,7 +2364,7 @@ Borrow lifetimes are lexically bounded; Stilla v1.3 has no user-visible lifetime
 
 A plain parameter accepts only Copy argument types.
 
-The top type `any` is the sole exception (§10.6): a plain `any` parameter
+The top type `any` is the sole exception (Parameter modes): a plain `any` parameter
 accepts any argument type — a Copy argument coerces into the `any`, and a
 unique argument must be written with explicit `move` at the call site,
 with its ownership transferring into the `any`.
@@ -2379,7 +2381,7 @@ A fresh unique value may transfer directly without an explicit `move` token.
 
 Every live unique local owner is destroyed when its scope ends during normal control flow unless it has already been moved or explicitly dropped.
 
-Unique temporaries are destroyed at the end of their full expression in reverse creation order during normal control flow (Runtime §6.4).
+Unique temporaries are destroyed at the end of their full expression in reverse creation order during normal control flow (the Runtime specification).
 
 ## User drop hook
 
@@ -2391,11 +2393,11 @@ Its destruction-view argument cannot be moved, dropped, returned, or used to tra
 
 ## Structural destruction
 
-After a struct's user hook completes normally, unique fields are destroyed in reverse declaration order (Runtime §6.2).
+After a struct's user hook completes normally, unique fields are destroyed in reverse declaration order (the Runtime specification).
 
 ## Panic and traps
 
-Panic and runtime traps terminate the current Stilla execution context without unwinding (Runtime §7).
+Panic and runtime traps terminate the current Stilla execution context without unwinding (the Runtime specification).
 
 Stilla does not execute pending local, temporary, field, or module destruction as a consequence of such termination.
 
@@ -2403,15 +2405,15 @@ Host cleanup after termination is outside Stilla source semantics.
 
 ## Evaluation order
 
-Unless explicitly stated otherwise, subexpressions are evaluated exactly once from left to right (Runtime §5).
+Unless explicitly stated otherwise, subexpressions are evaluated exactly once from left to right (the Runtime specification).
 
-`and` and `or` short-circuit (Runtime §5).
+`and` and `or` short-circuit (the Runtime specification).
 
 ## Recursion
 
-Recursive value types must contain indirection on every recursive storage cycle, and their ownership classification follows the greatest-fixpoint rule of §10.3.
+Recursive value types must contain indirection on every recursive storage cycle, and their ownership classification follows the greatest-fixpoint rule of **Composite ownership**.
 
-Iteration is expressed as self-recursion; a conforming implementation must reuse the caller's frame for a direct self-recursive call in tail position (§13.5, ir.md §14.7), so self-recursive iteration does not grow the stack. Mutual recursion and non-tail recursion may grow the stack, bounded by implementation-defined resources.
+Iteration is expressed as self-recursion; a conforming implementation must reuse the caller's frame for a direct self-recursive call in tail position (**Iteration**; `ir.md`), so self-recursive iteration does not grow the stack. Mutual recursion and non-tail recursion may grow the stack, bounded by implementation-defined resources.
 
 ## Teardown
 
@@ -2419,11 +2421,11 @@ A unique module constant whose type defines a `drop` hook must not read —
 directly or through any transitively called function — a module constant
 declared later than the constant being destroyed, because teardown
 destroys constants in reverse declaration order and a later constant is
-already destroyed when the hook runs (§5, Runtime §2.5).
+already destroyed when the hook runs (**Module Constants**; the Runtime specification).
 
 ## Modules
 
-Each resolved module is instantiated at most once per execution context (Runtime §2.1).
+Each resolved module is instantiated at most once per execution context (the Runtime specification).
 
 Each module has a compiler-generated nominal struct type with ordinary immutable record/member semantics; there is no separate runtime module type category.
 
@@ -2469,15 +2471,16 @@ An unspecialized generic function is not a runtime value.
 
 Inferred or explicit specialization must produce a concrete function before runtime use.
 
-A specialized generic is invoked at a call site; binding a specialized
-generic as a standalone function value is outside v1.3 (§12.4).
+A specialized generic is a first-class monomorphic function value
+(`identity::[int32]`; see **Generic functions are not first-class before specialization**); the IR carries one monomorphic function per
+used specialization, never the unspecialized template.
 
 `value::[Types]` is compile-time specialization syntax, not runtime dispatch.
 
 Type arguments are inferred structurally from the call's argument
-expressions (§12.2); a type argument carried only inside a generic named
+expressions (Inferred specialization); a type argument carried only inside a generic named
 type's argument list, and a call with no type-carrying argument, require
-explicit `::[...]` specialization (§12.3).
+explicit `::[...]` specialization (Explicit specialization).
 
 ---
 

@@ -151,6 +151,8 @@ test "moduleinfo rejects an import cycle with a diagnostic" {
     try testing.expectError(error.Diagnostic, b.build("a"));
     try testing.expect(b.diag != null);
     try testing.expect(std.mem.indexOf(u8, b.diag.?.message, "import cycle") != null);
+    // Pass 6.2: the full cycle path is named, not just one module.
+    try testing.expect(std.mem.indexOf(u8, b.diag.?.message, "a imports b imports a") != null);
 }
 
 test "moduleinfo rejects an unresolved import" {
@@ -451,12 +453,12 @@ test "moduleinfo ownershipOf resolves named structs and unions" {
     const resolve = moduleinfo.resolveOf(t.graph);
     const app = t.graph.module("app").?;
     // Core §10.2: a struct with a drop hook is unique.
-    try testing.expectEqual(cfg.Ownership.copy, moduleinfo.ownershipOf(resolve, app, .{ .named = resolve.intern("app.Dup").? }).?);
-    try testing.expectEqual(cfg.Ownership.unique, moduleinfo.ownershipOf(resolve, app, .{ .named = resolve.intern("app.File").? }).?);
+    try testing.expectEqual(cfg.Ownership.copy, moduleinfo.ownershipOf(resolve, app, .{ .named = .{ .id = resolve.intern("app.Dup").?, .args = &.{} } }).?);
+    try testing.expectEqual(cfg.Ownership.unique, moduleinfo.ownershipOf(resolve, app, .{ .named = .{ .id = resolve.intern("app.File").?, .args = &.{} } }).?);
     // Core §10.3: a struct with an unique field is unique; a union with
     // an unique payload variant is unique.
-    try testing.expectEqual(cfg.Ownership.unique, moduleinfo.ownershipOf(resolve, app, .{ .named = resolve.intern("app.Holds").? }).?);
-    try testing.expectEqual(cfg.Ownership.unique, moduleinfo.ownershipOf(resolve, app, .{ .named = resolve.intern("app.Maybe").? }).?);
+    try testing.expectEqual(cfg.Ownership.unique, moduleinfo.ownershipOf(resolve, app, .{ .named = .{ .id = resolve.intern("app.Holds").?, .args = &.{} } }).?);
+    try testing.expectEqual(cfg.Ownership.unique, moduleinfo.ownershipOf(resolve, app, .{ .named = .{ .id = resolve.intern("app.Maybe").?, .args = &.{} } }).?);
 }
 
 test "moduleinfo ownershipOf handles recursive types through indirection" {
@@ -476,7 +478,7 @@ test "moduleinfo ownershipOf handles recursive types through indirection" {
 
     const resolve = moduleinfo.resolveOf(t.graph);
     const app = t.graph.module("app").?;
-    try testing.expectEqual(cfg.Ownership.unique, moduleinfo.ownershipOf(resolve, app, .{ .named = resolve.intern("app.Tree").? }).?);
+    try testing.expectEqual(cfg.Ownership.unique, moduleinfo.ownershipOf(resolve, app, .{ .named = .{ .id = resolve.intern("app.Tree").?, .args = &.{} } }).?);
     // A type cycle that passes only through function types is Copy
     // (Core §10.3: a function type is not an owned component).
     var t2 = try buildGraph("app", &.{
@@ -491,7 +493,7 @@ test "moduleinfo ownershipOf handles recursive types through indirection" {
 
     const resolve2 = moduleinfo.resolveOf(t2.graph);
     const app2 = t2.graph.module("app").?;
-    try testing.expectEqual(cfg.Ownership.copy, moduleinfo.ownershipOf(resolve2, app2, .{ .named = resolve2.intern("app.F").? }).?);
+    try testing.expectEqual(cfg.Ownership.copy, moduleinfo.ownershipOf(resolve2, app2, .{ .named = .{ .id = resolve2.intern("app.F").?, .args = &.{} } }).?);
 }
 
 test "moduleinfo resolveType expands aliases and resolves containers" {
@@ -571,7 +573,7 @@ test "moduleinfo inferExprType infers module constant types" {
     try testing.expectEqual(ast.PrimitiveKind.int32, (moduleinfo.inferExprType(resolve, app, app.valueMember("g").?.decl.const_.init.?).?).primitive);
     try testing.expectEqual(ast.PrimitiveKind.bool, (moduleinfo.inferExprType(resolve, app, app.valueMember("h").?.decl.const_.init.?).?).primitive);
     // A call's return type resolves through the callee signature.
-    try testing.expectEqualStrings("app.P", resolve.typeNameOf((moduleinfo.inferExprType(resolve, app, app.valueMember("p").?.decl.const_.init.?).?).named).?);
+    try testing.expectEqualStrings("app.P", resolve.typeNameOf((moduleinfo.inferExprType(resolve, app, app.valueMember("p").?.decl.const_.init.?).?).named.id).?);
 }
 
 test "moduleinfo resolvePathMember and resolvePathTarget" {
@@ -724,7 +726,7 @@ test "moduleinfo resolveTypeName follows using aliases for local type members" {
     // through the using alias yields the IR-native named reference
     // (type arguments resolve in the lowering, frontend §4.2).
     const target = moduleinfo.resolveType(resolve, app, &tm.decl.alias.target).?;
-    try testing.expectEqualStrings("builtin.Option", resolve.typeNameOf(target.named).?);
+    try testing.expectEqualStrings("builtin.Option", resolve.typeNameOf(target.named.id).?);
 }
 
 test "moduleinfo isHostBinding distinguishes host and source modules" {

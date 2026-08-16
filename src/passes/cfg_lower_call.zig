@@ -69,14 +69,33 @@ pub fn lowerDirectCall(self: *Lowerer, fs: *FuncState, e: *const ast.Call, targe
         try arg_types.append(self.arena, a2.type_);
     }
     // Generic signatures are specialized from the argument types
-    // (frontend §4.4); the callee's body is phase-2 monomorphization.
-    const specialized = moduleinfo.specializeSignature(self.resolve, fs.module, sig, arg_types.items);
-    const ret = switch (specialized) {
-        .function => |sft| sft.ret.*,
-        else => return self.fail(e.span, "callee is not a function", .{}),
+    // (frontend §4.4) — or, for a generic call, taken from the checker's
+    // recorded `FuncInstance` signature, which honors explicit `::[...]`
+    // arguments the argument types alone cannot express.
+    const ret = try specializedRet(self, fs, e, vm.type_, arg_types.items);
+    // A generic call targets the used specialization's monomorphic
+    // function (`{module}.{fn}.{id}`); a non-generic call targets the
+    // function directly (ir.md §11).
+    const qname = blk: {
+        if (self.ann) |a| {
+            if (a.per_module.get(fs.module.specifier)) |ma| {
+                if (ma.call_of.get(e)) |inst| {
+                    break :blk try instanceName(self, target.module.specifier, vm.name.text, inst.id);
+                }
+            }
+        }
+        break :blk try cfg_lower_program.qualifiedName(self, target.module.specifier, vm.name.text);
     };
-    const qname = try cfg_lower_program.qualifiedName(self, target.module.specifier, vm.name.text);
     return try emitCall(self, fs, e.span, .{ .direct = .{ .name = qname } }, args.items, ret);
+}
+
+/// The IR name of a generic function's used specialization: the
+/// declaration's qualified name with the instance's id suffix
+/// (`iter.fold_with.3`). Deterministic and unique per program — the id is
+/// the instance's index in the checker's `Annotation.instances` (ir.md
+/// §11).
+pub fn instanceName(self: *Lowerer, module_spec: []const u8, fn_name: []const u8, id: u32) LowerError![]const u8 {
+    return std.fmt.allocPrint(self.arena, "{s}.{d}", .{ try cfg_lower_program.qualifiedName(self, module_spec, fn_name), id });
 }
 
 /// A call through a function value (a `load_member`d function, a
@@ -104,6 +123,25 @@ pub fn lowerValueCall(self: *Lowerer, fs: *FuncState, e: *const ast.Call, fv: *c
     return try emitCall(self, fs, e.span, .{ .value = fv }, args.items, ret);
 }
 
+/// The concrete return type of a call: the checker's recorded
+/// `FuncInstance` signature when the call is a generic specialization
+/// (explicit or inferred, Core §12.2/§12.3), otherwise the signature
+/// specialized from the argument types.
+pub fn specializedRet(self: *Lowerer, fs: *FuncState, e: *const ast.Call, sig: cfg.Type, arg_types: []const cfg.Type) LowerError!cfg.Type {
+    if (self.ann) |a| {
+        if (a.per_module.get(fs.module.specifier)) |ma| {
+            if (ma.call_of.get(e)) |inst| {
+                if (inst.signature == .function) return inst.signature.function.ret.*;
+            }
+        }
+    }
+    const specialized = moduleinfo.specializeSignature(self.resolve, fs.module, sig.function, arg_types);
+    return switch (specialized) {
+        .function => |sft| sft.ret.*,
+        else => self.fail(e.span, "callee is not a function", .{}),
+    };
+}
+
 /// A call to a host binding: a `syscall` instruction carrying the
 /// resolved concrete signature (frontend §5.6, ir.md §8.2).
 pub fn lowerHostCall(self: *Lowerer, fs: *FuncState, e: *const ast.Call, target: moduleinfo.PathTarget) LowerError!?*cfg.Value {
@@ -119,11 +157,7 @@ pub fn lowerHostCall(self: *Lowerer, fs: *FuncState, e: *const ast.Call, target:
         try args.append(self.arena, a2);
         try arg_types.append(self.arena, a2.type_);
     }
-    const specialized = moduleinfo.specializeSignature(self.resolve, fs.module, sig, arg_types.items);
-    const ret = switch (specialized) {
-        .function => |sft| sft.ret.*,
-        else => return self.fail(e.span, "callee is not a function", .{}),
-    };
+    const ret = try specializedRet(self, fs, e, vm.type_, arg_types.items);
     // The syscall target dispatches on (module, member) — stable,
     // because module member layout is static (Core §2.1).
     const call_target: cfg.SysCallTarget = if (std.mem.eql(u8, target.module.specifier, "builtin"))

@@ -73,7 +73,7 @@ pub fn inferExprType(resolve: Resolve, from: *ModuleInfo, e: *const ast.Expr) ?c
             const name = m.name.text;
             break :blk switch (base) {
                 .named => |n| blk2: {
-                    const qname = resolve.typeNameOf(n) orelse break :blk2 null;
+                    const qname = resolve.typeNameOf(n.id) orelse break :blk2 null;
                     const sd = type_shape.structDecl(resolve, from, qname) orelse break :blk2 null;
                     const idx = type_shape.fieldIndex(sd, name) orelse break :blk2 null;
                     break :blk2 type_resolve.resolveType(resolve, from, &sd.fields[idx].type_);
@@ -104,7 +104,7 @@ fn inferPathType(resolve: Resolve, from: *ModuleInfo, p: *const ast.PathExpr) ?c
         const name = type_resolve.joinPath(resolve.arena, p.path) orelse return null;
         const qt = type_resolve.resolveQualifiedTypeName(resolve, from, name);
         const id = if (qt) |q| resolve.intern(q.qualified) else resolve.intern(name);
-        return .{ .named = id orelse return null };
+        return .{ .named = .{ .id = id orelse return null, .args = &.{} } };
     }
     const vm = resolvePathMember(resolve, from, p.path) orelse return null;
     return vm.type_;
@@ -320,7 +320,7 @@ pub fn specializeSignatureExplicit(
     return substSignature(resolve, from, sig, &env);
 }
 
-fn unifyType(
+pub fn unifyType(
     resolve: Resolve,
     from: *ModuleInfo,
     pat: cfg.Type,
@@ -334,9 +334,23 @@ fn unifyType(
             env.put(resolve.arena, n, arg) catch return false;
             return true;
         },
-        .named => {
-            // A concrete interned decl: matches only an equal TypeId (canonical).
-            return cfg.Type.eql(pat, arg);
+        .named => |pn| blk: {
+            // The same declaration, with unified type arguments: the
+            // pattern's arguments may reference type parameters (in a
+            // generic signature `Array[T]` unifies against `Array[int32]`
+            // by binding `T`); a wildcard (empty args) matches any
+            // instantiation.
+            const an = switch (arg) {
+                .named => |n| n,
+                else => break :blk false,
+            };
+            if (pn.id != an.id) break :blk false;
+            if (pn.args.len == 0 or an.args.len == 0) break :blk true;
+            if (pn.args.len != an.args.len) break :blk false;
+            for (pn.args, an.args) |x, y| {
+                if (!unifyType(resolve, from, x, y, env)) break :blk false;
+            }
+            break :blk true;
         },
         .list => |pl| return switch (arg) {
             .list => |al| unifyType(resolve, from, pl.*, al.*, env),
@@ -374,8 +388,19 @@ fn unifyType(
 fn substType(resolve: Resolve, from: *ModuleInfo, t: cfg.Type, env: *const std.StringHashMapUnmanaged(cfg.Type)) cfg.Type {
     return switch (t) {
         .param => |n| if (env.get(n)) |r| return r else return t,
-        // `.named` is a concrete TypeId; never bound by the name-keyed env.
-        .named => return t,
+        .named => |n| blk: {
+            // Substitute through the type arguments of a named
+            // instantiation (`HashMap[K, V]` → `HashMap[str, int32]`).
+            if (n.args.len == 0) break :blk t;
+            var changed = false;
+            const out = resolve.arena.alloc(cfg.Type, n.args.len) catch break :blk t;
+            for (n.args, 0..) |a, i| {
+                out[i] = substType(resolve, from, a, env);
+                if (!cfg.Type.eql(out[i], a)) changed = true;
+            }
+            if (!changed) break :blk t;
+            break :blk .{ .named = .{ .id = n.id, .args = out } };
+        },
         .list => |inner| blk: {
             const sub = substType(resolve, from, inner.*, env);
             if (cfg.Type.eql(sub, inner.*)) break :blk t;

@@ -7,6 +7,7 @@ const std = @import("std");
 const ast = @import("../ast.zig");
 const cfg = @import("../cfg.zig");
 const moduleinfo = @import("../moduleinfo.zig");
+const type_resolve = @import("type_resolve.zig");
 const lower = @import("../lower.zig");
 const cfg_lower_expr = @import("cfg_lower_expr.zig");
 const cfg_lower_call = @import("cfg_lower_call.zig");
@@ -286,7 +287,7 @@ pub fn lowerMatch(self: *Lowerer, fs: *FuncState, e: *const ast.MatchExpr) Lower
     const moving = isMoveExpr(e.scrutinee);
     const scrut = (try cfg_lower_expr.lowerExpr(self, fs, e.scrutinee)) orelse return null;
     if (scrut.type_ == .named) {
-        if (self.resolve.typeNameOf(scrut.type_.named)) |tname| {
+        if (self.resolve.typeNameOf(scrut.type_.named.id)) |tname| {
             if (moduleinfo.unionDecl(self.resolve, fs.module, tname)) |ud| {
                 return try lowerUnionMatch(self, fs, e, scrut, moving, ud);
             }
@@ -384,13 +385,17 @@ pub fn bindUnionPattern(self: *Lowerer, fs: *FuncState, pattern: *const ast.Patt
         .wildcard => {},
         .path => |pp| switch (pp.tail) {
             .variant => |vp| {
-                const ud = moduleinfo.unionDecl(self.resolve, fs.module, self.resolve.typeNameOf(scrut.type_.named) orelse unreachable).?;
+                const ud = moduleinfo.unionDecl(self.resolve, fs.module, self.resolve.typeNameOf(scrut.type_.named.id) orelse unreachable).?;
                 const tag = moduleinfo.variantIndex(ud, vp.name.text) orelse unreachable;
                 const variant = ud.variants[tag];
                 const args = vp.args orelse return; // no payload to bind
                 const types = variant.types orelse return;
                 if (types.len == 1) {
-                    const payload_type = try self.resolveType(fs, &types[0]);
+                    // The payload type of a generic instantiation
+                    // substitutes the declaration's type parameters
+                    // (Core §12.1): `Option[int32]`'s `Some` payload is
+                    // `int32`, not `T`.
+                    const payload_type = type_resolve.substParams(self.arena, ud.type_params, scrut.type_.named.args, try self.resolveType(fs, &types[0]));
                     if (moving) {
                         const payload = (try cfg_lower_emit.emitUnpack(self, fs, vp.name.span, .{ .unpack_variant = .{ .base = scrut, .tag = @intCast(tag) } }, &.{payload_type}))[0];
                         if (args.len == 1) {
@@ -410,7 +415,7 @@ pub fn bindUnionPattern(self: *Lowerer, fs: *FuncState, pattern: *const ast.Patt
                     // A tuple payload destructures element-wise: one
                     // `unpack_variant` defines every payload element.
                     var payload_elems = std.ArrayListUnmanaged(cfg.Type).empty;
-                    for (types) |*t| try payload_elems.append(self.arena, try self.resolveType(fs, t));
+                    for (types) |*t| try payload_elems.append(self.arena, type_resolve.substParams(self.arena, ud.type_params, scrut.type_.named.args, try self.resolveType(fs, t)));
                     if (moving) {
                         const payloads = try cfg_lower_emit.emitUnpack(self, fs, vp.name.span, .{ .unpack_variant = .{ .base = scrut, .tag = @intCast(tag) } }, payload_elems.items);
                         for (args, payloads) |*argp, proj| try cfg_lower_pattern.bindPattern(self, fs, argp, proj, proj.state == .owned);

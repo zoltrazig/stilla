@@ -33,8 +33,13 @@ pub const Result = union(enum) {
     /// dependencies. The order is deterministic given a fixed edge order.
     order: []usize,
     /// A back edge to a gray (in-progress) node: the import graph has a
-    /// cycle. `edge.span` points at the import that closed it.
-    cycle: Edge,
+    /// cycle. `span` points at the import that closed it; `path` is the
+    /// full cycle in import order, **with the closing node repeated** —
+    /// `[a, b, c, a]` reads "a imports b imports c imports a".
+    cycle: struct {
+        span: ast.Span,
+        path: []usize,
+    },
 };
 
 /// Three-color DFS from `entry` over the static node set `0..node_count`.
@@ -57,6 +62,7 @@ pub fn reversePostorder(
     var stack = std.ArrayListUnmanaged(Frame).empty;
     defer stack.deinit(allocator);
     var post = std.ArrayListUnmanaged(usize).empty;
+    defer post.deinit(allocator); // no-op on the success path (toOwnedSlice empties it)
 
     color[entry] = 1;
     try stack.append(allocator, .{ .node = entry, .child = 0 });
@@ -65,7 +71,26 @@ pub fn reversePostorder(
         if (top.child < children[top.node].len) {
             const edge = children[top.node][top.child];
             top.child += 1;
-            if (color[edge.dep] == 1) return Result{ .cycle = edge };
+            if (color[edge.dep] == 1) {
+                // Back edge into a gray node: a cycle. Recover the full
+                // path (frontend §3.5) by walking the DFS stack from the
+                // target down to the stack top, then closing the loop:
+                // the stack holds gray nodes where each is the importer of
+                // the node above it, so `[target?..top] ++ [target]` is the
+                // cycle in import order with both ends equal.
+                var j = stack.items.len - 1;
+                while (stack.items[j].node != edge.dep) j -= 1;
+                const len = (stack.items.len - j) + 1; // gray tail + closing repeat
+                const path = try allocator.alloc(usize, len);
+                var k: usize = 0;
+                var idx = j;
+                while (idx < stack.items.len) : (idx += 1) {
+                    path[k] = stack.items[idx].node;
+                    k += 1;
+                }
+                path[k] = edge.dep;
+                return Result{ .cycle = .{ .span = edge.span, .path = path } };
+            }
             if (color[edge.dep] == 0) {
                 color[edge.dep] = 1;
                 try stack.append(allocator, .{ .node = edge.dep, .child = 0 });
@@ -98,7 +123,7 @@ test "topo_sort orders dependencies before dependents" {
     try testing.expectEqualSlices(usize, &.{ 2, 1, 0 }, result.order);
 }
 
-test "topo_sort rejects a cycle with the back edge" {
+test "topo_sort rejects a cycle with the full path" {
     const testing = std.testing;
     // a imports b, b imports a.
     const children = [_][]const Edge{
@@ -107,5 +132,27 @@ test "topo_sort rejects a cycle with the back edge" {
     };
     const result = try reversePostorder(testing.allocator, 2, 0, &children);
     try testing.expect(result == .cycle);
-    try testing.expectEqual(@as(usize, 0), result.cycle.dep);
+    defer testing.allocator.free(result.cycle.path);
+    // "a imports b imports a" — both ends name the same module.
+    try testing.expectEqualSlices(usize, &.{ 0, 1, 0 }, result.cycle.path);
+}
+
+test "topo_sort reports a longer cycle in import order" {
+    const testing = std.testing;
+    // a imports b, b imports c, c imports a (and c imports d, d imports
+    // nothing).
+    const children = [_][]const Edge{
+        &.{.{ .dep = 1, .span = ast.Span.init(0, 0, 0) }},
+        &.{.{ .dep = 2, .span = ast.Span.init(0, 0, 0) }},
+        &.{
+            .{ .dep = 3, .span = ast.Span.init(0, 0, 0) },
+            .{ .dep = 0, .span = ast.Span.init(0, 0, 0) },
+        },
+        &.{},
+    };
+    const result = try reversePostorder(testing.allocator, 4, 0, &children);
+    try testing.expect(result == .cycle);
+    defer testing.allocator.free(result.cycle.path);
+    // a imports b imports c imports a (d is never reached).
+    try testing.expectEqualSlices(usize, &.{ 0, 1, 2, 0 }, result.cycle.path);
 }

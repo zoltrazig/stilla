@@ -31,14 +31,28 @@ pub fn lowerModule(self: *Lowerer, info: *moduleinfo.ModuleInfo) LowerError!*cfg
         init_func = try lowerInit(self, info);
         try funcs.append(self.arena, init_func.?);
     }
-    // Lower every function member.
+    // Lower every function member. Generic functions are compile-time
+    // templates (Core §12.4): their templates are never lowered; each used
+    // specialization is lowered below from its monomorphized body clone.
     for (info.values) |*vm| switch (vm.decl) {
-        .func => |f| if (f.body != null) {
+        .func => |f| if (f.body != null and f.type_params.len == 0) {
             const ir = try cfg_lower_func.lowerFunc(self, info, vm);
             try funcs.append(self.arena, ir);
         },
         else => {},
     };
+    // The used specializations of generic functions declared by this
+    // module (frontend §4.4): each is a monomorphic function named
+    // `{module}.{fn}.{id}` (ir.md §11). Host bindings have no body
+    // (`mono == null`) and are never lowered here.
+    if (self.ann) |a| {
+        for (a.instances.items) |inst| {
+            if (inst.module != info) continue;
+            if (inst.mono == null) continue;
+            const ir = try cfg_lower_func.lowerInstance(self, info, inst);
+            try funcs.append(self.arena, ir);
+        }
+    }
     // Drop hooks (Core §9.1): a struct's `drop(file) { … }` body is
     // compiled as a hidden per-type function so its code is typechecked
     // and lowered like any other function. `drop %v` of such a struct
@@ -156,7 +170,7 @@ pub fn lowerDropHook(self: *Lowerer, info: *moduleinfo.ModuleInfo, s: *const ast
         .span = d.param.span,
         .name = d.param,
         .mode = .borrow,
-        .type_ = .{ .named = (moduleinfo.resolveTypeId(self.resolve, info, s.name.text) orelse return self.fail(d.span, "drop hook type unresolved", .{})) },
+        .type_ = .{ .named = .{ .id = (moduleinfo.resolveTypeId(self.resolve, info, s.name.text) orelse return self.fail(d.span, "drop hook type unresolved", .{})), .args = &.{} } },
     };
     var fs = try cfg_lower_func.newFuncState(self, info, .{ .span = d.span, .text = qname }, params, .{ .primitive = .void });
     const entry = try cfg_lower_emit.newBlock(self, &fs, "entry");

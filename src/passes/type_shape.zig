@@ -90,8 +90,8 @@ fn ownershipVisited(
             }
             break :blk acc;
         },
-        .named => |id| blk: {
-            const name = resolve.typeNameOf(id) orelse break :blk null;
+        .named => |n| blk: {
+            const name = resolve.typeNameOf(n.id) orelse break :blk null;
             const tm = type_resolve.resolveTypeName(resolve, from, name) orelse break :blk null;
             const final = type_resolve.followAlias(resolve, from, tm) orelse break :blk null;
             break :blk switch (final.decl) {
@@ -102,7 +102,11 @@ fn ownershipVisited(
                     var acc: ?cfg.Ownership = cfg.Ownership.copy;
                     for (s.fields) |f| {
                         const ft = type_resolve.resolveType(resolve, from, &f.type_) orelse continue;
-                        const ow = ownershipVisited(resolve, from, ft, visited) orelse {
+                        // A generic instantiation's ownership resolves
+                        // through its substituted fields (`Option[int32]`
+                        // is Copy; `Option[File]` is unique).
+                        const ft_sub = type_resolve.substParams(resolve.arena, s.type_params, n.args, ft);
+                        const ow = ownershipVisited(resolve, from, ft_sub, visited) orelse {
                             acc = cfg.Ownership.unique;
                             break;
                         };
@@ -117,7 +121,8 @@ fn ownershipVisited(
                     for (u.variants) |v| {
                         if (v.types) |types| for (types) |vt| {
                             const t2 = type_resolve.resolveType(resolve, from, &vt) orelse continue;
-                            const ow = ownershipVisited(resolve, from, t2, visited) orelse {
+                            const t2_sub = type_resolve.substParams(resolve.arena, u.type_params, n.args, t2);
+                            const ow = ownershipVisited(resolve, from, t2_sub, visited) orelse {
                                 acc = cfg.Ownership.unique;
                                 break;
                             };

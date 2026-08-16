@@ -101,7 +101,7 @@ pub fn annotateModule(ck: *checker.Checker, info: *ModuleInfo) CheckError!void {
 fn checkDropHook(frame: *Frame, s: *const ast.StructDef, d: *const ast.DropDecl) CheckError!void {
     _ = try pushScope(frame, true);
     defer popScope(frame);
-    _ = try bindLocal(frame, d.param.text, cfg.Type{ .named = (moduleinfo.resolveTypeId(frame.resolve, frame.info, s.name.text) orelse return) }, true);
+    _ = try bindLocal(frame, d.param.text, cfg.Type{ .named = .{ .id = (moduleinfo.resolveTypeId(frame.resolve, frame.info, s.name.text) orelse return), .args = &.{} } }, true);
     _ = try checkBlock(frame, d.body);
     if (d.body.result) |*r| {
         if (try isBorrowedExpr(frame, r)) {
@@ -165,16 +165,17 @@ fn checkLet(frame: *Frame, l: *const ast.LetStmt) CheckError!void {
     // it against the initializer (frontend §4.6, Core §5).
     if (l.type_ != null) _ = try frame.ck.resolveTypeOf(frame.ma, frame.info, &l.type_.?);
     const t: ?cfg.Type = blk: {
-        // A declared `any` type makes the binding `any` (Core §11.6): the
-        // top-type coercion is materialized at the let, so type-test
-        // patterns and `as` recovery see a genuine `any` value. The
-        // initializer is still inferred and annotated (its type feeds
-        // `validateLet`'s compatibility check).
+        // The declared type types the binding when one is written (Core
+        // §4): a declared `any` makes the binding `any` (the top-type
+        // coercion is materialized at the let, Core §11.6), a declared
+        // generic instantiation (`Option[int32]`) types the binding even
+        // when the initializer is an unconstrained construction
+        // (`Option::None`). The initializer is still inferred and
+        // annotated (its type feeds `validateLet`'s compatibility check).
         const it = try inferExpr(frame, l.init);
         if (l.type_ != null) {
             const dt = try frame.ck.resolveTypeOf(frame.ma, frame.info, &l.type_.?);
-            if (dt == .primitive and dt.primitive == .any) break :blk dt;
-            if (it == null) break :blk dt;
+            break :blk dt;
         }
         break :blk it;
     };
@@ -386,7 +387,7 @@ fn consumesScrutinee(frame: *Frame, e: *const ast.Expr, t: cfg.Type) bool {
 /// destructuring is fine. Only reached for consuming scrutinees.
 fn checkDropHookMatch(frame: *Frame, m: *const ast.MatchExpr, scrut_t: cfg.Type) CheckError!void {
     if (scrut_t != .named) return;
-    const sd = moduleinfo.structDecl(frame.resolve, frame.info, frame.resolve.typeNameOf(scrut_t.named) orelse return) orelse return;
+    const sd = moduleinfo.structDecl(frame.resolve, frame.info, frame.resolve.typeNameOf(scrut_t.named.id) orelse return) orelse return;
     if (sd.drop == null) return;
     for (m.arms) |*arm| {
         if (arm.pattern == .path and arm.pattern.path.tail == .struct_) {
@@ -657,7 +658,7 @@ fn inferPath(frame: *Frame, p: *const ast.PathExpr) CheckError!?cfg.Type {
                 }
                 try requireMoveIfOwned(frame, f.value, "field");
             }
-            return namedPath(frame, p.path);
+            return namedPath(frame, p, sc, null);
         },
         .variant => |*v| {
             // Union-variant construction: the path is a type name. Payload
@@ -672,7 +673,7 @@ fn inferPath(frame: *Frame, p: *const ast.PathExpr) CheckError!?cfg.Type {
                     try requireMoveIfOwned(frame, a, "payload");
                 }
             }
-            return namedPath(frame, p.path);
+            return namedPath(frame, p, null, v);
         },
         .none => {},
     }
@@ -757,10 +758,13 @@ fn isCapture(frame: *Frame, scope_of_local: *const Scope) bool {
 fn memberTypeOf(frame: *Frame, cur: cfg.Type, seg: ast.Ident) CheckError!?cfg.Type {
     switch (cur) {
         .named => |n| {
-            const qname = frame.resolve.typeNameOf(n) orelse return null;
+            const qname = frame.resolve.typeNameOf(n.id) orelse return null;
             const sd = moduleinfo.structDecl(frame.resolve, frame.info, qname) orelse return null;
             const idx = moduleinfo.fieldIndex(sd, seg.text) orelse return null;
-            return try frame.ck.resolveTypeOf(frame.ma, frame.info, &sd.fields[idx].type_);
+            const resolved = try frame.ck.resolveTypeOf(frame.ma, frame.info, &sd.fields[idx].type_);
+            // A generic instantiation's field type substitutes the
+            // declaration's type parameters (Core §12.1).
+            return type_resolve.substParams(frame.ck.alloc(), sd.type_params, n.args, resolved);
         },
         .tuple => |elems| {
             const idx = std.fmt.parseInt(usize, seg.text, 10) catch return null;
@@ -771,9 +775,81 @@ fn memberTypeOf(frame: *Frame, cur: cfg.Type, seg: ast.Ident) CheckError!?cfg.Ty
     }
 }
 
-fn namedPath(frame: *Frame, path: []const ast.Ident) CheckError!?cfg.Type {
-    const name = type_resolve.joinPath(frame.ck.alloc(), path) orelse return null;
-    return cfg.Type{ .named = (moduleinfo.resolveTypeId(frame.resolve, frame.info, name) orelse return null) };
+/// The type of a struct or union construction path: the named
+/// declaration with its type arguments — written explicitly, or inferred
+/// from the field/payload argument types (`Option::Some(42)` →
+/// `Option[int32]`), or empty (a wildcard matching any instantiation of
+/// the declaration) when nothing constrains them (`Option::None`).
+fn namedPath(frame: *Frame, p: *const ast.PathExpr, sc: ?*const ast.StructConstruct, v: ?*const ast.VariantExpr) CheckError!?cfg.Type {
+    const name = type_resolve.joinPath(frame.ck.alloc(), p.path) orelse return null;
+    const id = moduleinfo.resolveTypeId(frame.resolve, frame.info, name) orelse return null;
+    var args: []cfg.Type = &.{};
+    if (p.type_args) |wa| {
+        args = try frame.ck.alloc().alloc(cfg.Type, wa.len);
+        for (wa, 0..) |*w, i| args[i] = try frame.ck.resolveTypeOf(frame.ma, frame.info, w);
+    } else {
+        args = try inferConstructArgs(frame, id, sc, v);
+    }
+    return cfg.Type{ .named = .{ .id = id, .args = args } };
+}
+
+/// Infer a construction's type arguments from its field/payload argument
+/// types (Core §12.2): unify each declaration-written field/payload type
+/// (which references the declaration's type parameters) against the
+/// corresponding argument expression type. Any parameter left unbound
+/// leaves the arguments empty (a wildcard).
+fn inferConstructArgs(frame: *Frame, id: moduleinfo.TypeId, sc: ?*const ast.StructConstruct, v: ?*const ast.VariantExpr) CheckError![]cfg.Type {
+    const name = frame.resolve.typeNameOf(id) orelse return &.{};
+    const alloc = frame.ck.alloc();
+    var params: []const ast.Ident = &.{};
+    var written: []const ast.Type = &.{};
+    var args: []const cfg.Type = &.{};
+    if (sc) |s| {
+        const sd = moduleinfo.structDecl(frame.resolve, frame.info, name) orelse return &.{};
+        params = sd.type_params;
+        if (params.len == 0) return &.{};
+        const n = sd.fields.len;
+        const wt = try alloc.alloc(ast.Type, n);
+        const at = try alloc.alloc(cfg.Type, n);
+        var used = false;
+        for (sd.fields, 0..) |*f, i| {
+            wt[i] = f.type_;
+            var found: ?*const ast.Expr = null;
+            for (s.fields) |*sf| {
+                if (std.mem.eql(u8, sf.name.text, f.name.text)) {
+                    found = sf.value;
+                    break;
+                }
+            }
+            at[i] = if (found) |fe| (try inferExpr(frame, fe)) orelse return &.{} else .{ .primitive = .void };
+            used = used or found != null;
+        }
+        written = wt;
+        args = at;
+        if (!used) return &.{};
+    } else if (v) |vv| {
+        const ud = moduleinfo.unionDecl(frame.resolve, frame.info, name) orelse return &.{};
+        params = ud.type_params;
+        if (params.len == 0) return &.{};
+        const idx = moduleinfo.variantIndex(ud, vv.name.text) orelse return &.{};
+        const vt = ud.variants[idx].types orelse return &.{};
+        written = vt;
+        const va = vv.args orelse return &.{};
+        const at = try alloc.alloc(cfg.Type, va.len);
+        for (va, 0..) |*a, i| at[i] = (try inferExpr(frame, a)) orelse return &.{};
+        args = at;
+    } else return &.{};
+    var env = std.StringHashMapUnmanaged(cfg.Type).empty;
+    const count = @min(written.len, args.len);
+    for (written[0..count], args[0..count]) |*w, a| {
+        const wt = try frame.ck.resolveTypeOf(frame.ma, frame.info, w);
+        _ = type_infer.unifyType(frame.resolve, frame.info, wt, a, &env);
+    }
+    const out = try alloc.alloc(cfg.Type, params.len);
+    for (params, 0..) |*prm, i| {
+        out[i] = env.get(prm.text) orelse return &.{};
+    }
+    return out;
 }
 
 // ---------------------------------------------------------------------------
@@ -958,6 +1034,8 @@ fn specializeInstance(
         .type_args = type_args,
         .signature = type_infer.substSignature(def_resolve, def_module, sig, &env),
         .mono = null,
+        .module = def_module,
+        .id = @intCast(ck.annotation.instances.items.len),
     };
     // Append before the body is checked so a self-recursive generic call
     // deduplicates to the in-flight instance.
@@ -1062,10 +1140,11 @@ fn resolveMember(frame: *Frame, object: *const ast.Expr, name: []const u8) Check
     const obj_t = (try inferExpr(frame, object)) orelse return null;
     switch (obj_t) {
         .named => |n| {
-            const qname = frame.resolve.typeNameOf(n) orelse return null;
+            const qname = frame.resolve.typeNameOf(n.id) orelse return null;
             const sd = moduleinfo.structDecl(frame.resolve, frame.info, qname) orelse return null;
             const idx = moduleinfo.fieldIndex(sd, name) orelse return null;
-            return try frame.ck.resolveTypeOf(frame.ma, frame.info, &sd.fields[idx].type_);
+            const resolved = try frame.ck.resolveTypeOf(frame.ma, frame.info, &sd.fields[idx].type_);
+            return type_resolve.substParams(frame.ck.alloc(), sd.type_params, n.args, resolved);
         },
         .tuple => |elems| {
             const idx = std.fmt.parseInt(usize, name, 10) catch return null;
@@ -1121,6 +1200,13 @@ fn inferPattern(frame: *Frame, p: *const ast.Pattern, value_t: cfg.Type, borrow:
         .type_test => |*tt| {
             if (tt.binding) |b| {
                 const t = try frame.ck.resolveTypeOf(frame.ma, frame.info, &tt.type_);
+                // Core §11.6.2: a unique payload can be recovered only from a
+                // moved `any` (`match (move a)`); a non-consuming match over
+                // `any` binds only Copy payloads. The lowering enforces the
+                // same rule (cfg_lower_pattern.zig).
+                if (borrow and isUnique(frame, t)) {
+                    return frame.ck.fail(tt.span, "cannot recover an unique payload from a borrowed 'any'; use match (move scrutinee)", .{});
+                }
                 _ = try bindLocal(frame, b.text, t, borrow and isUnique(frame, t));
             }
         },
@@ -1139,10 +1225,14 @@ fn inferPattern(frame: *Frame, p: *const ast.Pattern, value_t: cfg.Type, borrow:
             },
             .struct_ => |*sp| {
                 if (value_t == .named) {
-                    const sd = moduleinfo.structDecl(frame.resolve, frame.info, frame.resolve.typeNameOf(value_t.named) orelse return) orelse return;
+                    const sd = moduleinfo.structDecl(frame.resolve, frame.info, frame.resolve.typeNameOf(value_t.named.id) orelse return) orelse return;
                     for (sp.fields) |*f| {
                         const idx = moduleinfo.fieldIndex(sd, f.name.text) orelse continue;
-                        const field_t = try frame.ck.resolveTypeOf(frame.ma, frame.info, &sd.fields[@intCast(idx)].type_);
+                        const resolved = try frame.ck.resolveTypeOf(frame.ma, frame.info, &sd.fields[@intCast(idx)].type_);
+                        // The field type of a generic instantiation
+                        // substitutes the declaration's type parameters
+                        // (`Pair[int32, str]`'s `first` is `int32`).
+                        const field_t = type_resolve.substParams(frame.ck.alloc(), sd.type_params, value_t.named.args, resolved);
                         if (f.pattern) |*fp| {
                             try inferPattern(frame, fp, field_t, borrow);
                         } else {
@@ -1159,10 +1249,15 @@ fn inferPattern(frame: *Frame, p: *const ast.Pattern, value_t: cfg.Type, borrow:
                     if (vp.args) |args| {
                         if (ud.variants[@intCast(idx)].types) |types| {
                             for (args, 0..) |*a, i| {
-                                const payload_t = if (i < types.len)
+                                const resolved = if (i < types.len)
                                     try frame.ck.resolveTypeOf(frame.ma, frame.info, &types[i])
                                 else
                                     cfg.Type{ .primitive = .any };
+                                // The payload type of a generic
+                                // instantiation substitutes the type
+                                // parameters (`Option[int32]`'s `Some`
+                                // payload is `int32`, not `T`).
+                                const payload_t = type_resolve.substParams(frame.ck.alloc(), ud.type_params, value_t.named.args, resolved);
                                 try inferPattern(frame, a, payload_t, borrow);
                             }
                         }

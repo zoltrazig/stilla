@@ -300,7 +300,7 @@ fn validateMatch(frame: *Frame, m: *const ast.MatchExpr) CheckError!void {
     } else if (scrut_t == .named) {
         // A match over a union must cover every variant (Core §13.3, §18
         // *Match*) unless a wildcard arm exists.
-        const ud = moduleinfo.unionDecl(frame.resolve, frame.info, frame.resolve.typeNameOf(scrut_t.named) orelse return) orelse return;
+        const ud = moduleinfo.unionDecl(frame.resolve, frame.info, frame.resolve.typeNameOf(scrut_t.named.id) orelse return) orelse return;
         var has_wildcard = false;
         const covered = try frame.ck.alloc().alloc(bool, ud.variants.len);
         @memset(covered, false);
@@ -313,7 +313,7 @@ fn validateMatch(frame: *Frame, m: *const ast.MatchExpr) CheckError!void {
                 const pp = &arm.pattern.path;
                 if (pp.tail == .variant) {
                     const name = type_resolve.joinPath(frame.ck.alloc(), pp.path) orelse continue;
-                    const scrut_name = frame.resolve.typeNameOf(scrut_t.named) orelse continue;
+                    const scrut_name = frame.resolve.typeNameOf(scrut_t.named.id) orelse continue;
                     // An arm matches this union when its leading path
                     // segment is the union unqualified name.
                     if (!std.mem.eql(u8, name, lastSegment(scrut_name))) continue;
@@ -827,7 +827,7 @@ const InitOrder = struct {
     /// unique (Core §10.2), so no separate uniqueness check is needed.
     fn dropHookOf(frame: *Frame, t: cfg.Type) ?*ast.DropDecl {
         if (t != .named) return null;
-        const name = frame.resolve.typeNameOf(t.named) orelse return null;
+        const name = frame.resolve.typeNameOf(t.named.id) orelse return null;
         const sd = moduleinfo.structDecl(frame.resolve, frame.info, name) orelse return null;
         return sd.drop;
     }
@@ -1094,9 +1094,17 @@ fn compatible(expected: cfg.Type, actual: cfg.Type) bool {
 /// boundaries.
 fn compatibleRecur(expected: cfg.Type, actual: cfg.Type) bool {
     if (expected == .named and actual == .named) {
-        // Canonical identity is the TypeId (ir.md §11): two named types
-        // unify iff they are the same interned decl.
-        return expected.named == actual.named;
+        // The same interned declaration, with compatible type arguments.
+        // Empty arguments are a wildcard: an uninstantiated construction
+        // (`Option::None`) matches any instantiation of the same
+        // declaration; a non-empty argument list must match exactly.
+        if (expected.named.id != actual.named.id) return false;
+        if (expected.named.args.len == 0 or actual.named.args.len == 0) return true;
+        if (expected.named.args.len != actual.named.args.len) return false;
+        for (expected.named.args, actual.named.args) |x, y| {
+            if (!compatible(x, y)) return false;
+        }
+        return true;
     }
     switch (expected) {
         .function => |pf| return switch (actual) {
@@ -1160,7 +1168,19 @@ fn isNumeric(t: cfg.Type) bool {
 fn fmtType(alloc: std.mem.Allocator, resolve: moduleinfo.Resolve, t: cfg.Type) ![]const u8 {
     return switch (t) {
         .primitive => |k| std.fmt.allocPrint(alloc, "{s}", .{@tagName(k)}),
-        .named => |n| std.fmt.allocPrint(alloc, "{s}", .{resolve.typeNameOf(n) orelse "?"}),
+        .named => |n| blk: {
+            var buf = std.ArrayListUnmanaged(u8).empty;
+            try buf.appendSlice(alloc, resolve.typeNameOf(n.id) orelse "?");
+            if (n.args.len > 0) {
+                try buf.append(alloc, '[');
+                for (n.args, 0..) |a, i| {
+                    if (i > 0) try buf.append(alloc, ',');
+                    try buf.appendSlice(alloc, try fmtType(alloc, resolve, a));
+                }
+                try buf.append(alloc, ']');
+            }
+            break :blk try buf.toOwnedSlice(alloc);
+        },
         .param => |p| std.fmt.allocPrint(alloc, "{s}", .{p}),
         .module => std.fmt.allocPrint(alloc, "module", .{}),
         .cleanup => std.fmt.allocPrint(alloc, "cleanup", .{}),

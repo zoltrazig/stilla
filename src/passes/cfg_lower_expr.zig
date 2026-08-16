@@ -38,7 +38,7 @@ pub fn lowerExprInner(self: *Lowerer, fs: *FuncState, e: *const ast.Expr) LowerE
         .string => |lit| try emitConst(self, fs, lit.span, .{ .string = lit.value }, .{ .primitive = .str }),
         .bool => |lit| try emitConst(self, fs, lit.span, .{ .bool = lit.value }, .{ .primitive = .bool }),
         .void => |lit| try emitVoid(self, fs, lit.span),
-        .path => |p| try cfg_lower_path.lowerPath(self, fs, &p),
+        .path => |*p| try cfg_lower_path.lowerPath(self, fs, e, p),
         .paren => |p| try lowerExpr(self, fs, p.inner),
         .tuple => |t| try lowerTuple(self, fs, &t),
         .list => |l| try lowerList(self, fs, &l),
@@ -53,13 +53,29 @@ pub fn lowerExprInner(self: *Lowerer, fs: *FuncState, e: *const ast.Expr) LowerE
         .cast => |c| try lowerCast(self, fs, &c),
         .member => |m| try cfg_lower_path.lowerMember(self, fs, &m),
         .index => |ix| try cfg_lower_path.lowerIndex(self, fs, &ix),
-        .call => |c| try cfg_lower_call.lowerCall(self, fs, &c),
-        .specialize => |s| self.fail(s.span, "an unspecialized generic cannot be used as a value (Core §12.4)", .{}),
+        .call => |*c| try cfg_lower_call.lowerCall(self, fs, c),
+        .specialize => |*s| try lowerSpecialize(self, fs, s),
     };
 }
 
 pub fn emitConst(self: *Lowerer, fs: *FuncState, span: ast.Span, value: cfg.ConstValue, type_: cfg.Type) LowerError!?*cfg.Value {
     return cfg_lower_emit.emit(self, fs, span, .{ .const_ = value }, type_);
+}
+
+/// An explicit `::[...]` specialization in value position (Core §12.4):
+/// `let f = identity::[int32];` is a first-class monomorphic function
+/// value — a `fn_ref` to the used specialization's monomorphic function
+/// (`{module}.{fn}.{id}`).
+pub fn lowerSpecialize(self: *Lowerer, fs: *FuncState, s: *const ast.Specialize) LowerError!?*cfg.Value {
+    if (self.ann) |a| {
+        if (a.per_module.get(fs.module.specifier)) |ma| {
+            if (ma.spec_of.get(s)) |inst| {
+                const qname = try cfg_lower_call.instanceName(self, inst.module.specifier, inst.decl.name.text, inst.id);
+                return cfg_lower_emit.emit(self, fs, s.span, .{ .fn_ref = qname }, inst.signature);
+            }
+        }
+    }
+    return self.fail(s.span, "an unspecialized generic cannot be used as a value (Core §12.4)", .{});
 }
 
 /// A `void`-typed expression result. `void` is a singleton type with no
@@ -92,7 +108,7 @@ pub fn emitVoid(self: *Lowerer, fs: *FuncState, span: ast.Span) LowerError!?*cfg
 /// Struct literal: fields are evaluated in *written* order
 /// (Runtime §5) but the `construct` carries them in declaration order
 /// (Core §8.1, ir.md §5.3).
-pub fn lowerStructConstruct(self: *Lowerer, fs: *FuncState, p: *const ast.PathExpr, sc: *const ast.StructConstruct) LowerError!?*cfg.Value {
+pub fn lowerStructConstruct(self: *Lowerer, fs: *FuncState, e: *const ast.Expr, p: *const ast.PathExpr, sc: *const ast.StructConstruct) LowerError!?*cfg.Value {
     const name = try cfg_lower_path.joinPath(self, p.path);
     const sd = moduleinfo.structDecl(self.resolve, fs.module, name) orelse
         return self.fail(p.span, "unknown struct type '{s}'", .{name});
@@ -111,7 +127,8 @@ pub fn lowerStructConstruct(self: *Lowerer, fs: *FuncState, p: *const ast.PathEx
     for (sd.fields, 0..) |f, i| {
         if (!seen[i]) return self.fail(p.span, "missing field '{s}' in '{s}'", .{ f.name.text, name });
     }
-    const result = try cfg_lower_emit.emit(self, fs, p.span, .{ .construct = .{ .tag = null, .args = args } }, .{ .named = moduleinfo.resolveTypeId(self.resolve, fs.module, name) orelse return null });
+    const result_type = self.annotatedType(fs, e) orelse cfg.Type{ .named = .{ .id = moduleinfo.resolveTypeId(self.resolve, fs.module, name) orelse return null, .args = &.{} } };
+    const result = try cfg_lower_emit.emit(self, fs, p.span, .{ .construct = .{ .tag = null, .args = args } }, result_type);
     // Unique field values move into the constructed value.
     for (args) |a| {
         if (a.ownership == .unique and !cfg_lower_emit.isConsumed(fs, a)) {
@@ -123,7 +140,7 @@ pub fn lowerStructConstruct(self: *Lowerer, fs: *FuncState, p: *const ast.PathEx
 }
 
 /// Union variant construction: `Result::Ok(value)` (Core §11).
-pub fn lowerVariantConstruct(self: *Lowerer, fs: *FuncState, p: *const ast.PathExpr, ve: *const ast.VariantExpr) LowerError!?*cfg.Value {
+pub fn lowerVariantConstruct(self: *Lowerer, fs: *FuncState, e: *const ast.Expr, p: *const ast.PathExpr, ve: *const ast.VariantExpr) LowerError!?*cfg.Value {
     const name = try cfg_lower_path.joinPath(self, p.path);
     const ud = moduleinfo.unionDecl(self.resolve, fs.module, name) orelse
         return self.fail(p.span, "unknown union type '{s}'", .{name});
@@ -136,7 +153,8 @@ pub fn lowerVariantConstruct(self: *Lowerer, fs: *FuncState, p: *const ast.PathE
             try args.append(self.arena, v);
         }
     }
-    const result = try cfg_lower_emit.emit(self, fs, p.span, .{ .construct = .{ .tag = tag, .args = args.items } }, .{ .named = moduleinfo.resolveTypeId(self.resolve, fs.module, name) orelse return null });
+    const result_type = self.annotatedType(fs, e) orelse cfg.Type{ .named = .{ .id = moduleinfo.resolveTypeId(self.resolve, fs.module, name) orelse return null, .args = &.{} } };
+    const result = try cfg_lower_emit.emit(self, fs, p.span, .{ .construct = .{ .tag = tag, .args = args.items } }, result_type);
     for (args.items) |a| {
         if (a.ownership == .unique and !cfg_lower_emit.isConsumed(fs, a)) {
             cfg_lower_emit.markConsumed(self, fs, a);

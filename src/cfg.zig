@@ -73,11 +73,12 @@ pub const TypeId = u32;
 
 pub const Type = union(enum) {
     primitive: ast.PrimitiveKind,
-    /// A named struct or union reference: a `TypeId` index into the
-    /// program type environment (`IrProgram.types`, ir.md §11). Canonical
-    /// identity is the `TypeId`; the declaration name strings are for
+    /// A named struct or union reference: the declaration's `TypeId` plus
+    /// the type arguments of this instantiation (empty for non-generic
+    /// types). Canonical identity is the declaration `TypeId` together with
+    /// the arguments (`Named`); the declaration name strings are for
     /// printing and diagnostics only.
-    named: TypeId,
+    named: Named,
     /// A generic type parameter of an enclosing declaration, e.g. the
     /// `T` of `fn foo[T](x: T) -> T` (Core §12). `null` ownership
     /// (deferred) until a monomorphic substitution fixes it. Distinct
@@ -97,6 +98,14 @@ pub const Type = union(enum) {
     /// only `cleanup_disable` / `drop_cleanup` consume it. Classified
     /// Copy so ordinary scope-end machinery never drops it.
     cleanup,
+
+    /// A named struct or union reference with its type arguments: the
+    /// declaration `TypeId` and the instantiation's arguments, in the
+    /// declaration's parameter order.
+    pub const Named = struct {
+        id: TypeId,
+        args: []Type,
+    };
 
     /// Structural ownership (ir.md §6.1): primitives are Copy except
     /// the top type `any` and the opaque payload type `hostdata`, which are
@@ -121,6 +130,17 @@ pub const Type = union(enum) {
         };
     }
 
+    /// Whether two named references denote the same instantiation: the
+    /// same declaration with structurally equal type arguments.
+    fn namedEql(a: Named, b: Named) bool {
+        if (a.id != b.id) return false;
+        if (a.args.len != b.args.len) return false;
+        for (a.args, b.args) |x, y| {
+            if (!eql(x, y)) return false;
+        }
+        return true;
+    }
+
     pub fn eql(a: Type, b: Type) bool {
         return switch (a) {
             .primitive => |ka| switch (b) {
@@ -129,7 +149,7 @@ pub const Type = union(enum) {
             },
             .module => b == .module,
             .named => |na| switch (b) {
-                .named => |nb| na == nb,
+                .named => |nb| namedEql(na, nb),
                 else => false,
             },
             .param => |pa| switch (b) {

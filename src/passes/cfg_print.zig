@@ -117,11 +117,19 @@ fn printFunc(out: *std.ArrayList(u8), allocator: std.mem.Allocator, types: []con
 fn printType(out: *std.ArrayList(u8), allocator: std.mem.Allocator, types: []const []const u8, t: Type) !void {
     switch (t) {
         .primitive => |k| try w(out, allocator, "{s}", .{@tagName(k)}),
-        .named => |id| {
-            if (id < types.len) {
-                try w(out, allocator, "{s}", .{types[id]});
+        .named => |n| {
+            if (n.id < types.len) {
+                try w(out, allocator, "{s}", .{types[n.id]});
             } else {
-                try w(out, allocator, "#{d}", .{id});
+                try w(out, allocator, "#{d}", .{n.id});
+            }
+            if (n.args.len > 0) {
+                try w(out, allocator, "[", .{});
+                for (n.args, 0..) |a, i| {
+                    if (i > 0) try w(out, allocator, ", ", .{});
+                    try printType(out, allocator, types, a);
+                }
+                try w(out, allocator, "]", .{});
             }
         },
         .param => |s| try w(out, allocator, "{s}", .{s}),

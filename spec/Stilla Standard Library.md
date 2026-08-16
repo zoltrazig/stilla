@@ -12,16 +12,15 @@ Stilla v1.3 specifications: *Stilla Core Language Specification*
 The standard library is a set of ordinary importable modules. Its types are
 not language keywords, and its functions are ordinary module functions.
 
-Module resolution follows Core §2.4; each module here may be
-resolved as a standard-library module or provided by an embedding host
-(Core §2.6).
+Module resolution follows the Core specification; each module here may be
+resolved as a standard-library module or provided by an embedding host.
 
 The language core provides only the abstract sequence type `list[T]`:
 
 - immutable;
 - abstract storage (an implementation may use reference-counted sharing);
 - supported directly by literals, patterns, and indexing; iteration is
-  provided by the `iter` module (§7).
+  provided by the `iter` module.
 
 By contrast, the collection modules `array[T]` and `hashmap[K, V]` are not
 abstract types. They are concrete host-provided implementations oriented
@@ -35,19 +34,19 @@ replace them. An implementation or host may substitute alternative
 representations, or add specialized collection modules, without touching the
 language core.
 
-A container value is an ordinary nominal struct (Core §7) whose runtime
+A container value is an ordinary nominal struct (the Core specification) whose runtime
 value is an immutable **token** naming a host-owned opaque buffer: the
 host owns the buffer's memory and lifetime, Stilla never inspects it, and
-the module functions of §2 and §3 are the only access path. The token is
-Copy when its element types are Copy (Core §10.1, §10.3), and the element
-types must be Copy (§2, §3) — a container is never a `hostdata` payload and
-does not depend on Core §11.7.
+the `array` and `hashmap` module functions are the only access path. The token is
+Copy when its element types are Copy (the Core specification), and the element
+types must be Copy (The `array` module, The `hashmap` module) — a container is never a `hostdata` payload and
+does not depend on the Core specification.
 
 The standard library provides:
 
 ```text
 builtin       required core interface: print, str, len, range, box, peek,
-              unbox, panic, assert, hash (Runtime §4)
+              unbox, panic, assert, hash (the Runtime specification)
 array[T]      host-owned contiguous-memory sequence
 hashmap[K, V] host-owned contiguous-bucket hash table
 math          common mathematical constants and functions
@@ -58,7 +57,7 @@ iter          list combinators: each, each_with, fold, fold_with, consume_each,
 ```
 
 Every module here, including `builtin`, is imported like any other module
-(Core §2.4, Core §3):
+(the Core specification):
 
 ```stilla
 const builtin = import("builtin");
@@ -80,29 +79,29 @@ array.len[T]:
     fn(Array[T]) -> int32
 ```
 
-- `Array[T]` is an ordinary nominal struct (§1): the module functions are
+- `Array[T]` is an ordinary nominal struct (Scope): the module functions are
   host bindings that construct, read, and destroy a host-owned opaque
   contiguous buffer; the Stilla value is the immutable token naming it.
 - `array.make(length, init)` constructs a fresh `Array[T]` of the given
   length; every element is initialized to a copy of `init`.
 - The element type `T` must be Copy. Parameters are plain (Copy)
-  parameters (Core §10.6): a unique `init` is rejected at compile time, so
+  parameters (the Core specification): a unique `init` is rejected at compile time, so
   the Copy restriction is enforced by the type system. The token is Copy
-  when `T` is Copy (Core §10.3) and may be reused freely.
+  when `T` is Copy (the Core specification) and may be reused freely.
 - `array.get(a, i)` reads element `i` and returns a copy of it. Invalid
-  indexing produces a deterministic runtime trap (Runtime §7.2).
+  indexing produces a deterministic runtime trap (the Runtime specification).
 - `array.len(a)` returns the length.
 - `get` returns an element by value; a borrowed unique return is not
-  expressible (Core §10.7), which is why `T` is restricted to Copy. Unique
-  element storage is provided by `list[T]` (Core §11.5) with the `iter`
-  combinators of §7.
+  expressible (the Core specification), which is why `T` is restricted to Copy. Unique
+  element storage is provided by `list[T]` (the Core specification) with the `iter`
+  combinators.
 - Wholesale iteration over `Array[T]` is host-provided: `for` is not a
-  core-language construct (Core §13.5), and the `iter` combinators of §7
+  core-language construct (the Core specification), and the `iter` combinators
   operate on `list[T]`, not on `Array[T]`.
-- `array.make`'s `T` is inferred from `init` (Core §12.2); `get` and `len`
+- `array.make`'s `T` is inferred from `init` (the Core specification); `get` and `len`
   carry `T` only in the token type, so their type argument must be written
   explicitly: `array.get::[int32](a, 2)`, `array.len::[int32](a)`
-  (Core §12.3).
+  (the Core specification).
 
 Usage:
 
@@ -138,26 +137,26 @@ hashmap.len[K, V]:
     fn(HashMap[K, V]) -> int32
 ```
 
-- `HashMap[K, V]` is an ordinary nominal struct (§1): the module functions
+- `HashMap[K, V]` is an ordinary nominal struct (Scope): the module functions
   are host bindings that construct, read, and transform a host-owned
   opaque contiguous-bucket table; the Stilla value is the immutable token
   naming it.
 - A key type `K` must be Copy and hashable; a value type `V` must be Copy.
-  Parameters are plain (Copy) parameters (Core §10.6), so the Copy
+  Parameters are plain (Copy) parameters (the Core specification), so the Copy
   restrictions are enforced by the type system.
-- `builtin.hash` provides hashing for the primitive key types (Runtime §4.9).
+- `builtin.hash` provides hashing for the primitive key types (the Runtime specification).
 - Insertion and removal are persistent-style: they take the token by plain
   (Copy) parameter and return a *new* map token. The input token remains
   usable and references the previous immutable table, so the map is never
   partially mutated.
 - `hashmap.get` returns a copy of the value as `Option[V]` — `Some(v)` when
   `key` is present, `None` otherwise. `get` returns a value by copy; a
-  borrowed unique return is not expressible (Core §10.7), which is why `V`
+  borrowed unique return is not expressible (the Core specification), which is why `V`
   is restricted to Copy.
 - Iteration order is unspecified but stable within a single execution
   context. Wholesale iteration over `HashMap[K, V]` is host-provided:
-  `for` is not a core-language construct (Core §13.5), and the `iter`
-  combinators of §7 operate on `list[T]`, not on `HashMap[K, V]`.
+  `for` is not a core-language construct (the Core specification), and the `iter`
+  combinators operate on `list[T]`, not on `HashMap[K, V]`.
 
 Usage:
 
@@ -178,10 +177,10 @@ match (hashmap.get::[str, int32](m, "a")) {
 ```
 
 `insert`'s `K` and `V` are inferred from the key and value arguments
-(Core §12.2); the other functions carry `K`/`V` only in the token or result
-type, so their type arguments must be written explicitly (Core §12.3).
+(the Core specification); the other functions carry `K`/`V` only in the token or result
+type, so their type arguments must be written explicitly (the Core specification).
 `Option` is `builtin`'s type member, brought into scope with `using`
-(Core §2.8).
+(the Core specification).
 
 # 4. The `math` module
 
@@ -215,7 +214,7 @@ math.nan:
 - `inf` is positive infinity; `nan` is a quiet NaN.
 - Float results follow IEEE 754, including NaN and infinity. For example,
   `math.sqrt(-1.0)` is NaN and `math.ln(0.0)` is negative infinity. The
-  deterministic trap rules of Runtime §7.2 concern integer
+  deterministic trap rules of the Runtime specification concern integer
   operations, invalid indexing, and numeric conversion; a conforming
   implementation that traps on IEEE 754 NaN or infinity results instead must
   document the deviation.
@@ -293,13 +292,13 @@ math.max:
   corresponding integral value.
 - `math.abs` returns the absolute value of a `float32`. Integer absolute value
   is not provided: it is expressible directly in source, and negating the
-  minimum `int32` traps (integer overflow, Runtime §7.2).
+  minimum `int32` traps (integer overflow, the Runtime specification).
 - `math.min` and `math.max` follow IEEE 754 `fmin` and `fmax` semantics.
 - `math.asin` and `math.acos` accept arguments in the range `[-1.0, 1.0]`.
   Out-of-domain arguments produce NaN per IEEE 754 (or a documented trap, as
   above).
 - There is no implicit numeric conversion in Stilla; integer arguments must be
-  converted explicitly with `as` (Core §16.3).
+  converted explicitly with `as` (the Core specification).
 
 Usage:
 
@@ -390,7 +389,7 @@ string.from_codepoints:
 - `string.substring(s, start, end)` returns the substring from code-point
   index `start` up to but not including `end`, per the half-open interval
   `[start, end)`. Out-of-range offsets produce a deterministic runtime trap
-  (Runtime §7.2).
+  (the Runtime specification).
 - `string.split(s, sep)` splits `s` at every occurrence of `sep`. If `sep` is
   empty, the result is a list of single-code-point strings. An empty `s`
   splits to `[""]`.
@@ -408,14 +407,14 @@ string.from_codepoints:
 - `string.trim(s)` removes leading and trailing Unicode whitespace.
 - `string.to_utf8(s)` encodes `s` as a UTF-8 byte sequence.
   `string.from_utf8(bytes)` decodes a UTF-8 byte sequence; invalid UTF-8
-  produces a deterministic runtime trap (Runtime §7.2).
+  produces a deterministic runtime trap (the Runtime specification).
 - `string.to_codepoints(s)` yields the code points of `s`.
   `string.from_codepoints(cps)` accepts any `uint32` value that is a Unicode
   scalar value; surrogates and values above `0x10FFFF` produce a
-  deterministic runtime trap (Runtime §7.2).
+  deterministic runtime trap (the Runtime specification).
 - All functions are deterministic within a single execution context.
 
-There is no `byte` or `uint32` literal form in Stilla (Core §16.3); byte
+There is no `byte` or `uint32` literal form in Stilla (the Core specification); byte
 and code-point sequences are written with explicit conversions, for
 example `104 as byte` and `72 as uint32`, or obtained from
 `string.to_utf8` / `string.to_codepoints`.
@@ -436,28 +435,27 @@ let upper = string.upper(s);                          // "HELLO"
 # 6. The `hostdata` type
 
 `hostdata` is not a standard-library module. It is a core primitive type
-(Core §11.7) carrying an **opaque, host-defined payload**.
+(the Core specification) carrying an **opaque, host-defined payload**.
 
 - Only the host constructs `hostdata` values, through host functions and
-  module members (Core §2.6, Runtime §3.1); Stilla never constructs or
+  module members (Core specification, Runtime specification); Stilla never constructs or
   inspects one itself.
-- `hostdata` is unique (Core §11.7): it may be moved, borrowed, stored,
+- `hostdata` is unique (the Core specification): it may be moved, borrowed, stored,
   passed along, and handed to the host, and is never implicitly copyable.
 - Containers of `hostdata` as elements — `list[hostdata]`,
   `box[hostdata]`, and `tuple[..., hostdata]` — are unique by the
-  structural rule of Core §10.3. A `hostdata` value can therefore be
+  structural rule of the Core specification. A `hostdata` value can therefore be
   stored as an element of a container.
 - `builtin.str` and `builtin.hash` do not accept `hostdata`, so a `hostdata`
   value cannot be converted to text or used as a `hashmap` key.
-- Destruction of a `hostdata` value — automatic (Core §9.5), explicit `drop`
-  (Core §9.4), or container destruction — returns the opaque payload to the
-  host for disposal (Runtime §3.4, §7.3); this is host cleanup, not execution
+- Destruction of a `hostdata` value — automatic (the Core specification), explicit `drop`
+  (the Core specification), or container destruction — returns the opaque payload to the
+  host for disposal (the Runtime specification); this is host cleanup, not execution
   of a Stilla `drop` hook.
 
-`hostdata` is not involved in the `array` (§2) and `hashmap` (§3)
-containers: a container value is an ordinary nominal struct token (§1),
+`hostdata` is not involved in the `array` and `hashmap` containers (The `array` module, The `hashmap` module): a container value is an ordinary nominal struct token (Scope),
 not a `hostdata` payload. Container buffers are host-owned opaque memory
-managed by the host bindings of §2 and §3, not by Core §11.7.
+managed by the `array` and `hashmap` host bindings, not by the Core specification.
 
 Usage:
 
@@ -474,9 +472,9 @@ let b2 = os.pass_handle(move b);     // handed back to the host
 The `iter` module provides the list combinators `each`, `each_with`, `fold`,
 `fold_with`, `consume_each`, `consume_each_with`, `consume_fold`,
 `consume_fold_with`, `try_fold`, and `try_fold_with`. Stilla has no closures
-(Core §18): a function or lambda cannot capture enclosing local bindings.
+(the Core specification): a function or lambda cannot capture enclosing local bindings.
 Each combinator therefore accepts the per-element operation as an ordinary
-function-value parameter — a monomorphic, non-capturing method (Core §12).
+function-value parameter — a monomorphic, non-capturing method (the Core specification).
 The `*_with` variants additionally take a **context** value that is borrowed
 and passed to every invocation of the operation; context threading is the
 language's compensation for the absence of closures. The `consume_*`
@@ -484,8 +482,11 @@ variants consume the list and move each element into the operation.
 
 The module is ordinary Stilla source: `fold_with` and `consume_fold_with`
 are the recursion kernels (matching `[]` / `[head, ..tail]` and calling the
-operation value), and every other combinator is derived from them. The
-`try_fold*` functions are the exception — they are host bindings, because
+operation value), and the combinators without a user context — `each`,
+`fold`, `consume_each`, `consume_fold` — are derived from them by
+threading the operation value through the context slot; `each_with` and
+`consume_each_with` already carry a user context and are written directly.
+The `try_fold*` functions are the exception — they are host bindings, because
 their bodies need generic union-payload substitution (`Result[S, R]`'s
 payload types are the type parameters) which the structural frontend
 defers.
@@ -578,19 +579,19 @@ iter.try_fold_with[T, S, R, C]:
 ```
 
 - `iter.each(values, action)` invokes `action(item)` once per element in
-  increasing index order (Runtime §5) and returns `void`. The list is
+  increasing index order (the Runtime specification) and returns `void`. The list is
   borrowed, so its elements are borrowed and no ownership transfers.
 - `iter.each_with(values, context, action)` is `each` with a borrowed
   `context` passed to every invocation.
 - `iter.fold(values, state, step)` is a deterministic left fold from the
-  lowest index to the highest index (Runtime §5): the accumulator `state`
+  lowest index to the highest index (the Runtime specification): the accumulator `state`
   is moved into each `step(state, item)` invocation and the returned
   value becomes the next accumulator. The list is borrowed.
 - `iter.fold_with(values, state, context, step)` is `fold` with a
   borrowed `context` passed to every step call.
 - `iter.consume_each(values, action)` consumes the list as a whole; each
   element is moved into `action(move item)` in increasing index order
-  (Runtime §5).
+  (the Runtime specification).
 - `iter.consume_each_with(values, context, action)` is `consume_each`
   with a borrowed `context` passed to every invocation.
 - `iter.consume_fold(values, state, step)` is a consuming left fold: the
@@ -599,7 +600,7 @@ iter.try_fold_with[T, S, R, C]:
 - `iter.consume_fold_with(values, state, context, step)` is
   `consume_fold` with a borrowed `context` passed to every step call.
 - `iter.try_fold(values, state, step)` is a short-circuiting left fold,
-  lowest index to highest (Runtime §5): each `step(state, item)` returns
+  lowest index to highest (the Runtime specification): each `step(state, item)` returns
   `Result[S, R]`; `Complete(s)` continues with accumulator `s`, and the
   first `Break(r)` stops iteration immediately — the remaining elements
   are not visited — and is returned as the result. Completing every
@@ -607,7 +608,7 @@ iter.try_fold_with[T, S, R, C]:
 - `iter.try_fold_with(values, state, context, step)` is `try_fold` with a
   borrowed `context` passed to every step call.
 - The `borrow` parameters are non-owning: call sites pass plain arguments
-  (Core §10.6). For unique `T`, elements are borrowed (`each`, `fold`,
+  (the Core specification). For unique `T`, elements are borrowed (`each`, `fold`,
   `try_fold`) or moved exactly once (`consume_each`, `consume_fold`); if
   the instantiated element or accumulator type is Copy, the corresponding
   modes have ordinary copy semantics.

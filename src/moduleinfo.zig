@@ -492,17 +492,26 @@ pub const Builder = struct {
                 for (order) |i| try out.append(self.arena, self.raws.items[i]);
                 return out;
             },
-            .cycle => |edge| {
-                // Name the module the back edge points at — the one whose
-                // import closed the cycle (frontend §3.5).
-                return self.cycleDiag(self.raws.items[edge.dep].info.specifier, edge.span);
+            .cycle => |cyc| {
+                // Name the full cycle in import order (frontend §3.5),
+                // from the module the back edge points at back to itself.
+                return self.cycleDiag(cyc.path, cyc.span);
             },
         }
     }
 
-    fn cycleDiag(self: *Builder, specifier: []const u8, span: ast.Span) error{ Diagnostic, OutOfMemory } {
-        const msg = std.fmt.allocPrint(self.arena, "import cycle detected involving module '{s}'", .{specifier}) catch return error.OutOfMemory;
-        self.diag = .{ .span = span, .message = msg };
+    /// Emit the import-cycle diagnostic. `path` is `[a, b, c, a]` — the
+    /// cycle in import order with both ends the same module — rendered as
+    /// "a imports b imports c imports a". The span points at the import
+    /// that closed the cycle (the last element's importing expression).
+    fn cycleDiag(self: *Builder, path: []usize, span: ast.Span) error{ Diagnostic, OutOfMemory } {
+        var msg = std.ArrayListUnmanaged(u8).empty;
+        try msg.appendSlice(self.arena, "import cycle detected: ");
+        for (path, 0..) |node, k| {
+            try msg.appendSlice(self.arena, self.raws.items[node].info.specifier);
+            if (k + 1 < path.len) try msg.appendSlice(self.arena, " imports ");
+        }
+        self.diag = .{ .span = span, .message = try msg.toOwnedSlice(self.arena) };
         return error.Diagnostic;
     }
 
