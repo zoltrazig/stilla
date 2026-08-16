@@ -24,9 +24,8 @@ The language core provides only the abstract sequence type `list[T]`:
   provided by the `iter` module (§7).
 
 By contrast, the collection modules `array[T]` and `hashmap[K, V]` are not
-abstract types. They are concrete host-provided implementations whose values
-are opaque `hostdata` payloads (§6), oriented toward a contiguous-memory
-model, provided for performance:
+abstract types. They are concrete host-provided implementations oriented
+toward a contiguous-memory model, provided for performance:
 
 - `array[T]` — a concrete dense sequence with contiguous element storage;
 - `hashmap[K, V]` — a concrete hash table with contiguous bucket storage.
@@ -36,17 +35,21 @@ replace them. An implementation or host may substitute alternative
 representations, or add specialized collection modules, without touching the
 language core.
 
-Because a container value is a unique `hostdata` payload (Core §11.7),
-`Array[T]` and `HashMap[K, V]` are always unique, regardless of the element
-type (§2, §3).
+A container value is an ordinary nominal struct (Core §7) whose runtime
+value is an immutable **token** naming a host-owned opaque buffer: the
+host owns the buffer's memory and lifetime, Stilla never inspects it, and
+the module functions of §2 and §3 are the only access path. The token is
+Copy when its element types are Copy (Core §10.1, §10.3), and the element
+types must be Copy (§2, §3) — a container is never a `hostdata` payload and
+does not depend on Core §11.7.
 
 The standard library provides:
 
 ```text
 builtin       required core interface: print, str, len, range, box, peek,
               unbox, panic, assert, hash (Runtime §4)
-array[T]      hostdata-backed contiguous-memory sequence
-hashmap[K, V] hostdata-backed contiguous-bucket hash table
+array[T]      host-owned contiguous-memory sequence
+hashmap[K, V] host-owned contiguous-bucket hash table
 math          common mathematical constants and functions
 string        Unicode text operations and conversions
 iter          list combinators: each, each_with, fold, fold_with, consume_each,
@@ -68,35 +71,38 @@ Conceptual interface (a conforming standard library must provide at least this):
 
 ```stilla
 array.make[T]:
-    fn(int32, move T) -> Array[T]
+    fn(int32, T) -> Array[T]
 
 array.get[T]:
-    fn(move Array[T], int32) -> T
+    fn(Array[T], int32) -> T
 
 array.len[T]:
-    fn(move Array[T]) -> int32
+    fn(Array[T]) -> int32
 ```
 
-- `Array[T]` is a `hostdata` payload (§6): the module functions are host
-  bindings that construct, read, and destroy an opaque, host-defined
-  contiguous buffer. Stilla never inspects the payload.
+- `Array[T]` is an ordinary nominal struct (§1): the module functions are
+  host bindings that construct, read, and destroy a host-owned opaque
+  contiguous buffer; the Stilla value is the immutable token naming it.
 - `array.make(length, init)` constructs a fresh `Array[T]` of the given
-  length; every element is initialized to `init`. For unique `T`, `init`
-  is a fresh value and transfers implicitly (Core §10.5).
-- `Array[T]` is immutable after construction.
-- `array.get(a, i)` reads element `i`, borrowing the array's payload for the
-  operation. Invalid indexing produces a deterministic runtime trap
-  (Runtime §7.2).
-- For unique `T`, element access borrows, as with `list[T]` indexing
-  (Core §11.5).
+  length; every element is initialized to a copy of `init`.
+- The element type `T` must be Copy. Parameters are plain (Copy)
+  parameters (Core §10.6): a unique `init` is rejected at compile time, so
+  the Copy restriction is enforced by the type system. The token is Copy
+  when `T` is Copy (Core §10.3) and may be reused freely.
+- `array.get(a, i)` reads element `i` and returns a copy of it. Invalid
+  indexing produces a deterministic runtime trap (Runtime §7.2).
+- `array.len(a)` returns the length.
+- `get` returns an element by value; a borrowed unique return is not
+  expressible (Core §10.7), which is why `T` is restricted to Copy. Unique
+  element storage is provided by `list[T]` (Core §11.5) with the `iter`
+  combinators of §7.
 - Wholesale iteration over `Array[T]` is host-provided: `for` is not a
   core-language construct (Core §13.5), and the `iter` combinators of §7
   operate on `list[T]`, not on `Array[T]`.
-- `Array[T]` is always unique: it wraps an opaque `hostdata` payload, and
-  `hostdata` is not Copy (§6, Core §11.7). It is not Copy even
-  when `T` is Copy.
-- `array.get` and `array.len` parameters are declared with `move`; call
-  sites pass a plain argument to borrow (Core §10.6).
+- `array.make`'s `T` is inferred from `init` (Core §12.2); `get` and `len`
+  carry `T` only in the token type, so their type argument must be written
+  explicitly: `array.get::[int32](a, 2)`, `array.len::[int32](a)`
+  (Core §12.3).
 
 Usage:
 
@@ -104,7 +110,8 @@ Usage:
 const array = import("array");
 
 let a = array.make(4, 0);
-let x = array.get(a, 2);
+let x = array.get::[int32](a, 2);
+let n = array.len::[int32](a);
 ```
 
 # 3. The `hashmap` module
@@ -116,33 +123,37 @@ hashmap.empty[K, V]:
     fn() -> HashMap[K, V]
 
 hashmap.insert[K, V]:
-    fn(move HashMap[K, V], move K, move V) -> HashMap[K, V]
+    fn(HashMap[K, V], K, V) -> HashMap[K, V]
 
 hashmap.get[K, V]:
-    fn(move HashMap[K, V], K) -> Option[V]
+    fn(HashMap[K, V], K) -> Option[V]
 
 hashmap.contains[K, V]:
-    fn(move HashMap[K, V], K) -> bool
+    fn(HashMap[K, V], K) -> bool
 
 hashmap.remove[K, V]:
-    fn(move HashMap[K, V], K) -> tuple[HashMap[K, V], Option[V]]
+    fn(HashMap[K, V], K) -> tuple[HashMap[K, V], Option[V]]
 
 hashmap.len[K, V]:
-    fn(move HashMap[K, V]) -> int32
+    fn(HashMap[K, V]) -> int32
 ```
 
-- `HashMap[K, V]` is a `hostdata` payload (§6): the module functions are
-  host bindings that construct, read, transform, and destroy an opaque,
-  host-defined contiguous-bucket table. Stilla never inspects the payload.
-- A key type `K` must be Copy and hashable.
+- `HashMap[K, V]` is an ordinary nominal struct (§1): the module functions
+  are host bindings that construct, read, and transform a host-owned
+  opaque contiguous-bucket table; the Stilla value is the immutable token
+  naming it.
+- A key type `K` must be Copy and hashable; a value type `V` must be Copy.
+  Parameters are plain (Copy) parameters (Core §10.6), so the Copy
+  restrictions are enforced by the type system.
 - `builtin.hash` provides hashing for the primitive key types (Runtime §4.9).
-- Insertion and removal are persistent-style: they consume the input map and
-  return a new map. Because the map is always unique, ownership transfers as
-  a whole and the map is never partially mutated.
-- `hashmap.get` returns the value as `Option[V]`. For unique `V`, the payload
-  is borrowed for the lifetime of the operation, matching the borrow rule of
-  Core §10.7. Its map parameter is declared with `move`;
-  call sites pass a plain argument to borrow (Core §10.6).
+- Insertion and removal are persistent-style: they take the token by plain
+  (Copy) parameter and return a *new* map token. The input token remains
+  usable and references the previous immutable table, so the map is never
+  partially mutated.
+- `hashmap.get` returns a copy of the value as `Option[V]` — `Some(v)` when
+  `key` is present, `None` otherwise. `get` returns a value by copy; a
+  borrowed unique return is not expressible (Core §10.7), which is why `V`
+  is restricted to Copy.
 - Iteration order is unspecified but stable within a single execution
   context. Wholesale iteration over `HashMap[K, V]` is host-provided:
   `for` is not a core-language construct (Core §13.5), and the `iter`
@@ -154,15 +165,23 @@ Usage:
 const hashmap = import("hashmap");
 const builtin = import("builtin");
 
-let m = hashmap.empty();
+using builtin.Option;
+
+let m = hashmap.empty::[str, int32]();
 let m = hashmap.insert(m, "a", 1);
 let m = hashmap.insert(m, "b", 2);
 
-match (hashmap.get(m, "a")) {
+match (hashmap.get::[str, int32](m, "a")) {
     Option::Some(value) => builtin.print(builtin.str(value)),
     Option::None => builtin.print("missing")
 };
 ```
+
+`insert`'s `K` and `V` are inferred from the key and value arguments
+(Core §12.2); the other functions carry `K`/`V` only in the token or result
+type, so their type arguments must be written explicitly (Core §12.3).
+`Option` is `builtin`'s type member, brought into scope with `using`
+(Core §2.8).
 
 # 4. The `math` module
 
@@ -412,26 +431,17 @@ let upper = string.upper(s);                          // "HELLO"
 # 6. The `hostdata` type
 
 `hostdata` is not a standard-library module. It is a core primitive type
-(Core §11.7) carrying an **opaque, host-defined payload**. It is covered
-here because the `array` (§2) and `hashmap` (§3) containers are implemented
-on top of it.
+(Core §11.7) carrying an **opaque, host-defined payload**.
 
 - Only the host constructs `hostdata` values, through host functions and
-  module members (Core §2.6, Runtime §3.1). The `array` and `hashmap`
-  module functions are host bindings that construct, read, transform, and
-  destroy such payloads; Stilla never constructs or inspects one itself.
-- An `Array[T]` or `HashMap[K, V]` value is itself a `hostdata` payload.
-  Stilla therefore defines no operation on the container other than moving,
-  borrowing, storing, passing along, and handing to the host (Core §11.7),
-  and the module functions of §2 and §3 are its only access path.
-- `hostdata` is unique (Core §11.7). Because a container is a `hostdata`
-  payload, `Array[T]` and `HashMap[K, V]` are always unique, regardless of
-  `T` (§2, §3).
+  module members (Core §2.6, Runtime §3.1); Stilla never constructs or
+  inspects one itself.
+- `hostdata` is unique (Core §11.7): it may be moved, borrowed, stored,
+  passed along, and handed to the host, and is never implicitly copyable.
 - Containers of `hostdata` as elements — `list[hostdata]`,
-  `box[hostdata]`, `array[hostdata]`, `hashmap[K, hostdata]`, and
-  `tuple[..., hostdata]` — are unique by the structural rule of Core §10.3.
-  A `hostdata` value can therefore be stored as an element of a container,
-  but the container itself is a separate `hostdata` payload.
+  `box[hostdata]`, and `tuple[..., hostdata]` — are unique by the
+  structural rule of Core §10.3. A `hostdata` value can therefore be
+  stored as an element of a container.
 - `builtin.str` and `builtin.hash` do not accept `hostdata`, so a `hostdata`
   value cannot be converted to text or used as a `hashmap` key.
 - Destruction of a `hostdata` value — automatic (Core §9.5), explicit `drop`
@@ -439,19 +449,19 @@ on top of it.
   host for disposal (Runtime §3.4, §7.3); this is host cleanup, not execution
   of a Stilla `drop` hook.
 
+`hostdata` is not involved in the `array` (§2) and `hashmap` (§3)
+containers: a container value is an ordinary nominal struct token (§1),
+not a `hostdata` payload. Container buffers are host-owned opaque memory
+managed by the host bindings of §2 and §3, not by Core §11.7.
+
 Usage:
 
 ```stilla
-const array = import("array");
-const hashmap = import("hashmap");
+const os = import("os");
 
-let a = array.make(4, 0);              // Array[int32], a hostdata payload
-let x = array.get(a, 2);               // host binding reads the payload
-let b = move a;                        // ownership transfers as a whole
-
-let m = hashmap.empty();
-let m = hashmap.insert(m, "k", 1);     // HashMap[str, int32], a hostdata payload
-let v = hashmap.get(m, "k");           // Option[int32]
+let h = os.open_handle("device");   // a hostdata payload from a host binding
+let b = move h;                      // ownership transfers as a whole
+let b2 = os.pass_handle(move b);     // handed back to the host
 ```
 
 # 7. The `iter` module

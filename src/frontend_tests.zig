@@ -817,6 +817,46 @@ test "frontend compiles the standard-library bundle as host bindings" {
     try testing.expect(std.mem.indexOf(u8, out, "syscall builtin#range") != null);
 }
 
+test "frontend compiles the StdLib array/hashmap container examples" {
+    // StdLib §2 / §3: the container examples must compile as written —
+    // Copy token types, plain parameters, and explicit `::[...]`
+    // specialization where the type argument is not carried by an
+    // argument expression (Core §12.2, §12.3).
+    var c = try compileText("app", &.{
+        .{
+            "app",
+            \\const array = import("array");
+            \\const hashmap = import("hashmap");
+            \\const builtin = import("builtin");
+            \\using builtin.Option;
+            \\fn main() -> void {
+            \\    let a = array.make(4, 0);
+            \\    let x = array.get::[int32](a, 2);
+            \\    let n = array.len::[int32](a);
+            \\    let m = hashmap.empty::[str, int32]();
+            \\    let m = hashmap.insert(m, "a", 1);
+            \\    let m = hashmap.insert(m, "b", 2);
+            \\    match (hashmap.get::[str, int32](m, "a")) {
+            \\        Option::Some(value) => builtin.print(builtin.str(value)),
+            \\        Option::None => builtin.print("missing")
+            \\    };
+            \\}
+        },
+    });
+    defer c.deinit();
+
+    try testing.expect(c.graph != null);
+    try testing.expect(c.program != null);
+    const out = try irText(&c.program.?);
+    defer testing.allocator.free(out);
+    // Host binding calls lower to syscalls; no container value is ever
+    // a hostdata payload (StdLib §1, §6).
+    try testing.expect(std.mem.indexOf(u8, out, "syscall array#make") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "syscall array#get") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "syscall hashmap#empty") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "syscall hashmap#insert") != null);
+}
+
 test "frontend rejects missing, duplicate, and unknown struct fields" {
     // Core §8.1: all fields must be supplied exactly once; unknown fields
     // and duplicate fields are frontend.compile-time errors.

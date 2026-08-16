@@ -176,14 +176,23 @@ using-decl =
 ; Static semantics restrict module-resident generated struct values to
 ; module-level "const" bindings and restrict "import-expression" to this
 ; initializer position (Core spec 2.2).
+; The second form — "const identifier : type ;" — is a host constant
+; (Core spec 2.6): a declaration without an initializer whose value the
+; host provides at load/instantiation time; it requires the type
+; annotation because there is no initializer to infer from.
 
 const-def =
-    %s"const"
-    identifier
-    [ ":" type ]
-    "="
-    expression
-    ";"
+      %s"const"
+      identifier
+      [ ":" type ]
+      "="
+      expression
+      ";"
+    / %s"const"
+      identifier
+      ":"
+      type
+      ";"
 
 
 ; ----------------------------------------------------------------------------
@@ -193,14 +202,24 @@ const-def =
 ; A "borrow" parameter is non-owning. A "move" parameter is owning.
 ; Function types are monomorphic. Generic parameters are permitted on named
 ; function declarations but not on lambdas or function types.
+; The second form — "fn ... ;" — is a host binding (Core spec 2.6): a
+; declaration without a Stilla body whose implementation the host
+; provides; calls to it lower to runtime system calls and its body is
+; never lowered.
 
 func-def =
-    %s"fn"
-    identifier
-    [ type-params ]
-    "(" param-list ")"
-    [ "->" type ]
-    block
+      %s"fn"
+      identifier
+      [ type-params ]
+      "(" param-list ")"
+      [ "->" type ]
+      block
+    / %s"fn"
+      identifier
+      [ type-params ]
+      "(" param-list ")"
+      [ "->" type ]
+      ";"
 
 lambda =
     %s"fn"

@@ -298,6 +298,16 @@ An embedding host may register modules before compilation or execution.
 
 A host module must expose a statically known Stilla-compatible interface.
 
+A host module's function members may be **host bindings** — function
+declarations without a Stilla body (Grammar `func-def`, second form) — and
+its constant members may be **host constants** — `const` declarations
+without an initializer (Grammar `const-def`, second form). The host
+supplies the implementation or value: a host binding is callable only as a
+runtime system call, its body is never lowered, and a host constant is
+read as a runtime value the host provides at instantiation (Runtime §3.1).
+Standard-library modules use the same forms for their host-implemented
+members (Standard Library §1).
+
 Conceptually:
 
 ```stilla
@@ -1572,6 +1582,18 @@ identity(42)
 
 The compiler first infers a concrete specialization and then type-checks the resulting monomorphic call.
 
+The inference is **structural over the types of the call's argument
+expressions**: `list[T]`, `box[T]`, `tuple[...]`, and function types are
+matched componentwise. A type argument is not recovered from the value of
+a generic named type: a parameter such as `a: Array[T]` (Standard Library
+§2) carries `T` only inside the named type's argument list, and a value of
+that named type exposes no instantiation information, so `T` cannot be
+inferred there and must be written explicitly with `::[...]` (§12.3).
+There is likewise no inference from an expected result type in v1.3: a
+generic call with no type-carrying argument — for example
+`hashmap.empty()` (Standard Library §3) — requires explicit type
+arguments.
+
 Conceptually:
 
 ```text
@@ -1593,6 +1615,11 @@ identity::[int32](42)
 ```
 
 The syntax `::[...]` is compile-time specialization syntax. It does not perform a runtime postfix operation.
+
+Explicit specialization is required whenever inference cannot determine a
+type argument from the argument expressions (§12.2) — for example
+`array.get::[int32](a, 2)` and `hashmap.empty::[str, int32]()` (Standard
+Library §2, §3).
 
 Type specialization uses:
 
