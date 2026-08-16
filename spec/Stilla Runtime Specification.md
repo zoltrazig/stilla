@@ -235,7 +235,7 @@ A `hostdata` value (Core §11.7) is an opaque, type-erased payload with no runti
 
 # 4. Required `builtin` Interface
 
-Every conforming implementation must provide the following minimum interface. Programs reach it by importing the standard-library `builtin` module (Core §3) and calling its members; each member is a host binding whose calls lower to system calls (frontend §5.6).
+Every conforming implementation must provide the following minimum interface. Programs reach it by importing the standard-library `builtin` module (Core §3) and calling its members; each member is a host binding whose calls lower to system calls (frontend §5.6; the frontend design document is kept at `docs/frontend.md`).
 
 Stilla has no closures (Core §18): a function or lambda may not capture enclosing local bindings. The list combinators live in the `iter` module (StdLib §7) — `each`, `each_with`, `fold`, `fold_with`, `consume_each`, `consume_each_with`, `consume_fold`, `consume_fold_with`, `try_fold`, `try_fold_with`. Each accepts the per-element operation as an ordinary function-value parameter — a monomorphic, non-capturing method (Core §12) — and the `*_with` variants additionally take a borrowed context value the operation may read. Method-passing and context threading are Stilla's compensation for the absence of closures.
 

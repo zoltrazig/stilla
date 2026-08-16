@@ -2,7 +2,7 @@
 
 > **Version:** v1.3 Draft
 >
-> **Companion documents:** *Stilla Core Language Specification* and *Stilla Runtime Specification* define the source language and its execution behavior; *frontend.md* defines the compilation pipeline that produces this IR. This document defines the IR itself and is normative for all producers and consumers of it.
+> **Companion documents:** *Stilla Core Language Specification* and *Stilla Runtime Specification* define the source language and its execution behavior; *frontend.md* (kept at `docs/frontend.md`) defines the compilation pipeline that produces this IR. This document defines the IR itself and is normative for all producers and consumers of it.
 
 ## Table of Contents
 
@@ -38,7 +38,7 @@ The IR must carry, without reference to source text:
 - the **destruction schedule** — when and in what order values are destroyed (per the Stilla Runtime Specification);
 - **module storage** — module members as a statically known member table: runtime constants occupy laid-out storage slots, while function, module-valued, and host-binding members are static references.
 
-The IR is produced by the frontend (Phase 3 of the pipeline described in frontend.md) and consumed by the runtime. It is **not** an optimizer IR, not a register-based IR, and not target code. The frontend emits a direct, semantically faithful CFG; all optimization is a later consumer.
+The IR is produced by the frontend (Phase 3 of the pipeline described in frontend.md, kept at `docs/frontend.md`) and consumed by the runtime. It is **not** an optimizer IR, not a register-based IR, and not target code. The frontend emits a direct, semantically faithful CFG; all optimization is a later consumer.
 
 ## 1.2 Conventions
 
@@ -95,7 +95,7 @@ terminator ::= "ret" value?                  -- return; bare "ret" for void
 - **Use** — a reference to a value as an operand. SSA requires that every non-phi use of a value is **dominated** by its definition; a phi's operands are defined in the corresponding predecessor blocks.
 
 ```
-instr   ::= value "=" op            -- defining instruction
+instr   ::= value ("," value)* "=" op   -- defining; several results for the atomic destructure ops
           | effect                   -- drop | store_member | cleanup_*
 value   ::= "%" ident | "%" number
 ```
@@ -201,7 +201,7 @@ Operand types and trap behavior (overflow, divide-by-zero, invalid `any` recover
 | `tail` | `%d = tail %l` | borrowed sublist view (`[head, ..tail]`) |
 | `unpack_struct` | `%a: T, %b: U = unpack_struct %s` | all struct fields (consumes `%s`) |
 | `unpack_tuple` | `%a: T, %b: U = unpack_tuple %t` | all tuple elements (consumes `%t`) |
-| `unpack_variant` | `%p: T = unpack_variant %u, #k` | the payload of variant `#k` (consumes `%u`); the tag is carried for backend self-containment — the arm's `switch` dispatch already guaranteed the variant |
+| `unpack_variant` | `%p1: T1, %p2: T2, … = unpack_variant %u, #k` | the payload values of variant `#k`, in declaration order — one result per payload (consumes `%u`); the tag is carried for backend self-containment — the arm's `switch` dispatch already guaranteed the variant |
 | `split_list` | `%a: T, %b: T, %r: list[T] = split_list %l` | list items then the owned rest (consumes `%l`; may trap on a short list) |
 | `read_tag` | `%d = read_tag %u` | union discriminant, as a tag index |
 | `read_payload` | `%d = read_payload %u` | payload of the active variant, borrowed view |
@@ -238,6 +238,11 @@ Module members are modeled by a per-module **member table**: the module's runtim
 | op | form | produces |
 | --- | --- | --- |
 | `load_member` | `%d = load_member %m, #i` | member `#i` of `%m`: a storage read for a constant member, a function value (`fn_ref`) for a function member, a module value (`module_ref`) for a module-valued member |
+
+A host constant (a `const` declaration without an initializer, Core §2.6)
+is a `ConstSlot` member: `load_member` reads its slot as with any constant
+member, but `@init` never writes it and no `store_member` targets it — the
+host supplies the value at instantiation (§7).
 | `store_member` | `store_member #i, %v` | effect; writes constant slot `#i` of the *current* module — legal only inside `@init`, and only for constant members |
 
 ## 5.7 Phi and terminators
@@ -370,7 +375,12 @@ The only program-addressable memory in the IR is **module storage**: the statica
 
 ```
 ModuleMember =
-    ConstSlot(slot_id)       -- runtime constant: occupies storage slot slot_id
+    ConstSlot(slot_id)       -- runtime constant: occupies storage slot slot_id.
+                             --   A *host constant* (a `const` declaration
+                             --   without an initializer, Core §2.6) is a
+                             --   ConstSlot that `@init` never writes and no
+                             --   `store_member` targets; the host supplies
+                             --   the value at instantiation.
   | Function(func_id)        -- function declaration: direct function reference
   | ModuleRef(module_id)     -- module-valued constant: static module reference
   | HostBinding(binding_id)  -- declaration without a Stilla body: syscall target
@@ -422,7 +432,7 @@ syscallTarget ::= module "#" member_name   -- text form
                 | builtin                  -- shorthand for "builtin" module
 ```
 
-The target names a **host-binding member** of the module's member table — a declaration with no Stilla body. In memory, the syscall target carries the (module specifier, member name) pair; the runtime resolves it to a stable dispatch, and module member layout is static. Argument evaluation is identical to `call` (left to right, once); `move`/`borrow` modes apply; generic builtins (`len`, `map`, `fold`, `box`, `peek`, `unbox`) were specialized in phase 2, so the syscall carries a concrete signature. A binding whose result is a borrowed view (`builtin.peek`) produces a value whose `BorrowOrigin` is the `peek` root: the view is bound to the syscall's boxed argument — the sole argument position, so the origin carries no index.
+The target names a **host-binding member** of the module's member table — a declaration with no Stilla body. In memory, the syscall target carries the (module specifier, member name) pair; the runtime resolves it to a stable dispatch, and module member layout is static. Argument evaluation is identical to `call` (left to right, once); `move`/`borrow` modes apply; generic builtins (`len`, `box`, `peek`, `unbox`) were specialized in phase 2, so the syscall carries a concrete signature. A binding whose result is a borrowed view (`builtin.peek`) produces a value whose `BorrowOrigin` is the `peek` root: the view is bound to the syscall's boxed argument — the sole argument position, so the origin carries no index.
 
 ## 8.3 `never` returns
 
@@ -457,7 +467,7 @@ TypeDecl       ::= struct(StructDecl) | union(UnionDecl)
 StructDecl     ::= { module, name, ownership: Ownership, drop: Name?, fields: [FieldDecl] }
 FieldDecl      ::= { name, type: Type }
 UnionDecl      ::= { module, name, ownership: Ownership, variants: [VariantDecl] }
-VariantDecl    ::= { name, payload: Type? }
+VariantDecl    ::= { name, payloads: [Type] }
 FunctionType   ::= { params: [Param], ret: Type }
 ```
 
@@ -509,7 +519,7 @@ Index        ::= { base: Value, index: Value }
 Construct    ::= { tag: u32?, args: [Value] }
 LoadMember   ::= { module: Value, member: u32 }     -- member index: position in the module's value-member declaration order
 StoreMember  ::= { slot: u32, value: Value }        -- slot id: constant members only
-UnpackVariant::= { base: Value, tag: u32 }
+UnpackVariant::= { base: Value, tag: u32 }    -- the results are the variant's `payloads`, one per payload value, in declaration order
 Call         ::= { callee: direct(DirectCallee) | value(Value), args: [Value] }
 DirectCallee ::= { name: Name, func: IrFunc? }
 SysCall      ::= { target: SysCallTarget, args: [Value], sig: FunctionType }
@@ -528,10 +538,12 @@ OpInfo ::= { text: Name,             -- canonical spelling
              consumes: none | op0 | op1 | both | all,
              created: owned | borrowed | operand | none,
              may_trap: Bool,         -- trap behavior per the Runtime specification
-             effects: Bool }         -- observable beyond the result
+             effects: Bool,          -- observable beyond the result
+             multi: Bool }           -- defines several results (the atomic
+                                     -- destructure ops unpack_* / split_list)
 ```
 
-Every op has exactly one schema row. `arity` fixes the operand count. `consumes` declares which operands the op consumes. `created` declares the result's created state: `owned`, `borrowed`, `operand` (the result state depends on the operand — the `read_*` projections yield owned results over Copy bases and borrowed views over unique bases), or `none` (pure effects). `may_trap` and `effects` together give the op's effect class.
+Every op has exactly one schema row. `arity` fixes the operand count. `consumes` declares which operands the op consumes. `created` declares the result's created state: `owned`, `borrowed`, `operand` (the result state depends on the operand — the `read_*` projections yield owned results over Copy bases and borrowed views over unique bases), or `none` (pure effects). `may_trap` and `effects` together give the op's effect class; `multi` marks the ops that define several results.
 
 ## 9.5 Control flow
 
@@ -592,7 +604,7 @@ type    ::= "int32" | "uint32" | "float32" | "bool" | "str" | "byte"
           | "list" "[" type "]" | "box" "[" type "]"
           | "tuple" "[" type ("," type)* "]"
           | "fn" "(" ("borrow" | "move")? type ("," ("borrow" | "move")? type)* ")" "->" type
-instr   ::= value ":" type "=" op      -- defining
+instr   ::= value ":" type ("," value ":" type)* "=" op   -- defining; multi-result for the atomic destructure ops
           | effect                     -- drop / store_member / cleanup_*
 op      ::= "const" literal
           | "module_ref" string
@@ -608,7 +620,7 @@ op      ::= "const" literal
           | ("tail" | "unpack_struct" | "unpack_tuple" | "split_list") value
           | "unpack_variant" value "," number
           | ("read_tag"|"read_payload") value
-          | "construct" ("#" tag)? value ("," value)*
+          | "construct" ("#" tag)? [ value ("," value)* ]
           | "call" ("@" ident | value) ("," value)*
           | "syscall" target ("," value)*
           | "phi" "[" value "," label "]" ("," "[" value "," label "]")*
@@ -657,7 +669,7 @@ The frontend walks the annotated, monomorphic AST with a builder that appends in
 
 **Ordering guarantees.** Instruction emission order *is* evaluation order (per the Stilla Runtime Specification): callee before arguments, arguments left to right, base before member/index, index after base, operands left to right, scrutinee before arm selection, struct field initializers in written order, tuple/list elements left to right. No reordering pass exists or is permitted to reorder observable effects.
 
-**Optimizer contract.** The mid-level optimizer (frontend.md) is a *consumer* of the CFG: it rewrites instructions, blocks, and phis but must keep the program satisfying the validity invariants and unchanged observable behavior. Folding/propagation may replace an instruction with a constant but never change a `div`/`rem` by zero into a non-trap; dead-block elimination must fix up phi incoming lists and predecessor sets; drop elision must not remove a user `drop` hook that performs output; every optimized function must re-parse to the same CFG shape.
+**Optimizer contract.** The mid-level optimizer (frontend.md, kept at `docs/frontend.md`) is a *consumer* of the CFG: it rewrites instructions, blocks, and phis but must keep the program satisfying the validity invariants and unchanged observable behavior. Folding/propagation may replace an instruction with a constant but never change a `div`/`rem` by zero into a non-trap; dead-block elimination must fix up phi incoming lists and predecessor sets; drop elision must not remove a user `drop` hook that performs output; every optimized function must re-parse to the same CFG shape.
 
 ---
 
@@ -669,7 +681,7 @@ These invariants are the contract every producer of the IR must uphold — the f
 
 - one entry block; the entry has no predecessors; every block reachable from the entry;
 - exactly one terminator per block, last instruction;
-- `phi` only at block heads; one incoming per predecessor, in `preds` order; a `trap`-terminated predecessor contributes no phi input;
+- `phi` only at block heads; one incoming per predecessor, in `preds` order; a `trap`-terminated block has no out-edge and is therefore never a `phi` predecessor — its producing path contributes no `phi` input;
 - arity: every op has its declared operand count (≤2 except the four n-ary forms); `read_tuple` index < element count per the static type; `store_member` only in `@init`;
 - members: `load_member`'s member index names a member of the module's member table and the member's kind matches the load (a constant member is read from its slot, a function member yields a function value, a module-valued member yields a module value); `store_member`'s slot index names a constant member's slot;
 - types: `read_field` bases are structs and the field index names a field of the `StructDecl` (result typed as that field); `unpack_struct` consumes a struct and defines exactly its fields; `construct` with a `#tag` and `unpack_variant #k` keep the tag within the `UnionDecl`'s variants and match the payload arity; `read_tag` / `read_payload` bases are unions; `switch` arm tags are exactly the union's variants — exhaustive, with the implicit `trap` default unreachable and no bogus tags.
@@ -716,7 +728,7 @@ These invariants are the contract every producer of the IR must uphold — the f
 Consumers of the CFG:
 
 - **runtime interpreter/compiler** — executes function bodies; blocks, terminators, and explicit `drop`s make evaluation order and destruction unambiguous; module instantiation runs `@init` in topological order; the cleanup ops are executed as-is (their armed bits are token runtime state) — only a compiling backend expands them, at its own lowering, after validation and optimization.
-- **static analysis / mid-level optimizer** (frontend.md) — the CFG is the base for a fixed sequence of semantics-preserving rewrites: tail call optimization (which rewrites calls in tail position into frame-reusing branches; the resulting loop headers carry only Copy loop-carried values), constant folding, common subexpression elimination, partial redundancy elimination, copy propagation, dead-block elimination, drop elision (a `drop` whose effect is provably unobservable may be removed — `drop_cleanup` / `cleanup_disable` act on a token whose payload is a unique owner and are never elided), and phi simplification. Cleanup ops are additionally never CSE'd, duplicated, or reordered relative to each other or to the owner's consumption. Optimization is permitted only when the observable behavior is unchanged; drop elision must not remove a user drop hook that performs output, and no pass may move a destruction earlier than its prescribed point.
+- **static analysis / mid-level optimizer** (frontend.md, kept at `docs/frontend.md`) — the CFG is the base for a fixed sequence of semantics-preserving rewrites: tail call optimization (which rewrites calls in tail position into frame-reusing branches; the resulting loop headers carry only Copy loop-carried values), constant folding, common subexpression elimination, partial redundancy elimination, copy propagation, dead-block elimination, drop elision (a `drop` whose effect is provably unobservable may be removed — `drop_cleanup` / `cleanup_disable` act on a token whose payload is a unique owner and are never elided), and phi simplification. Cleanup ops are additionally never CSE'd, duplicated, or reordered relative to each other or to the owner's consumption. Optimization is permitted only when the observable behavior is unchanged; drop elision must not remove a user drop hook that performs output, and no pass may move a destruction earlier than its prescribed point.
 
 Non-goals: no register allocation, no instruction scheduling, no cost-model-driven optimizer in this document. The mid-level optimizer is a fixed, small set of CFG→CFG rewrites that preserve observable behavior; tail call optimization is the first of them, the remainder (folding, propagation, dead-block elimination, drop elision, phi simplification) follows. The `any` runtime representation (tagging) is a runtime concern; the IR only requires that a value coerced to `any` carries its payload.
 
@@ -780,7 +792,7 @@ let message =
 ```text
 func @msg(result: Result) -> str {
 entry:
-    %tag: u32 = read_tag %result
+    %tag: uint32 = read_tag %result
     switch %tag { #0 -> arm_ok, #1 -> arm_err }
 arm_ok:
     %v: str   = read_payload %result        ; Copy scrutinee: copy
@@ -828,7 +840,7 @@ entry:
     %b: File = syscall os#open_file, "b.txt"
     %b2: File = move %b
     call @consume, %b2
-    ret void
+    ret
 }
 ```
 
@@ -848,7 +860,7 @@ A `drop` of a struct with a user hook stays one instruction — the runtime runs
 ## 14.5 `never` and traps
 
 ```stilla
-let v = builtin.panic("boom");       -- never coerces to any type
+let v = builtin.panic("boom");       // never coerces to any type
 ```
 
 ```text
@@ -876,7 +888,7 @@ module "app" {
     entry:
         %g: str = const "hello"
         store_member #0, %g                  ; slot 0: greeting
-        ret void
+        ret
     }
     func @add(a: int32, b: int32) -> int32 {
     entry:

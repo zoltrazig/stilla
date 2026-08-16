@@ -751,6 +751,47 @@ test "frontend IR round-trips through the standalone cfg parser" {
     }
 }
 
+test "frontend IR round-trips multi-result destructures and zero-arg construct" {
+    // ir.md §5.3/§10: `unpack_variant` of a multi-payload variant defines
+    // one result per payload (comma-separated in the text form), and
+    // `construct` of an empty struct takes zero values. The printed IR
+    // must re-parse through the standalone cfg.Parser.
+    var c = try compileText("app", &.{
+        .{
+            "app",
+            \\const builtin = import("builtin");
+            \\union Tree[T] {
+            \\    Empty,
+            \\    Node(box[Tree[T]], T, box[Tree[T]])
+            \\}
+            \\struct Nothing {}
+            \\fn main() -> void {
+            \\    let t: Tree[int32] = Tree::Node(builtin.box(1), 5, builtin.box(2));
+            \\    let n = Nothing{};
+            \\    match (move t) {
+            \\        Tree::Empty => { let _ = n; },
+            \\        Tree::Node(l, x, r) => { let _ = l; let _ = x; let _ = r; }
+            \\    };
+            \\}
+        },
+    });
+    defer c.deinit();
+
+    const text = try irText(&c.program.?);
+    defer testing.allocator.free(text);
+    try testing.expect(std.mem.indexOf(u8, text, "unpack_variant") != null);
+    try testing.expect(std.mem.indexOf(u8, text, "= construct") != null);
+    var p = cfg.Parser.init(testing.allocator);
+    defer p.deinit();
+    const prog = try p.parse(text);
+    try testing.expect(prog.funcs.len > 0);
+    // Re-print the parsed program; the text form is canonical and must be
+    // unchanged (ir.md §10: parse -> print -> parse round-trips exactly).
+    const text2 = try cfg.print(&prog, testing.allocator);
+    defer testing.allocator.free(text2);
+    try testing.expectEqualStrings(text, text2);
+}
+
 test "frontend IR round-trips with duplicate-block-producing constructs" {
     // Block labels must be unique in the printed IR (ir.md §9): the
     // standalone cfg parser rejects duplicate labels. Repeated control
