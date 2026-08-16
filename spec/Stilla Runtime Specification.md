@@ -535,6 +535,12 @@ constructs and then destroys the returned `File`.
 
 Multiple unique temporaries created within one full expression are destroyed in reverse creation order.
 
+A **consuming destructure** destroys unbound components — a wildcard `_`
+arm of a consuming `match`, unbound fields of a struct pattern, and an
+exact `[a]` list pattern's unconsumed remainder — immediately after the
+pattern binds, in the structural order of §6.3 (ir.md §5.3: an exact list
+pattern's remainder is dropped at once).
+
 A panic or runtime trap interrupts this rule because Stilla performs no unwinding (§7.1).
 
 ## 6.5 Explicit destruction
@@ -577,8 +583,9 @@ A panic or runtime trap occurring inside a user `drop` hook terminates the execu
 
 The typing rules for operators and conversions are defined in Core §16.3. This section defines their runtime behavior.
 
-- Integer overflow traps.
-- Division by numeric zero traps.
+- `int32` integer overflow traps.
+- Integer `div`/`rem` by zero traps for both `int32` and `uint32`; `float32` division follows IEEE 754 (`x / 0.0` is ±infinity for `x ≠ 0`, NaN for `0.0 / 0.0`) and never traps.
+- `uint32` arithmetic is performed modulo 2³² and never traps on overflow or underflow; unary `-` on `uint32` computes the two's-complement negation and never traps, while `-` on `int32` traps on the minimum value (Core §16.3).
 - Invalid indexing traps.
 - Invalid runtime numeric conversion traps.
 - Invalid `any` cast traps: recovering an `any` payload under a target type that does not match its runtime tag (Core §11.6.1).

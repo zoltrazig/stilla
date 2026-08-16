@@ -137,6 +137,11 @@ These terms are used throughout the specification.
 - **specialization** — compile-time expansion of generic code to concrete types (§12).
 - **top type** — `any`, the type every value type coerces to; its counterpart is the bottom type `never`, which has no values and coerces to every type (§11.6, §13.2).
 - **destruction view** — the special borrowed view of a value seen inside its own `drop` hook (§9.2).
+- **full expression** — an expression that is not a subexpression of a
+  larger expression: a statement-level expression, a binding or constant
+  initializer, an argument, a field initializer, a match-arm body, or a
+  block's final expression. Unique temporaries are destroyed at the end
+  of the innermost enclosing full expression (Runtime §6.4).
 
 Runtime-side terms (execution context, module storage, teardown, host) are defined in Runtime §1.4.
 
@@ -542,6 +547,14 @@ It may not reference a later module constant.
 A module constant initializer must not transitively call a function that reads a module constant declared later than the initializer; such a program is rejected at compile time. This preserves the guarantee that module constants are read only after initialization (Runtime §2.3).
 
 A unique non-module constant is owned by the module execution context. It cannot be explicitly moved or explicitly dropped by source code and is destroyed during normal module/context teardown (Runtime §2.5).
+
+The initialization-order restriction applies symmetrically at teardown:
+teardown destroys unique constants in **reverse** declaration order
+(Runtime §2.5), so a later constant is already destroyed when an earlier
+constant's `drop` hook runs. A unique module constant whose type defines a
+`drop` hook — the hook and every function it transitively calls — must
+not read a module constant declared later than the constant being
+destroyed; such a program is rejected at compile time.
 
 ---
 
@@ -1320,6 +1333,32 @@ Notes:
 - Borrowing does not participate: a borrow never releases (§10.6, §10.7).
 - Panic and trap paths are not normal control flow (Runtime §7) and neither satisfy nor violate the release requirement; no destruction runs as a consequence of termination.
 
+## 10.11 Implicit consumption positions
+
+`move` is the explicit consume operator (§10.4), but ownership is
+transferred implicitly in **consuming positions** — positions that require
+an owned value:
+
+- a move-mode call argument — a fresh unique expression transfers
+  directly; an existing local owner requires `move` (§10.6);
+- a struct, union-variant, tuple, or list literal slot — a fresh unique
+  expression is owned by the constructed value; an existing local owner
+  requires `move`;
+- a `let` binding with an identifier pattern — a fresh unique expression
+  is owned by the new binding; an existing local owner requires `move`;
+- a function's final expression when the return type is unique — the
+  value is returned by ownership, and an existing local owner in final
+  position transfers implicitly, because the binding ends with the
+  return (§6.4);
+- a coercion of a unique value to `any` — the pack consumes the source
+  (§11.6).
+
+In every consuming position, an existing unique local owner is
+transferred only with an explicit `move`; a fresh unique expression
+transfers implicitly (§10.5); and a borrowed value never transfers
+(§10.7). Storing an existing unique owner without `move` is a compile-time
+error (§18 *Ownership*).
+
 ---
 
 # 11. Algebraic Data Types
@@ -1811,6 +1850,13 @@ This never performs a partial move from the original binding: the original bindi
 
 The core language defines no iteration construct. Repetition is expressed with ordinary recursive function calls (§6.5); a library may provide iteration helpers as ordinary module functions (§8), invoked like any other call. The core language has no special knowledge of such helpers.
 
+A conforming implementation **must** reuse the caller's frame for a direct
+self-recursive call in tail position (tail-call optimization), so
+iteration expressed as self-recursion does not grow the stack. Mutual
+recursion and non-tail recursion may grow the stack, bounded by
+implementation-defined resources (the frontend performs this optimization;
+ir.md §14.7).
+
 ---
 
 # 14. Patterns
@@ -2112,6 +2158,13 @@ Core arithmetic is defined as follows:
 - `< <= > >=` accept operands of the same numeric type;
 - `== !=` are required for `byte`, `int32`, `uint32`, `float32`, `bool`, and `str`.
 
+Integer `/` truncates toward zero. Integer `div` and `rem` by zero trap
+(Runtime §7.2). `int32` arithmetic traps on overflow; `uint32` arithmetic
+is performed modulo 2³² and never traps on overflow or underflow
+(Runtime §7.2). Unary `-` on `int32` traps on the minimum value; on
+`uint32` it computes the two's-complement negation (`0 - x`), which never
+traps (Runtime §7.2). Float arithmetic follows IEEE 754 (Runtime §7.2).
+
 The Stilla v1.3 core does not define equality for `any`, functions, structs, unions, tuples, lists, boxes, or modules. Libraries may provide explicit equality helpers.
 
 No operator is defined on `hostdata` (§11.7), and none is defined on `any` other than `as` and `match` type-testing (§11.6): an `any` value can be moved, borrowed, stored, passed along, handed to the host, recovered by `as`, and tested by `match`.
@@ -2248,6 +2301,13 @@ A function or lambda may not reference local bindings belonging to an enclosing 
 
 Functions are order-independent within a module; direct and mutual recursion are permitted (§6.5). Every function in a recursion cycle declares its return type explicitly. Module constant initialization must not transitively read a later-declared module constant (§5).
 
+## Path aliases
+
+A `using` declaration introduces a scoped compile-time alias for a path
+(§2.8): it is visible from its declaration point to the end of the
+enclosing module or block, may shadow and be shadowed like `let`, is not a
+runtime member, and requires its path to resolve.
+
 ## Match
 
 A match over a union must be exhaustive.
@@ -2270,6 +2330,13 @@ Use after move or destruction is a compile-time error.
 
 If a binding is released on some but not all normal paths through a conditional construct, it becomes **maybe-unique** and is unusable after the join; its automatic destruction is guarded by its runtime liveness state (§10.10). A definitely-released binding is unusable and is not automatically destroyed at scope end.
 
+Consuming positions (§10.11): a struct, union-variant, tuple, or list
+literal slot, a `let` binding with an identifier pattern, and a move-mode
+call argument transfer ownership implicitly for a fresh unique expression;
+an existing unique local owner in any consuming position must be moved
+with explicit `move`, and storing it without `move` is a compile-time
+error.
+
 ## Whole-owner rule
 
 Explicit ownership movement operates on complete local owners.
@@ -2289,6 +2356,11 @@ Borrow lifetimes are lexically bounded; Stilla v1.3 has no user-visible lifetime
 ## Parameters
 
 A plain parameter accepts only Copy argument types.
+
+The top type `any` is the sole exception (§10.6): a plain `any` parameter
+accepts any argument type — a Copy argument coerces into the `any`, and a
+unique argument must be written with explicit `move` at the call site,
+with its ownership transferring into the `any`.
 
 A `borrow` parameter receives a non-owning view and leaves the caller's ownership unchanged.
 
@@ -2383,6 +2455,11 @@ An unspecialized generic function is not a runtime value.
 Inferred or explicit specialization must produce a concrete function before runtime use.
 
 `value::[Types]` is compile-time specialization syntax, not runtime dispatch.
+
+Type arguments are inferred structurally from the call's argument
+expressions (§12.2); a type argument carried only inside a generic named
+type's argument list, and a call with no type-carrying argument, require
+explicit `::[...]` specialization (§12.3).
 
 ---
 

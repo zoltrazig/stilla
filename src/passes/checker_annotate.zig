@@ -170,9 +170,18 @@ fn checkLet(frame: *Frame, l: *const ast.LetStmt) CheckError!void {
         break :blk null;
     };
     // A `let` binding owns its initializer, so the initializer may not be
-    // a borrowed unique value (Core §10.7, §18).
+    // a borrowed unique value (Core §10.7, §18). An irrefutable
+    // identifier pattern bound to an existing unique local owner requires
+    // an explicit `move` (Core §10.4); a fresh unique expression binds
+    // directly (Core §10.5).
     if (try isBorrowedExpr(frame, l.init)) {
         return frame.ck.fail(l.init.span(), "cannot store a borrowed value into an owning binding (Core §10.7)", .{});
+    }
+    switch (l.pattern) {
+        .path => |*pp| if (pp.tail == .none and pp.path.len == 1) {
+            try requireMoveIfOwned(frame, l.init, "binding");
+        },
+        else => {},
     }
     if (t) |tt| try inferPattern(frame, &l.pattern, tt, false);
 }
@@ -381,6 +390,27 @@ fn checkDropHookMatch(frame: *Frame, m: *const ast.MatchExpr, scrut_t: cfg.Type)
 // Call-argument ownership (Core §18 *Parameters*, §10.6, §10.7)
 // ---------------------------------------------------------------------------
 
+/// An existing unique local owner must be transferred with an explicit
+/// `move` (Core §10.4, §10.6): storing it into an owning field, payload,
+/// tuple/list element, or binding without `move` would leave two owners
+/// of one value. A fresh unique expression transfers implicitly (Core
+/// §10.5) and a Copy value needs no transfer; a `move` operand or a
+/// parenthesized `(move x)` is already explicit and passes through.
+fn requireMoveIfOwned(frame: *Frame, a: *const ast.Expr, what: []const u8) CheckError!void {
+    switch (a.*) {
+        .path => |*p| {
+            if (p.tail == .none and p.path.len == 1) {
+                if (lookupLocal(frame, p.path[0].text)) |local| {
+                    if (isUnique(frame, local.type_) and local.state == .owned) {
+                        return frame.ck.fail(a.span(), "unique value must be moved with 'move' before being stored into an owning {s} (Core §10.4)", .{what});
+                    }
+                }
+            }
+        },
+        else => {},
+    }
+}
+
 /// Check every argument of a call against its parameter's mode. A plain
 /// parameter accepts only Copy arguments; a `borrow` parameter
 /// rejects `move`; a `move` parameter requires an explicit `move` of an
@@ -394,6 +424,28 @@ fn checkArgsOwnership(frame: *Frame, c: *const ast.Call, arg_types: []const cfg.
         if (!isUnique(frame, arg_types[i])) continue;
         switch (params[i].mode) {
             .plain => {
+                // The top type `any` is the sole exception (Core §10.6):
+                // a unique argument may be moved into the `any` — an
+                // explicit `move` or a fresh unique value transfers; an
+                // existing local owner must be moved. `hostdata` never
+                // coerces to `any` (Core §11.6) and is rejected.
+                const pt = params[i].type_;
+                if (pt == .primitive and pt.primitive == .any) {
+                    if (arg_types[i] == .primitive and arg_types[i].primitive == .hostdata) {
+                        return frame.ck.fail(a.span(), "'hostdata' does not coerce to 'any' (Core §11.6, §11.7)", .{});
+                    }
+                    if (scrutineeIsMove(frame, a)) continue;
+                    if (a.* != .path) continue; // fresh unique expression
+                    if (lookupLocal(frame, a.path.path[0].text)) |local| {
+                        if (isUnique(frame, local.type_) and local.state == .owned) {
+                            return frame.ck.fail(a.span(), "unique value must be moved with 'move' before being passed to an 'any' parameter (Core §10.6)", .{});
+                        }
+                    }
+                    if (try isBorrowedExpr(frame, a)) {
+                        return frame.ck.fail(a.span(), "cannot move a borrowed value (Core §10.7)", .{});
+                    }
+                    continue;
+                }
                 return frame.ck.fail(a.span(), "plain parameter accepts only Copy arguments (Core §10.6)", .{});
             },
             .borrow => {
@@ -454,6 +506,7 @@ fn inferExprInner(frame: *Frame, e: *const ast.Expr) CheckError!?cfg.Type {
                 if (try isBorrowedExpr(frame, el)) {
                     return frame.ck.fail(el.span(), "cannot store a borrowed value into an owning container (Core §10.7)", .{});
                 }
+                try requireMoveIfOwned(frame, el, "element");
                 elems[i] = et orelse cfg.Type{ .primitive = .any };
             }
             return cfg.Type{ .tuple = elems };
@@ -465,6 +518,7 @@ fn inferExprInner(frame: *Frame, e: *const ast.Expr) CheckError!?cfg.Type {
                 if (try isBorrowedExpr(frame, el)) {
                     return frame.ck.fail(el.span(), "cannot store a borrowed value into an owning container (Core §10.7)", .{});
                 }
+                try requireMoveIfOwned(frame, el, "element");
                 if (et) |t| {
                     if (i == 0) elem = t;
                 }
@@ -585,24 +639,28 @@ fn inferPath(frame: *Frame, p: *const ast.PathExpr) CheckError!?cfg.Type {
         .construct => |*sc| {
             // Struct construction: the path is a type name (Core §8.1).
             // Each field slot is an owning location, so a field value may
-            // not be a borrowed unique value (Core §10.7).
+            // not be a borrowed unique value (Core §10.7), and an existing
+            // unique local owner must be moved explicitly (Core §10.4).
             for (sc.fields) |*f| {
                 _ = try inferExpr(frame, f.value);
                 if (try isBorrowedExpr(frame, f.value)) {
                     return frame.ck.fail(f.value.span(), "cannot store a borrowed value into an owning field (Core §10.7)", .{});
                 }
+                try requireMoveIfOwned(frame, f.value, "field");
             }
             return namedPath(frame, p.path);
         },
         .variant => |*v| {
             // Union-variant construction: the path is a type name. Payload
-            // slots are owning locations (Core §10.7).
+            // slots are owning locations (Core §10.7), and an existing
+            // unique local owner must be moved explicitly (Core §10.4).
             if (v.args) |args| {
                 for (args) |*a| {
                     _ = try inferExpr(frame, a);
                     if (try isBorrowedExpr(frame, a)) {
                         return frame.ck.fail(a.span(), "cannot store a borrowed value into an owning payload (Core §10.7)", .{});
                     }
+                    try requireMoveIfOwned(frame, a, "payload");
                 }
             }
             return namedPath(frame, p.path);

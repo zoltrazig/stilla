@@ -168,7 +168,7 @@ Operand types and trap behavior (overflow, divide-by-zero, invalid `any` recover
 
 | op | form | produces |
 | --- | --- | --- |
-| `neg` | `%d = neg %a` | same numeric type; traps on `minInt` negation |
+| `neg` | `%d = neg %a` | same numeric type; traps on `int32` minimum negation; `uint32` negation is two's-complement and never traps (Core §16.3) |
 | `not` | `%d = not %a` | `bool` (source `!`) |
 | `num_cast` | `%d = num_cast %a` | the other numeric type; the numeric pair (`int32 ↔ float32`) only; `float32 → int32` traps on NaN, ±inf, or out-of-range |
 | `type_is` | `%d = type_is %a, T` | `bool` — runtime tag test against type `T` (a type-test arm of a `match` over an `any`) |

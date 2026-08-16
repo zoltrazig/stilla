@@ -765,6 +765,10 @@ const InitOrder = struct {
     /// The outermost local function called from the initializer, when the
     /// walk is inside a callee body (for transitive diagnostics).
     call: ?IOCall = null,
+    /// When non-null, the walk is over a module constant's `drop` hook
+    /// (teardown order, Core §5); the value is the constant's name, used
+    /// in diagnostics.
+    drop_owner: ?[]const u8 = null,
     /// Recursion guard over the local call graph (mutual recursion, §6.5).
     visiting: std.AutoHashMapUnmanaged(*const ast.FuncDef, void) = .empty,
 
@@ -790,6 +794,42 @@ const InitOrder = struct {
             },
             else => {},
         };
+        // Teardown (Core §5, Runtime §2.5): a unique module constant whose
+        // type defines a `drop` hook is destroyed during normal teardown in
+        // reverse declaration order, so a later constant is already
+        // destroyed when the hook runs. The hook — and every function it
+        // transitively calls — must therefore not read a module constant
+        // declared later than the constant being destroyed. The drop hook's
+        // parameter is a destruction view of the constant: it shadows the
+        // constant's name so its field reads are not misread as module
+        // reads. Containers whose elements carry drop hooks (e.g.
+        // `list[File]` constants) are not walked; the same hazard class is
+        // deferred to conformance work.
+        for (program.items) |*item| switch (item.*) {
+            .const_def => |*c| if (c.init != null) {
+                const vm = frame.info.valueMember(c.name.text) orelse continue;
+                const drop = dropHookOf(frame, vm.type_) orelse continue;
+                self.cur = self.index.get(c.name.text).?;
+                self.drop_owner = c.name.text;
+                self.call = null;
+                var s = IOScope{};
+                try s.locals.put(alloc, drop.param.text, null);
+                try self.bindModuleAliases(&s);
+                try self.walkBlock(&s, drop.body);
+                self.drop_owner = null;
+            },
+            else => {},
+        };
+    }
+
+    /// The `drop` hook of a module constant's type, when the type is a
+    /// named struct that defines one. A struct with a drop hook is always
+    /// unique (Core §10.2), so no separate uniqueness check is needed.
+    fn dropHookOf(frame: *Frame, t: cfg.Type) ?*ast.DropDecl {
+        if (t != .named) return null;
+        const name = frame.resolve.typeNameOf(t.named) orelse return null;
+        const sd = moduleinfo.structDecl(frame.resolve, frame.info, name) orelse return null;
+        return sd.drop;
     }
 
     /// Module-level `using` aliases are in scope for every initializer
@@ -839,6 +879,12 @@ const InitOrder = struct {
     fn checkConst(self: *InitOrder, name: []const u8, span: ast.Span) CheckError!void {
         const i = self.index.get(name) orelse return;
         if (i >= self.cur) {
+            if (self.drop_owner) |owner| {
+                if (self.call) |c| {
+                    return self.frame.ck.fail(c.span, "drop hook of module constant '{s}' calls '{s}', which reads module constant '{s}' declared later (Core §5)", .{ owner, c.name, name });
+                }
+                return self.frame.ck.fail(span, "drop hook of module constant '{s}' reads '{s}' declared later (Core §5)", .{ owner, name });
+            }
             // `i == self.cur` is a self-read: the initializer reads the
             // constant it is defining, directly or through a called local
             // function — circular under Core §5's strict declaration order.
@@ -1104,7 +1150,10 @@ fn isStr(t: cfg.Type) bool {
 }
 
 fn isNumeric(t: cfg.Type) bool {
-    return t == .primitive and (t.primitive == .int32 or t.primitive == .float32);
+    // Core §16.3: arithmetic is defined for `int32`, `uint32`, and
+    // `float32`; `byte` has no arithmetic. `uint32` arithmetic wraps
+    // modulo 2^32 and never traps (Runtime §7.2).
+    return t == .primitive and (t.primitive == .int32 or t.primitive == .uint32 or t.primitive == .float32);
 }
 
 /// A human-readable type name for diagnostics.

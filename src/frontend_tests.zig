@@ -1008,6 +1008,94 @@ test "frontend compiles the StdLib §5 string example with explicit conversions"
     try testing.expect(std.mem.indexOf(u8, out, "num_cast") != null);
 }
 
+test "frontend accepts uint32 arithmetic and two's-complement negation" {
+    // Core §16.3 / Runtime §7.2: uint32 arithmetic wraps modulo 2^32 and
+    // never traps; unary minus is two's-complement. byte arithmetic does
+    // not exist and stays rejected.
+    var c = try compileText("app", &.{
+        .{
+            "app",
+            \\fn main() -> uint32 {
+            \\    let u = 7 as uint32;
+            \\    let w = u + u * (3 as uint32);
+            \\    -w
+            \\}
+        },
+    });
+    defer c.deinit();
+    const out = try irText(&c.program.?);
+    defer testing.allocator.free(out);
+    try testing.expect(std.mem.count(u8, out, "uint32 = ") >= 1);
+
+    var c2 = try compileText("app", &.{
+        .{ "app", "fn main() -> void { let b = 1 as byte; let c = b + b; }" },
+    });
+    defer c2.deinit();
+    try testing.expect(c2.program == null);
+    try testing.expect(std.mem.indexOf(u8, c2.diag.?.message, "type mismatch") != null);
+}
+
+test "frontend requires move for existing unique owners in consuming positions" {
+    // Core §10.11: an existing unique local owner must be moved with
+    // explicit `move` before being stored into a struct field, a list or
+    // tuple element, or a let binding; fresh values transfer implicitly.
+    var c1 = try compileText("app", &.{
+        .{ "app", "const builtin = import(\"builtin\");\nstruct File { fd: int32; drop(f) { builtin.print(\"x\"); } }\nstruct Pair { a: File; b: File; }\nfn main() -> void { let x = File{ fd: 1 }; let p = Pair{ a: x, b: File{ fd: 2 } }; }" },
+    });
+    defer c1.deinit();
+    try testing.expect(c1.program == null);
+    try testing.expect(std.mem.indexOf(u8, c1.diag.?.message, "owning field") != null);
+
+    var c2 = try compileText("app", &.{
+        .{ "app", "const builtin = import(\"builtin\");\nstruct File { fd: int32; drop(f) { builtin.print(\"x\"); } }\nfn main() -> void { let x = File{ fd: 1 }; let xs = [x]; }" },
+    });
+    defer c2.deinit();
+    try testing.expect(c2.program == null);
+    try testing.expect(std.mem.indexOf(u8, c2.diag.?.message, "owning element") != null);
+
+    var c3 = try compileText("app", &.{
+        .{ "app", "const builtin = import(\"builtin\");\nstruct File { fd: int32; drop(f) { builtin.print(\"x\"); } }\nfn main() -> void { let x = File{ fd: 1 }; let y = x; }" },
+    });
+    defer c3.deinit();
+    try testing.expect(c3.program == null);
+    try testing.expect(std.mem.indexOf(u8, c3.diag.?.message, "owning binding") != null);
+}
+
+test "frontend applies the any-parameter exception with move discipline" {
+    // Core §10.6 / §18 *Parameters*: a plain `any` parameter is the sole
+    // exception to Copy-only plain parameters — a fresh unique value
+    // transfers implicitly, an existing owner must be moved, and
+    // hostdata never coerces to any (Core §11.6).
+    var c1 = try compileText("app", &.{
+        .{
+            "app",
+            \\const builtin = import("builtin");
+            \\struct File { fd: int32; drop(f) { builtin.print("x"); } }
+            \\fn f(a: any) -> void {}
+            \\fn main() -> void {
+            \\    f(File{ fd: 2 });
+            \\    let g = File{ fd: 3 };
+            \\    f(move g);
+            \\}
+        },
+    });
+    defer c1.deinit();
+    try testing.expect(c1.program != null);
+
+    var c2 = try compileText("app", &.{
+        .{
+            "app",
+            \\const builtin = import("builtin");
+            \\struct File { fd: int32; drop(f) { builtin.print("x"); } }
+            \\fn f(a: any) -> void {}
+            \\fn main() -> void { let h = File{ fd: 4 }; f(h); }
+        },
+    });
+    defer c2.deinit();
+    try testing.expect(c2.program == null);
+    try testing.expect(std.mem.indexOf(u8, c2.diag.?.message, "'any' parameter") != null);
+}
+
 test "frontend rejects missing, duplicate, and unknown struct fields" {
     // Core §8.1: all fields must be supplied exactly once; unknown fields
     // and duplicate fields are frontend.compile-time errors.

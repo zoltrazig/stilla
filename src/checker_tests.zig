@@ -1040,6 +1040,39 @@ test "checker accepts a function reading a later constant when nothing calls it"
     try testing.expectEqual(@as(usize, 0), t.ann.host_bindings.count());
 }
 
+test "checker rejects a drop hook reading a later module constant" {
+    // Teardown destroys module constants in reverse declaration order
+    // (Runtime §2.5): an earlier constant's drop hook runs after later
+    // constants are already destroyed, so it must not read them (Core §5).
+    try expectDiag(
+        \\struct File { fd: int32; drop(f) { let _ = later_msg; } }
+        \\const log: File = File{ fd: 1 };
+        \\const later_msg: str = "bye";
+    , "drop hook of module constant 'log' reads 'later_msg' declared later");
+}
+
+test "checker rejects a drop hook transitively reading a later module constant" {
+    // The drop hook calls `tell`, whose body reads `b` declared later.
+    try expectDiag(
+        \\fn tell() -> str { later_msg }
+        \\struct File { fd: int32; drop(f) { let _ = tell(); } }
+        \\const log: File = File{ fd: 1 };
+        \\const later_msg: str = "bye";
+    , "which reads module constant 'later_msg' declared later");
+}
+
+test "checker accepts a drop hook reading an earlier module constant" {
+    // An earlier constant is destroyed later at teardown, so it is still
+    // alive when the hook runs.
+    var t = try checkText(
+        \\const earlier: str = "hi";
+        \\struct File { fd: int32; drop(f) { let _ = earlier; } }
+        \\const log: File = File{ fd: 1 };
+    );
+    defer t.arena.deinit();
+    try testing.expectEqual(@as(usize, 0), t.ann.host_bindings.count());
+}
+
 test "checker ignores locals shadowing module constant names" {
     var t = try checkText(
         \\const a: int32 = f();
