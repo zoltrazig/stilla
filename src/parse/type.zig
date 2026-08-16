@@ -51,11 +51,9 @@ pub fn parseTypeInner(self: *parser.Parser, start: usize) ParseError!ast.Type {
             _ = self.advance();
             try self.expectAdvance(.lbracket, "'['");
             var elems = std.ArrayList(ast.Type).empty;
-            if (!self.at(.rbracket)) {
-                while (true) {
-                    try elems.append(self.arena.allocator(), try parseType(self));
-                    if (!self.eat(.comma)) break;
-                }
+            while (true) {
+                try elems.append(self.arena.allocator(), try parseType(self));
+                if (!self.eat(.comma)) break;
             }
             try self.expectAdvance(.rbracket, "']'");
             break :blk .{ .tuple = .{ .span = self.spanFrom(start), .elems = try self.arena.allocator().dupe(ast.Type, elems.items) } };

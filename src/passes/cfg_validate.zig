@@ -525,7 +525,11 @@ fn checkInstr(
             if (!isBool(v.type_)) return typeErr(allocator, f, b, "not", v.type_);
         },
         .num_cast => |v| {
-            if (!isNumeric(v.type_) or !isNumeric(instr.results[0].type_)) {
+            // The numeric cast types are the full integer/float family
+            // (Core §16.3: int32 ↔ float32, int32 ↔ byte, int32 ↔ uint32,
+            // byte ↔ int32, uint32 ↔ int32); distinct from the arithmetic
+            // `isNumeric` set, which gates add/sub/mul/div/rem.
+            if (!isNumCastType(v.type_) or !isNumCastType(instr.results[0].type_)) {
                 return typeErr(allocator, f, b, "num_cast", v.type_);
             }
         },
@@ -872,6 +876,13 @@ fn defBlock(f: *const cfg.IrFunc, instr: *const cfg.Instr) ?*const cfg.BasicBloc
 
 fn isNumeric(t: cfg.Type) bool {
     return t == .primitive and (t.primitive == .int32 or t.primitive == .uint32 or t.primitive == .float32);
+}
+
+/// The type set a `num_cast` may move between (Core §16.3): the integer
+/// family plus float32. Arithmetic (`isNumeric`) stays as-is; enabling
+/// a cast does not enable `byte + byte` or `uint32` negation.
+fn isNumCastType(t: cfg.Type) bool {
+    return t == .primitive and (t.primitive == .int32 or t.primitive == .uint32 or t.primitive == .byte or t.primitive == .float32);
 }
 
 fn isBool(t: cfg.Type) bool {

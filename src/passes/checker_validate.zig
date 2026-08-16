@@ -215,9 +215,30 @@ fn validateCast(frame: *Frame, c: *const ast.Cast) CheckError!void {
     if (dst == .primitive and dst.primitive == .hostdata) {
         return frame.ck.fail(c.span, "invalid cast: 'hostdata' has no cast (Core §11.7)", .{});
     }
+    // An `any` source recovers by tag (Core §11.6.1); `never` coerces to
+    // every type (Core §13.2).
     if (isNeverOrAny(src)) return;
-    if (isNumeric(src) and isNumeric(dst)) return;
+    if (validNumCast(src, dst)) return;
     return frame.ck.fail(c.span, "invalid cast", .{});
+}
+
+/// The numeric `as` pairs, exactly as Core §16.3 lists them. No identity
+/// casts (`int32 as int32`), no `byte`/`uint32` to/from `float32`, and no
+/// implicit widening. This predicate is separate from the arithmetic
+/// `isNumeric` set: `byte + byte` and `uint32 + uint32` are not defined
+/// by Core §16.3 (that is Phase 5 numeric-semantics work), so enabling
+/// a cast must not enable arithmetic.
+fn validNumCast(src: cfg.Type, dst: cfg.Type) bool {
+    if (src != .primitive or dst != .primitive) return false;
+    const s = src.primitive;
+    const d = dst.primitive;
+    return switch (s) {
+        .int32 => d == .float32 or d == .byte or d == .uint32,
+        .float32 => d == .int32,
+        .byte => d == .int32,
+        .uint32 => d == .int32,
+        else => false,
+    };
 }
 
 fn validateCall(frame: *Frame, c: *const ast.Call) CheckError!void {

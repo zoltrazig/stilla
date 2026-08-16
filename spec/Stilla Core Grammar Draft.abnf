@@ -43,7 +43,7 @@
 ;   Every syntactic decision point in this grammar is resolvable with a single
 ;   token of lookahead over the token stream. Parenthesized forms are
 ;   left-factored so that the "(" decision point needs only the token after
-;   "(" (see "paren-or-tuple" and "tuple-pattern"). Three FOLLOW-set overlaps
+;   "(" (see "paren-or-tuple" and "tuple-pattern"). Four FOLLOW-set overlaps
 ;   are resolved by documented parser rules rather than in the BNF itself:
 ;     1. block: after parsing an expression at statement level, a ";" makes it
 ;        an expression statement; a "}" makes it the final expression.
@@ -55,6 +55,11 @@
 ;        type-args) marks a type-test pattern binding (Core spec 14.7), and a
 ;        "list", "box", "tuple", "fn", or primitive-type keyword at pattern
 ;        start likewise begins a "type-test-pattern" directly.
+;     4. path-segment: the token after "." or "::" is read as a member name
+;        even when it is a reserved word (lexically pre-identified), so
+;        members named by reserved words such as "builtin.str" parse; the
+;        reserved-word spelling is only recognized as a keyword at a
+;        decision point, not after a member-access dot.
 ;   Lexical productions note the short extra-character scans they require
 ;   (see "wildcard-token", "integer" / "float").
 ; ============================================================================
@@ -182,17 +187,10 @@ using-decl =
 ; annotation because there is no initializer to infer from.
 
 const-def =
-      %s"const"
-      identifier
-      [ ":" type ]
-      "="
-      expression
-      ";"
-    / %s"const"
-      identifier
-      ":"
-      type
-      ";"
+    %s"const"
+    identifier
+    ( ":" type ( ";" / "=" expression ";" )
+    / "=" expression ";" )
 
 
 ; ----------------------------------------------------------------------------
@@ -295,6 +293,15 @@ named-type =
     type-path
     [ type-args ]
 
+; A path segment is normally an identifier, but a reserved word
+; (lexically pre-identified; see "Reserved words") is also accepted as a
+; segment after "." and "::", so that members named by reserved words —
+; e.g. "builtin.str" and "builtin.box" (Core spec 3) — parse. This is a
+; documented parser rule (LL(1) parsing note 4): the token after "." or
+; "::" is read as a member name whether or not it is reserved. The same
+; rule applies to the first segment of a "type-path" when the path names
+; a type member such as "builtin.Option".
+
 type-path =
     identifier
     *( "." identifier )
@@ -311,10 +318,14 @@ box-type =
     type
     "]"
 
+; The empty tuple type "tuple[]" is not a type: the empty tuple "()" is
+; the unique value of type "void" (Core spec 11.4). A single-element
+; tuple type "tuple[int32]" is valid and distinct from "int32".
+
 tuple-type =
     %s"tuple"
     "["
-    [ type *( "," type ) ]
+    type *( "," type )
     "]"
 
 
@@ -504,6 +515,9 @@ postfix-suffix =
     / index-suffix
     / call-suffix
     / specialization-suffix
+
+; Reserved words are accepted as member names after "." (path-segment
+; rule under "type-path", LL(1) parsing note 4), so "builtin.str" parses.
 
 member-suffix =
     "."

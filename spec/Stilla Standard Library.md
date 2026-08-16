@@ -415,12 +415,17 @@ string.from_codepoints:
   deterministic runtime trap (Runtime §7.2).
 - All functions are deterministic within a single execution context.
 
+There is no `byte` or `uint32` literal form in Stilla (Core §16.3); byte
+and code-point sequences are written with explicit conversions, for
+example `104 as byte` and `72 as uint32`, or obtained from
+`string.to_utf8` / `string.to_codepoints`.
+
 Usage:
 
 ```stilla
 const string = import("string");
 
-let s = string.from_utf8([104, 101, 108, 108, 111]);  // "hello"
+let s = string.from_utf8([104 as byte, 101 as byte, 108 as byte, 108 as byte, 111 as byte]);  // "hello"
 let parts = string.split(s, "l");                     // ["he", "", "o"]
 let joined = string.join(parts, "-");                 // "he--o"
 let bytes = string.to_utf8(s);                        // [104, 101, 108, 108, 111]

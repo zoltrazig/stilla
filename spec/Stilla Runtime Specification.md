@@ -584,6 +584,7 @@ The typing rules for operators and conversions are defined in Core §16.3. This 
 - Invalid `any` cast traps: recovering an `any` payload under a target type that does not match its runtime tag (Core §11.6.1).
 - `int32 as float32` uses the IEEE 754 conversion with round-to-nearest, ties-to-even; precision may be lost.
 - `float32 as int32` truncates toward zero and traps if the source is NaN, infinite, or outside the `int32` range.
+- `int32 as byte` traps when the value is outside `[0, 255]`; `int32 as uint32` traps on a negative value; `uint32 as int32` traps when the value exceeds the `int32` maximum; `byte as int32` never traps (Core §16.3).
 - `float32` uses IEEE 754 binary32 representation.
 - Other `float32` arithmetic follows IEEE 754 binary32 behavior.
 - Floating equality follows IEEE numeric comparison: NaN is unequal to every value including itself, while `+0.0 == -0.0` is true.

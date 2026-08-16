@@ -890,6 +890,83 @@ test "frontend rejects every hostdata/any coercion and cast" {
     try testing.expect(std.mem.indexOf(u8, c4.diag.?.message, "does not coerce to 'any'") != null);
 }
 
+test "frontend rejects the empty tuple type" {
+    // Core §11.4: `tuple[]` is not a type — the empty tuple `()` is the
+    // unique `void` value; a tuple type has at least one element.
+    var c = try compileText("app", &.{
+        .{ "app", "fn main() -> void { let t: tuple[] = (); }" },
+    });
+    defer c.deinit();
+    try testing.expect(c.program == null);
+    try testing.expect(std.mem.indexOf(u8, c.diag.?.message, "expected a type") != null);
+}
+
+test "frontend accepts the integer-family as conversions" {
+    // Core §16.3: int32 ↔ float32, int32 ↔ byte, int32 ↔ uint32,
+    // byte ↔ int32, uint32 ↔ int32. They lower to `num_cast`.
+    var c = try compileText("app", &.{
+        .{
+            "app",
+            \\fn main() -> int32 {
+            \\    let b = 104 as byte;
+            \\    let u = 7 as uint32;
+            \\    (b as int32) + (u as int32)
+            \\}
+        },
+    });
+    defer c.deinit();
+
+    const out = try irText(&c.program.?);
+    defer testing.allocator.free(out);
+    try testing.expect(std.mem.count(u8, out, "num_cast") == 4);
+}
+
+test "frontend rejects casts outside the Core §16.3 list" {
+    // Identity casts, byte/uint32 to float, and any cast touching
+    // hostdata are compile errors; `a as T` on an `any` scrutinee still
+    // routes to `any_unpack` and is unaffected.
+    var c1 = try compileText("app", &.{
+        .{ "app", "fn main() -> void { let a = 42 as int32; }" },
+    });
+    defer c1.deinit();
+    try testing.expect(c1.program == null);
+    try testing.expect(std.mem.indexOf(u8, c1.diag.?.message, "invalid cast") != null);
+
+    var c2 = try compileText("app", &.{
+        .{ "app", "fn main() -> void { let b = 104 as byte; let a = b as float32; }" },
+    });
+    defer c2.deinit();
+    try testing.expect(c2.program == null);
+    try testing.expect(std.mem.indexOf(u8, c2.diag.?.message, "invalid cast") != null);
+}
+
+test "frontend compiles the StdLib §5 string example with explicit conversions" {
+    // StdLib §5: byte sequences are written with explicit `as byte`
+    // conversions (Core §16.3); the example must compile as written.
+    var c = try compileText("app", &.{
+        .{
+            "app",
+            \\const string = import("string");
+            \\fn main() -> void {
+            \\    let s = string.from_utf8([104 as byte, 101 as byte, 108 as byte, 108 as byte, 111 as byte]);
+            \\    let parts = string.split(s, "l");
+            \\    let joined = string.join(parts, "-");
+            \\    let bytes = string.to_utf8(s);
+            \\    let cps = string.to_codepoints(s);
+            \\    let upper = string.upper(s);
+            \\}
+        },
+    });
+    defer c.deinit();
+
+    try testing.expect(c.graph != null);
+    try testing.expect(c.program != null);
+    const out = try irText(&c.program.?);
+    defer testing.allocator.free(out);
+    try testing.expect(std.mem.indexOf(u8, out, "syscall string#from_utf8") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "num_cast") != null);
+}
+
 test "frontend rejects missing, duplicate, and unknown struct fields" {
     // Core §8.1: all fields must be supplied exactly once; unknown fields
     // and duplicate fields are frontend.compile-time errors.

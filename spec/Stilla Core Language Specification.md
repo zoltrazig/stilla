@@ -1417,7 +1417,10 @@ Literal:
 (42, "hello", true)
 ```
 
-The empty tuple `()` is the unique `void` value.
+A tuple type has **at least one element**: `tuple[]` is not a type — the
+empty tuple `()` is the unique `void` value. A single-element tuple type
+`tuple[int32]` is valid and distinct from `int32`; its literal is written
+`(42,)` (Grammar `paren-or-tuple`).
 
 ## 11.5 List
 
@@ -2118,10 +2121,21 @@ Core `as` conversions are:
 ```text
 int32 as float32
 float32 as int32
-any as T        // T a concrete type, T ≠ any, never (Core §11.6.1)
+int32 as byte
+byte as int32
+int32 as uint32
+uint32 as int32
+any as T        // T a concrete type, T ≠ any, never, hostdata (Core §11.6.1)
 ```
 
 No other core conversion is implied by `as`.
+
+An integer literal has type `int32`, and a float literal has type
+`float32` (Grammar `integer`, `float`). Stilla defines no `byte` or
+`uint32` literal form and no implicit numeric conversion; a `byte` or
+`uint32` value is written with an explicit conversion, for example
+`104 as byte` or `7 as uint32`. Conversion from `int32` traps when the
+value is outside the target's range (Runtime §7.2).
 
 `as` is not extended to `hostdata`: no cast is defined from or to `hostdata` (§11.7).
 
