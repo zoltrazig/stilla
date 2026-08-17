@@ -63,9 +63,9 @@ fn fold[T, S](
 ) -> S {
     fold_with(
         values,
-        state,
+        move state,
         step,
-        fn(move s: S, borrow f: fn(move S, borrow T) -> S, borrow x: T) -> S { f(s, x) }
+        fn(move s: S, borrow f: fn(move S, borrow T) -> S, borrow x: T) -> S { f(move s, x) }
     )
 }
 
@@ -78,7 +78,7 @@ fn fold_with[T, S, C](
 ) -> S {
     match (values) {
         [] => state,
-        [head, ..tail] => fold_with(tail, step(state, context, head), context, step)
+        [head, ..tail] => fold_with(tail, step(move state, context, head), context, step)
     }
 }
 
@@ -92,10 +92,10 @@ fn consume_each[T](
     // accumulator is returned unchanged and discarded.
     {
         consume_fold_with(
-            values,
+            move values,
             false,
             action,
-            fn(move s: bool, borrow f: fn(move T) -> void, move x: T) -> bool { f(x); s }
+            fn(move s: bool, borrow f: fn(move T) -> void, move x: T) -> bool { f(move x); s }
         );
     }
 }
@@ -123,10 +123,10 @@ fn consume_fold[T, S](
     step: fn(move S, move T) -> S
 ) -> S {
     consume_fold_with(
-        values,
-        state,
+        move values,
+        move state,
         step,
-        fn(move s: S, borrow f: fn(move S, move T) -> S, move x: T) -> S { f(s, x) }
+        fn(move s: S, borrow f: fn(move S, move T) -> S, move x: T) -> S { f(move s, move x) }
     )
 }
 
@@ -139,7 +139,7 @@ fn consume_fold_with[T, S, C](
 ) -> S {
     match (move values) {
         [] => state,
-        [head, ..tail] => consume_fold_with(move tail, step(state, context, move head), context, step)
+        [head, ..tail] => consume_fold_with(move tail, step(move state, context, move head), context, step)
     }
 }
 

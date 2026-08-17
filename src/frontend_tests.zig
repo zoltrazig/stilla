@@ -924,6 +924,38 @@ test "Pass 7 emits tailcall for a move/unique self-recursive fold" {
     try testing.expect(std.mem.indexOf(u8, body, "= call @app.fold_files") == null);
 }
 
+test "iter.fold with a unique accumulator compiles and fold_with tailcalls" {
+    // The StdLib move gap (Core §18): fold/fold_with used to omit `move` when
+    // re-passing a move-mode parameter, so a unique accumulator type could not
+    // instantiate them. Now a unique S instantiates, and (with the Pass 7
+    // emission) the embedded fold_with runs the unique accumulator across a
+    // frame-reusing `tailcall`, not a growing stack.
+    var sources = moduleinfo.Sources{};
+    var source_map = std.StringHashMapUnmanaged([]const u8).empty;
+    defer source_map.deinit(testing.allocator);
+    try source_map.put(testing.allocator, "app",
+        \\const builtin = import("builtin");
+        \\const iter = import("iter");
+        \\struct File { fd: int32; drop(file) {} }
+        \\fn ff(borrow acc: File, x: int32) -> File { File{ fd: acc.fd + x } }
+        \\fn run_fold(xs: list[int32]) -> File {
+        \\    let s: File = File{ fd: 0 };
+        \\    iter.fold(xs, move s, fn(move a: File, borrow x: int32) -> File { ff(a, x) })
+        \\}
+        \\fn main() -> void { builtin.print("x"); }
+    );
+    sources.source = source_map;
+    var c = try frontend.compile(testing.allocator, .{ .entry = "app", .sources = sources, .entry_fn = "main", .optimize = true });
+    defer c.deinit();
+
+    const program = c.program.?;
+    const text = try irText(&program);
+    defer testing.allocator.free(text);
+    // The embedded monomorphized fold_with carries the unique accumulator
+    // through a tailcall.
+    try testing.expect(std.mem.indexOf(u8, text, "tailcall @iter.fold_with.1") != null);
+}
+
 test "frontend IR round-trips with duplicate-block-producing constructs" {
     // Block labels must be unique in the printed IR (ir.md §9): the
     // standalone cfg parser rejects duplicate labels. Repeated control
