@@ -49,6 +49,10 @@ pub fn tailCall(program: *cfg.IrProgram, allocator: std.mem.Allocator) !void {
     try program.resolveDirectCalls(allocator);
     for (program.funcs) |f| {
         try rewriteFunc(f, allocator);
+        // After the Copy-only phi-loop rewrites, convert whichever direct
+        // self-tail-calls remain (move/unique carriers the phi loop cannot
+        // express) into the frame-reusing `tailcall` terminator.
+        try emitTailCalls(f, allocator);
     }
 }
 
@@ -579,4 +583,100 @@ fn rewriteInstr(instr: *cfg.Instr, renames: *const std.AutoHashMap(*cfg.Value, *
         },
         .const_, .module_ref, .fn_ref => {},
     }
+}
+
+// ---------------------------------------------------------------------------
+// `tailcall` emission (ir.md §14.7.1)
+// ---------------------------------------------------------------------------
+
+/// Convert a direct self-recursive tail call that carries move/unique
+/// loop-carried state — which the Copy-only phi-loop rewrite (§7.2) cannot
+/// express — into the frame-reusing `tailcall` terminator. The call's block
+/// becomes an **exit** (no out-edge, like `ret`): its branch to the join is
+/// severed, the join loses the block as a predecessor and drops the call
+/// result's phi incoming, and the reuse disposes of the remaining owned
+/// locals (an armed cleanup token guarding such a local is satisfied by the
+/// reuse, so no `drop_cleanup` is emitted on the tail path).
+///
+/// Supported shape (the fold pattern): block `b` ends in
+/// `call @f, args` and branches to a single target `t`, whose phi consumes
+/// the call result and whose `ret` returns it — the base case reaches the
+/// same `ret` through a different predecessor, so `t` must keep at least one
+/// non-call predecessor for the function's only `ret` to stay reachable.
+/// Every other move-mode tail call stays an ordinary `call`.
+fn emitTailCalls(f: *cfg.IrFunc, allocator: std.mem.Allocator) !void {
+    for (f.blocks) |b| {
+        // The tail call must be the block's last instruction.
+        var call: ?*cfg.Instr = null;
+        for (b.instrs) |instr| {
+            if (instr.op == .call and instr.op.call.callee == .direct and instr.op.call.callee.direct.func == f) {
+                call = instr;
+            } else if (call != null) {
+                call = null; // a non-self-call follows the candidate
+                break;
+            }
+        }
+        const ci = call orelse continue;
+        if (ci.results.len != 1) continue; // void self-calls not handled here
+        const result = ci.results[0];
+
+        // Tail position: the result is re-turned through a join phi
+        // (`br t` + phi in t whose result `t` rets), or ret'd directly.
+        switch (b.terminator) {
+            .branch => |t| {
+                const phi_res = phiIncoming(t, b, result) orelse continue;
+                if (b.terminator.branch != t) continue;
+                // The result must be used *only* as that join phi input — a
+                // self-call whose result is consumed elsewhere is not a tail
+                // call and must not be frame-reused.
+                const uses = try collectUses(f, result, allocator);
+                if (uses.items.len != 1) continue;
+                // The join must keep a ret on another path (the base case),
+                // so the function does not lose its only reachable return.
+                if (t.preds.len < 2) continue;
+                switch (t.terminator) {
+                    .ret => |rv| {
+                        if (rv != phi_res) continue;
+                    },
+                    else => continue,
+                }
+                try convertToTailCall(b, ci, t, f, allocator);
+            },
+            else => continue,
+        }
+    }
+}
+
+/// The result of the phi in `t` whose incoming `[v, pred]` equals the given
+/// value and block; null when `v` is not a phi input of `pred` in `t`.
+fn phiIncoming(t: *cfg.BasicBlock, pred: *cfg.BasicBlock, v: *const cfg.Value) ?*cfg.Value {
+    for (t.instrs) |instr| {
+        if (instr.op != .phi) continue;
+        for (instr.op.phi.incoming) |inc| {
+            if (inc.pred == pred and inc.value == v) return instr.results[0];
+        }
+    }
+    return null;
+}
+
+/// Rewrite `b` (whose last instruction is the self-call `ci` and whose
+/// terminator branches to `t`) so that `b` ends in `tailcall @f, args`, and
+/// sever `b` from `t` (drop it from `t`'s predecessors and from every phi's
+/// incoming in `t`).
+fn convertToTailCall(
+    b: *cfg.BasicBlock,
+    ci: *cfg.Instr,
+    t: *cfg.BasicBlock,
+    f: *cfg.IrFunc,
+    allocator: std.mem.Allocator,
+) !void {
+    const args = ci.op.call.args;
+    // Remove the `call` instruction from `b` (it is the last instruction).
+    var kept = std.ArrayList(*cfg.Instr).empty;
+    for (b.instrs) |instr| {
+        if (instr != ci) try kept.append(allocator, instr);
+    }
+    b.instrs = try kept.toOwnedSlice(allocator);
+    b.terminator = .{ .tailcall = .{ .name = f.name.text, .func = f, .args = args } };
+    try dropPred(t, b, allocator);
 }

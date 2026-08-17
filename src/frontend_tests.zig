@@ -879,6 +879,51 @@ test "tailcall terminator round-trips text and validates" {
     try testing.expectEqual(@as(?[]const u8, null), try lower.validate(&prog2, arena.allocator()));
 }
 
+test "Pass 7 emits tailcall for a move/unique self-recursive fold" {
+    // ir.md §14.7.1: a direct self-recursive tail call carrying move/unique
+    // loop-carried state (the iter.fold_with shape) is rewritten by Pass 7
+    // into the frame-reusing `tailcall` terminator instead of an ordinary
+    // `call`+`ret`, so recursion over a unique accumulator does not grow the
+    // stack. The optimizer (which validates after every pass, incl. tail
+    // call) must accept the emitted IR, and the base-case `ret` survives via
+    // the join's other predecessor.
+    // Build with the optimizer on (Passes 7–8), as the `stilla` executable
+    // does — Pass 7's tailcall emission runs inside the optimizer.
+    var sources = moduleinfo.Sources{};
+    var source_map = std.StringHashMapUnmanaged([]const u8).empty;
+    defer source_map.deinit(testing.allocator);
+    try source_map.put(testing.allocator, "app",
+        \\const builtin = import("builtin");
+        \\struct File { fd: int32; drop(file) {} }
+        \\fn step(borrow f: File, x: int32) -> int32 { f.fd + x }
+        \\fn fold_files(xs: list[int32], move acc: File) -> File {
+        \\    match (xs) {
+        \\        [] => acc,
+        \\        [h, ..t] => {
+        \\            let next: File = File{ fd: step(acc, h) };
+        \\            fold_files(t, move next)
+        \\        }
+        \\    }
+        \\}
+        \\fn main() -> void { builtin.print("x"); }
+    );
+    sources.source = source_map;
+    var c = try frontend.compile(testing.allocator, .{ .entry = "app", .sources = sources, .entry_fn = "main", .optimize = true });
+    defer c.deinit();
+
+    const program = c.program.?;
+    const text = try irText(&program);
+    defer testing.allocator.free(text);
+    std.debug.print("DEBUG TEXT: {s}\n", .{text});
+    const body = funcBody(text, "func @app.fold_files");
+    // The recursive arm is a tailcall; the base-case ret survives.
+    try testing.expect(std.mem.indexOf(u8, body, "tailcall @app.fold_files") != null);
+    try testing.expect(std.mem.indexOf(u8, body, "ret %") != null);
+    // No ordinary self `call` remains ('= call @…' — 'tailcall @…' also
+    // contains the substring 'call @', so the defining form must be sought).
+    try testing.expect(std.mem.indexOf(u8, body, "= call @app.fold_files") == null);
+}
+
 test "frontend IR round-trips with duplicate-block-producing constructs" {
     // Block labels must be unique in the printed IR (ir.md §9): the
     // standalone cfg parser rejects duplicate labels. Repeated control
