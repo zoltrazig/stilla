@@ -35,12 +35,38 @@ representations, or add specialized collection modules, without touching the
 language core.
 
 A container value is an ordinary nominal struct (the Core specification) whose runtime
+A container value is an ordinary nominal struct (the Core specification) whose runtime
 value is an immutable **token** naming a host-owned opaque buffer: the
 host owns the buffer's memory and lifetime, Stilla never inspects it, and
 the `array` and `hashmap` module functions are the only access path. The token is
 Copy when its element types are Copy (the Core specification), and the element
 types must be Copy (The `array` module, The `hashmap` module) — a container is never a `hostdata` payload and
 does not depend on the Core specification.
+
+**Abstract-buffer contract (v1.3 chosen semantics).** The Stilla *value* is
+the Copy token; the opaque buffer it names is not a Stilla value and cannot
+be created or inspected in source. A conforming implementation must ensure
+that:
+
+- a valid buffer exists only behind the container module's host bindings —
+  the token is produced by `array.make` / `hashmap.empty` (and the
+  persistent `hashmap.insert`/`remove` clones) and consumed by the read /
+  destroy host bindings; a token raw-constructed in source (for example an
+  `array.make`-shaped struct literal) names no buffer and is a programming
+  error, not a valid container (the v1.3 documents keep the container as an
+  ordinary nominal struct rather than an `opaque` nominal type — adding an
+  `opaque`/`extern` nominal type to the IR is the follow-up that would make
+  this unreachable in the type system);
+- the buffer's lifetime is **bound to the execution context**: buffers are
+  allocated in the context-arena and reclaimed by the execution-context-
+  level host cleanup at context end (Runtime §…). A Copy token may be
+  freely duplicated and stored; there is no per-token destruction event in
+  the language (the IR schedules no `drop` for Copy values), so the host
+  must not rely on a last-token-gone signal — memory is context-scoped, not
+  reference-counted-to-zero. `ponytail:` ceiling — a persistent `HashMap`
+  that keeps allocating per context grows until context end; if long-lived
+  contexts matter, add an explicit rehash/GC or a per-entry reference count
+  as a future refinement.
 
 The standard library provides:
 
@@ -181,6 +207,25 @@ match (hashmap.get::[str, int32](m, "a")) {
 type, so their type arguments must be written explicitly (the Core specification).
 `Option` is `builtin`'s type member, brought into scope with `using`
 (the Core specification).
+
+**`builtin.Option`** — a compile-time *type member* of the `builtin` module
+(Core §2.5, §2.8), formally:
+
+```stilla
+union Option[T] {
+    Some(T),
+    None
+}
+```
+
+`Option[T]` is the standard library's designated option type. It is a
+plain data union: matchable, and the `Some` payload substitutes the
+instantiation's type argument. The `hashmap` and `string` interfaces that
+return `Option` are *defined* against this member (`hashmap.get`,
+`string.index_of` , …), so a conforming implementation must provide it and
+user code brings it into scope with `using builtin.Option;`. The `Some`
+payload is copied out of the returned `Option` in a non-consuming `match`
+and moved out of it in a consuming `match (move …)`.
 
 # 4. The `math` module
 

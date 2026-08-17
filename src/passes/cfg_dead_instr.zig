@@ -176,6 +176,7 @@ fn collectInstrOperands(instr: *const cfg.Instr, out: *std.ArrayList(*cfg.Value)
     switch (instr.op) {
         .neg, .not_, .num_cast, .any_pack_copy, .any_pack_move, .any_unpack_copy, .any_unpack_move, .cleanup_owner, .cleanup_disable, .drop_cleanup, .copy, .borrow, .move_, .tail, .unpack_struct, .unpack_tuple, .split_list, .read_tag, .read_payload, .drop_ => |v| try out.append(allocator, v),
         .unpack_variant => |uv| try out.append(allocator, uv.base),
+        .borrow_variant => |bv| try out.append(allocator, bv.base),
         .type_is => |x| try out.append(allocator, x.value),
         .add, .sub, .mul, .div, .rem, .concat, .eq, .ne, .lt, .le, .gt, .ge => |x| {
             try out.append(allocator, x.a);

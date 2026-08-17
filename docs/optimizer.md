@@ -76,7 +76,12 @@ returned value's destruction schedule (Runtime §6) is unchanged because
 the frame is reused; only direct `call`s to a known `IrFunc` are
 candidates (a call through a function *value* has no statically known
 target); v0.1 is **Copy-only**: loop-carried parameters are all Copy and
-a move-mode parameter never loops back (ir.md §10.9).
+a move-mode parameter never loops back through a phi (ir.md §10.9) — it
+is instead expressed as the `tailcall` terminator (ir.md §14.7.1), which
+carries move/unique state atomically into a reused frame, so the
+Copy-only limitation does not forbid `iter`-style unique-accumulator
+iteration, it only means a unique value never re-enters the loop as a
+phi.
 
 ## Pass 8 — Mid-level optimizer driver
 

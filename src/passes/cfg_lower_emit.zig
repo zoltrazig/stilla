@@ -144,10 +144,30 @@ pub fn emitUnpack(self: *lower.Lowerer, fs: *lower.FuncState, span: ast.Span, op
     return results;
 }
 
-/// The created value state of a definition (ir.md §6.1): from the op
-/// schema for the static cases, or derived from the operand for the
-/// `.operand` ops (projections whose created state follows the
-/// *result* type — a Copy member read from an unique base is a copy,
+/// Emit a non-consuming multi-result variant projection (ir.md §5.3):
+/// this is `read_payload` generalized to a variant's whole payload set,
+/// symmetric with `unpack_variant`. The base is not consumed; each result
+/// is an owned *copy* when its payload type is Copy and a *borrowed view*
+/// (rooted at the base) when unique — the same rule as `read_field` of a
+/// unique base. The op must carry its tag so the parser/backend need not
+/// recover which variant's payloads these are from the switch context.
+pub fn emitBorrowVariant(self: *lower.Lowerer, fs: *lower.FuncState, span: ast.Span, base: *cfg.Value, tag: u32, result_types: []const cfg.Type) lower.LowerError![]*cfg.Value {
+    const b = fs.cur orelse return &.{};
+    const op: cfg.Op = .{ .borrow_variant = .{ .base = base, .tag = tag } };
+    const results = try self.arena.alloc(*cfg.Value, result_types.len);
+    for (result_types, 0..) |rt, i| {
+        const state = readState(rt); // Copy -> owned copy, unique -> borrowed
+        const v = try newValue(self, fs, span, rt, state);
+        if (v.state == .borrowed) v.origin = cfg.originOf(op);
+        results[i] = v;
+        if (v.ownership == .unique) try fs.created.append(self.arena, v);
+    }
+    const instr = try self.arena.create(cfg.Instr);
+    instr.* = .{ .span = span, .results = results, .op = op };
+    try fs.block_instrs.items[b.id].append(self.arena, instr);
+    for (results) |v| v.def = instr;
+    return results;
+}
 /// an unique member read is a borrowed view). Parameters are SSA roots
 /// (ir.md §5.1): their state is set when they are seeded, never by an op.
 pub fn createdState(op: cfg.Op, fs: *lower.FuncState, result_type: cfg.Type) cfg.ValueState {
@@ -157,7 +177,7 @@ pub fn createdState(op: cfg.Op, fs: *lower.FuncState, result_type: cfg.Type) cfg
         .borrowed => .borrowed,
         .none => .owned, // effects produce no value; unreachable here
         .operand => switch (op) {
-            .read_field, .read_tuple, .read_index, .read_payload => readState(result_type),
+            .read_field, .read_tuple, .read_index, .read_payload, .borrow_variant => readState(result_type),
             .tail => |v| readState(v.type_),
             else => unreachable,
         },

@@ -105,6 +105,7 @@ const OpName = enum {
     split_list,
     read_tag,
     read_payload,
+    borrow_variant,
     call,
     syscall,
     phi,
@@ -742,7 +743,7 @@ pub const Parser = struct {
             .borrowed => .borrowed,
             .none => .owned, // effects produce no value; unreachable here
             .operand => switch (op) {
-                .read_field, .read_tuple, .read_index, .read_payload => readState(result_type),
+                .read_field, .read_tuple, .read_index, .read_payload, .borrow_variant => readState(result_type),
                 .tail => |v| readState(v.type_),
                 else => unreachable,
             },
@@ -795,6 +796,12 @@ pub const Parser = struct {
             .split_list => return .{ .split_list = try self.parseOperand() },
             .read_tag => return .{ .read_tag = try self.parseOperand() },
             .read_payload => return .{ .read_payload = try self.parseOperand() },
+            .borrow_variant => {
+                const base = try self.parseOperand();
+                try self.expectComma();
+                const tag = try self.parseTagNumber();
+                return .{ .borrow_variant = .{ .base = base, .tag = tag } };
+            },
             .add => return .{ .add = try self.parseBin() },
             .sub => return .{ .sub = try self.parseBin() },
             .mul => return .{ .mul = try self.parseBin() },

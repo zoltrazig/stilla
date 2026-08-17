@@ -795,6 +795,49 @@ test "frontend IR round-trips multi-result destructures and zero-arg construct" 
     try testing.expectEqualStrings(text, text2);
 }
 
+test "frontend lowers a non-consuming multi-payload match to borrow_variant" {
+    // ir.md §5.3: a non-consuming `match` over a multi-payload variant has
+    // no single-result `read_payload` to project all payloads, so the
+    // lowering emits the multi-result `borrow_variant %u, #tag` (symmetric
+    // with `unpack_variant`, but the base is never consumed). Each payload
+    // is copied out when Copy and a borrowed view when unique.
+    var c = try compileText("app", &.{
+        .{
+            "app",
+            \\const builtin = import("builtin");
+            \\union Tree[T] {
+            \\    Empty,
+            \\    Node(box[Tree[T]], T, box[Tree[T]])
+            \\}
+            \\struct Nothing {}
+            \\fn sum(t: Tree[int32]) -> int32 {
+            \\    match (t) {
+            \\        Tree::Empty => 0,
+            \\        Tree::Node(l, x, r) => x,
+            \\    }
+            \\}
+            \\fn main() -> void { let n = Nothing{}; let _ = n; }
+        },
+    });
+    defer c.deinit();
+
+    const text = try irText(&c.program.?);
+    defer testing.allocator.free(text);
+    // The multi-payload non-consuming arm projects all three payloads with
+    // one borrow_variant (tag-carrying), not a read_payload+read_tuple hack.
+    try testing.expect(std.mem.indexOf(u8, text, "= borrow_variant %") != null);
+    try testing.expect(std.mem.indexOf(u8, text, ", #1") != null);
+    // Single-payload / consuming arms keep their ops.
+    // The standalone parser round-trips the printed text.
+    var p = cfg.Parser.init(testing.allocator);
+    defer p.deinit();
+    const prog = try p.parse(text);
+    try testing.expect(prog.funcs.len > 0);
+    const text2 = try cfg.print(&prog, testing.allocator);
+    defer testing.allocator.free(text2);
+    try testing.expectEqualStrings(text, text2);
+}
+
 test "frontend IR round-trips with duplicate-block-producing constructs" {
     // Block labels must be unique in the printed IR (ir.md §9): the
     // standalone cfg parser rejects duplicate labels. Repeated control

@@ -73,6 +73,7 @@ terminator ::= "ret" value?                  -- return; bare "ret" for void
              | "br" label
              | "br" value "?" label ":" label
              | "switch" value "{" tag "->" label ("," tag "->" label)* "}"
+             | "tailcall" label value ("," value)*   -- frame-reusing self call
              | "trap"
 ```
 
@@ -204,7 +205,8 @@ Operand types and trap behavior (overflow, divide-by-zero, invalid `any` recover
 | `unpack_variant` | `%p1: T1, %p2: T2, … = unpack_variant %u, #k` | the payload values of variant `#k`, in declaration order — one result per payload (consumes `%u`); the tag is carried for backend self-containment — the arm's `switch` dispatch already guaranteed the variant |
 | `split_list` | `%a: T, %b: T, %r: list[T] = split_list %l` | list items then the owned rest (consumes `%l`; may trap on a short list) |
 | `read_tag` | `%d = read_tag %u` | union discriminant, as a tag index |
-| `read_payload` | `%d = read_payload %u` | payload of the active variant, borrowed view |
+| `read_payload` | `%d = read_payload %u` | the payload of the active variant, borrowed view — a single-payload variant's single payload (for a multi-payload variant, use `borrow_variant`) |
+| `borrow_variant` | `%p1: T1, %p2: T2, … = borrow_variant %u, #k` | the payload values of variant `#k`, in declaration order — one result per payload, the base never consumed; a Copy payload is copied out (owned), an unique payload is a borrowed view rooted at the base (mirrors `read_field` of an unique base). Symmetric with `unpack_variant`. The tag is carried for backend self-containment — the arm's `switch` dispatch already guaranteed the variant |
 
 `builtin.box`, `builtin.peek`, and `builtin.unbox` are **not** IR ops: they are host bindings and lower to `syscall`. A `peek` result arrives in the IR as a `borrowed` value, matching the borrowed-view contract of the Stilla Runtime Specification, with origin `peek`.
 
@@ -283,7 +285,7 @@ Whether a value is still *available* at a program point is **not** a value prope
 | `borrow` | `owned` or `borrowed` | `borrowed` | origin `root(%a)` |
 | `read_*` / `tail` | base `owned` (Copy) → base unchanged | `owned` | implicit copy |
 | `read_*` / `tail` | base `owned`/`borrowed` (unique) → base unchanged | `borrowed` | origin `root(base)` |
-| `read_tag` / `read_payload` | scrutinee unchanged | `owned` (tag) / per above (payload) | |
+| `read_tag` / `read_payload` / `borrow_variant` | scrutinee unchanged | `owned` (tag) / per above (payload) | |
 | `move` | `%a` consumed | `owned` | |
 | `unpack_*` / `split_list` | base consumed as a whole; results owned | `owned` | |
 | `any_pack_move` / `any_unpack_move` | operand consumed | `owned` | the `T → any` / `any → T` ownership transfers |
@@ -318,7 +320,7 @@ Two consequences the lowering must respect:
 1. **Ownership transfers to the phi.** A unique value listed as a phi input is *not* destroyed at the end of its producing block; the scope ends *after* the join, and destruction targets the phi result. This is how `let f = if (c) { open_a() } else { open_b() };` destroys exactly the branch that executed.
 2. **A unique phi result is destroyed at most once.** The frontend places the `drop` at the phi result's destruction point — the end of the *enclosing* scope — never in the branch blocks.
 
-Stilla source has no loop construct and no loop-carried mutable state (per the Stilla Core Language Specification); the only loops in the IR are produced by tail call optimization (frontend.md). A loop header carries only **Copy** parameters: loop-carried unique state is out of scope — a move-mode parameter never loops back, because ownership dataflow over a cyclic CFG requires fixed-point semantics that the IR does not define. The destruction schedule is then trivially valid: the reused frame holds only Copy state, so nothing is reordered.
+Stilla source has no loop construct and no loop-carried mutable state (per the Stilla Core Language Specification); the only loops in the IR are produced by tail call optimization (frontend.md). A Copy-only loop header carries only **Copy** parameters: loop-carried unique state is expressed by the `tailcall` terminator instead of a phi loop (ir.md §14.7.1), which reuses the frame and transfers ownership atomically, so no cyclic ownership fixed point over unique values is required in the IR.
 
 ## 6.4 Destruction placement
 
@@ -358,7 +360,7 @@ Every borrowed value carries a **`BorrowOrigin`** anchoring its lifetime to a **
 | --- | --- | --- |
 | `borrow %a` | `root(%a)` | the base value |
 | `read_*` / `tail` over a unique base | `root(base)` | the base value |
-| `read_payload` over a unique scrutinee | `root(scrutinee)` | the scrutinee |
+| `read_payload` / `borrow_variant` over a unique scrutinee | `root(scrutinee)` | the scrutinee |
 | `load_member %m, #i` of a unique constant member | `root(%m)` | the module value — module storage is immutable after `@init`, so this root is never consumed |
 | a borrow-mode parameter | `call` | the function-call lifetime: the caller's argument, which the callee cannot consume |
 | `syscall builtin#peek, %b` | `peek` | the boxed owner argument — the borrowed view is bound to it |
@@ -685,7 +687,7 @@ These invariants are the contract every producer of the IR must uphold — the f
 - `phi` only at block heads; one incoming per predecessor, in `preds` order; a `trap`-terminated block has no out-edge and is therefore never a `phi` predecessor — its producing path contributes no `phi` input;
 - arity: every op has its declared operand count (≤2 except the four n-ary forms); `read_tuple` index < element count per the static type; `store_member` only in `@init`;
 - members: `load_member`'s member index names a member of the module's member table and the member's kind matches the load (a constant member is read from its slot, a function member yields a function value, a module-valued member yields a module value); `store_member`'s slot index names a constant member's slot;
-- types: `read_field` bases are structs and the field index names a field of the `StructDecl` (result typed as that field); `unpack_struct` consumes a struct and defines exactly its fields; `construct` with a `#tag` and `unpack_variant #k` keep the tag within the `UnionDecl`'s variants and match the payload arity; `read_tag` / `read_payload` bases are unions; `switch` arm tags are exactly the union's variants — exhaustive, with the implicit `trap` default unreachable and no bogus tags.
+- types: `read_field` bases are structs and the field index names a field of the `StructDecl` (result typed as that field); `unpack_struct` consumes a struct and defines exactly its fields; `construct` with a `#tag` and `unpack_variant #k` keep the tag within the `UnionDecl`'s variants and match the payload arity; `read_tag` / `read_payload` / `borrow_variant` bases are unions; `switch` arm tags are exactly the union's variants — exhaustive, with the implicit `trap` default unreachable and no bogus tags.
 
 **SSA**
 
@@ -720,6 +722,7 @@ These invariants are the contract every producer of the IR must uphold — the f
 **Producer guarantees** — the checker enforces these at the source boundary; they need flow analysis the IR does not carry, so the validator checks their preconditions only:
 
 - the active-variant payload typing of `read_payload` inside a `switch` arm — the validator checks only that the base is a union, not which arm is live;
+- the payload *arity and types* of `borrow_variant` / `unpack_variant` — the tag is carried in the IR, so the variant is known, but the variant's declared payload list (which fixes the result count and each result's type) is not re-derived by the validator; it checks the base is nominal and the result count is ≥ 1, trusting the checker for the rest;
 - the `any_unpack_*`-after-`type_is` discipline — recovery of a payload must follow a successful tag test.
 
 ---
@@ -729,7 +732,7 @@ These invariants are the contract every producer of the IR must uphold — the f
 Consumers of the CFG:
 
 - **runtime interpreter/compiler** — executes function bodies; blocks, terminators, and explicit `drop`s make evaluation order and destruction unambiguous; module instantiation runs `@init` in topological order; the cleanup ops are executed as-is (their armed bits are token runtime state) — only a compiling backend expands them, at its own lowering, after validation and optimization.
-- **static analysis / mid-level optimizer** (frontend.md, kept at `docs/frontend.md`) — the CFG is the base for a fixed sequence of semantics-preserving rewrites: tail call optimization (which rewrites calls in tail position into frame-reusing branches; the resulting loop headers carry only Copy loop-carried values), constant folding, common subexpression elimination, partial redundancy elimination, copy propagation, dead-block elimination, drop elision (a `drop` whose effect is provably unobservable may be removed — `drop_cleanup` / `cleanup_disable` act on a token whose payload is a unique owner and are never elided), and phi simplification. Cleanup ops are additionally never CSE'd, duplicated, or reordered relative to each other or to the owner's consumption. Optimization is permitted only when the observable behavior is unchanged; drop elision must not remove a user drop hook that performs output, and no pass may move a destruction earlier than its prescribed point.
+- **static analysis / mid-level optimizer** (frontend.md, kept at `docs/frontend.md`) — the CFG is the base for a fixed sequence of semantics-preserving rewrites: tail call optimization (which rewrites calls in tail position into frame-reusing branches — Copy carriers into a loop-header phi loop, move/unique carriers into the `tailcall` terminator, §14.7), constant folding, common subexpression elimination, partial redundancy elimination, copy propagation, dead-block elimination, drop elision (a `drop` whose effect is provably unobservable may be removed — `drop_cleanup` / `cleanup_disable` act on a token whose payload is a unique owner and are never elided), and phi simplification. Cleanup ops are additionally never CSE'd, duplicated, or reordered relative to each other or to the owner's consumption. Optimization is permitted only when the observable behavior is unchanged; drop elision must not remove a user drop hook that performs output, and no pass may move a destruction earlier than its prescribed point.
 
 Non-goals: no register allocation, no instruction scheduling, no cost-model-driven optimizer in this document. The mid-level optimizer is a fixed, small set of CFG→CFG rewrites that preserve observable behavior; tail call optimization is the first of them, the remainder (folding, propagation, dead-block elimination, drop elision, phi simplification) follows. The `any` runtime representation (tagging) is a runtime concern; the IR only requires that a value coerced to `any` carries its payload.
 
@@ -967,7 +970,29 @@ recur:
 }
 ```
 
-Every use of a raw parameter in the body is rewritten to its header phi result, so the loop-carried value is genuinely SSA (`%n1` is defined in `header`, which dominates the body) and the phi's loop-back incoming is the fresh argument value. The rewrite is valid only when no live unique value's destruction would be reordered: the reused frame holds the parameter (now the phi result via the back-edge) and the arguments, and everything else the caller owned is already destroyed before the tail position, so the destruction schedule is unchanged. The validator's edge-sensitive ownership analysis checks each header phi's incoming against its arriving edge. A tail-call candidate must have all-Copy loop-carried parameters, no live unique local on the tail edge, and no armed cleanup token on the tail edge — a move-mode parameter's loop-back is not supported (no loop phi over unique values), because ownership dataflow over a cyclic CFG needs fixed-point semantics that the IR does not define. The destruction schedule is then trivially valid: the reused frame holds only Copy state, so nothing is reordered.
+Every use of a raw parameter in the body is rewritten to its header phi result, so the loop-carried value is genuinely SSA (`%n1` is defined in `header`, which dominates the body) and the phi's loop-back incoming is the fresh argument value. The rewrite is valid only when no live unique value's destruction would be reordered: the reused frame holds the parameter (now the phi result via the back-edge) and the arguments, and everything else the caller owned is already destroyed before the tail position, so the destruction schedule is unchanged. The validator's edge-sensitive ownership analysis checks each header phi's incoming against its arriving edge. A Copy-only candidate requires all-Copy loop-carried parameters, no live unique local on the tail edge, and no armed cleanup token on the tail edge — a move-mode parameter's loop-back is **not** a phi (no loop phi over unique values); it is expressed as the `tailcall` terminator instead (§14.7.1), which carries the unique / move-mode state atomically into a reused frame. The destruction schedule is trivially valid in both forms: the phi loop holds only Copy state, and `tailcall` transfers ownership as the tail position itself, so nothing is reordered.
+
+### 14.7.1 The `tailcall` terminator (move / unique loop-carried state)
+
+A direct self-recursive tail call that carries a move-mode (possibly unique) argument cannot reuse a Copy-only loop header, so the lowering represents it as the **`tailcall`** terminator instead of a phi loop:
+
+```text
+recur:
+    %nextS: S   = step(%state, ...)          ; produces the next accumulator
+    %values: list[T] = tail %values
+    tailcall @self, %values, %nextS, %ctx, %step
+```
+
+The `tailcall` terminator is the frame-reuse form of a *direct self-call*: it transfers each argument's ownership into the callee's parameter slot for the next frame and jumps to the entry, reusing the current frame instead of allocating a new one. It is **atomic with respect to ownership**: the current frame's locals that are no longer needed are destroyed, and the argument values are moved into the (reused) parameter slots *first*, so the old parameters' storage is dead by the time the callee body re-reads it. There is no `ret` to consume the result — the next frame's `ret` is the whole call's return — so the Core tail-call guarantee (recursion written as iteration does not grow the stack, Runtime §7.3) holds even when the loop-carried state is unique.
+
+Rules (the validator enforces them):
+
+- `tailcall` appears only in tail position: block `B` ends in `tailcall @self, %a, …`, and every path from `B` to a `ret` passes through a reused frame — there is no result to return, so the enclosing function's `ret` is reached only via the final self-frame's `ret`. The target is always the enclosing `IrFunc`.
+- Argument types match the callee's parameter types; argument modes follow the parameter modes: a plain/borrow parameter takes a view, a move parameter transfers ownership of a unique argument and consumes it. A borrow-mode argument must not name a local the reuse destroys (its root must outlive the frame reuse); the validator checks availability on the tail edge.
+- No unique value is live across the `tailcall` except by being an argument: after the transfer the current frame holds no unique local whose destruction the reuse would reorder.
+- The tail edge carries no armed cleanup token (a scope-end `drop_cleanup` would sit after the reuse point); otherwise the destruction schedule is unchanged.
+
+Backends and the runtime interpreter execute `tailcall` by reusing the current frame's slots; an optimizing backend may lower it to a machine jump. The mid-level optimizer treats `tailcall` as a control-flow edge to the function's entry, not as the phi-loop shape, so unique loop-carried state needs no cyclic ownership fixed point in the IR itself.
 
 ## 14.8 Constant folding
 

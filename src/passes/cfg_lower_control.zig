@@ -420,12 +420,8 @@ pub fn bindUnionPattern(self: *Lowerer, fs: *FuncState, pattern: *const ast.Patt
                         const payloads = try cfg_lower_emit.emitUnpack(self, fs, vp.name.span, .{ .unpack_variant = .{ .base = scrut, .tag = @intCast(tag) } }, payload_elems.items);
                         for (args, payloads) |*argp, proj| try cfg_lower_pattern.bindPattern(self, fs, argp, proj, proj.state == .owned);
                     } else {
-                        const tuple_type: cfg.Type = .{ .tuple = payload_elems.items };
-                        const payload = (try cfg_lower_emit.emit(self, fs, vp.name.span, .{ .read_payload = scrut }, tuple_type)) orelse return;
-                        for (args, 0..) |*argp, i| {
-                            const proj = (try cfg_lower_emit.emit(self, fs, argp.span(), .{ .read_tuple = .{ .base = payload, .index = @intCast(i) } }, payload_elems.items[i])) orelse continue;
-                            try cfg_lower_pattern.bindPattern(self, fs, argp, proj, proj.state == .owned);
-                        }
+                        const payloads = try cfg_lower_emit.emitBorrowVariant(self, fs, vp.name.span, scrut, @intCast(tag), payload_elems.items);
+                        for (args, payloads) |*argp, proj| try cfg_lower_pattern.bindPattern(self, fs, argp, proj, proj.state == .owned);
                     }
                 }
             },

@@ -273,7 +273,8 @@ pub const Value = struct {
 
 /// One instruction: defines `results` (one value for single-result ops,
 /// several for the atomic destructure ops `unpack_struct` / `unpack_tuple` /
-/// `unpack_variant` / `split_list`, ir.md §5.3) unless it is a pure effect
+/// `unpack_variant` / `split_list` and the non-consuming `borrow_variant`,
+/// ir.md §5.3) unless it is a pure effect
 /// (`drop`, `store_member`, `cleanup_disable`, `drop_cleanup`, or a
 /// `void`/effect `call` / `syscall`).
 ///
@@ -370,6 +371,11 @@ pub const Op = union(enum) {
     split_list: *Value, // list pattern: item values, then the rest
     read_tag: *Value,
     read_payload: *Value,
+    /// Non-consuming multi-result variant projection (ir.md §5.3): a
+    /// borrowed-match payload read, symmetric with `unpack_variant`. The
+    /// base is never consumed; a Copy payload is copied out (owned), an
+    /// unique payload is a borrowed view rooted at the base.
+    borrow_variant: BorrowVariant,
 
     // calls (§8)
     call: Call, // n-ary
@@ -383,6 +389,7 @@ pub const Bin = struct { a: *Value, b: *Value };
 pub const Proj = struct { base: *Value, index: u32 };
 pub const Index = struct { base: *Value, index: *Value };
 pub const UnpackVariant = struct { base: *Value, tag: u32 };
+pub const BorrowVariant = struct { base: *Value, tag: u32 };
 
 // ---------------------------------------------------------------------------
 // Op schema (ir.md §5, §13) — the single machine-readable contract
@@ -513,6 +520,11 @@ pub fn opInfo(tag: OpTag) OpInfo {
         .split_list => .{ .text = "split_list", .arity = .one, .consumes = .op0, .created = .owned, .may_trap = true, .effects = false, .multi = true },
         .read_tag => .{ .text = "read_tag", .arity = .one, .consumes = .none, .created = .owned, .may_trap = false, .effects = false },
         .read_payload => .{ .text = "read_payload", .arity = .one, .consumes = .none, .created = .operand, .may_trap = false, .effects = false },
+        // `borrow_variant` mirrors `read_payload` but multi-result: the
+        // base is not consumed (`.consumes = .none`); each result's state
+        // follows its payload type (Copy -> owned copy, unique -> borrowed)
+        // via `.created = .operand`.
+        .borrow_variant => .{ .text = "borrow_variant", .arity = .one, .consumes = .none, .created = .operand, .may_trap = false, .effects = false, .multi = true },
 
         // calls (§8)
         .call => .{ .text = "call", .arity = .nary, .consumes = .none, .created = .owned, .may_trap = true, .effects = true },
@@ -536,6 +548,7 @@ pub fn originOf(op: Op) ?BorrowOrigin {
         .read_field, .read_tuple => |p| .{ .root = p.base },
         .read_index => |p| .{ .root = p.base },
         .read_payload => |p| .{ .root = p },
+        .borrow_variant => |b| .{ .root = b.base },
         .tail => |v| .{ .root = v },
         .load_member => |lm| .{ .root = lm.module },
         .syscall => |sc| if (sc.target == .builtin and sc.target.builtin == .peek) .peek else null,
@@ -879,6 +892,9 @@ pub fn rewriteUses(f: *IrFunc, from: *Value, to: *Value) void {
             },
             .unpack_variant => |*uv| {
                 if (uv.base == from) uv.base = to;
+            },
+            .borrow_variant => |*bv| {
+                if (bv.base == from) bv.base = to;
             },
             .type_is => |*x| {
                 if (x.value == from) x.value = to;

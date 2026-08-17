@@ -240,6 +240,11 @@ fn printInstr(out: *std.ArrayList(u8), allocator: std.mem.Allocator, types: []co
             try printOperand(out, allocator, uv.base);
             try w(out, allocator, ", #{d}", .{uv.tag});
         },
+        .borrow_variant => |bv| {
+            try w(out, allocator, "borrow_variant ", .{});
+            try printOperand(out, allocator, bv.base);
+            try w(out, allocator, ", #{d}", .{bv.tag});
+        },
         .type_is => |ti| {
             try w(out, allocator, "type_is ", .{});
             try printOperand(out, allocator, ti.value);

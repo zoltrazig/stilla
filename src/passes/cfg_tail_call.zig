@@ -291,6 +291,7 @@ fn instrUses(instr: *const cfg.Instr, v: *const cfg.Value) bool {
     return switch (instr.op) {
         .neg, .not_, .num_cast, .any_pack_copy, .any_pack_move, .any_unpack_copy, .any_unpack_move, .cleanup_owner, .cleanup_disable, .drop_cleanup, .copy, .borrow, .move_, .tail, .unpack_struct, .unpack_tuple, .split_list, .read_tag, .read_payload, .drop_ => |x| x == v,
         .unpack_variant => |uv| uv.base == v,
+        .borrow_variant => |bv| bv.base == v,
         .type_is => |x| x.value == v,
         .add, .sub, .mul, .div, .rem, .concat, .eq, .ne, .lt, .le, .gt, .ge => |x| x.a == v or x.b == v,
         .load_member => |x| x.module == v,
@@ -539,6 +540,7 @@ fn rewriteInstr(instr: *cfg.Instr, renames: *const std.AutoHashMap(*cfg.Value, *
             v.* = renames.get(v.*) orelse v.*;
         },
         .unpack_variant => |*uv| uv.base = renames.get(uv.base) orelse uv.base,
+        .borrow_variant => |*bv| bv.base = renames.get(bv.base) orelse bv.base,
         .type_is => |*x| x.value = renames.get(x.value) orelse x.value,
         .add, .sub, .mul, .div, .rem, .concat, .eq, .ne, .lt, .le, .gt, .ge => |*x| {
             x.a = renames.get(x.a) orelse x.a;

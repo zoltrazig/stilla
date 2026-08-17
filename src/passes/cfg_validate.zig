@@ -336,6 +336,7 @@ fn operand0(op: cfg.Op) ?*const cfg.Value {
     return switch (op) {
         .neg, .not_, .num_cast, .any_pack_copy, .any_pack_move, .any_unpack_copy, .any_unpack_move, .cleanup_owner, .cleanup_disable, .drop_cleanup, .copy, .borrow, .move_, .tail, .unpack_struct, .unpack_tuple, .split_list, .read_tag, .read_payload, .drop_ => |v| v,
         .unpack_variant => |uv| uv.base,
+        .borrow_variant => |bv| bv.base,
         .type_is => |x| x.value,
         .load_member => |x| x.module,
         .read_field, .read_tuple => |x| x.base,
@@ -613,6 +614,17 @@ fn checkInstr(
                 return msg(allocator, "function @{s}: unpack_variant of borrowed value %{d} in block '{s}' (Core §10.7)", .{ f.name.text, uv.base.id, b.name });
             }
         },
+        // `borrow_variant` does not consume its base (it reads the payloads
+        // of the switch-dispatched variant), so the base may be owned or
+        // borrowed; the base must be a nominal union, and the payload arity
+        // of a multi-payload projection is carried only as result count
+        // (the variant's payload types are not in the IR — ir.md §13 gap
+        // note; the checker guarantees them at the source boundary).
+        .borrow_variant => |bv| {
+            if (bv.base.type_ != .named) {
+                return typeErr(allocator, f, b, "borrow_variant", bv.base.type_);
+            }
+        },
         .read_tag => |v| {
             _ = v;
             if (instr.results[0].type_ != .primitive or instr.results[0].type_.primitive != .uint32) {
@@ -706,7 +718,7 @@ fn checkTerminator(f: *const cfg.IrFunc, b: *const cfg.BasicBlock, dom: [][]bool
 fn valueOperandCount(op: cfg.Op) usize {
     return switch (op) {
         .const_, .module_ref, .fn_ref => 0,
-        .neg, .not_, .num_cast, .any_pack_copy, .any_pack_move, .any_unpack_copy, .any_unpack_move, .cleanup_owner, .cleanup_disable, .drop_cleanup, .copy, .borrow, .move_, .tail, .unpack_struct, .unpack_tuple, .unpack_variant, .split_list, .read_tag, .read_payload, .drop_ => 1,
+        .neg, .not_, .num_cast, .any_pack_copy, .any_pack_move, .any_unpack_copy, .any_unpack_move, .cleanup_owner, .cleanup_disable, .drop_cleanup, .copy, .borrow, .move_, .tail, .unpack_struct, .unpack_tuple, .unpack_variant, .borrow_variant, .split_list, .read_tag, .read_payload, .drop_ => 1,
         .type_is => 1,
         .load_member => 1,
         .store_member => 1,
@@ -727,6 +739,7 @@ fn collectOperands(instr: *const cfg.Instr, allocator: std.mem.Allocator) ![]*co
     switch (instr.op) {
         .neg, .not_, .num_cast, .any_pack_copy, .any_pack_move, .any_unpack_copy, .any_unpack_move, .cleanup_owner, .cleanup_disable, .drop_cleanup, .copy, .borrow, .move_, .tail, .unpack_struct, .unpack_tuple, .split_list, .read_tag, .read_payload, .drop_ => |v| try out.append(allocator, v),
         .unpack_variant => |uv| try out.append(allocator, uv.base),
+        .borrow_variant => |bv| try out.append(allocator, bv.base),
         .type_is => |x| try out.append(allocator, x.value),
         .load_member => |x| try out.append(allocator, x.module),
         .store_member => |x| try out.append(allocator, x.value),

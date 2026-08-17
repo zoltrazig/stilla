@@ -151,6 +151,7 @@ fn rewriteInstr(instr: *cfg.Instr, fwd: *const std.AutoHashMap(*cfg.Value, *cfg.
             v.* = resolve(fwd, v.*);
         },
         .unpack_variant => |*uv| uv.base = resolve(fwd, uv.base),
+        .borrow_variant => |*bv| bv.base = resolve(fwd, bv.base),
         .type_is => |*x| x.value = resolve(fwd, x.value),
         .add, .sub, .mul, .div, .rem, .concat, .eq, .ne, .lt, .le, .gt, .ge => |*x| {
             x.a = resolve(fwd, x.a);
