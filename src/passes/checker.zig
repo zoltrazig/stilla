@@ -137,6 +137,13 @@ pub const Frame = struct {
     ma: *ModuleAnnotation,
     resolve: moduleinfo.Resolve,
     scope: *Scope,
+    /// The goal type of the value currently being inferred (Core §11): a
+    /// declared `let` type, a function's return type, or a match-arm /
+    /// branch result. A union/struct construction whose type arguments
+    /// cannot be inferred from its payloads alone fills the unbound ones
+    /// from this expected type (`Result::Break(r)` inside a function
+    /// returning `Result[S,R]`). `null` when there is no goal.
+    expect: ?cfg.Type = null,
 };
 
 /// Whether a value of type `t` is owned (not Copy): unique types are

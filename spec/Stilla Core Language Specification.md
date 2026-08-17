@@ -125,10 +125,10 @@ These terms are used throughout the specification.
 - **module** — a source file compiled into one implicit immutable struct value (Files, Modules, and Namespaces).
 - **module value / module-resident** — a value of a compiler-generated module type; it may appear only in module-level `const` bindings (Module values are module-scope only).
 - **binding** — a name bound to an immutable value. `let` creates local bindings (Bindings); `const` creates module constants (Module Constants).
-- **Copy** — a capability held by some types: a Copy value may be implicitly copied, such as `int32` or `str`; dropping a Copy value does nothing (Copy capability).
-- **unique** — a value without the Copy capability: it may be used at most once and must be destroyed exactly once; it is not implicitly copyable (Unique values).
+- **Copy** — a capability held by some types: a *Copy* value may be implicitly copied, such as `int32` or `str`; dropping a *Copy* value does nothing (*Copy* capability).
+- **unique** — a value without the *Copy* capability: it may be used at most once and must be destroyed exactly once; it is not implicitly copyable (*Unique* values).
 - **owner** — a binding or location that holds a value; every value has ownership (Ownership).
-- **maybe-unique** — a unique binding released on some but not all normal paths through a conditional construct; it is unusable after the join, and its destruction is guarded by an implementation-maintained liveness state (Conditional release).
+- **maybe-unique** — a *Unique* binding released on some but not all normal paths through a conditional construct; it is unusable after the join, and its destruction is guarded by an implementation-maintained liveness state (Conditional release).
 - **borrow** — a non-owning, read-only view of a value; it never transfers ownership (Parameter modes).
 - **move** — explicit ownership transfer of a complete local owner (Ownership transfer with `move`).
 - **drop** — deterministic destruction: a user `drop` hook (`drop` lifecycle declaration), an explicit `drop` statement (Explicit destruction), or automatic destruction when a scope ends (Automatic destruction).
@@ -140,7 +140,7 @@ These terms are used throughout the specification.
 - **full expression** — an expression that is not a subexpression of a
   larger expression: a statement-level expression, a binding or constant
   initializer, an argument, a field initializer, a match-arm body, or a
-  block's final expression. Unique temporaries are destroyed at the end
+  block's final expression. *Unique* temporaries are destroyed at the end
   of the innermost enclosing full expression (the Runtime specification).
 
 Runtime-side terms (execution context, module storage, teardown, host) are defined in the Runtime specification.
@@ -544,12 +544,12 @@ It may not reference a later module constant.
 
 A module constant initializer must not transitively call a function that reads a module constant declared later than the initializer; such a program is rejected at compile time. This preserves the guarantee that module constants are read only after initialization (the Runtime specification).
 
-A unique non-module constant is owned by the module execution context. It cannot be explicitly moved or explicitly dropped by source code and is destroyed during normal module/context teardown (the Runtime specification).
+A *Unique* non-module constant is owned by the module execution context. It cannot be explicitly moved or explicitly dropped by source code and is destroyed during normal module/context teardown (the Runtime specification).
 
 The initialization-order restriction applies symmetrically at teardown:
-teardown destroys unique constants in **reverse** declaration order
+teardown destroys *Unique* constants in **reverse** declaration order
 (the Runtime specification), so a later constant is already destroyed when an earlier
-constant's `drop` hook runs. A unique module constant whose type defines a
+constant's `drop` hook runs. A *Unique* module constant whose type defines a
 `drop` hook — the hook and every function it transitively calls — must
 not read a module constant declared later than the constant being
 destroyed; such a program is rejected at compile time.
@@ -714,7 +714,7 @@ Functions and lambdas are **order-independent** within the module in which they 
 
 Every function participating in a recursion cycle — direct or mutual — must declare its return type explicitly (Return values).
 
-A function type is a finite code-reference type. A struct or union may contain a function field whose type mentions the enclosing type; the function type breaks the storage cycle (Recursive types) and does not make the enclosing type unique on that account (Composite ownership).
+A function type is a finite code-reference type. A struct or union may contain a function field whose type mentions the enclosing type; the function type breaks the storage cycle (Recursive types) and does not make the enclosing type *Unique* on that account (Composite ownership).
 
 ---
 
@@ -924,8 +924,8 @@ The argument visible inside a `drop` hook is a special borrowed **destruction vi
 
 A destruction view may:
 
-- read Copy fields;
-- borrow unique fields;
+- read *Copy* fields;
+- borrow *Unique* fields;
 - apply `builtin.peek` to a boxed field;
 - access ordinary members;
 - call functions whose relevant parameters are declared `borrow` (Parameter modes);
@@ -943,7 +943,7 @@ Partial movement from a destruction view is forbidden.
 
 ## 9.3 Destruction order
 
-The order in which a struct value is destroyed at runtime is defined in the Runtime specification: the user `drop` hook runs first, then unique fields are destroyed in reverse declaration order, then the complete value is marked destroyed.
+The order in which a struct value is destroyed at runtime is defined in the Runtime specification: the user `drop` hook runs first, then *Unique* fields are destroyed in reverse declaration order, then the complete value is marked destroyed.
 
 ## 9.4 Explicit destruction
 
@@ -987,15 +987,15 @@ The destruction sequence performed by an explicit `drop` at runtime is defined i
 
 ## 9.5 Automatic destruction
 
-During normal control flow, a unique local owner that has not been moved or explicitly dropped is automatically destroyed when its scope ends.
+During normal control flow, a *Unique* local owner that has not been moved or explicitly dropped is automatically destroyed when its scope ends.
 
 The destruction order — reverse creation order — is defined in the Runtime specification.
 
 ## 9.6 Structural destruction
 
-Values containing unique components are destroyed structurally.
+Values containing *Unique* components are destroyed structurally.
 
-The precise ordering for each container form — struct fields, tuple elements, list elements, union payloads, `box[T]`, and module-owned unique constants — and the rule that only the active union variant is destroyed, are defined in the Runtime specification.
+The precise ordering for each container form — struct fields, tuple elements, list elements, union payloads, `box[T]`, and module-owned *Unique* constants — and the rule that only the active union variant is destroyed, are defined in the Runtime specification.
 
 ---
 
@@ -1012,11 +1012,11 @@ In addition, the type checker tracks non-owning **borrowed views** of values.
 
 A borrow is never an owner and never participates in destruction.
 
-This section states the static (compile-time) ownership model. Every value has ownership: some types have the **Copy** capability (Copy capability), and a value without Copy is **unique** (Unique values). The timing of runtime destruction — scope exit, full-expression temporaries, and module teardown — is defined in the Runtime specification.
+This section states the static (compile-time) ownership model. Every value has ownership: some types have the **Copy** capability (*Copy* capability), and a value without *Copy* is **unique** (*Unique* values). The timing of runtime destruction — scope exit, full-expression temporaries, and module teardown — is defined in the Runtime specification.
 
-## 10.1 Copy capability
+## 10.1 *Copy* capability
 
-Typical Copy values include:
+Typical *Copy* values include:
 
 ```text
 byte
@@ -1029,42 +1029,42 @@ void
 fn(...)
 ```
 
-A Copy value may be copied implicitly.
+A *Copy* value may be copied implicitly.
 
-Copy is a capability: a Copy value may be copied implicitly; a value without Copy is unique (Unique values); `drop` of a Copy value does nothing.
+*Copy* is a capability: a *Copy* value may be copied implicitly; a value without *Copy* is *Unique* (*Unique* values); `drop` of a *Copy* value does nothing.
 
 Immutable strings may use reference-counted sharing.
 
 All first-class function values are monomorphic (Generics).
 
-The top type `any` is **not** Copy: because it may hold a value of any type — including a unique value — `any` is always unique (The top type `any`). The type `hostdata` is **not** Copy: it wraps a host-owned opaque payload and is always unique (The `hostdata` type).
+The top type `any` is **not** *Copy*: because it may hold a value of any type — including a *Unique* value — `any` is always *Unique* (The top type `any`). The type `hostdata` is **not** *Copy*: it wraps a host-owned opaque payload and is always *Unique* (The `hostdata` type).
 
-## 10.2 Unique values
+## 10.2 *Unique* values
 
-A value is unique if:
+A value is *Unique* if:
 
 - its named struct type defines `drop`; or
-- one of its owned components is unique.
+- one of its owned components is *Unique*.
 
-Unique values cannot be implicitly copied.
+*Unique* values cannot be implicitly copied.
 
-A unique owner may be:
+A *Unique* owner may be:
 
 - borrowed any number of times;
 - moved at most once;
 - destroyed at most once.
 
-Use after move or destruction is a compile-time error. A Copy owner is exempt: it may be used, moved, and destroyed any number of times, and `drop` of a Copy value has no effect. The implementation may analyse whether a binding could be a simple Copy (passed by value) and reduce it to a simple value when compiled.
+Use after move or destruction is a compile-time error. A *Copy* owner is exempt: it may be used, moved, and destroyed any number of times, and `drop` of a *Copy* value has no effect. The implementation may analyse whether a binding could be a simple *Copy* (passed by value) and reduce it to a simple value when compiled.
 
 ## 10.3 Composite ownership
 
 Ownership classification is structural.
 
-For example, `tuple[A, B]` is unique if either `A` or `B` is unique.
+For example, `tuple[A, B]` is *Unique* if either `A` or `B` is *Unique*.
 
-A union is unique if any variant payload can contain a unique value.
+A union is *Unique* if any variant payload can contain a *Unique* value.
 
-The top type `any` is unique for the same structural reason: it may hold a value of any type, including a unique value (The top type `any`).
+The top type `any` is *Unique* for the same structural reason: it may hold a value of any type, including a *Unique* value (The top type `any`).
 
 For containers:
 
@@ -1073,30 +1073,31 @@ list[T]
 box[T]
 ```
 
-the container is Copy if `T` is Copy and unique if `T` is unique.
+the container is *Copy* if `T` is *Copy* and *Unique* if `T` is *Unique*.
 
-An implementation may use reference-counted sharing for Copy `list[T]` and `box[T]`.
+An implementation may use reference-counted sharing for *Copy* `list[T]` and `box[T]`.
 
-A non-Copy list or box has unique source-language ownership.
+A non-*Copy* list or box has *Unique* source-language ownership.
 
 **Recursive classification.** The rules of **Copy capability** and **Unique values** define a monotone system of equations over
 types. For a type whose type graph is cyclic, the equations have multiple solutions; Stilla v1.3
-resolves the ambiguity to the **greatest fixpoint**. A recursive occurrence reached through an owned
-component is classified as unique. A type is Copy only if its classification is well-founded
-without treating any recursive back-edge as unique.
+resolves the ambiguity to the **least fixpoint**: a recursive occurrence reached through an owned
+component is classified as *Unique*. A type is *Copy* only if its classification is well-founded
+without relying on any recursive back-edge — the back-edge must not be needed to establish
+*Copy*-ness (as it would be for `Tree` below).
 
 Consequences:
 
 - A recursive type with no `drop` hook, such as `Tree` in **Named unions**, is **unique**: it cannot be
-  copied implicitly, and `box[Tree]` / `list[Tree]` are unique containers.
-- The reference-counting sharing freedom of this section applies only to Copy containers,
+  copied implicitly, and `box[Tree]` / `list[Tree]` are *Unique* containers.
+- The reference-counting sharing freedom of this section applies only to *Copy* containers,
   which under this rule are never recursive.
-- A function type is not an owned component: it contains no payload and is always Copy
-  (Copy capability). A type cycle that passes only through function types — for example
-  `struct F { call: fn(F) -> int32 }` — does not make the type unique and is not recursive storage
+- A function type is not an owned component: it contains no payload and is always *Copy*
+  (*Copy* capability). A type cycle that passes only through function types — for example
+  `struct F { call: fn(F) -> int32 }` — does not make the type *Unique* and is not recursive storage
   (Recursive types).
 
-Implementations must resolve the classification to the greatest fixpoint; the choice is observable
+Implementations must resolve the classification to the least fixpoint; the choice is observable
 (Ownership transfer with `move`) and is therefore normative. A worklist algorithm over the strongly connected components of
 the type graph is a conforming method.
 
@@ -1134,9 +1135,9 @@ Syntactically, `move` names a complete local binding.
 
 To extract owned components, the complete owner must first be consumed by destructuring (Ownership and destructuring).
 
-## 10.5 Fresh unique values
+## 10.5 Fresh *Unique* values
 
-A freshly produced unique value already carries fresh ownership and has no existing local owner to invalidate.
+A freshly produced *Unique* value already carries fresh ownership and has no existing local owner to invalidate.
 
 Therefore:
 
@@ -1167,11 +1168,11 @@ fn add_one(x: int32) -> int32 {
 }
 ```
 
-A plain parameter accepts only a Copy argument type. The argument is passed by ordinary value semantics and may be copied.
+A plain parameter accepts only a *Copy* argument type. The argument is passed by ordinary value semantics and may be copied.
 
-Passing a unique value to a plain parameter is a compile-time error.
+Passing a *Unique* value to a plain parameter is a compile-time error.
 
-The top type `any` is the sole exception (The top type `any`): a plain parameter of type `any` accepts any argument type. A Copy argument is coerced into the `any` and may be copied; a unique argument must be written with explicit `move` at the call site, and its ownership transfers into the `any`.
+The top type `any` is the sole exception (The top type `any`): a plain parameter of type `any` accepts any argument type. A *Copy* argument is coerced into the `any` and may be copied; a *Unique* argument must be written with explicit `move` at the call site, and its ownership transfers into the `any`.
 
 ### Borrow parameters
 
@@ -1194,7 +1195,7 @@ inspect(file);
 
 The caller remains the owner. A `borrow` parameter may receive an owned value or another compatible borrowed view.
 
-Inside the callee, a borrowed unique value may be read, matched non-consumingly, have members read, and be passed to another compatible `borrow` parameter.
+Inside the callee, a borrowed *Unique* value may be read, matched non-consumingly, have members read, and be passed to another compatible `borrow` parameter.
 
 It may not be moved, explicitly dropped, returned as an owned value, or stored into an owning location.
 
@@ -1210,21 +1211,21 @@ fn consume(move file: File) -> void {
 
 A `move` parameter is an owner inside the callee.
 
-An existing unique local owner must be transferred explicitly:
+An existing *Unique* local owner must be transferred explicitly:
 
 ```stilla
 consume(move file);
 ```
 
-A fresh unique expression transfers implicitly:
+A fresh *Unique* expression transfers implicitly:
 
 ```stilla
 consume(open_file("data.txt"));
 ```
 
-Calling an ownership-taking parameter with an existing unique owner without `move` is a compile-time error.
+Calling an ownership-taking parameter with an existing *Unique* owner without `move` is a compile-time error.
 
-For Copy types, `move` is semantically equivalent to an ordinary copy: it has no observable ownership effect, does not invalidate the source binding, and may be omitted.
+For *Copy* types, `move` is semantically equivalent to an ordinary copy: it has no observable ownership effect, does not invalidate the source binding, and may be omitted.
 
 Function types preserve parameter mode:
 
@@ -1252,7 +1253,7 @@ Stilla v1.3 does not provide general user-visible lifetime parameters.
 
 Borrow lifetimes are intentionally restricted so they can be checked lexically.
 
-User-defined functions may not return a borrowed unique value in v1.3.
+User-defined functions may not return a borrowed *Unique* value in v1.3.
 
 ## 10.8 Box borrowing and unboxing
 
@@ -1272,9 +1273,9 @@ builtin.unbox(move boxed)
 
 `builtin.peek(boxed)` creates a transient borrowed view of the contained `T`.
 
-For Copy `T`, the value may be copied normally.
+For *Copy* `T`, the value may be copied normally.
 
-For unique `T`, the borrowed result:
+For *Unique* `T`, the borrowed result:
 
 - may have members read;
 - may be matched non-consumingly;
@@ -1307,23 +1308,23 @@ fn contains(borrow tree: Tree, v: int32) -> bool {
 
 Partial movement through a borrowed box is forbidden.
 
-## 10.9 Unique temporaries
+## 10.9 *Unique* temporaries
 
-When a unique temporary is destroyed at runtime — at the end of the containing full expression, in reverse creation order, unless interrupted by panic — is defined in the Runtime specification.
+When a *Unique* temporary is destroyed at runtime — at the end of the containing full expression, in reverse creation order, unless interrupted by panic — is defined in the Runtime specification.
 
 ## 10.10 Conditional release
 
 A **conditional construct** is an `if`/`else` expression (`if`), a `match` expression (`match`), or a short-circuit `and`/`or` operand (Evaluation order).
 
-Let `v` be a unique local binding whose scope encloses a conditional construct `C`. If any normal-control-flow path through `C` **releases** `v` — by `move` (Ownership transfer with `move`), explicit `drop` (Explicit destruction), or a consuming destructure of its whole owner (Ownership and destructuring) — and some other normal path does not, then `v` is **maybe-unique**: it may not be used, borrowed, moved, or dropped afterward (compile-time error, use-after-move; see **Unique values**), and its scope-end destruction is conditional — the implementation tracks at runtime whether the binding was already released and destroys it only if it is still alive.
+Let `v` be a *Unique* local binding whose scope encloses a conditional construct `C`. If any normal-control-flow path through `C` **releases** `v` — by `move` (Ownership transfer with `move`), explicit `drop` (Explicit destruction), or a consuming destructure of its whole owner (Ownership and destructuring) — and some other normal path does not, then `v` is **maybe-unique**: it may not be used, borrowed, moved, or dropped afterward (compile-time error, use-after-move; see **Unique values**), and its scope-end destruction is conditional — the implementation tracks at runtime whether the binding was already released and destroys it only if it is still alive.
 
-Consequently, after a conditional construct `C`, every unique binding whose scope encloses `C` is either **definitely owned**, **maybe-unique**, or **definitely released**:
+Consequently, after a conditional construct `C`, every *Unique* binding whose scope encloses `C` is either **definitely owned**, **maybe-unique**, or **definitely released**:
 
 - a definitely-owned binding behaves normally: it may be borrowed, moved, dropped, or automatically destroyed at scope end;
-- a maybe-unique binding is released on some but not all normal-control-flow paths: it may not be used, borrowed, moved, or dropped afterward, and its scope-end destruction is conditional — the implementation tracks whether the binding was already released and destroys it only if it is still alive;
+- a maybe-*Unique* binding is released on some but not all normal-control-flow paths: it may not be used, borrowed, moved, or dropped afterward, and its scope-end destruction is conditional — the implementation tracks whether the binding was already released and destroys it only if it is still alive;
 - a definitely-released binding was released on every normal path: it may not be used, borrowed, moved, or dropped afterward, and is not automatically destroyed at scope end; any such use is a compile-time error (use-after-move; see **Unique values**).
 
-For a maybe-unique binding, the runtime liveness flag is introduced only when the implementation cannot statically establish that the binding was released on every path (e.g. a binding released in one arm of an `if` but not the other).
+For a maybe-*Unique* binding, the runtime liveness flag is introduced only when the implementation cannot statically establish that the binding was released on every path (e.g. a binding released in one arm of an `if` but not the other).
 
 Notes:
 
@@ -1337,24 +1338,24 @@ Notes:
 transferred implicitly in **consuming positions** — positions that require
 an owned value:
 
-- a move-mode call argument — a fresh unique expression transfers
+- a move-mode call argument — a fresh *Unique* expression transfers
   directly; an existing local owner requires `move` (Parameter modes);
-- a struct, union-variant, tuple, or list literal slot — a fresh unique
+- a struct, union-variant, tuple, or list literal slot — a fresh *Unique*
   expression is owned by the constructed value; an existing local owner
   requires `move`;
-- a `let` binding with an identifier pattern — a fresh unique expression
+- a `let` binding with an identifier pattern — a fresh *Unique* expression
   is owned by the new binding; an existing local owner requires `move`;
-- a function's final expression when the return type is unique — the
+- a function's final expression when the return type is *Unique* — the
   value is returned by ownership, and an existing local owner in final
   position transfers implicitly, because the binding ends with the
   return (Return values);
-- a coercion of a unique value to `any` — the pack consumes the source
+- a coercion of a *Unique* value to `any` — the pack consumes the source
   (The top type `any`).
 
-In every consuming position, an existing unique local owner is
-transferred only with an explicit `move`; a fresh unique expression
-transfers implicitly (Fresh unique values); and a borrowed value never transfers
-(Borrow lifetime rule). Storing an existing unique owner without `move` is a compile-time
+In every consuming position, an existing *Unique* local owner is
+transferred only with an explicit `move`; a fresh *Unique* expression
+transfers implicitly (Fresh *Unique* values); and a borrowed value never transfers
+(Borrow lifetime rule). Storing an existing *Unique* owner without `move` is a compile-time
 error (Formal Static Semantics, *Ownership*).
 
 ---
@@ -1379,7 +1380,9 @@ Option[int32]::Some(42)
 Option[int32]::None
 ```
 
-When type arguments are inferable from context, they may be omitted:
+When type arguments are inferable from context — from the payloads, or
+from the expected instantiation of the same declaration (Inferred
+specialization) — they may be omitted:
 
 ```stilla
 let x: Option[int32] =
@@ -1438,7 +1441,7 @@ Recursive inline storage is forbidden.
 
 Every recursive storage cycle must pass through indirection such as `box[T]`, `list[T]`, or a function type (Composite ownership).
 
-The unique classification of recursive types follows the greatest-fixpoint rule of **Composite ownership**.
+The *Unique* classification of recursive types follows the least-fixpoint rule of **Composite ownership**.
 
 ## 11.4 Tuple
 
@@ -1455,7 +1458,7 @@ Literal:
 ```
 
 A tuple type has **at least one element**: `tuple[]` is not a type — the
-empty tuple `()` is the unique `void` value. A single-element tuple type
+empty tuple `()` is the sole `void` value. A single-element tuple type
 `tuple[int32]` is valid and distinct from `int32`; its literal is written
 `(42,)` (Grammar `paren-or-tuple`).
 
@@ -1481,7 +1484,7 @@ Indexing uses the `@[...]` syntax and does not mutate a list:
 let first = values@[0];
 ```
 
-An indexed unique element is borrowed and cannot be independently moved.
+An indexed *Unique* element is borrowed and cannot be independently moved.
 
 `list[T]` is the language's abstract sequence type. Concrete dense sequences such as `array[T]` are standard-library types, not keywords.
 
@@ -1501,18 +1504,18 @@ let b: any = "hello";               // Copy str, copied in
 let c: any = open_file("f");        // unique File, moved in (fresh value)
 ```
 
-The coercion is implicit. A Copy source value is copied into the `any`; a
-unique source value must be moved — an existing unique owner requires
-explicit `move` at the coercion site, while a fresh unique expression
-transfers implicitly (Fresh unique values) — and its ownership transfers into the `any`.
+The coercion is implicit. A *Copy* source value is copied into the `any`; a
+*Unique* source value must be moved — an existing *Unique* owner requires
+explicit `move` at the coercion site, while a fresh *Unique* expression
+transfers implicitly (Fresh *Unique* values) — and its ownership transfers into the `any`.
 
-`any` is **unique** (Composite ownership): because it may hold a unique value, an `any` value may be used at most once, must be destroyed exactly once, and is not implicitly copyable. `any` therefore does not appear in the Copy list of **Copy capability**, and containers of `any` — `list[any]`, `box[any]`, `tuple[..., any]` — are unique.
+`any` is **unique** (Composite ownership): because it may hold a *Unique* value, an `any` value may be used at most once, must be destroyed exactly once, and is not implicitly copyable. `any` therefore does not appear in the *Copy* list of **Copy capability**, and containers of `any` — `list[any]`, `box[any]`, `tuple[..., any]` — are *Unique*.
 
 An `any` value carries a **runtime type tag** recording its concrete payload type (the Runtime specification). The tag is deterministic and comparable; Stilla inspects it only through the two typed-recovery operations of **Recovery by `as`** and **Recovery by `match`**. No member access, indexing, operator, or equality is defined on `any` (Core operator typing and numeric conversion), and `any` does not coerce to any other type (Formal Static Semantics, *Typing*). Destruction of an `any` value destroys the tagged payload by the payload type's own destruction rules (Core specification, Runtime specification).
 
 The primary uses are:
 
-- **heterogeneous data** — unique containers such as `box[any]` and `list[any]` can carry values of different types together;
+- **heterogeneous data** — *Unique* containers such as `box[any]` and `list[any]` can carry values of different types together;
 - **typed recovery** — `as` (Recovery by `as`) and `match` type-test patterns (Recovery by `match`) recover a payload as a specific type, trapping on mismatch;
 - **opaque pass-through** — a Stilla program may receive, store, and forward `any` values without inspecting them.
 
@@ -1531,8 +1534,8 @@ The target type `T` must be a concrete Stilla type other than `any` and `never`;
 
 Ownership follows the target type, statically:
 
-- if `T` is Copy (Copy capability), the payload is copied out and the source `any` remains definitely owned; the same value may be recovered again;
-- if `T` is unique, the source must be moved: `(move a) as T`. The complete `any` is consumed (Ownership transfer with `move`), ownership of the payload transfers to the result, and the source becomes definitely released (Conditional release);
+- if `T` is *Copy* (*Copy* capability), the payload is copied out and the source `any` remains definitely owned; the same value may be recovered again;
+- if `T` is *Unique*, the source must be moved: `(move a) as T`. The complete `any` is consumed (Ownership transfer with `move`), ownership of the payload transfers to the result, and the source becomes definitely released (Conditional release);
 - `hostdata` never appears in an `any` payload — it does not coerce to `any` (The top type `any`, The `hostdata` type) — so `as hostdata` is never a valid recovery.
 
 ## 11.6.2 Recovery by `match`
@@ -1554,8 +1557,8 @@ A type-test pattern is a concrete type name, optionally followed by a binding id
 
 Binding mode follows **Borrowing and consuming matches**:
 
-- in a non-consuming match `match (a)`, the scrutinee is borrowed: arm bindings are copies of Copy payloads, and a unique payload cannot be extracted from a borrowed `any` — recovering a unique payload requires the consuming form, `match (move a)`;
-- in a consuming match `match (move a)`, the complete `any` is transferred: Copy arm bindings are copies, unique arm bindings are owners of the extracted payload, and the wildcard arm discards the payload.
+- in a non-consuming match `match (a)`, the scrutinee is borrowed: arm bindings are copies of *Copy* payloads, and a *Unique* payload cannot be extracted from a borrowed `any` — recovering a *Unique* payload requires the consuming form, `match (move a)`;
+- in a consuming match `match (move a)`, the complete `any` is transferred: *Copy* arm bindings are copies, *Unique* arm bindings are owners of the extracted payload, and the wildcard arm discards the payload.
 
 Type-test patterns may reference generic parameters; under monomorphization (Generics) they resolve to concrete tags.
 
@@ -1567,15 +1570,15 @@ Only the host constructs `hostdata` values, through host functions and module me
 
 Stilla defines no operation on `hostdata` other than moving, borrowing, storing, passing along, and handing to the host. No member access, indexing, operator, cast, pattern, equality, or hash is defined on `hostdata`, and it coerces to no other type (Core operator typing and numeric conversion).
 
-`hostdata` is **unique** (Composite ownership): a `hostdata` value may be used at most once, must be destroyed exactly once, and is not implicitly copyable. `hostdata` does not appear in the Copy list of **Copy capability**, and containers of `hostdata` — `list[hostdata]`, `box[hostdata]`, `tuple[..., hostdata]` — are unique.
+`hostdata` is **unique** (Composite ownership): a `hostdata` value may be used at most once, must be destroyed exactly once, and is not implicitly copyable. `hostdata` does not appear in the *Copy* list of **Copy capability**, and containers of `hostdata` — `list[hostdata]`, `box[hostdata]`, `tuple[..., hostdata]` — are *Unique*.
 
 Destruction of a `hostdata` value — automatic (the Core specification), explicit `drop` (the Core specification), or container destruction — returns the opaque payload to the host for disposal (the Runtime specification); this is host cleanup, not execution of a Stilla `drop` hook.
 
 The primary uses are:
 
 - **host bindings** — host-provided functions and module members may accept and return `hostdata` for opaque payloads;
-- **opaque handles** — a host may hand a Stilla program a `hostdata` value wrapping a host-owned resource; Stilla tracks it with unique ownership and hands it back without inspecting it;
-- **host-bound buffering** — unique containers such as `box[hostdata]` and `list[hostdata]` can carry opaque payloads that a Stilla program collects and forwards to the host as a whole.
+- **opaque handles** — a host may hand a Stilla program a `hostdata` value wrapping a host-owned resource; Stilla tracks it with *Unique* ownership and hands it back without inspecting it;
+- **host-bound buffering** — *Unique* containers such as `box[hostdata]` and `list[hostdata]` can carry opaque payloads that a Stilla program collects and forwards to the host as a whole.
 
 ---
 
@@ -1637,10 +1640,16 @@ matched componentwise. A type argument is not recovered from the value of
 a generic named type: a parameter such as `a: Array[T]` (the Standard Library) carries `T` only inside the named type's argument list, and a value of
 that named type exposes no instantiation information, so `T` cannot be
 inferred there and must be written explicitly with `::[...]` (Explicit specialization).
-There is likewise no inference from an expected result type in v1.3: a
-generic call with no type-carrying argument — for example
-`hashmap.empty()` (the Standard Library) — requires explicit type
-arguments.
+There is likewise no inference from an expected result type for generic
+*function* calls in v1.3: a generic call with no type-carrying argument —
+for example `hashmap.empty()` (the Standard Library) — requires explicit
+type arguments. The one exception is **union-variant construction**: a
+variant constructor whose payloads leave some type parameter unconstrained
+fills it from the expected instantiation of the same union declaration —
+the enclosing function's return type, a `let` type annotation, or an
+`if`/`match` result goal. The Standard Library relies on this when
+`try_fold` writes `Result::Complete(..)` / `Result::Break(..)` against a
+`Result[S, R]` return type (the Standard Library).
 
 Conceptually:
 
@@ -1703,7 +1712,7 @@ let f = identity::[int32];
 fn(move int32) -> int32
 ```
 
-For a Copy `int32`, the `move` mode has no observable ownership effect, but
+For a *Copy* `int32`, the `move` mode has no observable ownership effect, but
 it remains part of the function type.
 
 Generic functions stored in modules follow the same rule: `module.generic_name` may participate in compile-time call inference or explicit specialization, but only a concrete specialization becomes a runtime function value.
@@ -1826,7 +1835,7 @@ int32 n           // type-test pattern (Recovery by `match`, Type-test pattern)
 
 ## 13.4 Borrowing and consuming matches
 
-Matching a unique owner normally borrows it:
+Matching a *Unique* owner normally borrows it:
 
 ```stilla
 match (value) {
@@ -1834,7 +1843,7 @@ match (value) {
 }
 ```
 
-Unique pattern bindings produced by such a match are borrowed for the lifetime of the selected match arm.
+*Unique* pattern bindings produced by such a match are borrowed for the lifetime of the selected match arm.
 
 They may be read or passed to `borrow` parameters, but they are not owners.
 
@@ -1848,7 +1857,7 @@ match (move value) {
 
 the complete value is transferred into the match operation.
 
-Unique payload bindings then become owners within the selected arm.
+*Unique* payload bindings then become owners within the selected arm.
 
 This never performs a partial move from the original binding: the original binding is invalidated as a whole.
 
@@ -1860,7 +1869,8 @@ A conforming implementation **must** reuse the caller's frame for a direct
 self-recursive call in tail position (tail-call optimization), so
 iteration expressed as self-recursion does not grow the stack. Mutual
 recursion and non-tail recursion may grow the stack, bounded by
-implementation-defined resources (the frontend performs this optimization; see `ir.md`).
+implementation-defined resources (the mid-level optimizer performs this
+optimization; see `ir.md` §14.7).
 
 ---
 
@@ -1955,7 +1965,7 @@ The rest binding receives the remaining list.
 
 ## 14.6 Ownership and destructuring
 
-Destructuring a unique rvalue transfers ownership into unique pattern bindings.
+Destructuring a *Unique* rvalue transfers ownership into *Unique* pattern bindings.
 
 Example:
 
@@ -1982,7 +1992,7 @@ is invalid.
 
 `first` and `second` are independent owners.
 
-This is the supported way to decompose unique aggregate ownership **when the aggregate type does not define its own `drop` hook**.
+This is the supported way to decompose *Unique* aggregate ownership **when the aggregate type does not define its own `drop` hook**.
 
 A struct that defines `drop` may be destructured only through a borrowing pattern. Consuming destructuring of such a struct is a compile-time error, because moving out its fields would conflict with the struct's own destruction lifecycle.
 
@@ -2007,7 +2017,7 @@ tuple[int32, str] t
 _              // the required wildcard for `any`
 ```
 
-The pattern is a concrete type name, optionally followed by a binding identifier. It matches when the runtime tag equals that type. It is refutable and is accepted only by `match` (`match`), and only for a scrutinee of type `any`. A test type with a unique payload may be bound only in a consuming match, `match (move a)` (Recovery by `match`). Under monomorphization (Generics) generic parameters resolve to concrete tags. A `match` over an `any` value must include a wildcard `_` arm (Recovery by `match`).
+The pattern is a concrete type name, optionally followed by a binding identifier. It matches when the runtime tag equals that type. It is refutable and is accepted only by `match` (`match`), and only for a scrutinee of type `any`. A test type with a *Unique* payload may be bound only in a consuming match, `match (move a)` (Recovery by `match`). Under monomorphization (Generics) generic parameters resolve to concrete tags. A `match` over an `any` value must include a wildcard `_` arm (Recovery by `match`).
 
 ---
 
@@ -2163,7 +2173,7 @@ Core arithmetic is defined as follows:
 - `< <= > >=` accept operands of the same numeric type;
 - `== !=` are required for `byte`, `int32`, `uint32`, `float32`, `bool`, and `str`.
 
-Integer `/` truncates toward zero. Integer `div` and `rem` by zero trap
+Integer `/` truncates toward zero. Integer `/` and `%` by zero trap
 (the Runtime specification). `int32` arithmetic traps on overflow; `uint32` arithmetic
 is performed modulo 2³² and never traps on overflow or underflow
 (the Runtime specification). Unary `-` on `int32` traps on the minimum value; on
@@ -2317,9 +2327,9 @@ runtime member, and requires its path to resolve.
 
 A match over a union must be exhaustive.
 
-A non-consuming match of a unique value borrows the scrutinee and produces borrowed unique bindings.
+A non-consuming match of a *Unique* value borrows the scrutinee and produces borrowed *Unique* bindings.
 
-Recovering a unique payload from an `any` requires a consuming match, `match (move a)` (Recovery by `match`).
+Recovering a *Unique* payload from an `any` requires a consuming match, `match (move a)` (Recovery by `match`).
 
 A `match (move owner)` consumes the complete owner and may produce owning payload bindings, except that a struct defining its own `drop` hook cannot be consumingly destructured into fields.
 
@@ -2331,7 +2341,7 @@ Refutable patterns are accepted only by `match` in Stilla v1.3.
 
 ## Ownership
 
-A unique owner may be borrowed any number of times, moved at most once, and destroyed at most once.
+A *Unique* owner may be borrowed any number of times, moved at most once, and destroyed at most once.
 
 Use after move or destruction is a compile-time error.
 
@@ -2339,8 +2349,8 @@ If a binding is released on some but not all normal paths through a conditional 
 
 Consuming positions (Implicit consumption positions): a struct, union-variant, tuple, or list
 literal slot, a `let` binding with an identifier pattern, and a move-mode
-call argument transfer ownership implicitly for a fresh unique expression;
-an existing unique local owner in any consuming position must be moved
+call argument transfer ownership implicitly for a fresh *Unique* expression;
+an existing *Unique* local owner in any consuming position must be moved
 with explicit `move`, and storing it without `move` is a compile-time
 error.
 
@@ -2356,32 +2366,32 @@ Consuming destructuring of a struct that defines its own `drop` hook is forbidde
 
 `borrow` never transfers ownership.
 
-A borrowed unique value cannot be moved, dropped, returned as owned, or stored into an owning location.
+A borrowed *Unique* value cannot be moved, dropped, returned as owned, or stored into an owning location.
 
-Borrow lifetimes are lexically bounded; Stilla v1.3 has no user-visible lifetime parameters and no user-defined borrowed unique return values.
+Borrow lifetimes are lexically bounded; Stilla v1.3 has no user-visible lifetime parameters and no user-defined borrowed *Unique* return values.
 
 ## Parameters
 
-A plain parameter accepts only Copy argument types.
+A plain parameter accepts only *Copy* argument types.
 
 The top type `any` is the sole exception (Parameter modes): a plain `any` parameter
-accepts any argument type — a Copy argument coerces into the `any`, and a
-unique argument must be written with explicit `move` at the call site,
+accepts any argument type — a *Copy* argument coerces into the `any`, and a
+*Unique* argument must be written with explicit `move` at the call site,
 with its ownership transferring into the `any`.
 
 A `borrow` parameter receives a non-owning view and leaves the caller's ownership unchanged.
 
 A `move` parameter receives ownership.
 
-Passing an existing unique local owner to a `move` parameter requires `move owner` at the call site.
+Passing an existing *Unique* local owner to a `move` parameter requires `move owner` at the call site.
 
-A fresh unique value may transfer directly without an explicit `move` token.
+A fresh *Unique* value may transfer directly without an explicit `move` token.
 
 ## Destruction
 
-Every live unique local owner is destroyed when its scope ends during normal control flow unless it has already been moved or explicitly dropped.
+Every live *Unique* local owner is destroyed when its scope ends during normal control flow unless it has already been moved or explicitly dropped.
 
-Unique temporaries are destroyed at the end of their full expression in reverse creation order during normal control flow (the Runtime specification).
+*Unique* temporaries are destroyed at the end of their full expression in reverse creation order during normal control flow (the Runtime specification).
 
 ## User drop hook
 
@@ -2393,7 +2403,7 @@ Its destruction-view argument cannot be moved, dropped, returned, or used to tra
 
 ## Structural destruction
 
-After a struct's user hook completes normally, unique fields are destroyed in reverse declaration order (the Runtime specification).
+After a struct's user hook completes normally, *Unique* fields are destroyed in reverse declaration order (the Runtime specification).
 
 ## Panic and traps
 
@@ -2411,13 +2421,13 @@ Unless explicitly stated otherwise, subexpressions are evaluated exactly once fr
 
 ## Recursion
 
-Recursive value types must contain indirection on every recursive storage cycle, and their ownership classification follows the greatest-fixpoint rule of **Composite ownership**.
+Recursive value types must contain indirection on every recursive storage cycle, and their ownership classification follows the least-fixpoint rule of **Composite ownership**.
 
 Iteration is expressed as self-recursion; a conforming implementation must reuse the caller's frame for a direct self-recursive call in tail position (**Iteration**; `ir.md`), so self-recursive iteration does not grow the stack. Mutual recursion and non-tail recursion may grow the stack, bounded by implementation-defined resources.
 
 ## Teardown
 
-A unique module constant whose type defines a `drop` hook must not read —
+A *Unique* module constant whose type defines a `drop` hook must not read —
 directly or through any transitively called function — a module constant
 declared later than the constant being destroyed, because teardown
 destroys constants in reverse declaration order and a later constant is

@@ -150,21 +150,41 @@ fn consume_fold_with[T, S, C](
 // Completing every element yields `Complete(final state)`. The list is
 // borrowed.
 //
-// Host binding: the body needs generic union-payload substitution
-// (`Result[S, R]`'s payload types are the type parameters), which the
-// structural frontend defers; the host implements the short-circuiting
-// walk.
+// Ordinary Stilla source: the recursive `match` walks the list and each
+// step's `Result` drives the short-circuit. The constructor's unbound
+// type arguments fill from the `Result[S, R]` return type (Core §11),
+// so no explicit `Result::[S, R]::…` is required.
 fn try_fold[T, S, R](
     borrow values: list[T],
     move state: S,
     step: fn(move S, borrow T) -> Result[S, R]
-) -> Result[S, R];
+) -> Result[S, R] {
+    match (values) {
+        [] => Result::Complete(move state),
+        [head, ..tail] => {
+            match (step(move state, head)) {
+                Result::Complete(s) => try_fold(tail, move s, step),
+                Result::Break(r) => Result::Break(move r)
+            }
+        }
+    }
+}
 
 // Short-circuiting left fold with a borrowed context passed to every
-// step call. Host binding (see `try_fold`).
+// step call (see `try_fold`).
 fn try_fold_with[T, S, R, C](
     borrow values: list[T],
     move state: S,
     borrow context: C,
     step: fn(move S, borrow C, borrow T) -> Result[S, R]
-) -> Result[S, R];
+) -> Result[S, R] {
+    match (values) {
+        [] => Result::Complete(move state),
+        [head, ..tail] => {
+            match (step(move state, context, head)) {
+                Result::Complete(s) => try_fold_with(tail, move s, context, step),
+                Result::Break(r) => Result::Break(move r)
+            }
+        }
+    }
+}

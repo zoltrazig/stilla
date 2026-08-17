@@ -465,7 +465,7 @@ test "moduleinfo ownershipOf handles recursive types through indirection" {
     // Core §11.3: recursion is legal only through indirection (box). Core
     // §10.3: a recursive type with no drop hook, such as `Tree`, is
     // unique — it cannot be copied implicitly, and box[Tree]/list[Tree]
-    // are unique containers (greatest fixpoint).
+    // are unique containers (least fixpoint).
     var t = try buildGraph("app", &.{
         .{
             "app",
@@ -479,6 +479,10 @@ test "moduleinfo ownershipOf handles recursive types through indirection" {
     const resolve = moduleinfo.resolveOf(t.graph);
     const app = t.graph.module("app").?;
     try testing.expectEqual(cfg.Ownership.unique, moduleinfo.ownershipOf(resolve, app, .{ .named = .{ .id = resolve.intern("app.Tree").?, .args = &.{} } }).?);
+    // box[Tree] / list[Tree] are unique containers of the recursive type.
+    var tree = cfg.Type{ .named = .{ .id = resolve.intern("app.Tree").?, .args = &.{} } };
+    try testing.expectEqual(cfg.Ownership.unique, moduleinfo.ownershipOf(resolve, app, .{ .box = &tree }).?);
+    try testing.expectEqual(cfg.Ownership.unique, moduleinfo.ownershipOf(resolve, app, .{ .list = &tree }).?);
     // A type cycle that passes only through function types is Copy
     // (Core §10.3: a function type is not an owned component).
     var t2 = try buildGraph("app", &.{
@@ -494,6 +498,44 @@ test "moduleinfo ownershipOf handles recursive types through indirection" {
     const resolve2 = moduleinfo.resolveOf(t2.graph);
     const app2 = t2.graph.module("app").?;
     try testing.expectEqual(cfg.Ownership.copy, moduleinfo.ownershipOf(resolve2, app2, .{ .named = .{ .id = resolve2.intern("app.F").?, .args = &.{} } }).?);
+}
+
+test "moduleinfo ownershipOf: containers of a named Copy type are Copy" {
+    // Core §10.3: `box[T]` / `list[T]` are Copy when `T` is Copy, so a
+    // struct whose only component is such a container is Copy — including
+    // when the element is a named Copy type (a generic instantiation), and
+    // when two sibling instantiations of one declaration appear in one
+    // struct (they are distinct types, not a cycle).
+    var t = try buildGraph("app", &.{
+        .{
+            "app",
+            \\union Option[T] { Some(T), None }
+            \\struct Holder { b: box[Option[int32]]; }
+            \\struct Both { a: Option[int32]; b: Option[str]; }
+            \\struct Tree { children: list[Tree]; }
+            \\fn main() -> void {}
+        },
+    });
+    defer testing.allocator.destroy(t.arena);
+    defer t.arena.deinit();
+
+    const resolve = moduleinfo.resolveOf(t.graph);
+    const app = t.graph.module("app").?;
+    var opt_i32_args = [_]cfg.Type{cfg.Type{ .primitive = .int32 }};
+    var opt_i32 = cfg.Type{ .named = .{ .id = resolve.intern("app.Option").?, .args = &opt_i32_args } };
+    var opt_str_args = [_]cfg.Type{cfg.Type{ .primitive = .str }};
+    const opt_str = cfg.Type{ .named = .{ .id = resolve.intern("app.Option").?, .args = &opt_str_args } };
+    // The named instantiation itself is Copy (its payload is Copy).
+    try testing.expectEqual(cfg.Ownership.copy, moduleinfo.ownershipOf(resolve, app, opt_i32).?);
+    // The container of a named Copy type is Copy (was: unique).
+    try testing.expectEqual(cfg.Ownership.copy, moduleinfo.ownershipOf(resolve, app, .{ .box = &opt_i32 }).?);
+    // A struct holding it is Copy (was: unique).
+    try testing.expectEqual(cfg.Ownership.copy, moduleinfo.ownershipOf(resolve, app, .{ .named = .{ .id = resolve.intern("app.Holder").?, .args = &.{} } }).?);
+    // Sibling instantiations of one declaration are distinct, not a cycle.
+    try testing.expectEqual(cfg.Ownership.copy, moduleinfo.ownershipOf(resolve, app, .{ .named = .{ .id = resolve.intern("app.Both").?, .args = &.{} } }).?);
+    _ = opt_str;
+    // A recursive type through list indirection stays unique (least fixpoint).
+    try testing.expectEqual(cfg.Ownership.unique, moduleinfo.ownershipOf(resolve, app, .{ .named = .{ .id = resolve.intern("app.Tree").?, .args = &.{} } }).?);
 }
 
 test "moduleinfo resolveType expands aliases and resolves containers" {

@@ -195,6 +195,19 @@ test "checker accepts an exhaustive union match" {
     try testing.expectEqual(@as(usize, 0), t.ann.host_bindings.count());
 }
 
+test "checker accepts an exhaustive union match through a using alias" {
+    // Core §2.8: a `using ... as` alias denotes the path as a whole, so
+    // `Opt::Some(..)` in pattern position is the same union as the
+    // scrutinee `Opt[int32]` and must count toward exhaustiveness.
+    // (No diagnostic; the lowerer owns the IR generation.)
+    var t = try checkText(
+        \\const builtin = import("builtin");
+        \\using builtin.Option as Opt;
+        \\fn f(o: Opt[int32]) -> int32 { match (o) { Opt::Some(v) => v, Opt::None => 0 } }
+    );
+    defer t.arena.deinit();
+}
+
 test "checker rejects use of a moved unique value" {
     try expectDiag(
         \\struct File { fd: int32; drop(file) {} }

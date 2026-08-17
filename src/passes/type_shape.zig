@@ -61,13 +61,20 @@ pub fn variantIndex(ud: *const ast.UnionDef, name: []const u8) ?u32 {
 /// primitives and function/module values are Copy (except `any`),
 /// containers join their components, named types resolve through the
 /// graph. `null` means the ownership is genuinely deferred (an
-/// unspecialized type parameter). Recursive references contribute
-/// `Copy` (Core §18: recursion is legal only through indirection,
-/// so the cycle itself is neutral); the caller treats a final `null` as
-/// Copy.
+/// unspecialized type parameter). The classification is the **least
+/// fixpoint** of the Copy equations (Core §10.3): a recursive occurrence
+/// reached through an owned component — a back-edge to a named type
+/// currently being classified — is unique; a cycle that passes only
+/// through function types is Copy (a function type is not an owned
+/// component, so the cycle is never entered). The caller treats a final
+/// `null` as not-unique.
 pub fn ownershipOf(resolve: Resolve, from: *ModuleInfo, t: cfg.Type) ?cfg.Ownership {
-    // The visited set is arena-owned; no deinit needed.
-    var visited = std.AutoHashMapUnmanaged(*const TypeMember, void).empty;
+    // The ancestor stack holds the named types currently being
+    // classified. It is a path set, not a grow-only seen set: sibling
+    // instantiations of the same declaration (`Option[int32]` and
+    // `Option[str]`) are distinct types and must not look like a cycle.
+    // Arena-owned; no deinit needed.
+    var visited = std.ArrayListUnmanaged(cfg.Type).empty;
     return ownershipVisited(resolve, from, t, &visited);
 }
 
@@ -75,13 +82,13 @@ fn ownershipVisited(
     resolve: Resolve,
     from: *ModuleInfo,
     t: cfg.Type,
-    visited: *std.AutoHashMapUnmanaged(*const TypeMember, void),
+    visited: *std.ArrayListUnmanaged(cfg.Type),
 ) ?cfg.Ownership {
     return switch (t) {
         .primitive => |k| if (k == .any or k == .hostdata) cfg.Ownership.unique else cfg.Ownership.copy,
         .module, .function, .cleanup => cfg.Ownership.copy,
         .param => null, // deferred until monomorphic substitution
-        .list, .box => |inner| inner.ownership(),
+        .list, .box => |inner| ownershipVisited(resolve, from, inner.*, visited),
         .tuple => |elems| blk: {
             var acc: ?cfg.Ownership = cfg.Ownership.copy;
             for (elems) |e| {
@@ -94,10 +101,14 @@ fn ownershipVisited(
             const name = resolve.typeNameOf(n.id) orelse break :blk null;
             const tm = type_resolve.resolveTypeName(resolve, from, name) orelse break :blk null;
             const final = type_resolve.followAlias(resolve, from, tm) orelse break :blk null;
+            // Least fixpoint (Core §10.3): a back-edge to a named type
+            // currently being classified — a recursive occurrence reached
+            // through an owned component — is unique.
+            for (visited.items) |anc| if (cfg.Type.eql(t, anc)) break :blk cfg.Ownership.unique;
+            visited.append(resolve.arena, t) catch break :blk null;
+            defer _ = visited.pop();
             break :blk switch (final.decl) {
                 .struct_ => |s| blk2: {
-                    if (visited.contains(final)) break :blk2 cfg.Ownership.copy;
-                    visited.put(resolve.arena, final, {}) catch break :blk2 null;
                     if (s.drop != null) break :blk2 cfg.Ownership.unique;
                     var acc: ?cfg.Ownership = cfg.Ownership.copy;
                     for (s.fields) |f| {
@@ -115,8 +126,6 @@ fn ownershipVisited(
                     break :blk2 acc;
                 },
                 .union_ => |u| blk2: {
-                    if (visited.contains(final)) break :blk2 cfg.Ownership.copy;
-                    visited.put(resolve.arena, final, {}) catch break :blk2 null;
                     var acc: ?cfg.Ownership = cfg.Ownership.copy;
                     for (u.variants) |v| {
                         if (v.types) |types| for (types) |vt| {

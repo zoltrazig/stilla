@@ -35,16 +35,15 @@ representations, or add specialized collection modules, without touching the
 language core.
 
 A container value is an ordinary nominal struct (the Core specification) whose runtime
-A container value is an ordinary nominal struct (the Core specification) whose runtime
 value is an immutable **token** naming a host-owned opaque buffer: the
 host owns the buffer's memory and lifetime, Stilla never inspects it, and
 the `array` and `hashmap` module functions are the only access path. The token is
-Copy when its element types are Copy (the Core specification), and the element
-types must be Copy (The `array` module, The `hashmap` module) — a container is never a `hostdata` payload and
+*Copy* when its element types are *Copy* (the Core specification), and the element
+types must be *Copy* (The `array` module, The `hashmap` module) — a container is never a `hostdata` payload and
 does not depend on the Core specification.
 
 **Abstract-buffer contract (v1.3 chosen semantics).** The Stilla *value* is
-the Copy token; the opaque buffer it names is not a Stilla value and cannot
+the *Copy* token; the opaque buffer it names is not a Stilla value and cannot
 be created or inspected in source. A conforming implementation must ensure
 that:
 
@@ -59,9 +58,10 @@ that:
   this unreachable in the type system);
 - the buffer's lifetime is **bound to the execution context**: buffers are
   allocated in the context-arena and reclaimed by the execution-context-
-  level host cleanup at context end (Runtime §…). A Copy token may be
+  level host cleanup at context end (the Runtime specification, §1.3
+  Execution context, §7.3 Host cleanup responsibility). A *Copy* token may be
   freely duplicated and stored; there is no per-token destruction event in
-  the language (the IR schedules no `drop` for Copy values), so the host
+  the language (the IR schedules no `drop` for *Copy* values), so the host
   must not rely on a last-token-gone signal — memory is context-scoped, not
   reference-counted-to-zero. `ponytail:` ceiling — a persistent `HashMap`
   that keeps allocating per context grows until context end; if long-lived
@@ -110,15 +110,15 @@ array.len[T]:
   contiguous buffer; the Stilla value is the immutable token naming it.
 - `array.make(length, init)` constructs a fresh `Array[T]` of the given
   length; every element is initialized to a copy of `init`.
-- The element type `T` must be Copy. Parameters are plain (Copy)
-  parameters (the Core specification): a unique `init` is rejected at compile time, so
-  the Copy restriction is enforced by the type system. The token is Copy
-  when `T` is Copy (the Core specification) and may be reused freely.
+- The element type `T` must be *Copy*. Parameters are plain (*Copy*)
+  parameters (the Core specification): a *Unique* `init` is rejected at compile time, so
+  the *Copy* restriction is enforced by the type system. The token is *Copy*
+  when `T` is *Copy* (the Core specification) and may be reused freely.
 - `array.get(a, i)` reads element `i` and returns a copy of it. Invalid
   indexing produces a deterministic runtime trap (the Runtime specification).
 - `array.len(a)` returns the length.
-- `get` returns an element by value; a borrowed unique return is not
-  expressible (the Core specification), which is why `T` is restricted to Copy. Unique
+- `get` returns an element by value; a borrowed *Unique* return is not
+  expressible (the Core specification), which is why `T` is restricted to *Copy*. *Unique*
   element storage is provided by `list[T]` (the Core specification) with the `iter`
   combinators.
 - Wholesale iteration over `Array[T]` is host-provided: `for` is not a
@@ -167,18 +167,18 @@ hashmap.len[K, V]:
   are host bindings that construct, read, and transform a host-owned
   opaque contiguous-bucket table; the Stilla value is the immutable token
   naming it.
-- A key type `K` must be Copy and hashable; a value type `V` must be Copy.
-  Parameters are plain (Copy) parameters (the Core specification), so the Copy
+- A key type `K` must be *Copy* and hashable; a value type `V` must be *Copy*.
+  Parameters are plain (*Copy*) parameters (the Core specification), so the *Copy*
   restrictions are enforced by the type system.
 - `builtin.hash` provides hashing for the primitive key types (the Runtime specification).
 - Insertion and removal are persistent-style: they take the token by plain
-  (Copy) parameter and return a *new* map token. The input token remains
+  (*Copy*) parameter and return a *new* map token. The input token remains
   usable and references the previous immutable table, so the map is never
   partially mutated.
 - `hashmap.get` returns a copy of the value as `Option[V]` — `Some(v)` when
   `key` is present, `None` otherwise. `get` returns a value by copy; a
-  borrowed unique return is not expressible (the Core specification), which is why `V`
-  is restricted to Copy.
+  borrowed *Unique* return is not expressible (the Core specification), which is why `V`
+  is restricted to *Copy*.
 - Iteration order is unspecified but stable within a single execution
   context. Wholesale iteration over `HashMap[K, V]` is host-provided:
   `for` is not a core-language construct (the Core specification), and the `iter`
@@ -485,10 +485,10 @@ let upper = string.upper(s);                          // "HELLO"
 - Only the host constructs `hostdata` values, through host functions and
   module members (Core specification, Runtime specification); Stilla never constructs or
   inspects one itself.
-- `hostdata` is unique (the Core specification): it may be moved, borrowed, stored,
+- `hostdata` is *Unique* (the Core specification): it may be moved, borrowed, stored,
   passed along, and handed to the host, and is never implicitly copyable.
 - Containers of `hostdata` as elements — `list[hostdata]`,
-  `box[hostdata]`, and `tuple[..., hostdata]` — are unique by the
+  `box[hostdata]`, and `tuple[..., hostdata]` — are *Unique* by the
   structural rule of the Core specification. A `hostdata` value can therefore be
   stored as an element of a container.
 - `builtin.str` and `builtin.hash` do not accept `hostdata`, so a `hostdata`
@@ -529,12 +529,14 @@ The module is ordinary Stilla source: `fold_with` and `consume_fold_with`
 are the recursion kernels (matching `[]` / `[head, ..tail]` and calling the
 operation value), and the combinators without a user context — `each`,
 `fold`, `consume_each`, `consume_fold` — are derived from them by
-threading the operation value through the context slot; `each_with` and
-`consume_each_with` already carry a user context and are written directly.
-The `try_fold*` functions are the exception — they are host bindings, because
-their bodies need generic union-payload substitution (`Result[S, R]`'s
-payload types are the type parameters) which the structural frontend
-defers.
+threading the operation value through the context slot; `each_with`,
+`consume_each_with`, `try_fold`, and `try_fold_with` already carry a user
+context and are written directly. A `Result::Complete`/`Break` constructor
+whose type arguments are not fully constrained by its payloads fills the
+remaining ones from the expected instantiation of the same declaration —
+the enclosing function's `Result[S, R]` return type (Inferred
+specialization, the Core specification), so no explicit type arguments are
+required.
 
 The module defines the short-circuiting fold result type:
 
@@ -653,12 +655,12 @@ iter.try_fold_with[T, S, R, C]:
 - `iter.try_fold_with(values, state, context, step)` is `try_fold` with a
   borrowed `context` passed to every step call.
 - The `borrow` parameters are non-owning: call sites pass plain arguments
-  (the Core specification). For unique `T`, elements are borrowed (`each`, `fold`,
+  (the Core specification). For *Unique* `T`, elements are borrowed (`each`, `fold`,
   `try_fold`) or moved exactly once (`consume_each`, `consume_fold`); if
-  the instantiated element or accumulator type is Copy, the corresponding
+  the instantiated element or accumulator type is *Copy*, the corresponding
   modes have ordinary copy semantics.
 - The `context` value is borrowed for the duration of the operation and
-  passed to every invocation; it may be any type, including a unique value
+  passed to every invocation; it may be any type, including a *Unique* value
   whose ownership remains with the caller.
 
 Usage:
@@ -675,7 +677,7 @@ let total = iter.fold(
     }
 );
 
-// Short-circuit at the first negative value:
+// Short-circuit at the first value greater than 5 (x = 6, accumulator 15):
 let capped = iter.try_fold::[int32, int32, int32](
     builtin.range(1, 10),
     0,

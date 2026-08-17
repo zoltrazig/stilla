@@ -914,7 +914,6 @@ test "Pass 7 emits tailcall for a move/unique self-recursive fold" {
     const program = c.program.?;
     const text = try irText(&program);
     defer testing.allocator.free(text);
-    std.debug.print("DEBUG TEXT: {s}\n", .{text});
     const body = funcBody(text, "func @app.fold_files");
     // The recursive arm is a tailcall; the base-case ret survives.
     try testing.expect(std.mem.indexOf(u8, body, "tailcall @app.fold_files") != null);
@@ -954,6 +953,45 @@ test "iter.fold with a unique accumulator compiles and fold_with tailcalls" {
     // The embedded monomorphized fold_with carries the unique accumulator
     // through a tailcall.
     try testing.expect(std.mem.indexOf(u8, text, "tailcall @iter.fold_with.1") != null);
+}
+
+test "iter.try_fold is Stilla source and short-circuits on Break" {
+    // try_fold/try_fold_with were host bindings because the frontend could
+    // not substitute the generic union payloads of Result[S,R]. With
+    // expected-type-aware construction (Core §11) they are ordinary Stilla
+    // source: the embedded code compiles, and a step that returns Break
+    // stops iteration.
+    var sources = moduleinfo.Sources{};
+    var source_map = std.StringHashMapUnmanaged([]const u8).empty;
+    defer source_map.deinit(testing.allocator);
+    try source_map.put(testing.allocator, "app",
+        \\const builtin = import("builtin");
+        \\const iter = import("iter");
+        \\using iter.Result;
+        \\fn over(move a: int32, borrow x: int32) -> iter.Result[int32, str] {
+        \\    if (a + x > 10) { Result::Break("stop") } else { Result::Complete(a + x) }
+        \\}
+        \\fn run(xs: list[int32]) -> void {
+        \\    let r = iter.try_fold(xs, 0, over);
+        \\    match (r) {
+        \\        Result::Complete(v) => builtin.print(builtin.str(v)),
+        \\        Result::Break(m) => builtin.print(m)
+        \\    }
+        \\}
+        \\fn main() -> void { builtin.print("x"); }
+    );
+    sources.source = source_map;
+    var c = try frontend.compile(testing.allocator, .{ .entry = "app", .sources = sources, .entry_fn = "main", .optimize = true });
+    defer c.deinit();
+
+    const program = c.program.?;
+    const text = try irText(&program);
+    defer testing.allocator.free(text);
+    // The stdlib try_fold monomorphizes and continues/breaks via the
+    // Result union (a construct with the substituted payload types).
+    try testing.expect(std.mem.indexOf(u8, text, "func @iter.try_fold") != null);
+    try testing.expect(std.mem.indexOf(u8, text, "construct #0") != null); // Complete
+    try testing.expect(std.mem.indexOf(u8, text, "construct #1") != null); // Break
 }
 
 test "frontend IR round-trips with duplicate-block-producing constructs" {
@@ -4228,11 +4266,12 @@ test "Pass 8.4 copy propagation collapses copies of Copy values" {
 }
 
 test "Pass 8.4 copy propagation collapses box round-trip copies" {
-    // The checker's state tracking emits explicit `copy` instructions on
-    // the `move t` of a box whose payload is a plain struct (a Copy
-    // type): `copy %b; copy %copy; unbox`. The mid-level pass collapses
-    // the chain into a direct `unbox` of the box (Core §10.2 — `move` of
-    // a Copy value is an ordinary copy and may be omitted).
+    // `Token` is a plain Copy struct, so `box[Token]` is a Copy container
+    // (Core §10.3) and `move` of it is an ordinary copy (Core §10.2). The
+    // frontend's on-the-fly copy propagation folds that `copy` at the
+    // emit site (frontend.md §4.3), so the round-trip compiles to a
+    // direct `unbox` with no `copy` instruction anywhere; the mid-level
+    // pass keeps it that way.
     var c = try compileText("app", &.{
         .{
             "app",
@@ -4255,7 +4294,7 @@ test "Pass 8.4 copy propagation collapses box round-trip copies" {
     var program = c.program.?;
     const before = try irText(&program);
     defer testing.allocator.free(before);
-    try testing.expect(std.mem.indexOf(u8, funcBody(before, "func @app.main"), "copy %") != null);
+    try testing.expect(std.mem.indexOf(u8, funcBody(before, "func @app.main"), "copy %") == null);
 
     try lower.copyProp(&program, c.arena.allocator());
     const text = try irText(&program);

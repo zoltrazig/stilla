@@ -34,7 +34,7 @@ The IR must carry, without reference to source text:
 - the full **control flow** of a function — the CFG: blocks, edges, terminators;
 - the full **value flow** — SSA: each value defined exactly once, joined by phi nodes at merges;
 - the **evaluation order** — linear instruction order inside a block *is* evaluation order (per the Stilla Runtime Specification); short-circuiting is real control flow;
-- the **ownership semantics** — every unique value is moved, borrowed, copied, or dropped by an explicit instruction (per the Stilla Core Language Specification);
+- the **ownership semantics** — every *Unique* value is moved, borrowed, copied, or dropped by an explicit instruction (per the Stilla Core Language Specification);
 - the **destruction schedule** — when and in what order values are destroyed (per the Stilla Runtime Specification);
 - **module storage** — module members as a statically known member table: runtime constants occupy laid-out storage slots, while function, module-valued, and host-binding members are static references.
 
@@ -44,7 +44,7 @@ The IR is produced by the frontend (Phase 3 of the pipeline described in fronten
 
 - `%N` denotes an SSA value; `%a`, `%b`, … denote values in examples; `#i` denotes a statically known index.
 - Operand order in the text form is operand order in memory and, where evaluation order matters, source order.
-- The term **unique** denotes the non-Copy ownership class (per the Stilla Core Language Specification).
+- The term **unique** denotes the non-*Copy* ownership class (per the Stilla Core Language Specification).
 - Source spans may be attached to any syntax-derived entity for diagnostics; they have no semantic role and are not part of the definitions below.
 
 ---
@@ -54,7 +54,7 @@ The IR is produced by the frontend (Phase 3 of the pipeline described in fronten
 1. **Three-address code.** The IR is predominantly three-address and single-result: every instruction computes **one result** from **at most two source operands**, with explicit **atomic multi-result destructuring** operations (`unpack_*` / `split_list`). The n-ary exceptions — aggregate `construct`, `call`, `syscall`, and `phi` — are n-ary in operands but single-result (or pure effects). A strict canonization into ≤2-operand form is always available by introducing intermediate values, so the property is not lost, merely elided where the operand list is statically typed.
 2. **Static single assignment.** Every value is defined exactly once; control-flow merges join values with `phi`. Stilla's immutable bindings and shadowing map onto SSA without any renaming pass: each `let` is a fresh definition, shadowing is a fresh name.
 3. **Exactly-once, left-to-right evaluation.** Inside a block, instruction order is source evaluation order (per the Stilla Runtime Specification). Short-circuit `and` / `or` never become instructions — they lower to conditional-branch diamonds so the right operand is evaluated only when required.
-4. **Ownership is explicit.** `move`, `borrow`, `copy`, and `drop` are instructions. Every unique value is used at most once per path and destroyed exactly once per path; destruction is materialized in the CFG, not left to the runtime to infer.
+4. **Ownership is explicit.** `move`, `borrow`, `copy`, and `drop` are instructions. Every *Unique* value is used at most once per path and destroyed exactly once per path; destruction is materialized in the CFG, not left to the runtime to infer.
 5. **Locals are values; only module storage is program-addressable memory.** All local state lives in SSA values. The sole program-addressable memory in the IR is module storage — statically laid-out slots, written once by the module init function and read afterwards, holding exactly the module's runtime constant members. Function, module-valued, and host-binding members are not storage: they are static references in the member table. Cleanup tokens are compiler-managed ephemeral runtime state — armed bits, not program-addressable memory.
 
 ---
@@ -64,7 +64,7 @@ The IR is produced by the frontend (Phase 3 of the pipeline described in fronten
 A function is a directed graph of **basic blocks**. A block is a linear sequence of instructions terminated by exactly one **terminator**.
 
 - **Entry block.** Every function has exactly one entry block, which has no predecessors; the parameter values `%0..%k-1` are defined there.
-- **Terminators.** Exactly one per block, and it is the last instruction. The five forms are `ret`, `br` (unconditional), `br_cond` (conditional), `switch` (union dispatch), and `trap` (panic / `never`).
+- **Terminators.** Exactly one per block, and it is the last instruction. The six forms are `ret`, `br` (unconditional), `br_cond` (conditional), `switch` (union dispatch), `tailcall` (frame-reusing direct self-call, §14.7.1), and `trap` (panic / `never`).
 - **Layout.** Blocks are ordered so that fall-through is the common case: an unconditional `br` to the *next* block in layout may be elided by the printer; the in-memory form always carries an explicit terminator.
 - **Edges.** `br_cond` has exactly two out-edges; `switch` has one per arm plus an implicit default that is `trap`. Match exhaustiveness is guaranteed by the checker, so the default is unreachable.
 
@@ -91,7 +91,7 @@ terminator ::= "ret" value?                  -- return; bare "ret" for void
 
 ## 4.1 Definitions
 
-- **Value** — one SSA definition: the result of exactly one instruction. Values carry an IR-native type, an **ownership class** inherited from the type (Copy / unique), and a **created state** (owned / borrowed). Whether a value is still *available* at a program point — alive, consumed, or consumed on some paths only — is not a value property: it is an edge-sensitive dataflow property computed by the validator and mirrored by the lowering's consumption bookkeeping. Values are numbered per function in definition order (`%0, %1, …`); the text form also permits symbolic names (`%sum`) for readability.
+- **Value** — one SSA definition: the result of exactly one instruction. Values carry an IR-native type, an **ownership class** inherited from the type (*Copy* / *Unique*), and a **created state** (owned / borrowed). Whether a value is still *available* at a program point — alive, consumed, or consumed on some paths only — is not a value property: it is an edge-sensitive dataflow property computed by the validator and mirrored by the lowering's consumption bookkeeping. Values are numbered per function in definition order (`%0, %1, …`); the text form also permits symbolic names (`%sum`) for readability.
 - **Instruction** — a unit of computation. An instruction either *defines* one or more values (a single result for ordinary ops; several for the atomic destructure ops `unpack_*` / `split_list`) or is a **pure effect** with no results: `drop`, `store_member`, `cleanup_disable`, `drop_cleanup`.
 - **Use** — a reference to a value as an operand. SSA requires that every non-phi use of a value is **dominated** by its definition; a phi's operands are defined in the corresponding predecessor blocks.
 
@@ -129,15 +129,15 @@ The phi's type is the **join type** of the merged values:
 - a mix coercible to `any` joins as `any`;
 - anything else is a compile-time error and never reaches the IR.
 
-The `T → any` coercion of a mixed join is **not** implicit at the phi: the lowering materializes it on each predecessor edge — `any_pack_copy %x` (Copy source) or `any_pack_move %x` (unique source) is appended to the branch block before its `br join`, and the phi joins the homogeneous `any` values. Ownership stays explicit and the phi's operand types are verifiable.
+The `T → any` coercion of a mixed join is **not** implicit at the phi: the lowering materializes it on each predecessor edge — `any_pack_copy %x` (*Copy* source) or `any_pack_move %x` (*Unique* source) is appended to the branch block before its `br join`, and the phi joins the homogeneous `any` values. Ownership stays explicit and the phi's operand types are verifiable.
 
 ## 4.4 Coercions
 
 Conversions are explicit instructions: `num_cast` for the Core §16.3 cast set — the `int32 ↔ float32` pair plus the integer-family conversions (`int32 as byte`, `byte as int32`, `int32 as uint32`, `uint32 as int32`) — and the four `any`-ops (`any_pack_copy` / `any_pack_move` / `any_unpack_copy` / `any_unpack_move`) for the top type. The remaining coercions are implicit and materialized at specific points:
 
 - **`never` → T** — a call whose result type is `never` is always immediately followed by `trap`; a `trap` block contributes no value to a phi.
-- **T → `any`** — at call boundaries (arguments to `any`-typed parameters, `ret` of an `any`-typed function) and on the predecessor edges of an `any` join. A Copy source is `any_pack_copy`'d into the `any` (the source stays owned); a unique source is `any_pack_move`'d (the source is consumed). Both are ordinary instructions emitted by the lowering. `hostdata` is never a source: it does not coerce to `any` (the Core specification).
-- **`any` → T recovery** — `a as T` for a Copy `T` lowers to `any_unpack_copy` (payload copied out, the `any` stays owned); `(move a) as T` — the only legal recovery of a unique payload — lowers to `any_unpack_move`, consuming the complete `any` and transferring payload ownership to the result.
+- **T → `any`** — at call boundaries (arguments to `any`-typed parameters, `ret` of an `any`-typed function) and on the predecessor edges of an `any` join. A *Copy* source is `any_pack_copy`'d into the `any` (the source stays owned); a *Unique* source is `any_pack_move`'d (the source is consumed). Both are ordinary instructions emitted by the lowering. `hostdata` is never a source: it does not coerce to `any` (the Core specification).
+- **`any` → T recovery** — `a as T` for a *Copy* `T` lowers to `any_unpack_copy` (payload copied out, the `any` stays owned); `(move a) as T` — the only legal recovery of a *Unique* payload — lowers to `any_unpack_move`, consuming the complete `any` and transferring payload ownership to the result.
 
 ---
 
@@ -173,9 +173,9 @@ Operand types and trap behavior (overflow, divide-by-zero, invalid `any` recover
 | `not` | `%d = not %a` | `bool` (source `!`) |
 | `num_cast` | `%d = num_cast %a` | the target numeric type; the Core §16.3 cast set (`int32 ↔ float32`, `int32 ↔ byte`, `int32 ↔ uint32`, `byte → int32`, `uint32 → int32`); `float32 → int32` traps on NaN, ±inf, or out-of-range; `int32 → byte` traps outside `[0, 255]`, `int32 → uint32` traps on a negative value, `uint32 → int32` traps above the `int32` maximum, `byte → int32` never traps (the Runtime specification) |
 | `type_is` | `%d = type_is %a, T` | `bool` — runtime tag test against type `T` (a type-test arm of a `match` over an `any`) |
-| `any_pack_copy` | `%d = any_pack_copy %a` | `any` — `T → any` of a Copy source; the source stays owned |
-| `any_pack_move` | `%d = any_pack_move %a` | `any` — `T → any` of a unique source; the source is consumed |
-| `any_unpack_copy` | `%d = any_unpack_copy %a` | `T` — `any as T` for a Copy `T`; the `any` stays owned; traps on a tag mismatch |
+| `any_pack_copy` | `%d = any_pack_copy %a` | `any` — `T → any` of a *Copy* source; the source stays owned |
+| `any_pack_move` | `%d = any_pack_move %a` | `any` — `T → any` of a *Unique* source; the source is consumed |
+| `any_unpack_copy` | `%d = any_unpack_copy %a` | `T` — `any as T` for a *Copy* `T`; the `any` stays owned; traps on a tag mismatch |
 | `any_unpack_move` | `%d = any_unpack_move %a` | `T` — `(move any) as T`; the complete `any` is consumed, payload ownership transfers to the result; traps on a tag mismatch |
 | `add sub mul div rem` | `%d = add %a, %b` | same numeric type; int overflow and `div`/`rem` by zero trap |
 | `concat` | `%d = concat %a, %b` | `str` (source `str + str`) |
@@ -187,7 +187,7 @@ Operand types and trap behavior (overflow, divide-by-zero, invalid `any` recover
 
 `construct` builds a value from components; projections read components. Projections come in two access kinds:
 
-- **read** — non-consuming: copies the component for Copy bases, produces a **borrowed view** for unique bases (member reads, borrowed matches) — each borrowed view carries a `BorrowOrigin` anchoring its lifetime;
+- **read** — non-consuming: copies the component for *Copy* bases, produces a **borrowed view** for *Unique* bases (member reads, borrowed matches) — each borrowed view carries a `BorrowOrigin` anchoring its lifetime;
 - **unpack** — consuming destructure: **atomic and multi-result**. One op consumes the base *as a whole* and defines all of its parts at once (destructuring with `move`) — no half-consumed base states exist. The results are the struct fields in declaration order, the tuple elements, the variant's payload values (tag-carrying), or the list items followed by the owned rest. An exact list pattern (`[a, b]`, no `..rest`) defines only the items; the consumed remainder is dropped immediately (the whole list is still consumed). A `[]` arm of a consuming match defines nothing and still consumes the base.
 
 | op | form | produces |
@@ -206,7 +206,7 @@ Operand types and trap behavior (overflow, divide-by-zero, invalid `any` recover
 | `split_list` | `%a: T, %b: T, %r: list[T] = split_list %l` | list items then the owned rest (consumes `%l`; may trap on a short list) |
 | `read_tag` | `%d = read_tag %u` | union discriminant, as a tag index |
 | `read_payload` | `%d = read_payload %u` | the payload of the active variant, borrowed view — a single-payload variant's single payload (for a multi-payload variant, use `borrow_variant`) |
-| `borrow_variant` | `%p1: T1, %p2: T2, … = borrow_variant %u, #k` | the payload values of variant `#k`, in declaration order — one result per payload, the base never consumed; a Copy payload is copied out (owned), an unique payload is a borrowed view rooted at the base (mirrors `read_field` of an unique base). Symmetric with `unpack_variant`. The tag is carried for backend self-containment — the arm's `switch` dispatch already guaranteed the variant |
+| `borrow_variant` | `%p1: T1, %p2: T2, … = borrow_variant %u, #k` | the payload values of variant `#k`, in declaration order — one result per payload, the base never consumed; a *Copy* payload is copied out (owned), an *Unique* payload is a borrowed view rooted at the base (mirrors `read_field` of an *Unique* base). Symmetric with `unpack_variant`. The tag is carried for backend self-containment — the arm's `switch` dispatch already guaranteed the variant |
 
 `builtin.box`, `builtin.peek`, and `builtin.unbox` are **not** IR ops: they are host bindings and lower to `syscall`. A `peek` result arrives in the IR as a `borrowed` value, matching the borrowed-view contract of the Stilla Runtime Specification, with origin `peek`.
 
@@ -214,15 +214,15 @@ Operand types and trap behavior (overflow, divide-by-zero, invalid `any` recover
 
 | op | form | produces |
 | --- | --- | --- |
-| `copy` | `%d = copy %a` | an owned copy; `%a` must be Copy |
+| `copy` | `%d = copy %a` | an owned copy; `%a` must be *Copy* |
 | `borrow` | `%d = borrow %a` | a non-owning view of `%a`; origin `root(%a)` |
 | `move` | `%d = move %a` | ownership of `%a` transferred; `%a` is dead |
-| `drop` | `drop %v` | effect: deterministic destruction; `%v` is dead; `%v` is never Copy — the frontend does not emit `drop` for Copy values |
+| `drop` | `drop %v` | effect: deterministic destruction; `%v` is dead; `%v` is never *Copy* — the frontend does not emit `drop` for *Copy* values |
 | `cleanup_owner` | `%d: cleanup = cleanup_owner %v` | a **cleanup token** (type `cleanup`) scheduling `%v`'s conditional destruction; a compiler-only value usable only by `cleanup_disable` / `drop_cleanup` |
 | `cleanup_disable` | `cleanup_disable %d` | effect: disarms the token without destroying the payload — emitted on the paths where the owner was consumed (moved, taken, transferred) |
 | `drop_cleanup` | `drop_cleanup %d` | effect: the scope-end conditional destruction — destroys the payload iff the token is still armed, then disarms it |
 
-`move` of a Copy value is semantically a copy with no invalidation — the lowering emits `copy` in that case. Because ownership is exactly Copy or unique, `drop` of a Copy value does nothing and the frontend never emits it; the lowering's drop emission skips any value whose type is Copy. `drop` of a struct with a user drop hook executes the full destruction sequence (hook, then reverse-declaration-order field destruction) inside the runtime; the IR does not expand it. Conditional destruction of a maybe-unique value is scheduled through its cleanup token: the maybe-unique *value* itself is never referenced after its construct's join — only its token is, so the destruction instruction is SSA-clean on every path.
+`move` of a *Copy* value is semantically a copy with no invalidation — the lowering emits `copy` in that case. Because ownership is exactly *Copy* or *Unique*, `drop` of a *Copy* value does nothing and the frontend never emits it; the lowering's drop emission skips any value whose type is *Copy*. `drop` of a struct with a user drop hook executes the full destruction sequence (hook, then reverse-declaration-order field destruction) inside the runtime; the IR does not expand it. Conditional destruction of a maybe-*Unique* value is scheduled through its cleanup token: the maybe-*Unique* *value* itself is never referenced after its construct's join — only its token is, so the destruction instruction is SSA-clean on every path.
 
 ## 5.5 Calls and system calls
 
@@ -252,10 +252,11 @@ host supplies the value at instantiation (Module storage and the member table).
 | op | form |
 | --- | --- |
 | `phi` | `%d = phi [%v, L1], [%w, L2]` — n-ary, block head only |
-| `ret` | `ret %v` or `ret` — return, transferring ownership of a unique result to the caller |
+| `ret` | `ret %v` or `ret` — return, transferring ownership of a *Unique* result to the caller |
 | `br` | `br L` — unconditional |
 | `br_cond` | `br %c ? L1 : L2` — `%c: bool` |
 | `switch` | `switch %t { #a -> L1, #b -> L2 }` — dispatch on a tag value; implicit `trap` default |
+| `tailcall` | `tailcall @f, %a, …` — frame-reusing direct self-call; an exit like `ret`/`trap`, no out-edge (§14.7.1) |
 | `trap` | `trap` — panic / `never` / unreachable |
 
 ---
@@ -269,22 +270,22 @@ A value carries its **created state**, fixed by its defining op:
 | state | meaning | created by |
 | --- | --- | --- |
 | `owned` | the current function owns the value | every defining op that is not a view |
-| `borrowed` | a non-owning view of some base | `borrow`, `read_*` / `tail` over a unique base, `load_member` of a unique constant member, a borrow-mode parameter, `peek` — each carries a `BorrowOrigin` anchoring its lifetime |
+| `borrowed` | a non-owning view of some base | `borrow`, `read_*` / `tail` over a *Unique* base, `load_member` of a *Unique* constant member, a borrow-mode parameter, `peek` — each carries a `BorrowOrigin` anchoring its lifetime |
 
-Whether a value is still *available* at a program point is **not** a value property: it is an edge-sensitive dataflow state — `Available`, `Consumed`, or `MaybeConsumed` (alive on some paths, consumed on others after a join) — computed by the validator and mirrored by the lowering's consumption bookkeeping. A value in `MaybeConsumed` state has **no uses at all** after its construct's join (a maybe-unique binding is unusable); its destruction is scheduled through its cleanup token, which references the token, never the value.
+Whether a value is still *available* at a program point is **not** a value property: it is an edge-sensitive dataflow state — `Available`, `Consumed`, or `MaybeConsumed` (alive on some paths, consumed on others after a join) — computed by the validator and mirrored by the lowering's consumption bookkeeping. A value in `MaybeConsumed` state has **no uses at all** after its construct's join (a maybe-*Unique* binding is unusable); its destruction is scheduled through its cleanup token, which references the token, never the value.
 
 ## 6.2 State transitions
 
 | instruction | operand state → | result state | notes |
 | --- | --- | --- | --- |
-| `const`, parameters (plain/move mode), arithmetic, `num_cast`, `any_pack_*`, `construct`, `call`, `syscall`, `module_ref`, `fn_ref`, `load_member` (constant member, Copy) | — | `owned` | |
-| `load_member` (constant member, unique) | — | `borrowed` | the module owns the constant; source cannot move or drop it; origin `root(%m)` |
+| `const`, parameters (plain/move mode), arithmetic, `num_cast`, `any_pack_*`, `construct`, `call`, `syscall`, `module_ref`, `fn_ref`, `load_member` (constant member, *Copy*) | — | `owned` | |
+| `load_member` (constant member, *Unique*) | — | `borrowed` | the module owns the constant; source cannot move or drop it; origin `root(%m)` |
 | `load_member` (function / module-valued member) | — | `owned` | a static reference (`fn_ref` / `module_ref`) |
 | a borrow-mode parameter | — | `borrowed` | origin `call` — valid throughout the callee |
-| `copy` | `owned` or `borrowed`, Copy | `owned` | copying a Copy value is always legal |
+| `copy` | `owned` or `borrowed`, *Copy* | `owned` | copying a *Copy* value is always legal |
 | `borrow` | `owned` or `borrowed` | `borrowed` | origin `root(%a)` |
-| `read_*` / `tail` | base `owned` (Copy) → base unchanged | `owned` | implicit copy |
-| `read_*` / `tail` | base `owned`/`borrowed` (unique) → base unchanged | `borrowed` | origin `root(base)` |
+| `read_*` / `tail` | base `owned` (*Copy*) → base unchanged | `owned` | implicit copy |
+| `read_*` / `tail` | base `owned`/`borrowed` (*Unique*) → base unchanged | `borrowed` | origin `root(base)` |
 | `read_tag` / `read_payload` / `borrow_variant` | scrutinee unchanged | `owned` (tag) / per above (payload) | |
 | `move` | `%a` consumed | `owned` | |
 | `unpack_*` / `split_list` | base consumed as a whole; results owned | `owned` | |
@@ -294,19 +295,19 @@ Whether a value is still *available* at a program point is **not** a value prope
 | `drop` | `%v` consumed | — | effect |
 | `cleanup_owner` | `%v` unchanged | `owned` (a `cleanup`-typed token) | compiler-only capability, never a user value |
 | `cleanup_disable` / `drop_cleanup` | token only | — | effect; the scheduled owner is never referenced |
-| `phi` | incoming unique values consumed on their edges | `owned` (join) | |
-| `ret %v` | `%v` (owned unique) consumed | — | borrowed returns are a compile-time error |
+| `phi` | incoming *Unique* values consumed on their edges | `owned` (join) | |
+| `ret %v` | `%v` (owned *Unique*) consumed | — | borrowed returns are a compile-time error |
 
 **Unique discipline invariants** (guaranteed by the checker, checked by the validator in simplified form):
 
-- a unique `owned` value is consumed at most once per path (one of: `move`, `drop`, `unpack_*` / `split_list`, a move-mode call argument, a phi, `ret`);
+- a *Unique* `owned` value is consumed at most once per path (one of: `move`, `drop`, `unpack_*` / `split_list`, a move-mode call argument, a phi, `ret`);
 - after consumption there are no further uses on that path;
 - a `borrowed` value is never `move`'d, `drop`'d, `unpack_*`'d / `split_list`'d, stored, or returned — its uses are reads, borrows, and borrow-mode arguments only;
-- a Copy value may be used any number of times.
+- a *Copy* value may be used any number of times.
 
 ## 6.3 Phi and ownership
 
-A phi over unique values is legal because CFG join edges are **exclusive by construction**: exactly one predecessor edge is taken, so exactly one incoming value is ever materialized. The phi's result owns whichever value arrived:
+A phi over *Unique* values is legal because CFG join edges are **exclusive by construction**: exactly one predecessor edge is taken, so exactly one incoming value is ever materialized. The phi's result owns whichever value arrived:
 
 ```
 then:  %a = …            else:  %b = …
@@ -317,26 +318,26 @@ join:  %f = phi [%a, then], [%b, else]
 
 Two consequences the lowering must respect:
 
-1. **Ownership transfers to the phi.** A unique value listed as a phi input is *not* destroyed at the end of its producing block; the scope ends *after* the join, and destruction targets the phi result. This is how `let f = if (c) { open_a() } else { open_b() };` destroys exactly the branch that executed.
+1. **Ownership transfers to the phi.** A *Unique* value listed as a phi input is *not* destroyed at the end of its producing block; the scope ends *after* the join, and destruction targets the phi result. This is how `let f = if (c) { open_a() } else { open_b() };` destroys exactly the branch that executed.
 2. **A unique phi result is destroyed at most once.** The frontend places the `drop` at the phi result's destruction point — the end of the *enclosing* scope — never in the branch blocks.
 
-Stilla source has no loop construct and no loop-carried mutable state (per the Stilla Core Language Specification); the only loops in the IR are produced by tail call optimization (frontend.md). A Copy-only loop header carries only **Copy** parameters: loop-carried unique state is expressed by the `tailcall` terminator instead of a phi loop (ir.md §14.7.1), which reuses the frame and transfers ownership atomically, so no cyclic ownership fixed point over unique values is required in the IR.
+Stilla source has no loop construct and no loop-carried mutable state (per the Stilla Core Language Specification); the only loops in the IR are produced by tail call optimization (frontend.md). A *Copy*-only loop header carries only **Copy** parameters: loop-carried *Unique* state is expressed by the `tailcall` terminator instead of a phi loop (ir.md §14.7.1), which reuses the frame and transfers ownership atomically, so no cyclic ownership fixed point over *Unique* values is required in the IR.
 
 ## 6.4 Destruction placement
 
-Destruction is deterministic (per the Stilla Runtime Specification) and materialized by the lowering. A `drop` occurs **only at the semantically prescribed destruction point — after all required uses**: a unique local's destruction point is its scope end, a temporary's is its full-expression end, and no pass moves destruction earlier on liveness grounds to shorten a lifetime — a value with a user `drop` hook makes destruction observable. The placement rules:
+Destruction is deterministic (per the Stilla Runtime Specification) and materialized by the lowering. A `drop` occurs **only at the semantically prescribed destruction point — after all required uses**: a *Unique* local's destruction point is its scope end, a temporary's is its full-expression end, and no pass moves destruction earlier on liveness grounds to shorten a lifetime — a value with a user `drop` hook makes destruction observable. The placement rules:
 
-- **Scope-end destruction.** Every live unique `owned` local is destroyed when its scope ends during normal control flow: `drop` ops are inserted at the exit of every block that terminates a scope — every `if`/`match` branch and the function epilogue — in **reverse creation order**.
+- **Scope-end destruction.** Every live *Unique* `owned` local is destroyed when its scope ends during normal control flow: `drop` ops are inserted at the exit of every block that terminates a scope — every `if`/`match` branch and the function epilogue — in **reverse creation order**.
 - **Join locals.** A local created by an `if`/`match` expression is a phi result; its `drop` goes at the end of the *enclosing* scope.
 - **Unique temporaries.** A temporary surviving to the end of its full expression is destroyed in **reverse creation order** (per the Stilla Runtime Specification): the builder keeps a per-expression temporary stack and emits its `drop`s at the expression's end. `consume(open_file("f"))` moves the temporary into the call and destroys nothing; `open_file("f");` as a statement drops it.
 - **Explicit `drop`.** Source `drop name;` is one `drop` instruction at that point in control flow.
-- **Conditional destruction.** A maybe-unique binding — released on some but not all paths through a conditional construct — is scheduled with a **cleanup token**. The lowering arms a token at the construct's entry (`%c: cleanup = cleanup_owner %v`, in the block that dominates every branch and the join); a path that consumes `%v` (moves, takes, transfers it) also disarms the token (`cleanup_disable %c`); the scope-end destruction is `drop_cleanup %c` — destroying the payload iff the token is still armed on the path that reached the scope exit. The per-path liveness lives in the token's armed bit (runtime state), not in an SSA value, so the maybe-unique value itself is never referenced after the construct's join and the destruction schedule is SSA-clean on every path.
+- **Conditional destruction.** A maybe-*Unique* binding — released on some but not all paths through a conditional construct — is scheduled with a **cleanup token**. The lowering arms a token at the construct's entry (`%c: cleanup = cleanup_owner %v`, in the block that dominates every branch and the join); a path that consumes `%v` (moves, takes, transfers it) also disarms the token (`cleanup_disable %c`); the scope-end destruction is `drop_cleanup %c` — destroying the payload iff the token is still armed on the path that reached the scope exit. The per-path liveness lives in the token's armed bit (runtime state), not in an SSA value, so the maybe-*Unique* value itself is never referenced after the construct's join and the destruction schedule is SSA-clean on every path.
 
   **Cleanup token invariants.** A cleanup token (type `cleanup`) is a compiler-managed capability, not a user value:
 
   - it is created only by `cleanup_owner` and used only by `cleanup_disable` / `drop_cleanup`;
   - it is never `copy`'d, `move`'d, `borrow`'d, stored into an aggregate or a module slot, passed as a `call` / `syscall` argument, `ret`'d, or merged by an ordinary `phi` — no token-phi exists, and the op schema types every ordinary op's operands, so no ordinary op accepts a `cleanup`-typed value;
-  - a token carries no Copy/unique ownership class: it is a separate, opaque value kind with no user-visible semantics;
+  - a token carries no *Copy*/*Unique* ownership class: it is a separate, opaque value kind with no user-visible semantics;
   - its **armed bit** is runtime state: `cleanup_disable` disarms; `drop_cleanup` destroys the payload iff still armed, then disarms;
   - cleanup ops are ordering-sensitive effects: the optimizer never CSEs, duplicates, or reorders them relative to the owner's consumption or to each other.
 
@@ -346,7 +347,7 @@ Destruction is deterministic (per the Stilla Runtime Specification) and material
   | --- | --- |
   | definitely owned (never consumed) | an ordinary `drop` at scope end — no token |
   | definitely released (consumed on every path) | no destruction — no cleanup ops at all |
-  | maybe-unique (consumed on some paths) | `cleanup_owner` at construct entry, `cleanup_disable` on consume paths, `drop_cleanup` at scope end |
+  | maybe-*Unique* (consumed on some paths) | `cleanup_owner` at construct entry, `cleanup_disable` on consume paths, `drop_cleanup` at scope end |
 
   Expansion beyond that is a backend matter: a compiling backend lowers the three ops — after validation and optimization — to a frame cleanup slot / armed bit and a conditional destruction (branch on the bit) at the scope exit. A runtime that interprets the SSA CFG directly executes the ops as-is — the armed bit is the token's runtime state — and never expands them at all.
 - **Drop hooks.** `drop %v` where `v`'s struct defines a `drop` hook is a *single* instruction: the runtime executes the destruction sequence — hook call (fields still valid), then reverse-declaration-order field destruction, then the value is marked destroyed. The IR does not expand this; the ordering is a runtime contract (per the Stilla Runtime Specification).
@@ -359,13 +360,13 @@ Every borrowed value carries a **`BorrowOrigin`** anchoring its lifetime to a **
 | produced by | origin | root |
 | --- | --- | --- |
 | `borrow %a` | `root(%a)` | the base value |
-| `read_*` / `tail` over a unique base | `root(base)` | the base value |
-| `read_payload` / `borrow_variant` over a unique scrutinee | `root(scrutinee)` | the scrutinee |
-| `load_member %m, #i` of a unique constant member | `root(%m)` | the module value — module storage is immutable after `@init`, so this root is never consumed |
+| `read_*` / `tail` over a *Unique* base | `root(base)` | the base value |
+| `read_payload` / `borrow_variant` over a *Unique* scrutinee | `root(scrutinee)` | the scrutinee |
+| `load_member %m, #i` of a *Unique* constant member | `root(%m)` | the module value — module storage is immutable after `@init`, so this root is never consumed |
 | a borrow-mode parameter | `call` | the function-call lifetime: the caller's argument, which the callee cannot consume |
 | `syscall builtin#peek, %b` | `peek` | the boxed owner argument — the borrowed view is bound to it |
 
-The `root` origin names the **immediate** base; the validator resolves it transitively through view chains (`%v = read_field %w, #i` where `%w` is itself borrowed resolves to `%w`'s root) to the ultimate root: an owned value, the `call` lifetime, or a `peek` owner. **Every use of a borrowed value requires its ultimate root to be `Available` at the use point**; a `call` root needs no check inside the callee, and a `peek` root is bound to the producing syscall's sole boxed argument. A Copy root makes the check vacuous — Copy values are never consumed. This availability rule is the IR form of the borrow-never-outlives-its-lexical-bound rule of the Stilla Core Language Specification; the other restrictions of that rule (a borrowed view may not be moved, dropped, stored, or returned) are ownership checks.
+The `root` origin names the **immediate** base; the validator resolves it transitively through view chains (`%v = read_field %w, #i` where `%w` is itself borrowed resolves to `%w`'s root) to the ultimate root: an owned value, the `call` lifetime, or a `peek` owner. **Every use of a borrowed value requires its ultimate root to be `Available` at the use point**; a `call` root needs no check inside the callee, and a `peek` root is bound to the producing syscall's sole boxed argument. A *Copy* root makes the check vacuous — *Copy* values are never consumed. This availability rule is the IR form of the borrow-never-outlives-its-lexical-bound rule of the Stilla Core Language Specification; the other restrictions of that rule (a borrowed view may not be moved, dropped, stored, or returned) are ownership checks.
 
 A phi may merge borrowed views only when every incoming resolves to the **same** root; the joined value inherits that root, and the root's availability on each arriving edge is checked by the edge-sensitive phi-input machinery. The lowering emits no phi over views of different roots: a join across owners has no single lexical owner.
 
@@ -391,13 +392,13 @@ ModuleMember =
 Only `ConstSlot` members are runtime storage. `Function`, `ModuleRef`, and `HostBinding` members are static references: `@init` never writes them and no instruction reads them from a slot. The member-to-slot mapping is explicit — the member table names each constant member's slot — and slots are numbered `0..k-1` among the constant members in declaration order. Member indices (the `load_member` operand) and slot indices (the `store_member` operand) are therefore **distinct index spaces**; nothing in the IR depends on them coinciding.
 
 - `module_ref "spec"` — a static module value. It is a constant usable in any function; module values are module-scope-only in source, but the IR may materialize them anywhere because they are statically known references.
-- `load_member %m, #i` — resolve member `#i` of module `%m` in its member table. A `ConstSlot` member is read from its slot: an owned copy for a Copy type, a **borrowed view** for a unique type — a module-owned unique constant cannot be moved or dropped by source. A `Function` member yields a function value (`fn_ref`); a `ModuleRef` member yields the module value directly, with no slot read. User functions reference module constants and functions this way; chained library paths (`std.math.sqrt`) lower to a chain of `load_member` ops.
+- `load_member %m, #i` — resolve member `#i` of module `%m` in its member table. A `ConstSlot` member is read from its slot: an owned copy for a *Copy* type, a **borrowed view** for a *Unique* type — a module-owned *Unique* constant cannot be moved or dropped by source. A `Function` member yields a function value (`fn_ref`); a `ModuleRef` member yields the module value directly, with no slot read. User functions reference module constants and functions this way; chained library paths (`std.math.sqrt`) lower to a chain of `load_member` ops.
 - `store_member #i, %v` — write constant slot `#i` of the **current** module. Legal only inside that module's `@init` function; slot writes are immutable once `@init` completes.
 
 Each module has an `@init` function (absent for host modules, which have no Stilla definitions to evaluate). Its job is to evaluate the module's constant members and nothing else:
 
 1. evaluate module constants **strictly in declaration order**, `store_member`-ing each `ConstSlot` member into its slot; module-valued members are never stored — they resolve statically as `ModuleRef` members, and imported modules are instantiated by the runtime in dependency order (per the Stilla Runtime Specification) without `@init` involvement;
-2. record slot metadata (`type_`, `init_order`) so the runtime can destroy module-owned unique constants in **reverse initialization order** during teardown (per the Stilla Runtime Specification) without a separate teardown function.
+2. record slot metadata (`type_`, `init_order`) so the runtime can destroy module-owned *Unique* constants in **reverse initialization order** during teardown (per the Stilla Runtime Specification) without a separate teardown function.
 
 ---
 
@@ -414,11 +415,11 @@ The callee is either a function value (a `load_member`d monomorphic function, or
 
 Parameter modes are applied at the call site (per the Stilla Core Language Specification):
 
-- **plain** — the argument type must be Copy; passed by value; a coercion to `any` materializes as `any_pack_copy`;
+- **plain** — the argument type must be *Copy*; passed by value; a coercion to `any` materializes as `any_pack_copy`;
 - **borrow** — the argument is passed as a view; the caller's ownership is unchanged; a borrow-mode parameter arrives `borrowed`;
-- **move** — the argument's ownership transfers: an existing unique owner arrives as `%a' = move %a` (or directly when fresh); the argument is dead after the call; Copy `move` lowers to `copy`.
+- **move** — the argument's ownership transfers: an existing *Unique* owner arrives as `%a' = move %a` (or directly when fresh); the argument is dead after the call; *Copy* `move` lowers to `copy`.
 
-Return: `ret %v` transfers ownership of a unique result to the caller. Borrowed returns are a compile-time error and never reach the IR.
+Return: `ret %v` transfers ownership of a *Unique* result to the caller. Borrowed returns are a compile-time error and never reach the IR.
 
 ## 8.2 `syscall`
 
@@ -477,7 +478,7 @@ FunctionType   ::= { params: [Param], ret: Type }
 
 - **Type environment.** Every nominal struct or union used by the program has one entry in the program's type environment, indexed by a stable `TypeId`. Canonical type identity is the `TypeId`; the name strings in `StructDecl` / `UnionDecl` are for printing and diagnostics only — the validator never compares names.
 - **Transparent aliases** expand during type resolution and leave no entry; structural types (`list`, `box`, `tuple`, function types) stay inline in `Type`.
-- **Ownership resolution.** A named type's ownership resolves through its declaration: Copy iff every owned component is Copy. A struct with a user drop hook is always unique — Copy destruction does nothing, so a drop hook implies unique; the two never contradict.
+- **Ownership resolution.** A named type's ownership resolves through its declaration: *Copy* iff every owned component is *Copy*. A struct with a user drop hook is always *Unique* — *Copy* destruction does nothing, so a drop hook implies *Unique*; the two never contradict.
 - **Type members are compile-time** (per the Stilla Core Language Specification): they exist here as declarations and never occupy module storage. The division is exact — type members go in the type environment (names), value members go in the member table.
 
 ## 9.2 Values and instructions
@@ -545,7 +546,7 @@ OpInfo ::= { text: Name,             -- canonical spelling
                                      -- destructure ops unpack_* / split_list)
 ```
 
-Every op has exactly one schema row. `arity` fixes the operand count. `consumes` declares which operands the op consumes. `created` declares the result's created state: `owned`, `borrowed`, `operand` (the result state depends on the operand — the `read_*` projections yield owned results over Copy bases and borrowed views over unique bases), or `none` (pure effects). `may_trap` and `effects` together give the op's effect class; `multi` marks the ops that define several results.
+Every op has exactly one schema row. `arity` fixes the operand count. `consumes` declares which operands the op consumes. `created` declares the result's created state: `owned`, `borrowed`, `operand` (the result state depends on the operand — the `read_*` projections yield owned results over *Copy* bases and borrowed views over *Unique* bases), or `none` (pure effects). `may_trap` and `effects` together give the op's effect class; `multi` marks the ops that define several results.
 
 ## 9.5 Control flow
 
@@ -652,14 +653,14 @@ The frontend walks the annotated, monomorphic AST with a builder that appends in
 | `!` | `not` |
 | `and` / `or` | `br_cond` diamond, join phi |
 | `a as T` | `num_cast` (the Core §16.3 cast set) or `any_unpack_copy` / `any_unpack_move` |
-| coercion to `any` | `any_pack_copy` (Copy) or `any_pack_move` (unique) at the boundary |
+| coercion to `any` | `any_pack_copy` (*Copy*) or `any_pack_move` (*Unique*) at the boundary |
 | `let name = expr` | evaluate `expr`, bind result as a fresh value |
 | `let pattern = expr` | destructure: `read_*` views or the atomic `unpack_*` / `split_list` |
 | `if` | `br_cond` then/else, join phi; no `else` → `void` join |
 | `match` (union) | `read_tag` + `switch`; per-arm payload binds; join phi |
 | `match` (other patterns) | `eq`/`br_cond` chains, projections, `tail` |
 | `match (move s)` | `unpack_variant` binds (tag-carrying); scrutinee wholly consumed |
-| `move name` | `move` (or `copy` for Copy); old value dead |
+| `move name` | `move` (or `copy` for *Copy*); old value dead |
 | `drop name;` | `drop` |
 | member access / index | `read_field` / `read_index` (bounds check traps) |
 | call | `call` (direct or value); modes applied per the call rules |
@@ -668,7 +669,7 @@ The frontend walks the annotated, monomorphic AST with a builder that appends in
 | `box` / `peek` / `unbox` | `syscall` |
 | module constants | `store_member` in `@init`, declaration order — constant members only; module-valued members are not stored |
 
-**Destruction placement** runs after the walk: for each scope that ends normally, `drop` its live unique locals in reverse creation order; append per-expression temporary drops at full-expression boundaries; never on `trap` paths. The ownership analysis has already proved every unique value is destroyed exactly once — the lowering only materializes the schedule.
+**Destruction placement** runs after the walk: for each scope that ends normally, `drop` its live *Unique* locals in reverse creation order; append per-expression temporary drops at full-expression boundaries; never on `trap` paths. The ownership analysis has already proved every *Unique* value is destroyed exactly once — the lowering only materializes the schedule.
 
 **Ordering guarantees.** Instruction emission order *is* evaluation order (per the Stilla Runtime Specification): callee before arguments, arguments left to right, base before member/index, index after base, operands left to right, scrutinee before arm selection, struct field initializers in written order, tuple/list elements left to right. No reordering pass exists or is permitted to reorder observable effects.
 
@@ -698,17 +699,17 @@ These invariants are the contract every producer of the IR must uphold — the f
 **Ownership (edge-sensitive dataflow)**
 
 - a `borrowed` value is never `move`'d, `drop`'d, `unpack_*`'d / `split_list`'d, stored, or returned; never passed to a move-mode parameter;
-- `copy` / `move` / `drop` / `unpack_*` / `split_list` / `any_pack_move` / `any_unpack_move` / phi / `ret` operands that are unique are `owned` (never `borrowed`, never already consumed in that instruction);
-- a forward analysis over the CFG tracks each unique value as `Available` / `Consumed` / `MaybeConsumed` per program point, merging at joins (`Available ⊔ Consumed = MaybeConsumed`): a consuming op requires its operand *available*; a `MaybeConsumed` value has no uses at all (its destruction is scheduled through its cleanup token); a phi input is checked against its **arriving edge's** exit state, so the loop-carried phis of tail-call optimization validate per edge;
+- `copy` / `move` / `drop` / `unpack_*` / `split_list` / `any_pack_move` / `any_unpack_move` / phi / `ret` operands that are *Unique* are `owned` (never `borrowed`, never already consumed in that instruction);
+- a forward analysis over the CFG tracks each *Unique* value as `Available` / `Consumed` / `MaybeConsumed` per program point, merging at joins (`Available ⊔ Consumed = MaybeConsumed`): a consuming op requires its operand *available*; a `MaybeConsumed` value has no uses at all (its destruction is scheduled through its cleanup token); a phi input is checked against its **arriving edge's** exit state, so the loop-carried phis of tail-call optimization validate per edge;
 - a destructure consumes its base atomically (`unpack_*` / `split_list`): one op, base `Available` on arrival and `Consumed` afterwards — there is no partial-consumption state to track;
-- `drop` of a Copy value is absent (the frontend never emits it); `cleanup_disable` / `drop_cleanup` operands are cleanup tokens;
+- `drop` of a *Copy* value is absent (the frontend never emits it); `cleanup_disable` / `drop_cleanup` operands are cleanup tokens;
 - cleanup tokens are compiler-only capabilities: each is created by exactly one `cleanup_owner` and used by `cleanup_disable` / `drop_cleanup` only — never `copy`'d, `move`'d, `borrow`'d, stored, passed as an argument, `ret`'d, or phi-merged (the schema types every ordinary op's operands, so no ordinary op accepts a `cleanup`-typed value);
 - a token is disarmed at most once per path, its `drop_cleanup` is its last use on the path, and every normal-exit path disposes of every armed token (trap paths skip all destruction);
 - `cleanup_disable` appears only on paths where the token's owner was consumed (moved, taken, transferred) on that path;
 - a borrow-mode parameter is the only way a value arrives `borrowed`;
-- a `load_member` of a unique constant member arrives `borrowed` — the module owns the constant and source cannot move or drop it;
-- named ownership: a `named`-typed value's ownership resolves through its type declaration; a struct with a user drop hook is always unique — a drop hook and Copy ownership contradict;
-- borrow provenance: every use of a `borrowed` value is checked against its ultimate root — `root` origins resolve transitively through the view chain, `call` origins need no check inside the callee, and `peek` origins are bound to the producing syscall's boxed argument. An owned root must be `Available` at the use point; a consumed or maybe-unique root is a violation (an owner dropped or moved while a view of it is still used);
+- a `load_member` of a *Unique* constant member arrives `borrowed` — the module owns the constant and source cannot move or drop it;
+- named ownership: a `named`-typed value's ownership resolves through its type declaration; a struct with a user drop hook is always *Unique* — a drop hook and *Copy* ownership contradict;
+- borrow provenance: every use of a `borrowed` value is checked against its ultimate root — `root` origins resolve transitively through the view chain, `call` origins need no check inside the callee, and `peek` origins are bound to the producing syscall's boxed argument. An owned root must be `Available` at the use point; a consumed or maybe-*Unique* root is a violation (an owner dropped or moved while a view of it is still used);
 - a value's origin is non-null iff its state is `borrowed`;
 - a phi over borrowed views joins views of one root, which the result inherits; the root's availability on each arriving edge is checked by the edge-sensitive phi-input machinery.
 
@@ -732,7 +733,7 @@ These invariants are the contract every producer of the IR must uphold — the f
 Consumers of the CFG:
 
 - **runtime interpreter/compiler** — executes function bodies; blocks, terminators, and explicit `drop`s make evaluation order and destruction unambiguous; module instantiation runs `@init` in topological order; the cleanup ops are executed as-is (their armed bits are token runtime state) — only a compiling backend expands them, at its own lowering, after validation and optimization.
-- **static analysis / mid-level optimizer** (frontend.md, kept at `docs/frontend.md`) — the CFG is the base for a fixed sequence of semantics-preserving rewrites: tail call optimization (which rewrites calls in tail position into frame-reusing branches — Copy carriers into a loop-header phi loop, move/unique carriers into the `tailcall` terminator, §14.7), constant folding, common subexpression elimination, partial redundancy elimination, copy propagation, dead-block elimination, drop elision (a `drop` whose effect is provably unobservable may be removed — `drop_cleanup` / `cleanup_disable` act on a token whose payload is a unique owner and are never elided), and phi simplification. Cleanup ops are additionally never CSE'd, duplicated, or reordered relative to each other or to the owner's consumption. Optimization is permitted only when the observable behavior is unchanged; drop elision must not remove a user drop hook that performs output, and no pass may move a destruction earlier than its prescribed point.
+- **static analysis / mid-level optimizer** (frontend.md, kept at `docs/frontend.md`) — the CFG is the base for a fixed sequence of semantics-preserving rewrites: tail call optimization (which rewrites calls in tail position into frame-reusing branches — *Copy* carriers into a loop-header phi loop, move/*Unique* carriers into the `tailcall` terminator, §14.7), constant folding, common subexpression elimination, partial redundancy elimination, copy propagation, dead-block elimination, drop elision (a `drop` whose effect is provably unobservable may be removed — `drop_cleanup` / `cleanup_disable` act on a token whose payload is a *Unique* owner and are never elided), and phi simplification. Cleanup ops are additionally never CSE'd, duplicated, or reordered relative to each other or to the owner's consumption. Optimization is permitted only when the observable behavior is unchanged; drop elision must not remove a user drop hook that performs output, and no pass may move a destruction earlier than its prescribed point.
 
 Non-goals: no register allocation, no instruction scheduling, no cost-model-driven optimizer in this document. The mid-level optimizer is a fixed, small set of CFG→CFG rewrites that preserve observable behavior; tail call optimization is the first of them, the remainder (folding, propagation, dead-block elimination, drop elision, phi simplification) follows. The `any` runtime representation (tagging) is a runtime concern; the IR only requires that a value coerced to `any` carries its payload.
 
@@ -848,7 +849,7 @@ entry:
 }
 ```
 
-An explicit `drop name;` is a single `drop` instruction. A statement that is a unique temporary call drops the temporary at the end of its full expression:
+An explicit `drop name;` is a single `drop` instruction. A statement that is a *Unique* temporary call drops the temporary at the end of its full expression:
 
 ```stilla
 open_file("temporary.txt");
@@ -970,11 +971,11 @@ recur:
 }
 ```
 
-Every use of a raw parameter in the body is rewritten to its header phi result, so the loop-carried value is genuinely SSA (`%n1` is defined in `header`, which dominates the body) and the phi's loop-back incoming is the fresh argument value. The rewrite is valid only when no live unique value's destruction would be reordered: the reused frame holds the parameter (now the phi result via the back-edge) and the arguments, and everything else the caller owned is already destroyed before the tail position, so the destruction schedule is unchanged. The validator's edge-sensitive ownership analysis checks each header phi's incoming against its arriving edge. A Copy-only candidate requires all-Copy loop-carried parameters, no live unique local on the tail edge, and no armed cleanup token on the tail edge — a move-mode parameter's loop-back is **not** a phi (no loop phi over unique values); it is expressed as the `tailcall` terminator instead (§14.7.1), which carries the unique / move-mode state atomically into a reused frame. The destruction schedule is trivially valid in both forms: the phi loop holds only Copy state, and `tailcall` transfers ownership as the tail position itself, so nothing is reordered.
+Every use of a raw parameter in the body is rewritten to its header phi result, so the loop-carried value is genuinely SSA (`%n1` is defined in `header`, which dominates the body) and the phi's loop-back incoming is the fresh argument value. The rewrite is valid only when no live *Unique* value's destruction would be reordered: the reused frame holds the parameter (now the phi result via the back-edge) and the arguments, and everything else the caller owned is already destroyed before the tail position, so the destruction schedule is unchanged. The validator's edge-sensitive ownership analysis checks each header phi's incoming against its arriving edge. A *Copy*-only candidate requires all-*Copy* loop-carried parameters, no live *Unique* local on the tail edge, and no armed cleanup token on the tail edge — a move-mode parameter's loop-back is **not** a phi (no loop phi over *Unique* values); it is expressed as the `tailcall` terminator instead (§14.7.1), which carries the *Unique* / move-mode state atomically into a reused frame. The destruction schedule is trivially valid in both forms: the phi loop holds only *Copy* state, and `tailcall` transfers ownership as the tail position itself, so nothing is reordered.
 
-### 14.7.1 The `tailcall` terminator (move / unique loop-carried state)
+### 14.7.1 The `tailcall` terminator (move / *Unique* loop-carried state)
 
-A direct self-recursive tail call that carries a move-mode (possibly unique) argument cannot reuse a Copy-only loop header, so the lowering represents it as the **`tailcall`** terminator instead of a phi loop:
+A direct self-recursive tail call that carries a move-mode (possibly *Unique*) argument cannot reuse a *Copy*-only loop header, so the lowering represents it as the **`tailcall`** terminator instead of a phi loop:
 
 ```text
 recur:
@@ -983,16 +984,16 @@ recur:
     tailcall @self, %values, %nextS, %ctx, %step
 ```
 
-The `tailcall` terminator is the frame-reuse form of a *direct self-call*: it transfers each argument's ownership into the callee's parameter slot for the next frame and jumps to the entry, reusing the current frame instead of allocating a new one. It is **atomic with respect to ownership**: the current frame's locals that are no longer needed are destroyed, and the argument values are moved into the (reused) parameter slots *first*, so the old parameters' storage is dead by the time the callee body re-reads it. There is no `ret` to consume the result — the next frame's `ret` is the whole call's return — so the Core tail-call guarantee (recursion written as iteration does not grow the stack, Runtime §7.3) holds even when the loop-carried state is unique.
+The `tailcall` terminator is the frame-reuse form of a *direct self-call*: it transfers each argument's ownership into the callee's parameter slot for the next frame and jumps to the entry, reusing the current frame instead of allocating a new one. It is **atomic with respect to ownership**: the current frame's locals that are no longer needed are destroyed, and the argument values are moved into the (reused) parameter slots *first*, so the old parameters' storage is dead by the time the callee body re-reads it. There is no `ret` to consume the result — the next frame's `ret` is the whole call's return — so the Core tail-call guarantee (recursion written as iteration does not grow the stack, Core §13.5, §18 *Recursion*) holds even when the loop-carried state is *Unique*.
 
 Rules (the validator enforces them):
 
 - `tailcall` appears only in tail position: block `B` ends in `tailcall @self, %a, …`, and every path from `B` to a `ret` passes through a reused frame — there is no result to return, so the enclosing function's `ret` is reached only via the final self-frame's `ret`. The target is always the enclosing `IrFunc`.
-- Argument types match the callee's parameter types; argument modes follow the parameter modes: a plain/borrow parameter takes a view, a move parameter transfers ownership of a unique argument and consumes it. A borrow-mode argument must not name a local the reuse destroys (its root must outlive the frame reuse); the validator checks availability on the tail edge.
-- No unique value is live across the `tailcall` except by being an argument: after the transfer the current frame holds no unique local whose destruction the reuse would reorder.
+- Argument types match the callee's parameter types; argument modes follow the parameter modes: a plain/borrow parameter takes a view, a move parameter transfers ownership of a *Unique* argument and consumes it. A borrow-mode argument must not name a local the reuse destroys (its root must outlive the frame reuse); the validator checks availability on the tail edge.
+- No *Unique* value is live across the `tailcall` except by being an argument: after the transfer the current frame holds no *Unique* local whose destruction the reuse would reorder.
 - The tail edge carries no armed cleanup token (a scope-end `drop_cleanup` would sit after the reuse point); otherwise the destruction schedule is unchanged.
 
-Backends and the runtime interpreter execute `tailcall` by reusing the current frame's slots; an optimizing backend may lower it to a machine jump. The mid-level optimizer treats `tailcall` as a control-flow edge to the function's entry, not as the phi-loop shape, so unique loop-carried state needs no cyclic ownership fixed point in the IR itself.
+Backends and the runtime interpreter execute `tailcall` by reusing the current frame's slots; an optimizing backend may lower it to a machine jump. The mid-level optimizer treats `tailcall` as a control-flow edge to the function's entry, not as the phi-loop shape, so *Unique* loop-carried state needs no cyclic ownership fixed point in the IR itself.
 
 ## 14.8 Constant folding
 

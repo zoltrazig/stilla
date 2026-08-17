@@ -124,7 +124,14 @@ fn checkFuncBody(frame: *Frame, f: *const ast.FuncDef, body: *const ast.Block) C
     }
     // Resolve the declared return type so the validate pass can check the
     // body's result against it; unreachable when the body has no result.
-    if (f.ret != null) _ = try frame.ck.resolveTypeOf(frame.ma, frame.info, &f.ret.?);
+    // The resolved return type is the body's goal (Core §11), so a
+    // construction whose type arguments are under-determined by its payloads
+    // fills the unbound ones from it.
+    const old_expect = frame.expect;
+    if (f.ret != null) {
+        frame.expect = try frame.ck.resolveTypeOf(frame.ma, frame.info, &f.ret.?);
+    }
+    defer frame.expect = old_expect;
 
     _ = try checkBlock(frame, body);
 
@@ -156,14 +163,17 @@ fn checkBlock(frame: *Frame, b: *const ast.Block) CheckError!cfg.Type {
         .empty => {},
     };
 
-    if (b.result) |*r| return (try inferExpr(frame, r)) orelse cfg.Type{ .primitive = .void };
+    if (b.result) |*r| return (try inferExprAs(frame, r, frame.expect)) orelse cfg.Type{ .primitive = .void };
     return cfg.Type{ .primitive = .void };
 }
 
 fn checkLet(frame: *Frame, l: *const ast.LetStmt) CheckError!void {
     // Resolve the declared type eagerly so the validate pass can compare
-    // it against the initializer (frontend §4.6, Core §5).
-    if (l.type_ != null) _ = try frame.ck.resolveTypeOf(frame.ma, frame.info, &l.type_.?);
+    // it against the initializer (frontend §4.6, Core §5); it is also the
+    // initializer's goal type (Core §11), so an under-determined
+    // construction fills its type arguments from it.
+    var declared: ?cfg.Type = null;
+    if (l.type_ != null) declared = try frame.ck.resolveTypeOf(frame.ma, frame.info, &l.type_.?);
     const t: ?cfg.Type = blk: {
         // The declared type types the binding when one is written (Core
         // §4): a declared `any` makes the binding `any` (the top-type
@@ -172,11 +182,8 @@ fn checkLet(frame: *Frame, l: *const ast.LetStmt) CheckError!void {
         // when the initializer is an unconstrained construction
         // (`Option::None`). The initializer is still inferred and
         // annotated (its type feeds `validateLet`'s compatibility check).
-        const it = try inferExpr(frame, l.init);
-        if (l.type_ != null) {
-            const dt = try frame.ck.resolveTypeOf(frame.ma, frame.info, &l.type_.?);
-            break :blk dt;
-        }
+        const it = try inferExprAs(frame, l.init, declared);
+        if (declared) |dt| break :blk dt;
         break :blk it;
     };
     // A `let` binding owns its initializer, so the initializer may not be
@@ -498,6 +505,17 @@ fn inferExpr(frame: *Frame, e: *const ast.Expr) CheckError!?cfg.Type {
     return t;
 }
 
+/// Infer `e` under a goal type (Core §11): constructions whose type
+/// arguments can't be inferred from their payloads alone fill the unbound
+/// ones from `expected`. The goal applies only to this subtree and is
+/// restored afterwards.
+fn inferExprAs(frame: *Frame, e: *const ast.Expr, expected: ?cfg.Type) CheckError!?cfg.Type {
+    const old = frame.expect;
+    frame.expect = expected;
+    defer frame.expect = old;
+    return inferExpr(frame, e);
+}
+
 fn inferExprInner(frame: *Frame, e: *const ast.Expr) CheckError!?cfg.Type {
     const alloc = frame.ck.alloc();
     switch (e.*) {
@@ -546,6 +564,9 @@ fn inferExprInner(frame: *Frame, e: *const ast.Expr) CheckError!?cfg.Type {
                 params[i] = .{ .span = p.span, .name = p.name, .mode = p.mode, .type_ = t };
                 _ = try bindLocal(frame, p.name.text, t, p.mode == .borrow);
             }
+            const old = frame.expect;
+            frame.expect = null; // a lambda's body has its own goal
+            defer frame.expect = old;
             const ret = try checkBlock(frame, lam.body);
             const ret_ptr = try alloc.create(cfg.Type);
             ret_ptr.* = ret;
@@ -559,7 +580,7 @@ fn inferExprInner(frame: *Frame, e: *const ast.Expr) CheckError!?cfg.Type {
             const then_path = try ownership.pathOf(frame, tracked, entry, ownership.blockCompletesNormally(frame, i.then));
             if (i.else_) |else_e| {
                 try ownership.restore(frame, tracked, entry);
-                const else_t = (try inferExpr(frame, else_e)) orelse cfg.Type{ .primitive = .void };
+                const else_t = (try inferExprAs(frame, else_e, frame.expect)) orelse cfg.Type{ .primitive = .void };
                 const else_path = try ownership.pathOf(frame, tracked, entry, ownership.exprCompletesNormally(frame, else_e));
                 try ownership.merge(frame, tracked, entry, &.{ then_path, else_path }, i.span);
                 return try joinBranches(frame, i.span, then_t, else_t);
@@ -586,7 +607,7 @@ fn inferExprInner(frame: *Frame, e: *const ast.Expr) CheckError!?cfg.Type {
             const paths = try alloc.alloc(ownership.Path, m.arms.len);
             for (m.arms, 0..) |*arm, ai| {
                 _ = try inferPattern(frame, &arm.pattern, scrut_t, !consuming);
-                const at = (try inferExpr(frame, arm.body)) orelse cfg.Type{ .primitive = .void };
+                const at = (try inferExprAs(frame, arm.body, frame.expect)) orelse cfg.Type{ .primitive = .void };
                 result = if (result) |r| try joinBranches(frame, m.span, r, at) else at;
                 paths[ai] = try ownership.pathOf(frame, tracked, entry, ownership.exprCompletesNormally(frame, arm.body));
                 try ownership.restore(frame, tracked, entry);
@@ -847,7 +868,21 @@ fn inferConstructArgs(frame: *Frame, id: moduleinfo.TypeId, sc: ?*const ast.Stru
     }
     const out = try alloc.alloc(cfg.Type, params.len);
     for (params, 0..) |*prm, i| {
-        out[i] = env.get(prm.text) orelse return &.{};
+        if (env.get(prm.text)) |t| {
+            out[i] = t;
+        } else if (frame.expect) |ex| {
+            // An unbound parameter fills from the goal type (Core §11): a
+            // construction whose payloads mention only some parameters
+            // (`Result::Break(r)` mentions R but not S) takes the others
+            // from the expected instantiation of the same declaration.
+            if (ex == .named and ex.named.id == id and ex.named.args.len == params.len) {
+                out[i] = ex.named.args[i];
+            } else {
+                return &.{}; // the goal doesn't constrain it: wildcard
+            }
+        } else {
+            return &.{}; // a type argument can't be determined: wildcard
+        }
     }
     return out;
 }

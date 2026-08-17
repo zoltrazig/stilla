@@ -54,10 +54,9 @@ fn checkModule(m: stdbundle.Module) !void {
     var ann = try ck.check(graph);
     defer ann.deinit();
 
-    // `iter` is ordinary Stilla source (StdLib §7): its combinators have
-    // real bodies, except the `try_fold*` host bindings (generic
-    // `Option[S]` payload resolution is deferred by the structural
-    // frontend). Every other bundle module is declaration-only host
+    // `iter` is ordinary Stilla source (StdLib §7): every combinator has a
+    // real body (the former `try_fold*` host bindings are now written in
+    // Stilla too). Every other bundle module is declaration-only host
     // binding surface.
     const is_iter = std.mem.eql(u8, m.specifier, "iter");
     for (graph.modules) |info| {
@@ -66,7 +65,7 @@ fn checkModule(m: stdbundle.Module) !void {
             .func_def => |*f| {
                 if (is_iter) {
                     // Source combinators have bodies and are not host
-                    // bindings; the `try_fold*` declarations are.
+                    // bindings.
                     try testing.expect((f.body == null) == ann.host_bindings.contains(f));
                 } else {
                     // Every bundle function is a host binding: a declaration

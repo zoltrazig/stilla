@@ -313,11 +313,16 @@ fn validateMatch(frame: *Frame, m: *const ast.MatchExpr) CheckError!void {
                 const pp = &arm.pattern.path;
                 if (pp.tail == .variant) {
                     const name = type_resolve.joinPath(frame.ck.alloc(), pp.path) orelse continue;
-                    const scrut_name = frame.resolve.typeNameOf(scrut_t.named.id) orelse continue;
-                    // An arm matches this union when its leading path
-                    // segment is the union unqualified name.
-                    if (!std.mem.eql(u8, name, lastSegment(scrut_name))) continue;
-                    if (moduleinfo.variantIndex(ud, pp.tail.variant.name.text)) |idx| {
+                    // Resolve the arm's leading path to its declaration
+                    // and compare with the scrutinee's union declaration —
+                    // not the unqualified names, which differ under a
+                    // `using ... as` alias (`using builtin.Option as Opt`
+                    // matches `Opt::Some(..)` against `Option`; Core §2.8).
+                    const tm = type_resolve.resolveTypeName(frame.resolve, frame.info, name) orelse continue;
+                    const final = type_resolve.followAlias(frame.resolve, frame.info, tm) orelse continue;
+                    if (final.decl != .union_) continue;
+                    if (final.decl.union_ != ud) continue;
+                    if (moduleinfo.variantIndex(final.decl.union_, pp.tail.variant.name.text)) |idx| {
                         covered[@intCast(idx)] = true;
                     }
                 }
@@ -1138,11 +1143,6 @@ fn compatibleRecur(expected: cfg.Type, actual: cfg.Type) bool {
         },
         else => return false,
     }
-}
-
-fn lastSegment(name: []const u8) []const u8 {
-    const dot = std.mem.lastIndexOfScalar(u8, name, '.') orelse return name;
-    return name[dot + 1 ..];
 }
 
 fn isNeverOrAny(t: cfg.Type) bool {

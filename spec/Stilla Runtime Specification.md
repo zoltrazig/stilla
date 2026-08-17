@@ -55,12 +55,12 @@ When a context begins relative to host lifecycle, and whether multiple contexts 
 
 ## 1.4 Key terminology
 
-These terms are used throughout this specification. Language-level terms (binding, unique, borrow, move, drop, etc.) are defined in the Core specification.
+These terms are used throughout this specification. Language-level terms (binding, *Unique*, borrow, move, drop, etc.) are defined in the Core specification.
 
 - **execution context** — the unit of program execution created by the host; it owns module storage and is terminated as a whole by panic (Execution context, Termination and Traps).
 - **module storage** — the immutable storage of an instantiated module (Module storage).
 - **module instantiation** — creating module storage for a resolved specifier (At most once per context).
-- **teardown** — normal-context destruction of module-owned unique constants in reverse initialization order (Teardown).
+- **teardown** — normal-context destruction of module-owned *Unique* constants in reverse initialization order (Teardown).
 - **embedding host / host** — the environment that creates the execution context, registers host-provided modules, invokes entry points, and receives control after termination (Host Environment).
 - **host-provided module** — a module implemented by the host that exposes a statically known Stilla-compatible interface (Host-provided modules).
 - **runtime trap** — a deterministic runtime failure such as overflow, division by zero, invalid indexing, or invalid conversion (Runtime traps and numeric behavior).
@@ -70,7 +70,7 @@ These terms are used throughout this specification. Language-level terms (bindin
 A conforming implementation must:
 
 - instantiate each resolved module at most once per execution context (At most once per context);
-- initialize module constants in declaration order (Initialization) and destroy module-owned unique constants during normal teardown (Teardown);
+- initialize module constants in declaration order (Initialization) and destroy module-owned *Unique* constants during normal teardown (Teardown);
 - provide the required `builtin` interface (Required `builtin` Interface);
 - evaluate subexpressions in the defined order (Evaluation Order);
 - destroy values as specified (Destruction at Runtime);
@@ -128,7 +128,7 @@ Imported module references do not transfer ownership of module storage.
 
 ## 2.5 Teardown
 
-Module-owned unique constants are destroyed during **normal context teardown** in reverse initialization order.
+Module-owned *Unique* constants are destroyed during **normal context teardown** in reverse initialization order.
 
 Teardown runs only during normal termination of the execution context.
 
@@ -305,13 +305,13 @@ builtin.box[T]:
     fn(move T) -> box[T]
 ```
 
-A fresh unique expression transfers implicitly:
+A fresh *Unique* expression transfers implicitly:
 
 ```stilla
 builtin.box(Tree[int32]::Empty)
 ```
 
-An existing unique owner requires `move` (the Core specification).
+An existing *Unique* owner requires `move` (the Core specification).
 
 ## 4.6 Peek and unbox
 
@@ -322,9 +322,9 @@ builtin.peek[T]:
     fn(borrow box[T]) -> <borrowed T>
 ```
 
-`<borrowed T>` is notation in this specification for a transient non-owning result. It is not a storable source-level type in Stilla v1.3.
+`<borrowed T>` is notation in this specification for a transient non-owning result. It is not a storable source-level type in Stilla v1.3; in the standard-library source (`std/builtin.st`) the binding is declared with the ordinary spelling `fn(borrow box[T]) -> T`, and the frontend's lowering produces the borrowed view for the result.
 
-For unique `T`, the result lives until the end of the enclosing full expression and is subject to the Core specification.
+For *Unique* `T`, the result lives until the end of the enclosing full expression and is subject to the Core specification.
 
 Ownership extraction:
 
@@ -333,7 +333,7 @@ builtin.unbox[T]:
     fn(move box[T]) -> T
 ```
 
-For an existing unique box:
+For an existing *Unique* box:
 
 ```stilla
 builtin.unbox(move boxed)
@@ -341,9 +341,9 @@ builtin.unbox(move boxed)
 
 consumes the box as a whole and returns ownership of `T`.
 
-For a fresh box expression, explicit `move` is unnecessary. If `box[T]` is Copy, `builtin.unbox(boxed)` is also valid and returns a copy without invalidating the source box.
+For a fresh box expression, explicit `move` is unnecessary. If `box[T]` is *Copy*, `builtin.unbox(boxed)` is also valid and returns a copy without invalidating the source box.
 
-For Copy `T`, implementations may return an ordinary copy from `builtin.peek`.
+For *Copy* `T`, implementations may return an ordinary copy from `builtin.peek`.
 
 ## 4.7 Panic
 
@@ -441,7 +441,7 @@ The `iter` combinators evaluate their iterable exactly once and visit elements i
 
 Module constants are initialized in declaration order (the Core specification).
 
-Unique temporaries surviving to the end of one full expression are destroyed in reverse creation order (Unique temporaries).
+*Unique* temporaries surviving to the end of one full expression are destroyed in reverse creation order (*Unique* temporaries).
 
 These rules apply to all conforming implementations and are not optimization hints. An implementation may optimize only when the observable behavior is unchanged.
 
@@ -453,7 +453,7 @@ The compile-time constraints of destruction — how `drop` hooks are declared, w
 
 ## 6.1 Automatic destruction
 
-During normal control flow, a unique local owner that has not been moved or explicitly dropped is automatically destroyed when its scope ends (the Core specification).
+During normal control flow, a *Unique* local owner that has not been moved or explicitly dropped is automatically destroyed when its scope ends (the Core specification).
 
 Local owners are destroyed in reverse creation order.
 
@@ -480,7 +480,7 @@ a
 During normal control flow, destroying a struct value proceeds in this exact order:
 
 1. execute the user-defined `drop` hook, if present;
-2. destroy unique fields in reverse declaration order;
+2. destroy *Unique* fields in reverse declaration order;
 3. mark the complete value destroyed.
 
 For:
@@ -508,7 +508,7 @@ The user hook runs while all fields remain valid. If the hook panics or traps, e
 
 ## 6.3 Structural destruction order
 
-Values containing unique components are destroyed structurally.
+Values containing *Unique* components are destroyed structurally.
 
 The required ordering is:
 
@@ -517,13 +517,13 @@ The required ordering is:
 - list elements: reverse index order;
 - union payloads: reverse payload order of the active variant;
 - `box[T]`: destroy the contained value;
-- module-owned unique constants: reverse module initialization order.
+- module-owned *Unique* constants: reverse module initialization order.
 
 Only the active union variant is destroyed.
 
-## 6.4 Unique temporaries
+## 6.4 *Unique* temporaries
 
-A unique temporary that is not transferred into another owner is automatically destroyed at the end of the containing full expression during normal control flow.
+A *Unique* temporary that is not transferred into another owner is automatically destroyed at the end of the containing full expression during normal control flow.
 
 For example:
 
@@ -533,7 +533,7 @@ open_file("temporary.txt");
 
 constructs and then destroys the returned `File`.
 
-Multiple unique temporaries created within one full expression are destroyed in reverse creation order.
+Multiple *Unique* temporaries created within one full expression are destroyed in reverse creation order.
 
 A **consuming destructure** destroys unbound components — a wildcard `_`
 arm of a consuming `match`, unbound fields of a struct pattern, and an
@@ -651,13 +651,13 @@ borrow T     non-owning parameter
 move T       ownership-taking parameter
 ```
 
-For an existing unique owner, ownership transfer is always explicit:
+For an existing *Unique* owner, ownership transfer is always explicit:
 
 ```stilla
 consume(move owner)
 ```
 
-A fresh unique expression may transfer directly:
+A fresh *Unique* expression may transfer directly:
 
 ```stilla
 consume(make_value())
