@@ -838,6 +838,47 @@ test "frontend lowers a non-consuming multi-payload match to borrow_variant" {
     try testing.expectEqualStrings(text, text2);
 }
 
+test "tailcall terminator round-trips text and validates" {
+    // ir.md §14.7.1: a `tailcall` is an exit terminator (no out-edge) for a
+    // move/unique direct self-recursion; its arguments transfer ownership into
+    // the reused frame. Hand-written text must re-parse, re-print exactly, and
+    // pass the validator (self target, arity, types, mode-correct arguments).
+    const text =
+        \\module "app" {
+        \\    func @f(n: int32) -> int32 {
+        \\    entry:
+        \\        %z: int32 = const 0
+        \\        %c: bool = eq %n, %z
+        \\        br %c ? base : rec
+        \\    base:
+        \\        ret %n
+        \\    rec:
+        \\        %one: int32 = const 1
+        \\        %nm1: int32 = sub %n, %one
+        \\        tailcall @f, %nm1
+        \\    }
+        \\}
+    ;
+    var p = cfg.Parser.init(testing.allocator);
+    defer p.deinit();
+    const prog = try p.parse(text);
+    try testing.expectEqual(@as(usize, 1), prog.funcs.len);
+    // The `tailcall` terminator survives the canonical printer.
+    const text2 = try cfg.print(&prog, testing.allocator);
+    defer testing.allocator.free(text2);
+    try testing.expect(std.mem.indexOf(u8, text2, "tailcall @f, %") != null);
+    // ...re-parses..., and ...validates (self target, arity, types, and a
+    // by-value Copy argument).
+    var p2 = cfg.Parser.init(testing.allocator);
+    defer p2.deinit();
+    const prog2 = try p2.parse(text2);
+    // Validate through an arena: the validator's temporaries (dominance
+    // matrix, state maps) are arena-scoped, not individually freed.
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    try testing.expectEqual(@as(?[]const u8, null), try lower.validate(&prog2, arena.allocator()));
+}
+
 test "frontend IR round-trips with duplicate-block-producing constructs" {
     // Block labels must be unique in the printed IR (ir.md §9): the
     // standalone cfg parser rejects duplicate labels. Repeated control

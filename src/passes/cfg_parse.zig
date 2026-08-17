@@ -723,6 +723,15 @@ pub const Parser = struct {
             try self.setTerminator(.trap);
             return;
         }
+        if (std.mem.eql(u8, text, "tailcall")) {
+            _ = self.advance();
+            const ft = self.cur();
+            if (ft.kind != .func_ref) return self.fail(ft, "expected a function reference for tailcall, found '{s}'", .{describe(ft)});
+            _ = self.advance();
+            const args = try self.parseCommaOperandList();
+            try self.setTerminator(.{ .tailcall = .{ .name = ft.text, .func = null, .args = args } });
+            return;
+        }
         return self.fail(t, "expected an instruction or terminator, found identifier '{s}'", .{text});
     }
 

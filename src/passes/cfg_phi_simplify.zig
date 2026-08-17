@@ -140,6 +140,9 @@ fn rewriteBlock(b: *cfg.BasicBlock, fwd: *const std.AutoHashMap(*cfg.Value, *cfg
         .branch => {},
         .branch_cond => |*bc| bc.cond = resolve(fwd, bc.cond),
         .@"switch" => |*s| s.disc = resolve(fwd, s.disc),
+        .tailcall => |*tc| for (tc.args) |*a| {
+            a.* = resolve(fwd, a.*);
+        },
         .trap => {},
     }
 }

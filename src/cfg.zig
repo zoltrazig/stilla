@@ -702,7 +702,21 @@ pub const Terminator = union(enum) {
     branch: *BasicBlock,
     branch_cond: struct { cond: *Value, then_: *BasicBlock, else_: *BasicBlock },
     @"switch": Switch,
+    /// Frame-reusing direct self-call (ir.md §14.7.1): the move/unique
+    /// form of a direct self-recursive tail call. Arguments are
+    /// transferred into the reused frame's parameter slots and the frame
+    /// is jumped to, so the block is an **exit** (no out-edge, like `ret` /
+    /// `trap`) — there is no result to return.
+    tailcall: TailCall,
     trap,
+};
+
+pub const TailCall = struct {
+    /// Target function name (text form). A `tailcall` is always a direct
+    /// self-call; `func` resolves to the enclosing `IrFunc`.
+    name: []const u8,
+    func: ?*IrFunc = null,
+    args: []*Value,
 };
 
 pub const Switch = struct {
@@ -768,7 +782,7 @@ pub fn finalizeBlocks(
     for (blocks) |_| try preds.append(allocator, .empty);
     for (blocks) |b| {
         switch (b.terminator) {
-            .ret, .trap => {},
+            .ret, .tailcall, .trap => {},
             .branch => |tgt| try preds.items[tgt.id].append(allocator, b),
             .branch_cond => |bc| {
                 try preds.items[bc.then_.id].append(allocator, b);
@@ -952,6 +966,11 @@ pub fn rewriteUses(f: *IrFunc, from: *Value, to: *Value) void {
             .@"switch" => |*s| {
                 if (s.disc == from) s.disc = to;
             },
+            .tailcall => |*tc| {
+                for (tc.args) |*a| {
+                    if (a.* == from) a.* = to;
+                }
+            },
             .trap => {},
         }
     }
@@ -1007,6 +1026,12 @@ pub const IrProgram = struct {
                         },
                         else => {},
                     }
+                }
+                switch (b.terminator) {
+                    .tailcall => |*tc| if (tc.func == null) {
+                        tc.func = map.get(tc.name);
+                    },
+                    else => {},
                 }
             }
         }

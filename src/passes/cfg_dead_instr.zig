@@ -207,6 +207,7 @@ fn collectTermOperands(term: cfg.Terminator, out: *std.ArrayList(*cfg.Value), al
         .branch => {},
         .branch_cond => |bc| try out.append(allocator, bc.cond),
         .@"switch" => |s| try out.append(allocator, s.disc),
+        .tailcall => |tc| for (tc.args) |a| try out.append(allocator, a),
         .trap => {},
     }
 }

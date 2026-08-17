@@ -279,6 +279,14 @@ fn collectUses(f: *cfg.IrFunc, v: *cfg.Value, allocator: std.mem.Allocator) !std
                     if (uses.items.len > 1) break :outer;
                 }
             },
+            .tailcall => |tc| {
+                for (tc.args) |a| {
+                    if (a == v) {
+                        try uses.append(allocator, .other);
+                        if (uses.items.len > 1) break :outer;
+                    }
+                }
+            },
             .trap => {},
         }
     }
@@ -529,6 +537,9 @@ fn rewriteBlock(b: *cfg.BasicBlock, renames: *const std.AutoHashMap(*cfg.Value, 
         .branch => {},
         .branch_cond => |*bc| bc.cond = renames.get(bc.cond) orelse bc.cond,
         .@"switch" => |*s| s.disc = renames.get(s.disc) orelse s.disc,
+        .tailcall => |*tc| for (tc.args) |*a| {
+            a.* = renames.get(a.*) orelse a.*;
+        },
         .trap => {},
     }
 }

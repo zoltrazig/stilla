@@ -103,7 +103,7 @@ fn validateFunc(f: *const cfg.IrFunc, allocator: std.mem.Allocator) !?[]const u8
                 for (s.arms) |arm| try ts.append(allocator, arm.block);
                 break :blk try ts.toOwnedSlice(allocator);
             },
-            .ret, .trap => continue,
+            .ret, .tailcall, .trap => continue,
         };
         for (targets) |t| {
             var listed = false;
@@ -273,7 +273,7 @@ fn validateFunc(f: *const cfg.IrFunc, allocator: std.mem.Allocator) !?[]const u8
 fn successors(b: *const cfg.BasicBlock, allocator: std.mem.Allocator) ![]const *const cfg.BasicBlock {
     var out = std.ArrayList(*const cfg.BasicBlock).empty;
     switch (b.terminator) {
-        .ret, .trap => {},
+        .ret, .tailcall, .trap => {},
         .branch => |t| try out.append(allocator, t),
         .branch_cond => |bc| {
             try out.append(allocator, bc.then_);
@@ -698,6 +698,50 @@ fn checkTerminator(f: *const cfg.IrFunc, b: *const cfg.BasicBlock, dom: [][]bool
             }
         },
         .branch, .trap => {},
+        .tailcall => |tc| {
+            // A `tailcall` is a direct self-call: the target must be the
+            // enclosing function, the argument list must match the
+            // parameter list in arity, type, and mode, each argument must
+            // be dominated, a move-mode argument must be available and is
+            // consumed (ownership transfers into the reused frame), and a
+            // borrow-mode argument must not borrow a root the frame reuse
+            // would destroy.
+            if (tc.func) |target| {
+                if (target != f) {
+                    return msg(allocator, "function @{s}: tailcall targets '@{s}', not the enclosing function (Core §…) — a tailcall must be a self-call", .{ f.name.text, target.name.text });
+                }
+            }
+            if (tc.args.len != f.params.len) {
+                return msg(allocator, "function @{s}: tailcall passes {d} arguments to a {d}-parameter function", .{ f.name.text, tc.args.len, f.params.len });
+            }
+            for (tc.args, f.params) |a, p| {
+                if (try checkUse(f, b, null, a, dom, allocator)) |m| return m;
+                if (!cfg.Type.eql(a.type_, p.type_)) {
+                    return msg(allocator, "function @{s}: tailcall argument %{d} of type {any} does not match parameter type {any}", .{ f.name.text, a.id, a.type_, p.type_ });
+                }
+                if (p.mode == .move) {
+                    if (a.ownership != .copy) {
+                        if (st.get(a)) |s| {
+                            if (s != .available) {
+                                return msg(allocator, "function @{s}: tailcall move-mode argument %{d} is not available in block '{s}'", .{ f.name.text, a.id, b.name });
+                            }
+                        }
+                        try st.put(a, .consumed);
+                    }
+                } else {
+                    if (a.ownership != .copy and a.state != .borrowed) {
+                        if (st.get(a)) |s| {
+                            if (s == .consumed) {
+                                return msg(allocator, "function @{s}: tailcall borrow-mode argument %{d} is consumed before the tailcall in block '{s}'", .{ f.name.text, a.id, b.name });
+                            }
+                        }
+                    }
+                    if (a.state == .borrowed) {
+                        if (try checkBorrowRoot(f, b, a, st.*, allocator)) |m| return m;
+                    }
+                }
+            }
+        },
         .branch_cond => |bc| {
             if (try checkUse(f, b, null, bc.cond, dom, allocator)) |m| return m;
             if (bc.cond.state == .borrowed) {

@@ -65,7 +65,7 @@ fn marks(f: *cfg.IrFunc, allocator: std.mem.Allocator) ![]bool {
     try work.append(allocator, f.entry);
     while (work.pop()) |b| {
         switch (b.terminator) {
-            .ret, .trap => {},
+            .ret, .tailcall, .trap => {},
             .branch => |succ| {
                 if (!seen[succ.id]) {
                     seen[succ.id] = true;

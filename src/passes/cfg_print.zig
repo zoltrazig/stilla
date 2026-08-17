@@ -380,6 +380,13 @@ fn printTerminator(out: *std.ArrayList(u8), allocator: std.mem.Allocator, types:
             try w(out, allocator, " }}", .{});
         },
         .trap => try w(out, allocator, "trap", .{}),
+        .tailcall => |tc| {
+            try w(out, allocator, "tailcall @{s}", .{tc.name});
+            for (tc.args) |a| {
+                try w(out, allocator, ", ", .{});
+                try printOperand(out, allocator, a);
+            }
+        },
     }
 }
 test "cfg round-trips through the printer" {
