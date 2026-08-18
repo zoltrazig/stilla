@@ -1754,11 +1754,13 @@ test "frontend lowers tuple destructuring to read_tuple projections" {
 }
 
 test "frontend lowers list indexing with read_index" {
-    // Core §11.5: indexing uses `@[...]` and does not mutate.
+    // Core §11.5 / Runtime §4.10: `list.get` reads a list element and
+    // does not mutate; it lowers to the bounds-checked `read_index` op.
     var c = try compileText("app", &.{
         .{
             "app",
-            \\fn f(xs: list[int32]) -> int32 { xs@[0] }
+            \\const lists = import("list");
+            \\fn f(xs: list[int32]) -> int32 { lists.get(xs, 0) }
             \\fn main() -> void {}
         },
     });
@@ -1767,6 +1769,24 @@ test "frontend lowers list indexing with read_index" {
     const out = try irText(&c.program.?);
     defer testing.allocator.free(out);
     try testing.expect(std.mem.indexOf(u8, out, "read_index") != null);
+}
+
+test "frontend borrows unique elements read via list.get" {
+    // Core §11.5: an element read of a *Unique* type is a borrowed view;
+    // returning it as owned is rejected (Core §10.7). This is the same
+    // rule the removed `@[...]` suffix applied.
+    var c = try compileText("app", &.{
+        .{
+            "app",
+            \\const lists = import("list");
+            \\struct File { fd: int32; drop(file) {} }
+            \\fn f(xs: list[File]) -> File { lists.get(xs, 0) }
+            \\fn main() -> void {}
+        },
+    });
+    defer c.deinit();
+    try testing.expect(c.program == null);
+    try testing.expect(std.mem.indexOf(u8, c.diag.?.message, "cannot return a borrowed value as owned") != null);
 }
 
 test "frontend lowers consuming list-pattern destructuring with split_list" {
@@ -1944,13 +1964,13 @@ test "frontend lowers a never-returning call to a trap path" {
 }
 
 test "frontend rejects indexing a non-list" {
-    // Core §11.5: indexing applies to lists.
+    // Core §11.5: `list.get` applies to lists.
     var c = try compileText("app", &.{
-        .{ "app", "fn f(x: int32) -> int32 { x@[0] }" },
+        .{ "app", "const lists = import(\"list\");\nfn f(x: int32) -> int32 { lists.get(x, 0) }" },
     });
     defer c.deinit();
     try testing.expect(c.program == null);
-    try testing.expect(std.mem.indexOf(u8, c.diag.?.message, "indexing requires a list") != null);
+    try testing.expect(std.mem.indexOf(u8, c.diag.?.message, "cannot infer type argument 'T'") != null);
 }
 
 test "frontend rejects calling a non-function value" {
@@ -3225,13 +3245,15 @@ test "frontend does not commute CSE operand order" {
 
 test "frontend reuses duplicate reads and casts" {
     // The CSE candidate set spans the pure projections: an identical
-    // `read_index` or `cast` in the same block is computed once.
+    // `read_index` (via `list.get`) or `cast` in the same block is
+    // computed once.
     var c = try compileText("app", &.{
         .{
             "app",
+            \\const lists = import("list");
             \\fn f(xs: list[int32], i: int32) -> float32 {
-            \\    let a = xs@[i];
-            \\    let b = xs@[i];
+            \\    let a = lists.get(xs, i);
+            \\    let b = lists.get(xs, i);
             \\    let c = a as float32;
             \\    let d = b as float32;
             \\    c + d

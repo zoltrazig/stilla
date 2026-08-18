@@ -19,7 +19,7 @@ The language core provides only the abstract sequence type `list[T]`:
 
 - immutable;
 - abstract storage (an implementation may use reference-counted sharing);
-- supported directly by literals, patterns, and indexing; iteration is
+- supported directly by literals, patterns, and element reads (`list.get`); iteration is
   provided by the `iter` module.
 
 By contrast, the collection modules `array[T]` and `hashmap[K, V]` are not
@@ -95,8 +95,8 @@ each instantiation is a distinct concrete nominal type.
 The standard library provides:
 
 ```text
-builtin       required core interface: print, str, len, range, box, peek,
-              unbox, panic, assert, hash (the Runtime specification)
+builtin       required core interface: print, str, len, range, box,
+              peek, unbox, panic, assert, hash (the Runtime specification)
 array[T]      host-owned contiguous-memory sequence, Unique opaque nominal
 hashmap[K, V] host-owned contiguous-bucket hash table, Unique opaque nominal
 math          common mathematical constants and functions
@@ -104,6 +104,8 @@ string        Unicode text operations and conversions
 iter          list combinators: each, each_with, fold, fold_with, consume_each,
               consume_each_with, consume_fold, consume_fold_with, try_fold,
               try_fold_with
+list          abstract list operations: get, is_empty, contains, count,
+              index_of, head
 ```
 
 Every module here, including `builtin`, is imported like any other module
@@ -779,3 +781,64 @@ match (capped) {
     iter.Result::Break(v) => builtin.print(builtin.str(v))
 };
 ```
+
+# 8. The `list` module
+
+The `list` module groups the operations on the abstract sequence type
+`list[T]`: the bounds-checked element read and the derived operations.
+The element read was a member of `builtin` in earlier versions; it lives
+here so that the list operations are grouped in one module (Runtime §4.10
+defines its execution semantics).
+
+Because `list` is the language's type keyword (the Core specification), a
+source binding for this module must use another name; the specifier
+itself is unaffected:
+
+```stilla
+const lists = import("list");
+let first = lists.get(values, 0);
+```
+
+Conceptual interface (a conforming standard library must provide at least this):
+
+```stilla
+list.get[T]:
+    fn(borrow list[T], int32) -> <T>
+
+list.is_empty[T]:
+    fn(borrow list[T]) -> bool
+
+list.contains[T]:
+    fn(borrow list[T], borrow T, fn(borrow T, borrow T) -> bool) -> bool
+
+list.count[T]:
+    fn(borrow list[T], borrow T, fn(borrow T, borrow T) -> bool) -> int32
+
+list.index_of[T]:
+    fn(borrow list[T], borrow T, fn(borrow T, borrow T) -> bool) -> Option[int32]
+
+list.head[T]:
+    fn(move list[T]) -> Option[T]
+```
+
+`get` is a host binding — a declaration without a Stilla definition
+(frontend §5.6). The frontend lowers calls to it as the bounds-checked
+`read_index` operation (Runtime §4.10, §7.2), not as a system call: a
+syscall's vtable slot cannot return an element of arbitrary type `T` by
+value. The list is borrowed and never consumed; a *Copy* element is
+returned as an owned copy and a *Unique* element as a transient borrowed
+view (the Core specification, *Borrowed unique elements*).
+
+The derived operations are ordinary Stilla source, like the `iter`
+combinators. Stilla defines no equality on generic element types (the
+Core specification), so the membership operations take an explicit `eq`
+comparison function; Stilla has no closures (the Core specification), so
+the comparison and the needle are threaded as ordinary function
+parameters (Core §13.5). `head` consumes the list: only a moved element
+can be returned by value for every `T` (the Core specification); the
+remaining elements are dropped.
+
+Stilla has no list-construction primitive beyond literals and
+`builtin.range` (the Runtime specification), so list-producing operations
+(`reverse`, `append`, `take`, `drop`, `filter`, `map`) are not
+expressible in source and are not provided.

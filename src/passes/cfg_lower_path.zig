@@ -155,17 +155,6 @@ pub fn memberLoad(self: *Lowerer, fs: *FuncState, span: ast.Span, base: *cfg.Val
     }
 }
 
-/// `object@[index]`: a list read with a bounds check (Runtime §7.2).
-pub fn lowerIndex(self: *Lowerer, fs: *FuncState, ix: *const ast.Index) LowerError!?*cfg.Value {
-    const base = (try cfg_lower_expr.lowerExpr(self, fs, ix.object)) orelse return null;
-    const idx = (try cfg_lower_expr.lowerExpr(self, fs, ix.index)) orelse return null;
-    const elem_type = switch (base.type_) {
-        .list => |inner| inner.*,
-        else => return self.fail(ix.span, "indexing requires a list", .{}),
-    };
-    return cfg_lower_emit.emit(self, fs, ix.span, .{ .read_index = .{ .base = base, .index = idx } }, elem_type);
-}
-
 /// Join a dotted path into a single written name (`app.calc`).
 pub fn joinPath(self: *Lowerer, path: []const ast.Ident) LowerError![]const u8 {
     var buf = std.ArrayListUnmanaged(u8).empty;

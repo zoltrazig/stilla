@@ -182,10 +182,6 @@ fn validateExpr(frame: *Frame, e: *const ast.Expr) CheckError!void {
         .move => {},
         .cast => |*c| try validateCast(frame, c),
         .member => |*mm| try validateExpr(frame, mm.object),
-        .index => |*ix| {
-            try validateExpr(frame, ix.object);
-            try validateExpr(frame, ix.index);
-        },
         .call => |*c| try validateCall(frame, c),
         .specialize => |*s| try validateExpr(frame, s.operand),
     }
@@ -1026,10 +1022,6 @@ const InitOrder = struct {
             },
             .cast => |*c| try self.walkExpr(scope, c.operand),
             .member => |*mm| try self.walkExpr(scope, mm.object),
-            .index => |*ix| {
-                try self.walkExpr(scope, ix.object);
-                try self.walkExpr(scope, ix.index);
-            },
             .call => |*c| try self.walkCall(scope, c),
             .specialize => |*s| try self.walkExpr(scope, s.operand),
             .move => |m| try self.readName(scope, m.name, m.span),

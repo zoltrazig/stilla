@@ -990,7 +990,7 @@ Explicit `drop` applies only to an owning **unique** local binding.
 It cannot directly target:
 
 - a field;
-- an indexed element;
+- a list element read via `list.get`;
 - a module constant;
 - a `borrow` parameter;
 - a module value.
@@ -1144,7 +1144,7 @@ Stilla v1.3 does not support partial move from:
 - struct fields;
 - tuple elements;
 - list elements;
-- indexed expressions.
+- list element reads via `list.get`.
 
 Syntactically, `move` names a complete local binding.
 
@@ -1493,13 +1493,13 @@ Literal:
 
 Lists are immutable.
 
-Indexing uses the `@[...]` syntax and does not mutate a list:
+A list element is read by the generic `list.get` function (Runtime §4.10), which does not mutate the list:
 
 ```stilla
-let first = values@[0];
+let first = list.get(values, 0);
 ```
 
-An indexed *Unique* element is borrowed and cannot be independently moved.
+The read is bounds-checked; an out-of-range index traps (Runtime §7.2). For a *Copy* element type, `get` returns an owned copy of the element. An element read of a *Unique* element type is borrowed and cannot be independently moved.
 
 `list[T]` is the language's abstract sequence type. Concrete dense sequences such as `array[T]` are standard-library types, not keywords.
 
@@ -1526,7 +1526,7 @@ transfers implicitly (Fresh *Unique* values) — and its ownership transfers int
 
 `any` is **unique** (Composite ownership): because it may hold a *Unique* value, an `any` value may be used at most once, must be destroyed exactly once, and is not implicitly copyable. `any` therefore does not appear in the *Copy* list of **Copy capability**, and containers of `any` — `list[any]`, `box[any]`, `tuple[..., any]` — are *Unique*.
 
-An `any` value carries a **runtime type tag** recording its concrete payload type (the Runtime specification). The tag is deterministic and comparable; Stilla inspects it only through the two typed-recovery operations of **Recovery by `as`** and **Recovery by `match`**. No member access, indexing, operator, or equality is defined on `any` (Core operator typing and numeric conversion), and `any` does not coerce to any other type (Formal Static Semantics, *Typing*). Destruction of an `any` value destroys the tagged payload by the payload type's own destruction rules (Core specification, Runtime specification).
+An `any` value carries a **runtime type tag** recording its concrete payload type (the Runtime specification). The tag is deterministic and comparable; Stilla inspects it only through the two typed-recovery operations of **Recovery by `as`** and **Recovery by `match`**. No member access, list element read, operator, or equality is defined on `any` (Core operator typing and numeric conversion), and `any` does not coerce to any other type (Formal Static Semantics, *Typing*). Destruction of an `any` value destroys the tagged payload by the payload type's own destruction rules (Core specification, Runtime specification).
 
 The primary uses are:
 
@@ -1583,7 +1583,7 @@ Type-test patterns may reference generic parameters; under monomorphization (Gen
 
 Only the host constructs `hostdata` values, through host functions and module members (**Host-provided modules**; the Runtime specification). No Stilla value coerces into `hostdata`, `hostdata` does not coerce into `any` (The top type `any`) or into any other type, and `hostdata` is not a top type.
 
-Stilla defines no operation on `hostdata` other than moving, borrowing, storing, passing along, and handing to the host. No member access, indexing, operator, cast, pattern, equality, or hash is defined on `hostdata`, and it coerces to no other type (Core operator typing and numeric conversion).
+Stilla defines no operation on `hostdata` other than moving, borrowing, storing, passing along, and handing to the host. No member access, list element read, operator, cast, pattern, equality, or hash is defined on `hostdata`, and it coerces to no other type (Core operator typing and numeric conversion).
 
 `hostdata` is **unique** (Composite ownership): a `hostdata` value may be used at most once, must be destroyed exactly once, and is not implicitly copyable. `hostdata` does not appear in the *Copy* list of **Copy capability**, and containers of `hostdata` — `list[hostdata]`, `box[hostdata]`, `tuple[..., hostdata]` — are *Unique*.
 
@@ -2415,7 +2415,7 @@ error.
 
 Explicit ownership movement operates on complete local owners.
 
-Direct partial movement from fields or indexed elements is forbidden.
+Direct partial movement from fields or list element reads is forbidden.
 
 Consuming destructuring of a struct that defines its own `drop` hook is forbidden.
 

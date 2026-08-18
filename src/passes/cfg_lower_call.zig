@@ -158,6 +158,15 @@ pub fn lowerHostCall(self: *Lowerer, fs: *FuncState, e: *const ast.Call, target:
         try arg_types.append(self.arena, a2.type_);
     }
     const ret = try specializedRet(self, fs, e, vm.type_, arg_types.items);
+    // `list.get(xs, i)` is the bounds-checked list read (Runtime §4.10,
+    // §7.2, StdLib §8) — the same `read_index` op the removed `@[i]`
+    // suffix lowered to — not a system call: a syscall's vtable slot
+    // cannot return an element of arbitrary type `T` by value.
+    if (std.mem.eql(u8, target.module.specifier, "list") and
+        std.mem.eql(u8, vm.name.text, "get"))
+    {
+        return try cfg_lower_emit.emit(self, fs, e.span, .{ .read_index = .{ .base = args.items[0], .index = args.items[1] } }, ret);
+    }
     // The syscall target dispatches on (module, member) — stable,
     // because module member layout is static (Core §2.1).
     const call_target: cfg.SysCallTarget = if (std.mem.eql(u8, target.module.specifier, "builtin"))

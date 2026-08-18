@@ -15,10 +15,10 @@
 ;   This revision is designed to be parseable by a strict LL(1) parser over
 ;   the lexical token stream (see "LL(1) parsing notes" below). Changes
 ;   relative to v1.2:
-;     - The index suffix is written "@[ ... ]" (e.g. "a@[0]"), removing the
-;       overlap between indexing and generic type arguments that required
-;       unbounded lookahead. The v1.2 index spelling "a[i]" is no longer
-;       valid; it must be written "a@[i]".
+;     - List element reads are the generic function call `list.get(xs,
+;       i)` (Core §11.5); Removing the suffix also removes the overlap between
+;       indexing and generic type arguments that required unbounded lookahead:
+;       "[" after a path is always type arguments.
 ;     - "_" is a dedicated token (the wildcard); it is not an identifier.
 ;     - The "(", "()" and "(e)" / "(e, ...)" forms are unified into one
 ;       production ("paren-or-tuple"), making the "(" decision point LL(1).
@@ -112,7 +112,6 @@ void-literal    = "(" ")"
 
 ; The leading "-" is an operator and is not part of an integer or float token.
 ; Identifiers are ASCII in Stilla v1.3. String contents may contain Unicode.
-; The "@" character is a punctuation token used only for the index suffix.
 
 
 ; ----------------------------------------------------------------------------
@@ -536,7 +535,6 @@ postfix =
 
 postfix-suffix =
       member-suffix
-    / index-suffix
     / call-suffix
     / specialization-suffix
 
@@ -546,15 +544,6 @@ postfix-suffix =
 member-suffix =
     "."
     identifier
-
-; The "@" marker makes indexing syntactically distinct from generic type
-; arguments: "[" immediately after a type-path is always "type-args". The
-; v1.2 index spelling "a[i]" is no longer valid; write "a@[i]".
-index-suffix =
-    "@"
-    "["
-    expression
-    "]"
 
 call-suffix =
     "("
@@ -579,8 +568,8 @@ arg-list =
 ; (see below): a path followed by a construction brace is "struct-construct";
 ; a path followed by ":: identifier" is a union variant expression; a path
 ; followed by ":: [ ... ]" is a generic specialization; otherwise the path
-; begins an ordinary value expression. Because indexing uses "@[", "[" after
-; a path is always type arguments.
+; begins an ordinary value expression. "[" after a path is always type
+; arguments (there is no index suffix).
 
 primary =
       literal
@@ -800,7 +789,7 @@ tuple-pattern =
 ; followed by a construction brace is a "struct-pattern"; a path followed by
 ; ":: identifier" is a "union-pattern"; a path followed by a binding
 ; identifier is a "type-test-pattern" (the Core specification); otherwise the
-; identifier is an "identifier-pattern". Patterns have no indexing, so "["
+; identifier is an "identifier-pattern". Patterns have no element reads, so "["
 ; after a path in pattern position is always "type-args".
 
 path-pattern =

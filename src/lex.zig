@@ -72,7 +72,6 @@ pub const TokenKind = enum {
     colon,
     semicolon,
     dot,
-    at,
     dcolon,
     arrow,
     fat_arrow,
@@ -197,7 +196,6 @@ pub const Lexer = struct {
             '*' => .star,
             '/' => .slash,
             '%' => .percent,
-            '@' => .at,
             ':' => if (self.peek1() == ':') blk: {
                 self.pos += 1;
                 break :blk .dcolon;
@@ -467,17 +465,17 @@ test "string content may be unicode" {
 }
 
 test "lexes all punctuation" {
-    var t = try tokenizeText("()[]{} ,;:. @ :: -> => = + - * / % ! == != < <= > >= ..");
+    var t = try tokenizeText("()[]{} ,;:. :: -> => = + - * / % ! == != < <= > >= ..");
     defer t.arena.deinit();
 
     const kinds = [_]TokenKind{
-        .lparen, .rparen,    .lbracket, .rbracket, .lbrace, .rbrace,
-        .comma,  .semicolon, .colon,    .dot,      .at,     .dcolon,
-        .arrow,  .fat_arrow, .equals,   .plus,     .minus,  .star,
-        .slash,  .percent,   .bang,     .eq_eq,    .ne,     .lt,
-        .le,     .gt,        .ge,       .ellipsis,
+        .lparen,    .rparen,    .lbracket, .rbracket, .lbrace, .rbrace,
+        .comma,     .semicolon, .colon,    .dot,      .dcolon, .arrow,
+        .fat_arrow, .equals,    .plus,     .minus,    .star,   .slash,
+        .percent,   .bang,      .eq_eq,    .ne,       .lt,     .le,
+        .gt,        .ge,        .ellipsis,
     };
-    try std.testing.expectEqual(@as(usize, 29), t.tokens.len);
+    try std.testing.expectEqual(@as(usize, 28), t.tokens.len);
     for (kinds, 0..) |kind, i| try std.testing.expectEqual(kind, t.tokens[i].kind);
 }
 
@@ -638,15 +636,13 @@ test "rejects a lone backslash" {
 }
 
 test "rejects a stray @ and dots" {
-    // `@` is punctuation used only for the index suffix; a lone `..` is
-    // the list-rest ellipsis, but `...` has no token (Grammar).
+    // `@` is not part of the language; a lone `..` is the list-rest
+    // ellipsis, but `...` has no token (Grammar).
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const source = try arena.allocator().create(ast.Source);
     source.* = try ast.Source.init(arena.allocator(), "t.st", 0, "a@");
     var lexer = Lexer.init(arena.allocator(), source);
-    try std.testing.expectEqual(.ident, (try lexer.tokenize())[0].kind);
-    // `a@` lexes @ as a punctuation token; the parser rejects a missing
-    // index expression. So the lexer itself accepts it.
-    try std.testing.expectEqual(.at, (try lexer.tokenize())[1].kind);
+    try std.testing.expectError(error.Syntax, lexer.tokenize());
+    try std.testing.expectEqualStrings("unexpected character '@'", lexer.diag.?.message);
 }

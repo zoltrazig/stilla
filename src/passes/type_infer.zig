@@ -86,13 +86,6 @@ pub fn inferExprType(resolve: Resolve, from: *ModuleInfo, e: *const ast.Expr) ?c
                 else => null,
             };
         },
-        .index => |ix| blk: {
-            const base = inferExprType(resolve, from, ix.object) orelse break :blk null;
-            break :blk switch (base) {
-                .list => |inner| inner.*,
-                else => null,
-            };
-        },
         .call => |c| callReturnType(resolve, from, &c),
         .specialize => |s| inferExprType(resolve, from, s.operand),
     };

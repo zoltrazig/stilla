@@ -5,11 +5,13 @@
 // the step function takes `move S` and `borrow T` and returns the next
 // accumulator. The context-threading `*_with` variants exist for
 // closures-free composition (Core §13.5), but plain `fold`/`each` cover
-// most cases. List literals, indexing (`@[...]`), and list patterns are
-// exercised too.
+// most cases. List literals, element reads (`list.get`), and list
+// patterns are exercised too.
 
 const builtin = import("builtin");
 const iter = import("iter");
+const lists = import("list");
+using builtin.Option;
 
 /// Count a list with explicit recursion over the [head, ..tail] pattern.
 fn count_list(xs: list[int32]) -> int32 {
@@ -23,7 +25,7 @@ fn main() -> void {
     // `builtin.range` is inclusive: [0, 10] → 11 elements.
     let xs = builtin.range(0, 10);
     builtin.assert(builtin.len(xs) == 11, "range length");
-    builtin.assert(xs@[0] == 0 and xs@[10] == 10, "read_index");
+    builtin.assert(lists.get(xs, 0) == 0 and lists.get(xs, 10) == 10, "read_index");
 
     // A fold over int32: sum 0..10.
     let sum = iter.fold[int32, int32](xs, 0,
@@ -50,4 +52,26 @@ fn main() -> void {
 
     // Recursive list patterns via a user function.
     builtin.assert(count_list(xs) == 11, "count_list");
+
+    // The `list` module (StdLib §8): element reads and derived
+    // operations. `list` is the type keyword, so the module is bound
+    // under `lists`.
+    let eq = fn(borrow a: int32, borrow b: int32) -> bool { a == b };
+    builtin.assert(!lists.is_empty(xs), "is_empty");
+    builtin.assert(lists.contains(xs, 5, eq), "contains");
+    builtin.assert(!lists.contains(xs, 42, eq), "contains miss");
+    builtin.assert(lists.count(xs, 10, eq) == 1, "count");
+    builtin.assert(lists.count(xs, 42, eq) == 0, "count miss");
+    match (lists.index_of(xs, 7, eq)) {
+        Option::Some(i) => builtin.assert(i == 7, "index_of"),
+        Option::None => builtin.assert(false, "index_of found"),
+    };
+    match (lists.index_of(xs, 42, eq)) {
+        Option::Some(_) => builtin.assert(false, "index_of miss"),
+        Option::None => (),
+    };
+    match (lists.head([1, 2, 3])) {
+        Option::Some(h) => builtin.assert(h == 1, "head"),
+        Option::None => builtin.assert(false, "head found"),
+    };
 }

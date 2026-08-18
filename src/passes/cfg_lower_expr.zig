@@ -69,7 +69,6 @@ pub fn lowerExprInner(self: *Lowerer, fs: *FuncState, e: *const ast.Expr) LowerE
         .move => |m| try lowerMove(self, fs, &m),
         .cast => |c| try lowerCast(self, fs, &c),
         .member => |m| try cfg_lower_path.lowerMember(self, fs, &m),
-        .index => |ix| try cfg_lower_path.lowerIndex(self, fs, &ix),
         .call => |*c| try cfg_lower_call.lowerCall(self, fs, c),
         .specialize => |*s| try lowerSpecialize(self, fs, s),
     };

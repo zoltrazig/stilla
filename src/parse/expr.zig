@@ -183,15 +183,6 @@ pub fn parsePostfix(self: *parser.Parser) ParseError!*ast.Expr {
                 const name = try self.expectIdent();
                 expr = try self.newExpr(.{ .member = .{ .span = ast.Span.merge(expr.span(), name.span), .object = expr, .name = name } });
             },
-            .at => {
-                _ = self.advance();
-                try self.expectAdvance(.lbracket, "'['");
-                const index = try parseExpression(
-                    self,
-                );
-                try self.expectAdvance(.rbracket, "']'");
-                expr = try self.newExpr(.{ .index = .{ .span = ast.Span.merge(expr.span(), index.span()), .object = expr, .index = index } });
-            },
             .lparen => {
                 _ = self.advance();
                 const args = try parseArgListRest(

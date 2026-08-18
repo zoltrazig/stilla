@@ -1,0 +1,66 @@
+{
+  "name": "Stilla",
+  "scopeName": "source.stilla",
+  "patterns": [
+    { "name": "comment.line.documentation.stilla", "match": "^\\s*///.*$" },
+    { "name": "comment.line.double-slash.stilla", "match": "//.*$" },
+    { "name": "comment.block.stilla", "begin": "/\\*", "end": "\\*/" },
+    {
+      "name": "string.quoted.double.stilla",
+      "begin": "\"",
+      "end": "\"",
+      "patterns": [
+        { "name": "constant.character.escape.stilla", "match": "\\\\[\\\\\"nrt]" }
+      ]
+    },
+    { "name": "constant.language.boolean.stilla", "match": "\\b(?:true|false)\\b" },
+    { "name": "constant.numeric.float.stilla", "match": "\\b\\d+\\.\\d+\\b" },
+    { "name": "constant.numeric.integer.stilla", "match": "\\b\\d+\\b" },
+    { "name": "variable.language.stilla", "match": "\\b_\\b" },
+    {
+      "match": "\\b(fn)\\s+([A-Za-z_][A-Za-z0-9_]*)",
+      "captures": {
+        "1": { "name": "keyword.declaration.stilla" },
+        "2": { "name": "entity.name.function.stilla" }
+      }
+    },
+    {
+      "match": "\\b((?:opaque\\s+)?(?:struct|union|type))\\s+([A-Za-z_][A-Za-z0-9_]*)",
+      "captures": {
+        "1": { "name": "keyword.declaration.stilla" },
+        "2": { "name": "entity.name.type.stilla" }
+      }
+    },
+    {
+      "match": "\\b(const|let)\\s+([A-Za-z_][A-Za-z0-9_]*)",
+      "captures": {
+        "1": { "name": "keyword.declaration.stilla" },
+        "2": { "name": "variable.other.stilla" }
+      }
+    },
+    { "name": "keyword.operator.stilla", "match": "\\b(?:and|as|borrow|drop|move|or)\\b" },
+    { "name": "keyword.declaration.stilla", "match": "\\b(?:const|fn|import|opaque|struct|type|union|using)\\b" },
+    { "name": "keyword.control.stilla", "match": "\\b(?:else|if|match)\\b" },
+    { "name": "storage.type.stilla", "match": "\\b(?:any|bool|box|byte|float32|hostdata|int32|list|never|str|tuple|uint32|void)\\b" },
+    {
+      "match": "\\.\\s*([A-Za-z_][A-Za-z0-9_]*)(?=\\s*(?:\\(|::\\s*\\[))",
+      "captures": { "1": { "name": "entity.name.function.stilla" } }
+    },
+    {
+      "match": "\\.\\s*([A-Z][A-Za-z0-9_]*)",
+      "captures": { "1": { "name": "support.type.stilla" } }
+    },
+    {
+      "match": "\\.\\s*([A-Za-z_][A-Za-z0-9_]*)",
+      "captures": { "1": { "name": "variable.other.member.stilla" } }
+    },
+    { "name": "support.type.stilla", "match": "\\b[A-Z][A-Za-z0-9_]*\\b" },
+    {
+      "match": "\\b([A-Za-z_][A-Za-z0-9_]*)(?=\\s*(?:\\(|::\\s*\\[))",
+      "captures": { "1": { "name": "entity.name.function.stilla" } }
+    },
+    { "name": "keyword.operator.stilla", "match": "(?:\\.\\.|->|::|=>|==|!=|<=|>=|[-+*/%=<>!])" },
+    { "name": "punctuation.section.brackets.stilla", "match": "[()\\[\\]{}]" },
+    { "name": "punctuation.separator.stilla", "match": "[,;:]" }
+  ]
+}

@@ -10,3 +10,4 @@ pub const string = @embedFile("string.st");
 pub const array = @embedFile("array.st");
 pub const hashmap = @embedFile("hashmap.st");
 pub const iter = @embedFile("iter.st");
+pub const list = @embedFile("list.st");

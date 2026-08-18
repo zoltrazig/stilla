@@ -397,9 +397,12 @@ fn isBorrowedExpr(frame: *Frame, e: *const ast.Expr) CheckError!bool {
             if (try moduleValueOf(frame, mm.object)) |_| return false;
             return isUniqueType(frame, frame.ma.expr_of.get(e));
         },
-        .index => |*ix| {
-            _ = ix;
-            return isUniqueType(frame, frame.ma.expr_of.get(e));
+        .call => |*c| {
+            // `list.get(xs, i)` reads an element: a Unique element is a
+            // borrowed view (Core §11.5) — the same rule the removed
+            // `@[...]` suffix applied.
+            if (try isListGet(frame, c)) return isUniqueType(frame, frame.ma.expr_of.get(e));
+            return false;
         },
         .if_ => |*i| {
             if (try isBorrowedExpr(frame, i.cond)) return true;
@@ -709,14 +712,6 @@ fn inferExprInner(frame: *Frame, e: *const ast.Expr) CheckError!?cfg.Type {
             return try frame.ck.resolveTypeOf(frame.ma, frame.info, &c.target);
         },
         .member => |*mm| return try resolveMember(frame, mm.object, mm.name.text),
-        .index => |*ix| {
-            const ot = try inferExpr(frame, ix.object);
-            _ = try inferExpr(frame, ix.index);
-            if (ot) |t| {
-                if (t == .list) return t.list.*;
-            }
-            return null;
-        },
         .call => |*c| return inferCall(frame, c),
         .specialize => |*s| return inferSpecialize(frame, s),
         .move => |m| return try markConsumed(frame, m.name.text, m.span, "move", "moved"),
@@ -1083,6 +1078,18 @@ fn inferCalleeDecl(frame: *Frame, callee: *const ast.Expr) CheckError!?moduleinf
         },
         else => return null,
     }
+}
+
+/// Whether a call targets `list.get` — the list element read
+/// (Runtime §4.10, StdLib §8). The callee's `::[...]` specialization
+/// wrapper is peeled first, so `list.get::[int32](xs, i)` is recognized
+/// too.
+fn isListGet(frame: *Frame, c: *const ast.Call) CheckError!bool {
+    var callee = c.callee;
+    if (callee.* == .specialize) callee = callee.specialize.operand;
+    const target = (try inferCalleeDecl(frame, callee)) orelse return false;
+    return std.mem.eql(u8, target.module.specifier, "list") and
+        std.mem.eql(u8, target.vm.name.text, "get");
 }
 
 /// Resolve the type arguments of an explicit `::[...]` specialization

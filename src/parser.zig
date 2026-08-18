@@ -467,7 +467,6 @@ fn tokenName(kind: lex.TokenKind) []const u8 {
         .colon => "':'",
         .semicolon => "';'",
         .dot => "'.'",
-        .at => "'@'",
         .dcolon => "'::'",
         .arrow => "'->'",
         .fat_arrow => "'=>'",
@@ -779,17 +778,16 @@ test "parses unary, move, and cast expressions" {
 }
 
 test "parses postfix chains" {
-    var t = try parseText("const r = a.b@[i + 1](x, 1).c;");
+    var t = try parseText("const r = a.b(i + 1).c;");
     defer t.tp.deinit();
 
     // `a.b` is one dotted type-path; the trailing `.c` is a member access.
     const r = t.program.items[0].const_def.init.?;
     try std.testing.expectEqualStrings("c", r.member.name.text);
     const call = r.member.object.call;
-    try std.testing.expectEqual(@as(usize, 2), call.args.len);
-    const index = call.callee.index;
-    try std.testing.expectEqual(ast.BinaryOp.add, index.index.binary.op);
-    const path = index.object.path;
+    try std.testing.expectEqual(@as(usize, 1), call.args.len);
+    try std.testing.expectEqual(ast.BinaryOp.add, call.args[0].binary.op);
+    const path = call.callee.path;
     try std.testing.expectEqual(@as(usize, 2), path.path.len);
     try std.testing.expectEqualStrings("a", path.path[0].text);
     try std.testing.expectEqualStrings("b", path.path[1].text);

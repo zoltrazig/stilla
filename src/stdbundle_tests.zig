@@ -54,18 +54,18 @@ fn checkModule(m: stdbundle.Module) !void {
     var ann = try ck.check(graph);
     defer ann.deinit();
 
-    // `iter` is ordinary Stilla source (StdLib §7): every combinator has a
-    // real body (the former `try_fold*` host bindings are now written in
-    // Stilla too). Every other bundle module is declaration-only host
-    // binding surface.
-    const is_iter = std.mem.eql(u8, m.specifier, "iter");
+    // `iter` and `list` are ordinary Stilla source (StdLib §7, §8):
+    // every combinator / derived operation has a real body. `list.get`
+    // is the one host binding among them — the element read, declared
+    // without a body and lowered to the `read_index` op. Every other
+    // bundle module is declaration-only host binding surface.
+    const mixed = std.mem.eql(u8, m.specifier, "iter") or std.mem.eql(u8, m.specifier, "list");
     for (graph.modules) |info| {
         const program = info.program orelse continue;
         for (program.items) |*item| switch (item.*) {
             .func_def => |*f| {
-                if (is_iter) {
-                    // Source combinators have bodies and are not host
-                    // bindings.
+                if (mixed) {
+                    // Mixed modules: a body exactly when not a host binding.
                     try testing.expect((f.body == null) == ann.host_bindings.contains(f));
                 } else {
                     // Every bundle function is a host binding: a declaration
@@ -84,8 +84,8 @@ fn checkModule(m: stdbundle.Module) !void {
 }
 
 test "std bundle exposes exactly the StdLib §1 module set" {
-    // StdLib §1: builtin, math, string, array, hashmap, iter.
-    const expected = [_][]const u8{ "builtin", "math", "string", "array", "hashmap", "iter" };
+    // StdLib §1: builtin, math, string, array, hashmap, iter, list.
+    const expected = [_][]const u8{ "builtin", "math", "string", "array", "hashmap", "iter", "list" };
     try testing.expectEqual(@as(usize, expected.len), stdbundle.modules.len);
     for (expected, 0..) |spec, i| {
         try testing.expectEqualStrings(spec, stdbundle.modules[i].specifier);

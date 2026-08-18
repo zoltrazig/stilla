@@ -34,4 +34,5 @@ pub const modules = [_]Module{
     .{ .specifier = "array", .source = sources.array },
     .{ .specifier = "hashmap", .source = sources.hashmap },
     .{ .specifier = "iter", .source = sources.iter },
+    .{ .specifier = "list", .source = sources.list },
 };

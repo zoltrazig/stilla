@@ -134,12 +134,13 @@ with a pattern lowers to destructuring ops.
 lower left-to-right (`std.math.sqrt` → load `std` module, load `math`
 member, load `sqrt` member — Core §2.7).
 
-### Index
+### Element read (`list.get`)
 
-Base, then index (Runtime §5: index after base), then `index` with a
-bounds check that traps on failure (Runtime §7.2). Source spelling is
-`base@[index]` (Core §11.5); the v1.2 `base[index]` form no longer
-parses (Grammar: `index-suffix`).
+Base, then index (Runtime §5: index after base), then `read_index` with a
+bounds check that traps on failure (Runtime §7.2). The source spelling is
+the generic call `list.get(base, index)` (Core §11.5); the v1.2
+`base[index]` and v1.3 `base@[index]` forms are no longer part of the
+grammar.
 
 ### Calls
 

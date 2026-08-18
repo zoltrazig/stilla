@@ -63,7 +63,7 @@ These terms are used throughout this specification. Language-level terms (bindin
 - **teardown** — normal-context destruction of module-owned *Unique* constants in reverse initialization order (Teardown).
 - **embedding host / host** — the environment that creates the execution context, registers host-provided modules, invokes entry points, and receives control after termination (Host Environment).
 - **host-provided module** — a module implemented by the host that exposes a statically known Stilla-compatible interface (Host-provided modules).
-- **runtime trap** — a deterministic runtime failure such as overflow, division by zero, invalid indexing, or invalid conversion (Runtime traps and numeric behavior).
+- **runtime trap** — a deterministic runtime failure such as overflow, division by zero, invalid list element read, or invalid conversion (Runtime traps and numeric behavior).
 
 ## 1.5 Conformance
 
@@ -406,6 +406,21 @@ For `float32`, `+0.0 == -0.0`, so both must hash identically. NaN follows IEEE c
 
 The exact hash algorithm and cross-implementation hash value are implementation-defined unless a standard-library profile specifies them.
 
+## 4.10 List element read
+
+```stilla
+list.get[T]:
+    fn(borrow list[T], int32) -> <T>
+```
+
+`<T>` is notation in this specification for the element read result: an owned copy for a *Copy* `T`, and a transient non-owning view for a *Unique* `T` (see `builtin.peek`, §4.6). It is not a storable source-level type in Stilla v1.3; in the standard-library source (`std/list.st`) the binding is declared with the ordinary spelling `fn(borrow list[T], int32) -> T`, and the frontend's lowering produces the appropriate result for the element type.
+
+The read is bounds-checked; an out-of-range index traps (§7.2). The list is borrowed and never consumed.
+
+`get` is a member of the `list` standard-library module (StdLib §8), not of `builtin`: the element read is not a system call — a syscall's vtable slot cannot return an element of arbitrary type `T` by value — and the frontend lowers calls to it as the bounds-checked `read_index` operation.
+
+An element read of a *Unique* `T` is borrowed and cannot be independently moved (Core §11.5); the view lives until the end of the enclosing full expression, like `builtin.peek`.
+
 ---
 
 # 5. Evaluation Order
@@ -418,8 +433,8 @@ This includes:
 
 - the callee before call arguments;
 - function arguments from left to right;
-- the base before a member or index (`@[...]`) operation;
-- the index expression after the indexed base;
+- the base before a member or `list.get` element-read operation;
+- the index argument after the base argument;
 - binary operator operands from left to right;
 - tuple elements from left to right;
 - list elements from left to right;
@@ -604,7 +619,7 @@ The typing rules for operators and conversions are defined in the Core specifica
 - `int32` integer overflow traps.
 - Integer `div`/`rem` by zero traps for both `int32` and `uint32`; `float32` division follows IEEE 754 (`x / 0.0` is ±infinity for `x ≠ 0`, NaN for `0.0 / 0.0`) and never traps.
 - `uint32` arithmetic is performed modulo 2³² and never traps on overflow or underflow; unary `-` on `uint32` computes the two's-complement negation and never traps, while `-` on `int32` traps on the minimum value (the Core specification).
-- Invalid indexing traps.
+- Invalid list element reads (`list.get` out of range) trap.
 - Invalid runtime numeric conversion traps.
 - Invalid `any` cast traps: recovering an `any` payload under a target type that does not match its runtime tag (the Core specification).
 - `int32 as float32` uses the IEEE 754 conversion with round-to-nearest, ties-to-even; precision may be lost.

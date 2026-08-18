@@ -177,11 +177,6 @@ fn cloneExpr(arena: std.mem.Allocator, sub: Substitution, e: *const ast.Expr) er
             .target = try cloneType(arena, sub, &c.target),
         } },
         .member => |m| .{ .member = .{ .span = m.span, .object = try cloneExprPtr(arena, sub, m.object), .name = m.name } },
-        .index => |ix| .{ .index = .{
-            .span = ix.span,
-            .object = try cloneExprPtr(arena, sub, ix.object),
-            .index = try cloneExprPtr(arena, sub, ix.index),
-        } },
         .call => |c| .{ .call = .{
             .span = c.span,
             .callee = try cloneExprPtr(arena, sub, c.callee),

@@ -419,7 +419,6 @@ pub const Expr = union(enum) {
     move: MoveExpr,
     cast: Cast,
     member: Member,
-    index: Index,
     call: Call,
     specialize: Specialize,
 
@@ -446,7 +445,6 @@ pub const Expr = union(enum) {
             .move => |n| n.span,
             .cast => |n| n.span,
             .member => |n| n.span,
-            .index => |n| n.span,
             .call => |n| n.span,
             .specialize => |n| n.span,
         };
@@ -641,14 +639,6 @@ pub const Member = struct {
     span: Span,
     object: *Expr,
     name: Ident,
-};
-
-/// `object@[index]` (Grammar `index-suffix`). The `@` marker keeps indexing
-/// distinct from generic type arguments.
-pub const Index = struct {
-    span: Span,
-    object: *Expr,
-    index: *Expr,
 };
 
 /// `callee(args)` (Grammar `call-suffix`).

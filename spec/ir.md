@@ -669,7 +669,7 @@ The frontend walks the annotated, monomorphic AST with a builder that appends in
 | `match (move s)` | `unpack_variant` binds (tag-carrying); scrutinee wholly consumed |
 | `move name` | `move` (or `copy` for *Copy*); old value dead |
 | `drop name;` | `drop` |
-| member access / index | `read_field` / `read_index` (bounds check traps) |
+| member access / list element read | `read_field` / `read_index` (bounds check traps) |
 | call | `call` (direct or value); modes applied per the call rules |
 | host binding call | `syscall` (never `call`); `never` return → `trap` |
 | struct / variant / tuple / list literal | `construct` (written order) |
