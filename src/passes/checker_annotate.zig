@@ -679,6 +679,14 @@ fn inferPath(frame: *Frame, p: *const ast.PathExpr) CheckError!?cfg.Type {
                 }
                 try requireMoveIfOwned(frame, f.value, "field");
             }
+            // A host-backed opaque nominal type has no fields and no
+            // Stilla-side construction (Core §11.8): raw construction of
+            // one is a compile-time error, not a runtime hazard.
+            if (try opaquePathName(frame, p)) |name| {
+                if (moduleinfo.opaqueDecl(frame.resolve, frame.info, name) != null) {
+                    return frame.ck.fail(p.span, "opaque host type '{s}' cannot be constructed in source (Core §11.8)", .{name});
+                }
+            }
             return namedPath(frame, p, sc, null);
         },
         .variant => |*v| {
@@ -694,12 +702,26 @@ fn inferPath(frame: *Frame, p: *const ast.PathExpr) CheckError!?cfg.Type {
                     try requireMoveIfOwned(frame, a, "payload");
                 }
             }
+            // An opaque host type is not a union (Core §11.8): variant
+            // construction of one is rejected explicitly rather than
+            // falling through to the unnamed-variant inference path.
+            if (try opaquePathName(frame, p)) |name| {
+                if (moduleinfo.opaqueDecl(frame.resolve, frame.info, name) != null) {
+                    return frame.ck.fail(p.span, "opaque host type '{s}' is not a union and has no variants (Core §11.8)", .{name});
+                }
+            }
             return namedPath(frame, p, null, v);
         },
         .none => {},
     }
 
     return resolvePath(frame, p.path);
+}
+
+/// The fully-qualified written name of a construction path (Core §8.1), or
+/// null when the path does not resolve as a type name.
+fn opaquePathName(frame: *Frame, p: *const ast.PathExpr) CheckError!?[]const u8 {
+    return type_resolve.joinPath(frame.ck.alloc(), p.path);
 }
 
 /// Resolve a dotted path's value type. The first segment resolves against
@@ -780,6 +802,12 @@ fn memberTypeOf(frame: *Frame, cur: cfg.Type, seg: ast.Ident) CheckError!?cfg.Ty
     switch (cur) {
         .named => |n| {
             const qname = frame.resolve.typeNameOf(n.id) orelse return null;
+            // An opaque host type has no fields (Core §11.8): member
+            // access on one is a compile-time error, not a null type that
+            // surfaces as a cryptic inference failure.
+            if (moduleinfo.opaqueDecl(frame.resolve, frame.info, qname) != null) {
+                return frame.ck.fail(seg.span, "opaque host type '{s}' has no fields (Core §11.8)", .{qname});
+            }
             const sd = moduleinfo.structDecl(frame.resolve, frame.info, qname) orelse return null;
             const idx = moduleinfo.fieldIndex(sd, seg.text) orelse return null;
             const resolved = try frame.ck.resolveTypeOf(frame.ma, frame.info, &sd.fields[idx].type_);

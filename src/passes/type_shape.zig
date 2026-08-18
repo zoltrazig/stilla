@@ -39,6 +39,19 @@ pub fn unionDecl(resolve: Resolve, from: *ModuleInfo, name: []const u8) ?*const 
     };
 }
 
+/// The opaque declaration behind a written type name, or null. A
+/// host-backed opaque nominal type (Core §11.8) is neither a struct nor a
+/// union: `structDecl`/`unionDecl` return null for it, and `opaqueDecl`
+/// returns the declaration.
+pub fn opaqueDecl(resolve: Resolve, from: *ModuleInfo, name: []const u8) ?*const ast.OpaqueDef {
+    const tm = type_resolve.resolveTypeName(resolve, from, name) orelse return null;
+    const final = type_resolve.followAlias(resolve, from, tm) orelse return null;
+    return switch (final.decl) {
+        .opaque_ => |o| o,
+        else => null,
+    };
+}
+
 /// Index of a named field in a struct declaration (declaration order,
 /// Core §8.1).
 pub fn fieldIndex(sd: *const ast.StructDef, name: []const u8) ?u32 {
@@ -108,6 +121,10 @@ fn ownershipVisited(
             visited.append(resolve.arena, t) catch break :blk null;
             defer _ = visited.pop();
             break :blk switch (final.decl) {
+                // A host-backed opaque nominal type is unique by declaration
+                // (Core §11.8): `Array[int32]` is unique even though `int32`
+                // is Copy. Ownership never recurses into the type arguments.
+                .opaque_ => cfg.Ownership.unique,
                 .struct_ => |s| blk2: {
                     if (s.drop != null) break :blk2 cfg.Ownership.unique;
                     var acc: ?cfg.Ownership = cfg.Ownership.copy;

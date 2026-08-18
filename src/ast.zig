@@ -130,6 +130,7 @@ pub const ModuleItem = union(enum) {
     type_def: TypeDef,
     struct_def: StructDef,
     union_def: UnionDef,
+    opaque_def: OpaqueDef,
     using_decl: UsingDecl,
 };
 
@@ -204,6 +205,17 @@ pub const UnionDef = struct {
     name: Ident,
     type_params: []Ident,
     variants: []VariantDecl,
+};
+
+/// `opaque type name [params];` (Grammar `opaque-def`, Core §11.8) — a
+/// host-backed opaque nominal type declared by a standard-library or
+/// host-provided module interface. It has no fields, no variants, and no
+/// Stilla-visible representation; only host bindings construct and destroy
+/// values. All opaque types are unique by declaration.
+pub const OpaqueDef = struct {
+    span: Span,
+    name: Ident,
+    type_params: []Ident,
 };
 
 /// `using path [as name];` — a scoped compile-time path alias (Grammar

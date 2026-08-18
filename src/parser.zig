@@ -75,8 +75,9 @@ pub const Parser = struct {
             .kw_type => .{ .type_def = try self.parseTypeDef() },
             .kw_struct => .{ .struct_def = try self.parseStructDef() },
             .kw_union => .{ .union_def = try self.parseUnionDef() },
+            .kw_opaque => .{ .opaque_def = try self.parseOpaqueDef() },
             .kw_using => .{ .using_decl = try self.parseUsingDecl() },
-            else => self.fail(self.cur().span, "expected a module item ('const', 'fn', 'type', 'struct', 'union', or 'using'), found {s}", .{self.describe(self.cur())}),
+            else => self.fail(self.cur().span, "expected a module item ('const', 'fn', 'type', 'struct', 'union', 'opaque', or 'using'), found {s}", .{self.describe(self.cur())}),
         };
     }
 
@@ -135,6 +136,20 @@ pub const Parser = struct {
         const target = try parse_type.parseType(self);
         try self.expectAdvance(.semicolon, "';'");
         return .{ .span = self.spanFrom(start), .name = name, .type_params = type_params, .target = target };
+    }
+
+    /// `opaque type name [params];` (Grammar `opaque-def`, Core §11.8) — a
+    /// host-backed opaque nominal type. Legal only in a standard-library or
+    /// host-provided module interface (enforced semantically in phase 2,
+    /// not here); a source module declaring one is a checker diagnostic.
+    pub fn parseOpaqueDef(self: *Parser) ParseError!ast.OpaqueDef {
+        const start = self.mark();
+        _ = self.advance(); // kw_opaque
+        try self.expectAdvance(.kw_type, "'type' after 'opaque'");
+        const name = try self.expectIdent();
+        const type_params = try self.parseOptionalTypeParams();
+        try self.expectAdvance(.semicolon, "';'");
+        return .{ .span = self.spanFrom(start), .name = name, .type_params = type_params };
     }
 
     pub fn parseStructDef(self: *Parser) ParseError!ast.StructDef {
@@ -424,6 +439,7 @@ fn tokenName(kind: lex.TokenKind) []const u8 {
         .kw_match => "'match'",
         .kw_move => "'move'",
         .kw_never => "'never'",
+        .kw_opaque => "'opaque'",
         .kw_or => "'or'",
         .kw_str => "'str'",
         .kw_struct => "'struct'",
@@ -615,6 +631,25 @@ test "parses struct definitions with drop declarations" {
     const d = s.drop.?;
     try std.testing.expectEqualStrings("v", d.param.text);
     try std.testing.expectEqual(@as(usize, 1), d.body.stmts.len);
+}
+
+test "parses opaque type declarations" {
+    var t = try parseText("opaque type Array[T];");
+    defer t.tp.deinit();
+
+    const o = t.program.items[0].opaque_def;
+    try std.testing.expectEqualStrings("Array", o.name.text);
+    try std.testing.expectEqual(@as(usize, 1), o.type_params.len);
+    try std.testing.expectEqualStrings("T", o.type_params[0].text);
+}
+
+test "parses opaque type declarations without parameters" {
+    var t = try parseText("opaque type Handle;");
+    defer t.tp.deinit();
+
+    const o = t.program.items[0].opaque_def;
+    try std.testing.expectEqualStrings("Handle", o.name.text);
+    try std.testing.expectEqual(@as(usize, 0), o.type_params.len);
 }
 
 test "parses union definitions" {
@@ -942,7 +977,7 @@ test "rejects a missing semicolon" {
 test "rejects let at module level" {
     var t = try parseError("let x = 1;");
     defer t.tp.deinit();
-    try std.testing.expectEqualStrings("expected a module item ('const', 'fn', 'type', 'struct', 'union', or 'using'), found 'let'", t.diag.message);
+    try std.testing.expectEqualStrings("expected a module item ('const', 'fn', 'type', 'struct', 'union', 'opaque', or 'using'), found 'let'", t.diag.message);
 }
 
 test "rejects reserved words as identifiers" {

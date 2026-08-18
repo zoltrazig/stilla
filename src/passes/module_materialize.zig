@@ -73,6 +73,11 @@ pub fn materialize(self: *Builder, raw: *RawModule) !void {
             try types.append(self.arena, .{ .name = u.name, .decl = .{ .union_ = u }, .generic = u.type_params.len > 0 });
             if (!type_index.contains(u.name.text)) try type_index.put(self.arena, u.name.text, idx);
         },
+        .opaque_def => |*o| {
+            const idx: u32 = @intCast(types.items.len);
+            try types.append(self.arena, .{ .name = o.name, .decl = .{ .opaque_ = o }, .generic = o.type_params.len > 0 });
+            if (!type_index.contains(o.name.text)) try type_index.put(self.arena, o.name.text, idx);
+        },
         .type_def => |*t| {
             const idx: u32 = @intCast(types.items.len);
             try types.append(self.arena, .{ .name = t.name, .decl = .{ .alias = t }, .generic = t.type_params.len > 0 });

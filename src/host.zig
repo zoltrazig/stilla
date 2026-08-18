@@ -33,6 +33,12 @@ pub const Host = struct {
     // resolves to exactly one of a Stilla source module, a standard-library
     // module, or a host-provided module.
     //
+    // TODO(runtime): opaque host type implementations (Runtime §3.1,
+    // §6.6) — per opaque declaration and monomorphic instantiation, the
+    // host registers a host identity (`host_id`) naming its construction
+    // and destruction routines; the runtime dispatches `host_drop` through
+    // it and the context-owned opaque object table stores the live values.
+    //
     // TODO(runtime): entry-point convention (Runtime §3.3) — a standalone
     // runtime conventionally loads an entry module and invokes
     // `entry.main()`; an embedding host may directly invoke any exposed

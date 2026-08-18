@@ -47,6 +47,16 @@ pub fn validateModule(ck: *checker.Checker, info: *ModuleInfo) CheckError!void {
     try checkRecursiveTypes(ck, info);
     try InitOrder.run(frame);
 
+    // A host-backed opaque nominal type is declared only by a
+    // standard-library or host-provided module interface (Core §11.8): a
+    // Stilla source module may not declare one.
+    if (info.kind == .source) {
+        for (info.types) |tm| switch (tm.decl) {
+            .opaque_ => |o| return ck.fail(o.span, "opaque host types may only be declared by a standard-library or host-provided module interface (Core §11.8)", .{}),
+            else => {},
+        };
+    }
+
     for (program.items) |*item| switch (item.*) {
         .const_def => |*c| try validateConst(frame, c),
         .func_def => |*f| if (f.body) |body| {
@@ -385,6 +395,9 @@ fn localRef(info: *ModuleInfo, name: []const u8) ?LocalRef {
         .struct_ => |s| return .{ .node = .{ .struct_ = s } },
         .union_ => |u| return .{ .node = .{ .union_ = u } },
         .alias => |ad| return .{ .alias = .{ .params = ad.type_params, .target = ad.target } },
+        // An opaque host type has no fields or variants and therefore no
+        // storage edges (Core §11.3): it terminates the walk.
+        .opaque_ => return null,
     };
     // No local type member: a module-level `using` type alias to a local
     // declaration keeps the direct edge (Core §2.8).

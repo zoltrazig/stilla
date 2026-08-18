@@ -3,35 +3,41 @@
 //
 // Host binding module: every function member is a *declaration without a
 // Stilla definition* (frontend §5.6); the host implements the storage and
-// operations. `HashMap[K, V]` is an ordinary nominal struct (StdLib §3):
-// its value is an immutable *token* naming a host-owned opaque table.
-// Stilla never inspects the table, and the module functions are its only
-// access path (see std/array.st).
+// operations. `HashMap[K, V]` is a host-backed opaque nominal type
+// (Core §11.8): it has no fields and no Stilla-visible representation, its
+// value is a unique opaque handle naming a host-owned contiguous table,
+// and only the module functions construct, read, and transform values.
+// Stilla can never raw-construct, field-access, or destructure a
+// `HashMap[K, V]` (Core §11.8).
 //
-// Key type `K` and value type `V` must be Copy (StdLib §3); `builtin.hash`
-// provides hashing for the primitive key types (Runtime §4.9). Insertion
-// and removal are persistent-style: they take the token by plain (Copy)
-// parameter and return a *new* map token; the input token remains usable
-// and references the previous immutable table, so the map is never
-// partially mutated. `get` returns a copy of the value as `Option[V]`.
-// Iteration order is unspecified but stable within a single execution
-// context.
+// `HashMap[K, V]` is unique by declaration (Core §11.8): it is never Copy,
+// even when `K` and `V` are Copy, so `insert`/`remove` take the map by
+// `move` and return the updated map and the host may mutate the table in
+// place (StdLib §1, §3); `get`/`contains`/`len`/`clone` borrow. Key type
+// `K` must be Copy and hashable; value type `V` must be Copy (StdLib §3):
+// the plain key/value parameters reject a unique `K`/`V` at compile time,
+// so `HashMap[Unique, V]` / `HashMap[K, Unique]` is uninhabited; a
+// borrowed unique return is not expressible (Core §10.7), so `get`
+// returns `Option[V]` by value. `builtin.hash` provides hashing for the
+// primitive key types (Runtime §4.9). Iteration order is unspecified but
+// stable within a single execution context.
 //
-// Type arguments of `empty`/`get`/`contains`/`remove`/`len` occur only in
-// the token or result type and must be written explicitly (`::[K, V]`,
-// Core §12.3); `insert`'s `K` and `V` are inferred from the key and value
-// arguments.
+// Type arguments of `empty`/`get`/`contains`/`remove`/`len`/`clone` occur
+// only in the token or result type and must be written explicitly
+// (`::[K, V]`, Core §12.3); `insert`'s `K` and `V` are inferred from the
+// key and value arguments, `remove`'s from the moved map and key.
 
 // `Option` is the `builtin` type member (Core §2.8); `builtin` is imported
 // like any other standard-library module (Core §3).
 const builtin = import("builtin");
 using builtin.Option;
 
-struct HashMap[K, V] {}
+opaque type HashMap[K, V];
 
 fn empty[K, V]() -> HashMap[K, V];
-fn insert[K, V](m: HashMap[K, V], key: K, value: V) -> HashMap[K, V];
-fn get[K, V](m: HashMap[K, V], key: K) -> Option[V];
-fn contains[K, V](m: HashMap[K, V], key: K) -> bool;
-fn remove[K, V](m: HashMap[K, V], key: K) -> tuple[HashMap[K, V], Option[V]];
-fn len[K, V](m: HashMap[K, V]) -> int32;
+fn insert[K, V](move m: HashMap[K, V], key: K, value: V) -> HashMap[K, V];
+fn get[K, V](borrow m: HashMap[K, V], key: K) -> Option[V];
+fn contains[K, V](borrow m: HashMap[K, V], key: K) -> bool;
+fn remove[K, V](move m: HashMap[K, V], key: K) -> tuple[HashMap[K, V], Option[V]];
+fn len[K, V](borrow m: HashMap[K, V]) -> int32;
+fn clone[K, V](borrow m: HashMap[K, V]) -> HashMap[K, V];

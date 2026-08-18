@@ -1062,9 +1062,10 @@ test "frontend compiles the standard-library bundle as host bindings" {
 
 test "frontend compiles the StdLib array/hashmap container examples" {
     // StdLib §2 / §3: the container examples must compile as written —
-    // Copy token types, plain parameters, and explicit `::[...]`
-    // specialization where the type argument is not carried by an
-    // argument expression (Core §12.2, §12.3).
+    // unique opaque nominal types, borrow/move parameters, explicit
+    // `::[...]` specialization where the type argument is not carried by
+    // an argument expression (Core §12.2, §12.3), and in-place consuming
+    // updates (move in, updated value out).
     var c = try compileText("app", &.{
         .{
             "app",
@@ -1076,13 +1077,17 @@ test "frontend compiles the StdLib array/hashmap container examples" {
             \\    let a = array.make(4, 0);
             \\    let x = array.get::[int32](a, 2);
             \\    let n = array.len::[int32](a);
+            \\    let a = array.set(move a, 2, 42);
+            \\    let b = array.clone::[int32](a);
             \\    let m = hashmap.empty::[str, int32]();
-            \\    let m = hashmap.insert(m, "a", 1);
-            \\    let m = hashmap.insert(m, "b", 2);
+            \\    let m = hashmap.insert(move m, "a", 1);
+            \\    let m = hashmap.insert(move m, "b", 2);
             \\    match (hashmap.get::[str, int32](m, "a")) {
             \\        Option::Some(value) => builtin.print(builtin.str(value)),
             \\        Option::None => builtin.print("missing")
             \\    };
+            \\    let (m, removed) = hashmap.remove::[str, int32](move m, "a");
+            \\    let c = hashmap.clone::[str, int32](m);
             \\}
         },
     });
@@ -1096,8 +1101,16 @@ test "frontend compiles the StdLib array/hashmap container examples" {
     // a hostdata payload (StdLib §1, §6).
     try testing.expect(std.mem.indexOf(u8, out, "syscall array#make") != null);
     try testing.expect(std.mem.indexOf(u8, out, "syscall array#get") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "syscall array#set") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "syscall array#clone") != null);
     try testing.expect(std.mem.indexOf(u8, out, "syscall hashmap#empty") != null);
     try testing.expect(std.mem.indexOf(u8, out, "syscall hashmap#insert") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "syscall hashmap#remove") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "syscall hashmap#clone") != null);
+    // The containers are unique by declaration (Core §11.8), so scope-end
+    // destruction emits `drop` for each live container — a Copy token
+    // would schedule none.
+    try testing.expect(std.mem.indexOf(u8, out, "drop %") != null);
 }
 
 test "frontend rejects every hostdata/any coercion and cast" {

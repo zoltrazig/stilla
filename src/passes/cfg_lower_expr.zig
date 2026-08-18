@@ -110,6 +110,12 @@ pub fn emitVoid(self: *Lowerer, fs: *FuncState, span: ast.Span) LowerError!?*cfg
 /// (Core §8.1, ir.md §5.3).
 pub fn lowerStructConstruct(self: *Lowerer, fs: *FuncState, e: *const ast.Expr, p: *const ast.PathExpr, sc: *const ast.StructConstruct) LowerError!?*cfg.Value {
     const name = try cfg_lower_path.joinPath(self, p.path);
+    // A host-backed opaque nominal type has no fields and no Stilla-side
+    // construction (Core §11.8); the checker rejects it in source, and the
+    // lowerer reports it cleanly for any path that reaches here.
+    if (moduleinfo.opaqueDecl(self.resolve, fs.module, name) != null) {
+        return self.fail(p.span, "opaque host type '{s}' cannot be constructed in source (Core §11.8)", .{name});
+    }
     const sd = moduleinfo.structDecl(self.resolve, fs.module, name) orelse
         return self.fail(p.span, "unknown struct type '{s}'", .{name});
     const args = try self.arena.alloc(*cfg.Value, sd.fields.len);

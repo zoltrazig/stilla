@@ -120,6 +120,10 @@ pub const TypeDecl = union(enum) {
     struct_: *const ast.StructDef,
     union_: *const ast.UnionDef,
     alias: *const ast.TypeDef,
+    /// A host-backed opaque nominal type (Core §11.8): no fields, no
+    /// variants, no Stilla-visible representation; unique by declaration.
+    /// Legal only in a standard-library or host-provided module interface.
+    opaque_: *const ast.OpaqueDef,
 };
 
 /// The resolved target of a `using` alias (Core §2.8): a module value, a
@@ -546,6 +550,7 @@ pub const resolveTypeId = type_resolve.resolveTypeId;
 pub const resolveQualifiedTypeName = type_resolve.resolveQualifiedTypeName;
 pub const structDecl = type_shape.structDecl;
 pub const unionDecl = type_shape.unionDecl;
+pub const opaqueDecl = type_shape.opaqueDecl;
 pub const fieldIndex = type_shape.fieldIndex;
 pub const variantIndex = type_shape.variantIndex;
 pub const ownershipOf = type_shape.ownershipOf;

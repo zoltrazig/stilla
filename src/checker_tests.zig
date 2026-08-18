@@ -814,6 +814,133 @@ test "checker rejects a generic call it cannot fully infer" {
 }
 
 // ---------------------------------------------------------------------------
+// checker — host-backed opaque nominal types (Core §11.8)
+// ---------------------------------------------------------------------------
+
+/// The hostlib standard-library module used by the opaque-type tests: an
+/// opaque declaration plus host bindings that construct, consume, and
+/// pass opaque values.
+const OPAQUE_LIB =
+    \\opaque type Handle[T];
+    \\fn make[T]() -> Handle[T];
+    \\fn pass[T](move h: Handle[T]) -> Handle[T];
+;
+
+/// Build an app (a source module) against `hostlib`, a standard-library
+/// module that may declare opaque host types (Core §11.8). The hostlib
+/// text is registered in the `standard_library` map, so its opaque
+/// declarations are legal; the app is an ordinary source module importing
+/// it.
+fn checkOpaqueText(hostlib: []const u8, app: []const u8) !struct { arena: std.heap.ArenaAllocator, graph: *moduleinfo.ModuleGraph, ann: checker.Annotation } {
+    const alloc = testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(alloc);
+    errdefer arena.deinit();
+
+    var source_map = std.StringHashMapUnmanaged([]const u8).empty;
+    try source_map.put(arena.allocator(), "app", app);
+    var std_map = std.StringHashMapUnmanaged([]const u8).empty;
+    try std_map.put(arena.allocator(), "hostlib", hostlib);
+
+    var builder = moduleinfo.Builder.init(arena.allocator(), moduleinfo.Sources{ .source = source_map, .standard_library = std_map });
+    const graph = try builder.build("app");
+
+    var ck = checker.Checker.init(arena.allocator());
+    const ann = try ck.check(graph);
+    return .{ .arena = arena, .graph = graph, .ann = ann };
+}
+
+fn expectOpaqueDiag(hostlib: []const u8, app: []const u8, want: []const u8) !void {
+    const alloc = testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(alloc);
+    defer arena.deinit();
+
+    var source_map = std.StringHashMapUnmanaged([]const u8).empty;
+    try source_map.put(arena.allocator(), "app", app);
+    var std_map = std.StringHashMapUnmanaged([]const u8).empty;
+    try std_map.put(arena.allocator(), "hostlib", hostlib);
+
+    var builder = moduleinfo.Builder.init(arena.allocator(), moduleinfo.Sources{ .source = source_map, .standard_library = std_map });
+    const graph = try builder.build("app");
+
+    var ck = checker.Checker.init(arena.allocator());
+    try testing.expectError(error.Diagnostic, ck.check(graph));
+    try testing.expect(ck.diag != null);
+    try testing.expect(std.mem.indexOf(u8, ck.diag.?.message, want) != null);
+}
+
+test "checker rejects raw construction of an opaque host type" {
+    // Core §11.8: an opaque host type has no fields and no Stilla-side
+    // construction — `Handle{ ... }` is a compile-time error, not a
+    // runtime hazard.
+    try expectOpaqueDiag(OPAQUE_LIB,
+        \\const hostlib = import("hostlib");
+        \\using hostlib.Handle;
+        \\fn main() -> void {
+        \\    let h = Handle{};
+        \\}
+    , "cannot be constructed in source");
+}
+
+test "checker rejects variant construction of an opaque host type" {
+    try expectOpaqueDiag(OPAQUE_LIB,
+        \\const hostlib = import("hostlib");
+        \\fn main() -> void {
+        \\    let h = hostlib.Handle::Some(1);
+        \\}
+    , "is not a union");
+}
+
+test "checker rejects member access on an opaque host type" {
+    try expectOpaqueDiag(OPAQUE_LIB,
+        \\const hostlib = import("hostlib");
+        \\fn f(h: hostlib.Handle[int32]) -> int32 {
+        \\    h.value
+        \\}
+    , "has no fields");
+}
+
+test "checker rejects an opaque declaration in a source module" {
+    // Core §11.8: `opaque type` is legal only in a standard-library or
+    // host-provided module interface.
+    try expectDiag(
+        \\opaque type Handle;
+        \\fn main() -> void {}
+    , "may only be declared by a standard-library or host-provided module");
+}
+
+test "checker classifies an opaque host type as unique" {
+    // Core §11.8: an opaque type is unique by declaration — implicit copy
+    // is rejected even though the type argument is Copy.
+    try expectOpaqueDiag(OPAQUE_LIB,
+        \\const hostlib = import("hostlib");
+        \\fn main() -> void {
+        \\    let a = hostlib.make::[int32]();
+        \\    let b = a;
+        \\}
+    , "unique value must be moved with 'move'");
+}
+
+test "checker accepts move, borrow, and any-pack of an opaque host type" {
+    // Core §11.8: an opaque value is a normal nominal value — moved,
+    // borrowed, stored, and packed into `any` like any other unique value.
+    var t = try checkOpaqueText(OPAQUE_LIB,
+        \\const hostlib = import("hostlib");
+        \\fn f(borrow h: hostlib.Handle[int32]) -> int32 { 0 }
+        \\fn main() -> void {
+        \\    let a = hostlib.make::[int32]();
+        \\    let c = move a;
+        \\    let d = hostlib.pass(move c);
+        \\    let e = f(d);
+        \\    let x: any = move d;
+        \\}
+    );
+    defer t.arena.deinit();
+    // The hostlib module's opaque declaration is a registered type member.
+    const hostlib = t.graph.module("hostlib") orelse return error.TestUnexpectedResult;
+    try testing.expect(hostlib.typeMember("Handle") != null);
+}
+
+// ---------------------------------------------------------------------------
 // checker — recursive types without indirection (Core §11.3, §18
 // *Recursion*)
 // ---------------------------------------------------------------------------

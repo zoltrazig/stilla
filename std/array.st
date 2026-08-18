@@ -2,23 +2,29 @@
 //
 // Host binding module: every function member is a *declaration without a
 // Stilla definition* (frontend §5.6); the host implements the storage and
-// operations. `Array[T]` is an ordinary nominal struct (StdLib §2): its
-// value is an immutable *token* naming a host-owned opaque buffer. Stilla
-// never inspects the buffer; the module functions are its only access
-// path, and the host owns the buffer's memory and lifetime (StdLib §6).
+// operations. `Array[T]` is a host-backed opaque nominal type (Core §11.8):
+// it has no fields and no Stilla-visible representation, its value is a
+// unique opaque handle naming a host-owned contiguous buffer, and only the
+// module functions construct, read, and destroy values. Stilla can never
+// raw-construct, field-access, or destructure an `Array[T]` (Core §11.8).
 //
-// The element type `T` must be Copy (StdLib §2): the token is Copy when
-// `T` is Copy, accessors take plain (Copy) parameters, and `get` returns
-// an element by value — a borrowed unique return is not expressible
-// (Core §10.7), so unique element types are out of scope for `array`;
-// use `list[T]` for unique elements. `make(length, init)` copies `init`
-// into every slot; `get` copies element `i` out; invalid indexing traps
-// (Runtime §7.2). Type arguments of `get`/`len` occur only in the token
-// type and must be written explicitly (`::[T]`, Core §12.3); `make`'s
-// `T` is inferred from `init`.
+// `Array[T]` is unique by declaration (Core §11.8): it is never Copy, even
+// when `T` is Copy, so consuming operations take the array by `move` and
+// return the updated array and the host may mutate the buffer in place
+// (StdLib §1, §2); `len`/`get`/`clone` borrow. The element type `T` must
+// be Copy (StdLib §2): `make`'s `init` and `set`'s `value` are plain
+// parameters, so a unique element is rejected at compile time and
+// `Array[Unique]` is uninhabited; a borrowed unique return is not
+// expressible (Core §10.7), so `get` returns `T` by value. Invalid
+// indexing traps (Runtime §7.2). Type arguments of `len`/`get`/`clone`
+// occur only in the token type and must be written explicitly
+// (`::[T]`, Core §12.3); `make`'s `T` is inferred from `init`, `set`'s
+// from the moved array and `value`.
 
-struct Array[T] {}
+opaque type Array[T];
 
 fn make[T](length: int32, init: T) -> Array[T];
-fn get[T](a: Array[T], i: int32) -> T;
-fn len[T](a: Array[T]) -> int32;
+fn len[T](borrow array: Array[T]) -> int32;
+fn get[T](borrow array: Array[T], index: int32) -> T;
+fn set[T](move array: Array[T], index: int32, value: T) -> Array[T];
+fn clone[T](borrow array: Array[T]) -> Array[T];

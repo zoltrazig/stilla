@@ -127,6 +127,11 @@ pub fn bindPattern(self: *Lowerer, fs: *FuncState, pattern: *const ast.Pattern, 
 
 pub fn destructureStruct(self: *Lowerer, fs: *FuncState, pp: *const ast.PathPattern, sp: *const ast.StructPattern, base: *cfg.Value, base_owned: bool) LowerError!void {
     const name = try cfg_lower_path.joinPath(self, pp.path);
+    // An opaque host type is not matchable by struct pattern (Core §11.8):
+    // it has no fields to destructure.
+    if (moduleinfo.opaqueDecl(self.resolve, fs.module, name) != null) {
+        return self.fail(sp.span, "opaque host type '{s}' has no fields to destructure (Core §11.8)", .{name});
+    }
     const sd = moduleinfo.structDecl(self.resolve, fs.module, name) orelse
         return self.fail(sp.span, "unknown struct type '{s}'", .{name});
     if (base_owned) {

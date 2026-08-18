@@ -36,6 +36,13 @@ pub const Context = struct {
     // TODO(runtime): module instantiation (§2), entry-point invocation
     // (§3.3), deterministic evaluation order (§5), destruction at runtime
     // (§6), panic propagation (§7), and the core runtime model (§8).
+    //
+    // TODO(runtime): the opaque object table (Runtime §3.4, §6.6) — one
+    // context-scoped handle per live opaque host type value (`Array[T]`,
+    // `HashMap[K, V]`, StdLib §1), mapping the handle to the host object;
+    // `drop` of an opaque value dispatches `host_drop(host_id, value)`,
+    // and context disposal walks the table and releases every remaining
+    // row on normal teardown and on panic alike.
 };
 
 test "context init and deinit" {

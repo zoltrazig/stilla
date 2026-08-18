@@ -44,7 +44,7 @@ fn checkModule(m: stdbundle.Module) !void {
     var source_map = std.StringHashMapUnmanaged([]const u8).empty;
     for (stdbundle.modules) |bm| try source_map.put(arena.allocator(), bm.specifier, bm.source);
 
-    var builder = moduleinfo.Builder.init(arena.allocator(), moduleinfo.Sources{ .source = source_map });
+    var builder = moduleinfo.Builder.init(arena.allocator(), moduleinfo.Sources{ .standard_library = source_map });
     const graph = builder.build(m.specifier) catch |err| {
         std.debug.print("FAIL {s}: {s}\n", .{ m.specifier, builder.diag.?.message });
         return err;
@@ -105,4 +105,31 @@ test "std bundle sources are non-empty host-binding surfaces" {
         // Each module must expose at least one member declaration.
         try testing.expect(std.mem.indexOf(u8, m.source, "fn ") != null);
     }
+}
+
+test "std bundle registers array and hashmap as opaque host types" {
+    // StdLib §1, Core §11.8: `Array[T]` and `HashMap[K, V]` are declared
+    // `opaque type` in the module interface and registered as opaque type
+    // members, not as structs.
+    const alloc = testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(alloc);
+    defer arena.deinit();
+
+    var source_map = std.StringHashMapUnmanaged([]const u8).empty;
+    for (stdbundle.modules) |bm| try source_map.put(arena.allocator(), bm.specifier, bm.source);
+
+    var builder = moduleinfo.Builder.init(arena.allocator(), moduleinfo.Sources{ .standard_library = source_map });
+    const graph = try builder.build("array");
+
+    const arr = graph.module("array").?;
+    const tm = arr.typeMember("Array") orelse return error.TestUnexpectedResult;
+    try testing.expect(tm.decl == .opaque_);
+    try testing.expect(tm.generic);
+
+    var builder2 = moduleinfo.Builder.init(arena.allocator(), moduleinfo.Sources{ .standard_library = source_map });
+    const graph2 = try builder2.build("hashmap");
+    const hm = graph2.module("hashmap").?;
+    const htm = hm.typeMember("HashMap") orelse return error.TestUnexpectedResult;
+    try testing.expect(htm.decl == .opaque_);
+    try testing.expect(htm.generic);
 }
