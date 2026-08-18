@@ -70,7 +70,7 @@ test "parser black-box: parses every module-item kind in one program" {
 }
 
 test "parser black-box: host-binding declarations parse without bodies" {
-    // frontend §5.6: a declaration without a body or initializer is a host
+    // A declaration without a body or initializer is a host binding (phase3-cfg-lowering.md, System calls for host bindings)
     // binding (`builtin.str[T]` etc., Runtime §4).
     const text = "fn str[T](value: T) -> str;\nconst max_int32: int32;\n";
     var t = try parseText(text);

@@ -275,7 +275,7 @@ Calling it with another type is a compile-time error unless the implementation e
 ## 4.3 List length
 
 ```stilla
-builtin.len[T]:
+list.len[T]:
     fn(borrow list[T]) -> int32
 ```
 
@@ -284,7 +284,7 @@ The list is borrowed and never consumed.
 ## 4.4 Integer range
 
 ```stilla
-builtin.range:
+list.range:
     fn(int32, int32) -> list[int32]
 ```
 

@@ -30,12 +30,6 @@ fn print(message: str) -> void;
 // §4.2 Conversion. Supported types: byte, int32, uint32, float32, bool, str.
 fn str[T](value: T) -> str;
 
-// §4.3 List length. The list is borrowed and never consumed.
-fn len[T](borrow xs: list[T]) -> int32;
-
-// §4.4 Integer range, inclusive: [start, end]; empty when start > end.
-fn range(start: int32, end: int32) -> list[int32];
-
 // §4.5 Box: ownership extraction is explicit (`move`).
 fn box[T](move value: T) -> box[T];
 

@@ -55,8 +55,8 @@ fn checkModule(m: stdbundle.Module) !void {
     defer ann.deinit();
 
     // `iter` and `list` are ordinary Stilla source (StdLib §7, §8):
-    // every combinator / derived operation has a real body. `list.get`
-    // is the one host binding among them — the element read, declared
+    // every combinator / derived operation has a real body. `list.get` and `list.len`
+    // are the host bindings among them — the element read, declared
     // without a body and lowered to the `read_index` op. Every other
     // bundle module is declaration-only host binding surface.
     const mixed = std.mem.eql(u8, m.specifier, "iter") or std.mem.eql(u8, m.specifier, "list");
@@ -97,7 +97,7 @@ test "std bundle exposes exactly the StdLib §1 module set" {
 
 test "std bundle sources are non-empty host-binding surfaces" {
     // Each embedded source is registered under its specifier; resolution
-    // loads them by that name (frontend §3.2), and they are declaration
+    // loads them by that name (phase1-module-graph.md, Loading, parsing, and deduplication), and they are declaration
     // surfaces without a Stilla `module` header of their own.
     for (stdbundle.modules) |m| {
         try testing.expect(m.source.len > 0);

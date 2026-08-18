@@ -19,7 +19,7 @@ functions become directed graphs of basic blocks over typed values, with
 explicit ownership operations and control flow. It is the last frontend
 phase and the runtime's input. The IR itself — 3-address code in SSA
 form — is specified authoritatively in [`spec/ir.md`](spec/ir.md); the
-sketch in §5.2 of the original frontend.md is superseded by ir.md §4–§11.
+sketch in the original frontend.md is superseded by ir.md §4–§11.
 
 The lowerer is in `src/lower.zig` plus `src/passes/cfg_lower_*.zig`
 files, consuming the [Phase 2](phase2-checker.md) annotation.
@@ -28,8 +28,8 @@ files, consuming the [Phase 2](phase2-checker.md) annotation.
 
 - **`IrModule`** — one per `ModuleInfo`: the module's member table
   (ir.md §7 — constants as storage slots; functions, module values, and
-  host bindings as static references), its init function (§5.5), and its
-  host bindings (§5.6).
+  host bindings as static references), its init function (Module init functions), and its
+  host bindings (System calls for host bindings).
 - **`IrFunc`** — one per runtime function: each monomorphic function
   declaration and each `FuncInstance` (host bindings get no `IrFunc` —
   they are syscalls only). Contains the signature (parameter modes, return
@@ -146,7 +146,7 @@ grammar.
 
 Evaluate callee then arguments left to right (Runtime §5); a Stilla
 function value lowers to `call`; a host binding lowers to `syscall`
-(§5.6).
+(System calls for host bindings).
 
 ### Construction (Core §8.1, §11)
 
@@ -273,10 +273,11 @@ have no Stilla definitions to evaluate.
 A **host binding** is a function member with a *declaration and no Stilla
 definition*:
 
-- every `builtin` member (`print`, `str`, `len`, `range`, `box`, `peek`,
-  `unbox`, `panic`, `assert`, `hash` — Core §3, Runtime §4); note that
-  `map` and `fold` are **not** builtins — the list combinators live in
-  the `iter` module (StdLib §7);
+- every `builtin` member (`print`, `str`, `box`, `peek`, `unbox`,
+  `panic`, `assert`, `hash` — Core §3, Runtime §4); note that `map`
+  and `fold` are **not** builtins — the list combinators live in the
+  `iter` module (StdLib §7), and the list operations `len`, `range`,
+  and `get` live in the `list` module (Runtime §4.3, §4.4, §4.10);
 - every member of a host-provided module (`os.open`, `file.close`, … —
   Core §2.6, Runtime §3.1), whose statically known interface is supplied
   by the host interface registry.
@@ -329,7 +330,7 @@ pub const SysCallTarget = union(enum) {
 - **panicking bindings** — `builtin.panic` returns `never`; its call is
   followed by a `trap` terminator, and no destruction runs after it
   (Runtime §7);
-- **generic builtins** — `builtin.len`, `builtin.str`, `builtin.box`,
+- **generic builtins** — `builtin.str`, `builtin.box`,
   `builtin.peek`, `builtin.unbox`, and `builtin.hash` are generic
   (Runtime §4); [Phase 2](phase2-checker.md) specializes them like any
   generic function (producing a `FuncInstance` with `body = null`), and
@@ -402,7 +403,7 @@ Consumers of the CFG:
 - **module instantiation** — `IrModule` init functions run in topological
   order, each module at most once (Runtime §2.1, §2.3);
 - **deterministic destruction** — scope/temporary `drop` ops and
-  reverse-order teardown are already materialized (§5.4, §5.5);
+  reverse-order teardown are already materialized (Destruction placement, Module init functions);
 - **[optimizer](optimizer.md)** — the CFG is the base for the mid-level
   optimizer (Passes 7–8), a fixed sequence of semantics-preserving
   CFG→CFG rewrites run as a **single ordered pass** (no iteration to
@@ -422,7 +423,7 @@ Consumers of the CFG:
 | `src/passes/cfg_lower_call.zig` | Call and syscall lowering |
 | `src/passes/cfg_lower_pattern.zig` | Pattern destructuring |
 | `src/passes/cfg_lower_path.zig` | Path expression lowering |
-| `src/passes/cfg_lower_emit.zig` | On-the-fly optimizations at construction (§4.3) |
+| `src/passes/cfg_lower_emit.zig` | On-the-fly optimizations at construction |
 | `src/passes/cfg_lower_validate.zig` | Post-lowering validation |
 | `src/passes/cfg_lower_drop.zig` | Post-optimization drop lowering: expand statically-expandable `drop`s (struct/tuple/box/union) into explicit CFG operations; only opaque, `hostdata`, `list`, and `any` drops remain single instructions |
 | `src/passes/cfg_lex.zig` | IR text lexing (re-exported by `cfg`) |

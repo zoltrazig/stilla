@@ -17,7 +17,7 @@
 // §11.5).
 //
 // Stilla has no list-construction primitive beyond literals and
-// `builtin.range` (Runtime §4.4), so list-producing operations
+// `list.range` (Runtime §4.4), so list-producing operations
 // (`reverse`, `append`, `take`, `drop`, `filter`, `map`) are not
 // expressible in source and are not provided.
 
@@ -30,9 +30,19 @@ using builtin.Option;
 // §11.5) and cannot be independently moved.
 fn get[T](borrow xs: list[T], index: int32) -> T;
 
+// §4.3 List length. The list is borrowed and never consumed. A host
+// binding: calls lower to the `list#len` system call (Runtime §4.3).
+fn len[T](borrow xs: list[T]) -> int32;
+
+// §4.4 Integer range, inclusive: [start, end]; empty when start > end.
+// A host binding: calls lower to the `list#range` system call (Runtime
+// §4.4). Like `get` and `len`, it is a member of this module rather
+// than of `builtin` so that the list operations live together.
+fn range(start: int32, end: int32) -> list[int32];
+
 // True when the list has no elements; the list is borrowed.
 fn is_empty[T](borrow xs: list[T]) -> bool {
-    builtin.len(xs) == 0
+    len(xs) == 0
 }
 
 // True when some element equals `needle` under `eq`, in increasing

@@ -39,7 +39,7 @@ against module members (Core §2.5):
   module-valued consts (Core §2.7);
 - `builtin.member` — the standard-library `builtin` module (Core §3,
   imported like any other module), whose members resolve to host
-  bindings ([Phase 3 §5.6](phase3-cfg-lowering.md#system-calls-for-host-bindings)).
+  bindings ([Phase 3 — System calls for host bindings](phase3-cfg-lowering.md#system-calls-for-host-bindings)).
 
 Module-qualified type lookup is static: module values never enter local
 value flow (Core §2.3), so a qualified path always denotes a statically
@@ -55,7 +55,7 @@ Every syntactic `ast.Type` is resolved to a `cfg.Type`
 - transparent alias expansion — aliases leave no node (Core §11.2);
 - the primitive types `any` and `hostdata` (Core §11.6, §11.7): `any` is
   the top type — always unique, carries a runtime type tag, and is
-  recovered only by `as` or `match` type-test patterns (§4.6);
+  recovered only by `as` or `match` type-test patterns (Core §11.6);
   `hostdata` is an opaque unique payload constructible only by the host;
 - host-backed opaque nominal types (Core §11.8) — declared by
   standard-library / host-provided module interfaces (`opaque type
@@ -82,10 +82,10 @@ The annotation a node receives is the quadruple the phase is named for:
 
 | annotation | meaning | source |
 | --- | --- | --- |
-| **name** | the resolved `Decl` the head of the expression refers to (binding, function, const, type, module member, …) | name resolution (§4.1) |
-| **type** | the `TypeInfo` the expression produces | type resolution (§4.2) |
-| **ownership** | the `Ownership` of the produced value, and — for bindings — the binding's ownership state (`is_borrow`, `consumed`, `released`, `maybe`) | ownership analysis (§4.5) |
-| **expression** | the inferred `TypeInfo` of the expression node itself (`expr_of`) | inference (§4.3) |
+| **name** | the resolved `Decl` the head of the expression refers to (binding, function, const, type, module member, …) | name resolution |
+| **type** | the `TypeInfo` the expression produces | type resolution |
+| **ownership** | the `Ownership` of the produced value, and — for bindings — the binding's ownership state (`is_borrow`, `consumed`, `released`, `maybe`) | ownership analysis |
+| **expression** | the inferred `TypeInfo` of the expression node itself (`expr_of`) | expression inference |
 
 ## Generic expansion
 
@@ -132,7 +132,7 @@ Ownership annotation drives the transfer checks:
     through a conditional construct; a definitely-released or maybe-unique
     binding is unusable afterward, and only a maybe-unique binding is
     conditionally destroyed at scope end (in the IR: through its cleanup
-    token — [Phase 3 §5.4](phase3-cfg-lowering.md#destruction-placement));
+    token — [Phase 3 — Destruction placement](phase3-cfg-lowering.md#destruction-placement));
 - `move name` marks the named binding consumed (Core §10.4);
 - `drop name;` marks it destroyed (Core §9.4);
 - a `borrow` parameter receives a non-owning view and leaves the caller's
@@ -221,11 +221,11 @@ pub const Annotation = struct {
     arena: std.heap.ArenaAllocator,
 
     /// Function members declared without a Stilla body (builtin / host):
-    /// calls to these lower to system calls, never in-IR calls (§5.6).
+    /// calls to these lower to system calls, never in-IR calls (phase 3 — System calls for host bindings).
     host_bindings: std.AutoHashMapUnmanaged(*const ast.FuncDef, void) = .empty,
 
     /// The used generic specializations, deduplicated per (declaration,
-    /// type args) across modules (§4.4). The lowerer consumes these and
+    /// type args) across modules (Generic expansion). The lowerer consumes these and
     /// lowers one monomorphic `IrFunc` per instance.
     instances: std.ArrayListUnmanaged(*FuncInstance) = .empty,
 
@@ -237,19 +237,19 @@ pub const Annotation = struct {
 
 pub const ModuleAnnotation = struct {
     module: *moduleinfo.ModuleInfo,
-    /// Written `ast.Type` → resolved `cfg.Type` (§4.2).
+    /// Written `ast.Type` → resolved `cfg.Type` (Type resolution).
     type_of:    std.AutoHashMapUnmanaged(*const ast.Type, cfg.Type) = .empty,
-    /// `ast.Expr` → produced `cfg.Type` (§4.3).
+    /// `ast.Expr` → produced `cfg.Type` (Expression inference).
     expr_of:    std.AutoHashMapUnmanaged(*const ast.Expr, cfg.Type) = .empty,
     /// Binding id → resolved type.
     binding_of: std.AutoHashMapUnmanaged(u32, cfg.Type) = .empty,
-    /// Binding id → static ownership state (§4.5).
+    /// Binding id → static ownership state (Ownership analysis).
     bindings:   std.AutoHashMapUnmanaged(u32, BindingState) = .empty,
     /// Call → callee's concrete signature (non-generic calls).
     call_sig:   std.AutoHashMapUnmanaged(*const ast.Call, cfg.Type) = .empty,
-    /// Call → the generic specialization it triggers (§4.4).
+    /// Call → the generic specialization it triggers (Generic expansion).
     call_of:    std.AutoHashMapUnmanaged(*const ast.Call, *FuncInstance) = .empty,
-    /// Value-position `::[...]` → its `FuncInstance` (§4.4).
+    /// Value-position `::[...]` → its `FuncInstance` (Generic expansion).
     spec_of:    std.AutoHashMapUnmanaged(*const ast.Specialize, *FuncInstance) = .empty,
     /// Module-member name → its declared identifier (name annotation).
     names:      std.StringHashMapUnmanaged(*const ast.Ident) = .empty,
@@ -275,7 +275,7 @@ and produces no more semantic errors.
 | --- | --- |
 | `src/passes/checker.zig` | Phase-2 driver |
 | `src/passes/checker_annotate.zig` | Name resolution, expression/pattern inference, binding-state tracking |
-| `src/passes/checker_validate.zig` | The §4.6 checks |
+| `src/passes/checker_validate.zig` | The [checks enabled by annotation](#checks-enabled-by-annotation) |
 | `src/passes/checker_ownership.zig` | Conditional-release state merging through `if`/`match`/`and`/`or` (Core §10.10) |
 | `src/passes/monomorphize.zig` | Deep-copy monomorphization of template bodies under concrete substitutions |
 | `src/passes/type_infer.zig` | `bindTypeArgs`, `substSignature`, `specializeSignatureExplicit` |
@@ -291,5 +291,5 @@ Phase 2 output is consumed by:
   concrete signatures, instantiated types, and ownership decisions;
   generic functions are lowered per used specialization (one monomorphic
   `IrFunc` per instance);
-- **The IR validator** ([§6.1](optimizer.md#ir-validator)) — validates
+- **The IR validator** ([Pass 6.1](optimizer.md#ir-validator)) — validates
   the lowered CFG against phase-2 invariants.

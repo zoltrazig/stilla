@@ -70,7 +70,7 @@ test "moduleinfo loads the entry module and orders modules by dependency" {
     defer t.arena.deinit();
 
     try testing.expectEqual(@as(usize, 2), t.graph.modules.len);
-    // Dependencies before dependents (frontend §3.5): `calc` first.
+    // Dependencies before dependents (phase1-module-graph.md, Import-cycle detection): `calc` first.
     try testing.expectEqualStrings("calc", t.graph.modules[0].specifier);
     try testing.expectEqualStrings("use", t.graph.modules[1].specifier);
     try testing.expectEqualStrings("use", t.graph.entry.specifier);
@@ -79,7 +79,7 @@ test "moduleinfo loads the entry module and orders modules by dependency" {
 }
 
 test "moduleinfo resolves the stdbundle standard-library modules" {
-    // The embedded `std/` bundle (frontend §3.2) is always resolvable,
+    // The embedded `std/` bundle (phase1-module-graph.md, Loading, parsing, and deduplication) is always resolvable,
     // before the caller's extra `standard_library` map (Runtime §2.6).
     var t = try buildGraph("app", &.{
         .{ "app", "const math = import(\"math\");\nfn main() -> void {}" },
@@ -191,7 +191,7 @@ test "moduleinfo builds member tables: values, types, using aliases" {
 
     const app = t.graph.module("app").?;
     // Value members: functions first, then module-value consts and
-    // ordinary consts (frontend §3.3 materializes funcs before consts,
+    // ordinary consts (phase1-module-graph.md, Module-level information materializes funcs before consts,
     // mirroring the generated module struct's member space).
     try testing.expectEqual(@as(usize, 4), app.values.len);
     try testing.expectEqualStrings("add", app.values[0].name.text);
@@ -662,10 +662,10 @@ test "moduleinfo specializeSignature instantiates generic host bindings" {
     var t = try buildGraph("app", &.{
         .{
             "app",
-            \\const builtin = import("builtin");
+            \\const lists = import("list");
             \\fn main() -> void {
-            \\    let n = builtin.len(["a", "b"]);
-            \\    let r = builtin.range(0, 5);
+            \\    let n = lists.len(["a", "b"]);
+            \\    let r = lists.range(0, 5);
             \\}
         },
     });
@@ -673,8 +673,7 @@ test "moduleinfo specializeSignature instantiates generic host bindings" {
     defer t.arena.deinit();
 
     const resolve = moduleinfo.resolveOf(t.graph);
-    const builtin = t.graph.module("builtin").?;
-    const len_vm = builtin.valueMember("len").?;
+    const len_vm = t.graph.module("list").?.valueMember("len").?;
     const sig = len_vm.type_.function;
 
     // `len[T](borrow xs: list[T]) -> int32` with a list[str] argument
@@ -682,7 +681,7 @@ test "moduleinfo specializeSignature instantiates generic host bindings" {
     var str_t = cfg.Type{ .primitive = .str };
     const list_str = cfg.Type{ .list = &str_t };
     const arg_types = [_]cfg.Type{list_str};
-    const specialized = moduleinfo.specializeSignature(resolve, builtin, sig, &arg_types);
+    const specialized = moduleinfo.specializeSignature(resolve, t.graph.module("list").?, sig, &arg_types);
     try testing.expect(specialized == .function);
     const ft = specialized.function;
     try testing.expectEqual(@as(usize, 1), ft.params.len);
@@ -691,12 +690,12 @@ test "moduleinfo specializeSignature instantiates generic host bindings" {
     try testing.expectEqual(ast.PrimitiveKind.str, ft.params[0].type_.list.*.primitive);
     try testing.expectEqual(ast.PrimitiveKind.int32, ft.ret.*.primitive);
 
-    // `range(start: int32, end: int32) -> list[int32]` is non-generic and
-    // passes through unchanged.
-    const range_vm = builtin.valueMember("range").?;
+    // `range(start: int32, end: int32) -> list[int32]` is a non-generic
+    // host binding of the `list` module and passes through unchanged.
+    const range_vm = t.graph.module("list").?.valueMember("range").?;
     const range_sig = range_vm.type_.function;
     const range_args = [_]cfg.Type{ .{ .primitive = .int32 }, .{ .primitive = .int32 } };
-    const r_specialized = moduleinfo.specializeSignature(resolve, builtin, range_sig, &range_args);
+    const r_specialized = moduleinfo.specializeSignature(resolve, t.graph.module("list").?, range_sig, &range_args);
     try testing.expect(r_specialized == .function);
     try testing.expect(r_specialized.function.ret.* == .list);
     try testing.expectEqual(ast.PrimitiveKind.int32, r_specialized.function.ret.*.list.*.primitive);
@@ -766,7 +765,7 @@ test "moduleinfo resolveTypeName follows using aliases for local type members" {
     const tm = app.typeMember("Maybe").?;
     // The alias target is the named type `Option[int32]`; resolving it
     // through the using alias yields the IR-native named reference
-    // (type arguments resolve in the lowering, frontend §4.2).
+    // (type arguments resolve in the lowering, phase2-checker.md, Type resolution).
     const target = moduleinfo.resolveType(resolve, app, &tm.decl.alias.target).?;
     try testing.expectEqualStrings("builtin.Option", resolve.typeNameOf(target.named.id).?);
 }

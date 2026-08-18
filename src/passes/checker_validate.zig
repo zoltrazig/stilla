@@ -1,4 +1,4 @@
-//! Pass: phase-2 consumer checks — frontend.md §4.6 (type mismatch, match
+//! Pass: phase-2 consumer checks — phase2-checker.md, Checks enabled by annotation (type mismatch, match
 //! exhaustiveness, refutable patterns, recursive types, module-const
 //! initialization order).
 //! In: the per-module annotation from `checker_annotate` (expr_of,
@@ -8,7 +8,7 @@
 //! Each check is a consumer of the annotation: the annotate pass fills
 //! the side tables, and this pass decides. The recursive-types and
 //! module-const initialization-order checks are structural walks over the
-//! module's declarations (no annotation needed). The remaining §4.6 items
+//! module's declarations (no annotation needed). The remaining checks
 //! (non-capture, borrow lifetimes, drop-hook restrictions) live in
 //! `checker_annotate`, where the binding-state machinery they need is;
 //! the lowerer reports the structural diagnostics (unknown bindings,
@@ -27,7 +27,7 @@ const Scope = checker.Scope;
 const ModuleInfo = moduleinfo.ModuleInfo;
 const ModuleAnnotation = checker.ModuleAnnotation;
 
-/// Run the §4.6 checks over one module.
+/// Run the checks over one module.
 pub fn validateModule(ck: *checker.Checker, info: *ModuleInfo) CheckError!void {
     const program = info.program orelse return;
     const ma = try ck.moduleAnnotation(info);
@@ -62,15 +62,15 @@ pub fn validateModule(ck: *checker.Checker, info: *ModuleInfo) CheckError!void {
         .func_def => |*f| if (f.body) |body| {
             // Generic templates are never checked unspecialized (Core
             // §12.4); each used specialization is validated under the
-            // concrete substitution (§4.4).
+            // concrete substitution (phase2-checker.md, Generic expansion).
             if (f.type_params.len == 0) try validateFunc(frame, f, body);
         },
         else => {},
     };
 }
 
-/// Run the §4.6 checks over one monomorphized generic instance body
-/// (frontend §4.4, Core §12.4). The instance was annotated against its
+/// Run the checks over one monomorphized generic instance body
+/// (phase2-checker.md, Generic expansion; Core §12.4). The instance was annotated against its
 /// defining module by `checkInstanceBody`; this runs the consumer checks
 /// over the same annotation.
 pub fn validateMonomorphized(ck: *checker.Checker, info: *ModuleInfo, ma: *ModuleAnnotation, f: *const ast.FuncDef) CheckError!void {
@@ -725,7 +725,7 @@ fn visitTypeEdge(
     switch (t.*) {
         .named => |n| {
             // Dotted names denote types of imported modules; imports are
-            // acyclic (§3.5), so a non-generic cross-module reference cannot
+            // acyclic (phase1-module-graph.md, Import-cycle detection), so a non-generic cross-module reference cannot
             // cycle back. A cross-module GENERIC instantiation (`m.B[Node]`
             // storing `Node` inline) is a known limitation of this pass —
             // closing it needs cross-module type resolution.

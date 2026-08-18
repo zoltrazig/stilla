@@ -1,4 +1,4 @@
-//! Pass: generic expansion — frontend.md §4.4, Core §12.
+//! Pass: generic expansion — phase2-checker.md, Generic expansion; Core §12.
 //! In: a generic `ast.FuncDef` template + the concrete `cfg.Type` type
 //! arguments of one specialization.
 //! Out: a monomorphized `ast.FuncDef` — a deep copy of the template whose

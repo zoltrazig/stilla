@@ -1,4 +1,4 @@
-//! Pass: phi simplification (frontend.md §8.7). In: a lowered
+//! Pass: phi simplification (optimizer.md, Pass 8.5). In: a lowered
 //! `cfg.IrProgram` (after jump threading, which leaves single-incoming
 //! phis behind). Out: the same program, with single-incoming phis, phis
 //! whose incoming values are all identical, and self-referential trivial

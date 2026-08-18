@@ -1,5 +1,5 @@
 //! Pass: local common subexpression elimination over module references
-//! and member loads (frontend.md §8.4). In: a lowered `cfg.IrProgram`
+//! and member loads (optimizer.md, Pass 8 driver). In: a lowered `cfg.IrProgram`
 //! (after tail-call elimination). Out: the same program, with an
 //! identical `module_ref` earlier in the same block reused, and an
 //! identical `load_member` of the same module slot (whose result is

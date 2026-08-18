@@ -5,8 +5,9 @@
 //!
 //! The load pass (`module_load.zig`) registers each module, then hands it
 //! to `scanModule` here: module-level consts are pre-scanned for
-//! `import(...)` initializers and single-segment path aliases (frontend
-//! §3.3, Core §2.2–§2.3), and module values are resolved transitively so
+//! `import(...)` initializers and single-segment path aliases
+//! (phase1-module-graph.md, Module-level information; Core §2.2–§2.3),
+//! and module values are resolved transitively so
 //! materialization can follow `import` aliases and `using` targets.
 
 const std = @import("std");
@@ -21,7 +22,7 @@ const RawConst = moduleinfo.RawConst;
 /// seed `raw.module_values` transitively.
 pub fn scanModule(self: *Builder, raw: *RawModule, program: *const ast.Program) !void {
     // Pre-scan module-level consts for imports and module-value
-    // aliases (frontend §3.3, Core §2.2–§2.3).
+    // aliases (phase1-module-graph.md, Module-level information; Core §2.2–§2.3).
     for (program.items) |*item| switch (item.*) {
         .const_def => |*c| try collectConst(self, raw, c),
         else => {},

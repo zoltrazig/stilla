@@ -142,7 +142,7 @@ pub const ModuleItem = union(enum) {
 ///
 /// When `init` is null the declaration is a **host binding** — a constant
 /// with a declared type and no Stilla initializer, whose value the host
-/// provides at runtime (frontend §5.6).
+/// provides at runtime (phase3-cfg-lowering.md, System calls for host bindings).
 pub const ConstDef = struct {
     span: Span,
     name: Ident,
@@ -156,7 +156,7 @@ pub const ConstDef = struct {
 ///
 /// When `body` is null the declaration is a **host binding** — a signature
 /// with no Stilla definition, whose calls the frontend lowers to system
-/// calls (frontend §5.6; e.g. `builtin` members, Runtime §4).
+/// calls (phase3-cfg-lowering.md, System calls for host bindings; e.g. `builtin` members, Runtime §4).
 pub const FuncDef = struct {
     span: Span,
     name: Ident,

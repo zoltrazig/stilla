@@ -23,11 +23,11 @@ ownership dataflow is a compile-time diagnostic.
 Constant folding, arithmetic simplification, common subexpression
 elimination, and copy propagation no longer exist as separate
 passes — they run on-the-fly at each instruction's construction site
-during [Phase 3](phase3-cfg-lowering.md) (§4.3, braun13cc.pdf §3.1).
+during [Phase 3](phase3-cfg-lowering.md) (braun13cc.pdf §3.1).
 The remaining Pass 8 sequence is: tail-call optimization, PRE,
 dead-block elimination, drop elision, jump threading, and phi
 simplification — followed by the post-optimization drop-lowering pass
-(§8.9), which expands every statically-expandable `drop` into explicit
+(§8.7), which expands every statically-expandable `drop` into explicit
 CFG operations.
 
 ## IR validator (Pass 6.1)
@@ -61,7 +61,7 @@ unique state afterwards and no armed cleanup token on the tail edge.
 
 Replace `call` + `ret` with a `j` back to the function's own entry
 block, re-binding the callee's parameters from the call arguments and
-splicing in phis for the reused frame's SSA values (ir.md §10.9). The
+splicing in phis for the reused frame's SSA values (ir.md §14.7). The
 chain drop is guarded:
 
 - an intermediate chain block (between the call block and the ret block)
@@ -78,7 +78,7 @@ returned value's destruction schedule (Runtime §6) is unchanged because
 the frame is reused; only direct `call`s to a known `IrFunc` are
 candidates (a call through a function *value* has no statically known
 target); v0.1 is **Copy-only**: loop-carried parameters are all Copy and
-a move-mode parameter never loops back through a phi (ir.md §10.9) — it
+a move-mode parameter never loops back through a phi (ir.md §14.7) — it
 is instead expressed as the `tailcall` terminator (ir.md §14.7.1), which
 carries move/unique state atomically into a reused frame, so the
 Copy-only limitation does not forbid `iter`-style unique-accumulator
@@ -93,7 +93,7 @@ lowered CFG, after Pass 7 and before the runtime consumes it. Each
 sub-pass is one file in `src/passes/`; each rewrite must preserve
 observable behavior (Runtime §5) and the ir.md §13 invariants.
 
-### On-the-fly optimizations (Phase 3 §4.3)
+### On-the-fly optimizations (phase 3, at construction)
 
 These run at each instruction's construction site in
 `cfg_lower_emit.zig`'s `emit`, replacing what would otherwise be
@@ -115,7 +115,7 @@ separate CFG→CFG passes:
   value (a copy of a Copy value is the value, ir.md §5.4), so no
   `copy` instructions reach the IR from the frontend.
 
-### 8.3 Partial redundancy elimination
+### 8.1 Partial redundancy elimination
 
 `src/passes/cfg_pre.zig` — rewrite a computation available on some —
 but not all — incoming edges of a join to a phi, inserting the
@@ -126,7 +126,7 @@ Runtime §7.2), Copy results, operands defined in a strict dominator of
 the join; the join's computation is replaced by the phi with the same
 result value, and values are renumbered in text order (ir.md §13).
 
-### 8.4 Dead-instruction elimination
+### 8.2 Dead-instruction elimination
 
 `src/passes/cfg_dead_instr.zig` — remove an instruction whose results
 are unused, Copy, and produced by a side-effect-free, non-consuming,
@@ -135,13 +135,13 @@ is unused is the common corpus case); iterated to a fixed point; calls,
 syscalls, consuming destructures, `div`/`rem`/`cast`/reads (traps) and
 phis are never candidates.
 
-### 8.5 Dead-block elimination
+### 8.3 Dead-block elimination
 
 `src/passes/cfg_dead_block.zig` — remove blocks unreachable from the
 entry; update phi incoming lists and predecessor sets accordingly
 (ir.md §3).
 
-### 8.6 Drop elision
+### 8.4 Drop elision
 
 `src/passes/cfg_drop_elide.zig` — remove a `drop` whose destruction is
 provably unobservable — the value is Copy, or already dead; must never
@@ -151,15 +151,15 @@ type with a user hook is always classified unique, so only Copy drops are
 elided, and `cleanup_drop` / `cleanup_disarm` (whose token's payload is
 an unique owner) are never elided.
 
-### 8.7 Phi simplification
+### 8.5 Phi simplification
 
 `src/passes/cfg_phi_simplify.zig` — remove single-incoming phis,
 identical-phis, and self-referential trivial phis (braun13cc Algorithm 3:
 `φ(v, vφ) → v`, with the user walk iterated to a fixed point; all-self
 phis are kept — the IR has no undefined value), forwarding their
-operands; pairs with 8.8 (threading produces single-incoming phis).
+operands; pairs with 8.6 (threading produces single-incoming phis).
 
-### 8.8 Jump threading
+### 8.6 Jump threading
 
 `src/passes/cfg_jump_thread.zig` — merge empty forwarding blocks (a
 block whose only op is an unconditional `j` to a single successor) into
@@ -169,7 +169,7 @@ collapse to their ultimate successor, cycles are left alone, and a
 candidate whose predecessor already targets the ultimate successor is
 skipped (no duplicate edges).
 
-### 8.9 Drop lowering (post-optimization)
+### 8.7 Drop lowering (post-optimization)
 
 `src/passes/cfg_lower_drop.zig` — after the Pass 8 sequence, expand every
 `drop` the CFG can express into explicit operations at the drop's
@@ -202,15 +202,15 @@ error, so the report is suppressed there to keep the log clean.
 | --- | --- |
 | `src/passes/cfg_optimize.zig` | Pass 8 driver — runs the full sequence |
 | `src/passes/cfg_tail_call.zig` | Pass 7 — tail call optimization |
-| `src/passes/cfg_pre.zig` | Pass 8.3 — partial redundancy elimination |
-| `src/passes/cfg_dead_instr.zig` | Pass 8.4 — dead-instruction elimination |
-| `src/passes/cfg_dead_block.zig` | Pass 8.5 — dead-block elimination |
-| `src/passes/cfg_drop_elide.zig` | Pass 8.6 — drop elision |
-| `src/passes/cfg_phi_simplify.zig` | Pass 8.7 — phi simplification |
-| `src/passes/cfg_jump_thread.zig` | Pass 8.8 — jump threading |
-| `src/passes/cfg_lower_drop.zig` | 8.9 — post-optimization drop lowering (structural drop expansion) |
+| `src/passes/cfg_pre.zig` | Pass 8.1 — partial redundancy elimination |
+| `src/passes/cfg_dead_instr.zig` | Pass 8.2 — dead-instruction elimination |
+| `src/passes/cfg_dead_block.zig` | Pass 8.3 — dead-block elimination |
+| `src/passes/cfg_drop_elide.zig` | Pass 8.4 — drop elision |
+| `src/passes/cfg_phi_simplify.zig` | Pass 8.5 — phi simplification |
+| `src/passes/cfg_jump_thread.zig` | Pass 8.6 — jump threading |
+| `src/passes/cfg_lower_drop.zig` | 8.7 — post-optimization drop lowering (structural drop expansion) |
 | `src/passes/cfg_validate.zig` | IR validator (Pass 6.1) — structure, SSA, typing, ownership |
-| `src/passes/cfg_lower_emit.zig` | On-the-fly optimizations at construction (§4.3) |
+| `src/passes/cfg_lower_emit.zig` | On-the-fly optimizations at construction |
 
 ## Relationship to other phases
 

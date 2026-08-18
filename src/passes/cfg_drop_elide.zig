@@ -1,4 +1,4 @@
-//! Pass: drop elision (frontend.md §8.6). In: a lowered `cfg.IrProgram`
+//! Pass: drop elision (optimizer.md, Pass 8.4). In: a lowered `cfg.IrProgram`
 //! (after dead-block elimination). Out: the same program, with every
 //! `drop` / `trydrop` whose destruction is provably unobservable removed.
 //!

@@ -167,13 +167,14 @@ pub const Parser = struct {
     f_brace: Token = undefined,
     next_func_id: u32 = 0,
 
-    // Program-level type environment (ir.md §11): the text form names
-    // structs/unions by string, so the parser interns each first-seen
-    // name into a stable `TypeId` and records the written name so
-    // printing round-trips it (ir.md §11; the text form carries no
-    // struct/union decls).
+    // Program-level type environment (ir.md §9.1): the text form
+    // names structs/unions by string, so the parser interns each
+    // first-seen name into a stable `TypeId` and records an
+    // `.unknown` `TypeDecl` (written name, no layout — the text form
+    // carries no type declarations) so printing round-trips it (ir.md
+    // §10).
     type_ids: std.StringHashMap(u32) = undefined,
-    types: std.ArrayList([]const u8) = .empty,
+    types: std.ArrayList(cfg.TypeDecl) = .empty,
     type_ids_ready: bool = false,
 
     pub fn init(allocator: std.mem.Allocator) Parser {
@@ -305,6 +306,10 @@ pub const Parser = struct {
                 .name = spec,
                 .init = init_func,
                 .funcs = try self.arena.allocator().dupe(*IrFunc, mfuncs.items),
+                // The text form carries no member declarations (ir.md
+                // §10): the member table is unknown here and the
+                // frontend materializes it.
+                .members = null,
                 .slots = slots,
             };
             try modules.append(self.arena.allocator(), m);
@@ -314,8 +319,9 @@ pub const Parser = struct {
             .modules = try self.arena.allocator().dupe(*IrModule, modules.items),
             .funcs = try self.arena.allocator().dupe(*IrFunc, funcs.items),
             // The text form carries no type declarations; typed names are
-            // interned into the name table as they are parsed (ir.md §11).
-            .types = try self.arena.allocator().dupe([]const u8, self.types.items),
+            // interned into `.unknown` `TypeDecl`s as they are parsed
+            // (ir.md §10).
+            .types = try self.arena.allocator().dupe(cfg.TypeDecl, self.types.items),
             .entry = null,
         };
         try program.resolveDirectCalls(self.arena.allocator());
@@ -604,8 +610,9 @@ pub const Parser = struct {
         if (name_toks.items.len != 1 and !info.multi) {
             return self.fail(op_tok, "'{s}' defines {d} results; only the atomic destructure ops define more than one", .{ info.text, name_toks.items.len });
         }
-        var op = try self.parseOpOperands(opname);
-        if (std.meta.activeTag(op) == .syscall) op.syscall.ret = types.items[0];
+        const op = try self.parseOpOperands(opname);
+        // The text form carries no syscall signature (ir.md §10): `sig`
+        // stays null and the validator skips signature checks for it.
         // Resolve the pre-registered placeholders: numeric def names are
         // positional (validated to equal the running id at registration),
         // symbolic names via the symbol table.
@@ -666,8 +673,7 @@ pub const Parser = struct {
         if (std.mem.eql(u8, text, "syscall")) {
             _ = self.advance();
             if (self.f_cur == null) return self.fail(t, "instruction appears after the block's terminator", .{});
-            var sc = try self.parseSyscall();
-            sc.ret = .{ .primitive = .void };
+            const sc = try self.parseSyscall();
             _ = try self.emit(t.span, .{ .syscall = sc }, &.{});
             return;
         }
@@ -917,7 +923,7 @@ pub const Parser = struct {
             .span = ast.Span.merge(mod_tok.span, member_tok.span),
             .target = target,
             .args = try self.parseCommaOperandList(),
-            .ret = undefined,
+            .sig = null,
         };
     }
 
@@ -1202,14 +1208,14 @@ pub const Parser = struct {
     }
 
     /// Intern a named struct/union from IR text: returns its stable `TypeId`,
-    /// recording the written name on first sight (ir.md §11; the text form
-    /// carries no fields/ownership, so the entry is name-only and prints
+    /// recording the written name on first sight (ir.md §10; the text form
+    /// carries no fields/ownership, so the entry is `.unknown` and prints
     /// back identically).
     fn internTypeName(self: *Parser, text: []const u8) TypeId {
         if (self.type_ids.get(text)) |id| return id;
         const id: TypeId = @intCast(self.types.items.len);
         self.type_ids.put(text, id) catch return 0;
-        self.types.append(self.arena.allocator(), text) catch return 0;
+        self.types.append(self.arena.allocator(), .{ .unknown = text }) catch return 0;
         return id;
     }
 
@@ -1408,7 +1414,7 @@ test "cfg parses a loop header phi with a back edge" {
         \\module "test" {
         \\func @dump(values: list[str]) -> void {
         \\entry:
-        \\    %n: int32 = syscall builtin#len, %values
+        \\    %n: int32 = syscall list#len, %values
         \\    %z: int32 = const 0
         \\    j header
         \\header:
@@ -1435,7 +1441,8 @@ test "cfg parses a loop header phi with a back edge" {
         .syscall => |s| s,
         else => unreachable,
     };
-    try std.testing.expectEqual(BuiltinId.len, sc.target.builtin);
+    try std.testing.expectEqualStrings("list", sc.target.host_module.module);
+    try std.testing.expectEqualStrings("len", sc.target.host_module.member);
 
     const header = f.blocks[1];
     const phi = switch (header.instrs[0].op) {
@@ -1455,7 +1462,7 @@ test "cfg parses a loop header phi with a back edge" {
     try std.testing.expect(be == header);
     try std.testing.expectEqual(@as(usize, 2), header.preds.len);
 }
-test "cfg resolves direct calls and builtin syscalls" {
+test "cfg resolves direct calls and host-module syscalls" {
     var t = try parseText(
         \\module "test" {
         \\func @inspect(borrow file: File) -> void {
@@ -1466,7 +1473,7 @@ test "cfg resolves direct calls and builtin syscalls" {
         \\entry:
         \\    %a: File = syscall os#open_file, "a.txt"
         \\    call @inspect, %a
-        \\    %n: int32 = syscall builtin#len, %a
+        \\    %n: int32 = syscall list#len, %a
         \\    ret
         \\}
         \\}
@@ -1538,7 +1545,7 @@ test "cfg parses constructs, projections, and a switch" {
         \\module "use" {
         \\    func @msg(result: Result) -> str {
         \\    entry:
-        \\        %tag: u32 = read_tag %result
+        \\        %tag: uint32 = read_tag %result
         \\        switch %tag { #0 -> arm_ok, #1 -> arm_err }
         \\    arm_ok:
         \\        %v: str = read_payload %result

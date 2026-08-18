@@ -95,7 +95,7 @@ each instantiation is a distinct concrete nominal type.
 The standard library provides:
 
 ```text
-builtin       required core interface: print, str, len, range, box,
+builtin       required core interface: print, str, box,
               peek, unbox, panic, assert, hash (the Runtime specification)
 array[T]      host-owned contiguous-memory sequence, Unique opaque nominal
 hashmap[K, V] host-owned contiguous-bucket hash table, Unique opaque nominal
@@ -104,8 +104,8 @@ string        Unicode text operations and conversions
 iter          list combinators: each, each_with, fold, fold_with, consume_each,
               consume_each_with, consume_fold, consume_fold_with, try_fold,
               try_fold_with
-list          abstract list operations: get, is_empty, contains, count,
-              index_of, head
+list          abstract list operations: get, len, range, is_empty, contains,
+              count, index_of, head
 ```
 
 Every module here, including `builtin`, is imported like any other module
@@ -753,10 +753,10 @@ Usage:
 
 ```stilla
 const iter = import("iter");
-const builtin = import("builtin");
+const lists = import("list");
 
 let total = iter.fold(
-    builtin.range(1, 10),
+    lists.range(1, 10),
     0,
     fn(move acc: int32, borrow x: int32) -> int32 {
         acc + x
@@ -765,7 +765,7 @@ let total = iter.fold(
 
 // Short-circuit at the first value greater than 5 (x = 6, accumulator 15):
 let capped = iter.try_fold::[int32, int32, int32](
-    builtin.range(1, 10),
+    lists.range(1, 10),
     0,
     fn(move acc: int32, borrow x: int32) -> iter.Result[int32, int32] {
         if (x > 5) {
@@ -786,9 +786,10 @@ match (capped) {
 
 The `list` module groups the operations on the abstract sequence type
 `list[T]`: the bounds-checked element read and the derived operations.
-The element read was a member of `builtin` in earlier versions; it lives
-here so that the list operations are grouped in one module (Runtime §4.10
-defines its execution semantics).
+The element read, the length query, and the range constructor were
+members of `builtin` in earlier versions; they live here so that the
+list operations are grouped in one module (Runtime §4.3, §4.4, §4.10
+define their execution semantics).
 
 Because `list` is the language's type keyword (the Core specification), a
 source binding for this module must use another name; the specifier
@@ -804,6 +805,12 @@ Conceptual interface (a conforming standard library must provide at least this):
 ```stilla
 list.get[T]:
     fn(borrow list[T], int32) -> <T>
+
+list.len[T]:
+    fn(borrow list[T]) -> int32
+
+list.range:
+    fn(int32, int32) -> list[int32]
 
 list.is_empty[T]:
     fn(borrow list[T]) -> bool
@@ -822,7 +829,7 @@ list.head[T]:
 ```
 
 `get` is a host binding — a declaration without a Stilla definition
-(frontend §5.6). The frontend lowers calls to it as the bounds-checked
+(phase3-cfg-lowering.md, System calls for host bindings). The frontend lowers calls to it as the bounds-checked
 `read_index` operation (Runtime §4.10, §7.2), not as a system call: a
 syscall's vtable slot cannot return an element of arbitrary type `T` by
 value. The list is borrowed and never consumed; a *Copy* element is
@@ -839,6 +846,6 @@ can be returned by value for every `T` (the Core specification); the
 remaining elements are dropped.
 
 Stilla has no list-construction primitive beyond literals and
-`builtin.range` (the Runtime specification), so list-producing operations
+`list.range` (the Runtime specification), so list-producing operations
 (`reverse`, `append`, `take`, `drop`, `filter`, `map`) are not
 expressible in source and are not provided.

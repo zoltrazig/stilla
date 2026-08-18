@@ -47,12 +47,12 @@ work has a home:
 | [`src/context.zig`](src/context.zig) | §1.3, §2, §8 | Execution context: owns module storage, instantiates standard-library modules (`builtin` included), unit of panic termination |
 | [`src/module.zig`](src/module.zig) | §2 | Module instantiation and immutable module storage, keyed by specifier |
 | [`src/host.zig`](src/host.zig) | §3 | Embedding-host contract: allocator, `builtin` implementation, host state |
-| [`src/builtin.zig`](src/builtin.zig) | §4 | Required `builtin` interface (`print`, `len`, `panic`, …) as a host-supplied vtable |
+| [`src/builtin.zig`](src/builtin.zig) | §4 | Required `builtin` interface (`print`, `panic`, …) as a host-supplied vtable |
 | [`src/panic.zig`](src/panic.zig) | §7 | Termination and traps: `Panic` + `Termination` without unwinding |
 | [`src/ast.zig`](src/ast.zig) | — (compile-time) | Source spans, line index, AST node types, and diagnostics |
 | [`src/lex.zig`](src/lex.zig) | — (compile-time) | Lexer for the core language grammar: source text → tokens |
 | [`src/parser.zig`](src/parser.zig) | — (compile-time) | LL(k) parser: token stream → AST |
-| [`src/passes/checker.zig`](src/passes/checker.zig) | — (compile-time) | Phase-2 type checker (frontend.md §4): per-module annotation (name/type/ownership/expression side tables), generic expansion via `monomorphize.zig`, and the §4.6 checks — type mismatch, match exhaustiveness, refutable patterns, non-capture, borrow lifetimes, module-const init order, recursive types without indirection, and drop-hook destruction-view restrictions |
+| [`src/passes/checker.zig`](src/passes/checker.zig) | — (compile-time) | Phase-2 type checker (phase2-checker.md): per-module annotation (name/type/ownership/expression side tables), generic expansion via `monomorphize.zig`, and the phase-2 checks — type mismatch, match exhaustiveness, refutable patterns, non-capture, borrow lifetimes, module-const init order, recursive types without indirection, and drop-hook destruction-view restrictions |
 | [`src/passes/`](src/passes/) | — (compile-time) | The pass implementations, one file per pass: phase-1 module graph (`module_load`…`module_check`, `topo_sort`), type resolution (`type_resolve`, `type_shape`, `type_infer`), phase-2 annotation and checks (`checker`, `checker_annotate`, `checker_validate`, `checker_ownership`, `monomorphize`), CFG lowering (`cfg_lower_*`; `cfg_lower_emit` also runs the on-the-fly constant folding / arithmetic simplification / CSE / copy propagation of braun13cc.pdf §3.1), the mid-level optimizer (`cfg_optimize`, `cfg_pre`, `cfg_dead_block`, `cfg_tail_call`), and the IR text form's lexer, parser, and printer (`cfg_lex`, `cfg_parse`, `cfg_print`, re-exported by `cfg`) |
 | [`src/moduleinfo.zig`](src/moduleinfo.zig) | — (compile-time) | Module graph construction (frontend phase 1): `Builder`, `ModuleInfo`, `ModuleGraph`, specifier resolution, member-table materialization (type-resolution helpers re-exported from `src/passes/type_resolve.zig`) |
 | [`src/frontend.zig`](src/frontend.zig) | — (compile-time) | Frontend pipeline driver: entry module → phase-1 graph → phase-3 `cfg.IrProgram` (`Compilation`) |
@@ -94,8 +94,8 @@ module "app" {
     entry:
         %0: int32 = const 0
         %1: int32 = const 10
-        %2: list[int32] = syscall builtin#range, %0, %1
-        %3: int32 = syscall builtin#len, %2
+        %2: list[int32] = syscall list#range, %0, %1
+        %3: int32 = syscall list#len, %2
         ret %3
     }
 }

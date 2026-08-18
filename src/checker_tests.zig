@@ -65,7 +65,7 @@ test "checker flags host bindings and leaves definitions alone" {
 }
 
 test "checker flags generic host bindings and leaves bodies alone" {
-    // frontend §5.6: a generic declaration without a body is a host
+    // A generic declaration without a body is a host binding (phase3-cfg-lowering.md, System calls for host bindings)
     // binding too (`builtin.str[T]` etc., Runtime §4).
     var t = try checkText(
         \\fn str[T](value: T) -> str;
@@ -125,7 +125,7 @@ test "checker distinguishes a defined body with a trailing expression" {
 }
 
 // ---------------------------------------------------------------------------
-// checker — phase-2 checks (frontend §4.6): type mismatch, match
+// checker — phase-2 checks (phase2-checker.md, Checks enabled by annotation): type mismatch, match
 // exhaustiveness, ownership transfer.
 // ---------------------------------------------------------------------------
 
@@ -240,7 +240,7 @@ test "checker accepts a type-test match over any" {
 }
 
 // ---------------------------------------------------------------------------
-// checker — ownership: conditional release and state merging (frontend §4.5,
+// checker — ownership: conditional release and state merging (phase2-checker.md, Ownership analysis,
 // Core §10.10): a binding released on some but not all paths through an
 // if/match/and/or becomes *maybe-unique* (still owned on some paths, dead on
 // others — the implementation tracks its runtime liveness), and a binding
@@ -468,7 +468,7 @@ test "checker accepts a construct after a binding was already released" {
 }
 
 // ---------------------------------------------------------------------------
-// checker — ownership transfer and borrow lifetimes (frontend §4.6, Core
+// checker — ownership transfer and borrow lifetimes (phase2-checker.md, Checks enabled by annotation; Core
 // §10.6, §10.7, §14.6, §18): a plain parameter accepts only Copy
 // arguments; a move parameter requires an explicit `move` of an existing
 // unique owner; a borrowed unique value cannot be moved, dropped, returned
@@ -641,7 +641,7 @@ test "checker rejects use of a binding consumed by a match scrutinee" {
 }
 
 // ---------------------------------------------------------------------------
-// checker — generic expansion (frontend §4.4, Core §12): a specialization
+// checker — generic expansion (phase2-checker.md, Generic expansion; Core §12): a specialization
 // produces a monomorphized instance that is checked under substitution.
 // ---------------------------------------------------------------------------
 
@@ -666,7 +666,7 @@ test "checker checks the monomorphized body of a generic call" {
 }
 
 test "checker deduplicates generic specializations" {
-    // frontend §4.4: instances are keyed by (declaration, type arguments);
+    // Generic expansion: instances are keyed by (declaration, type arguments);
     // two calls with the same args share one instance and one mono body.
     var t = try checkText(
         \\fn id[T](move x: T) -> T { move x }
@@ -780,7 +780,7 @@ test "checker rejects an unspecialized generic function as a value" {
 }
 
 test "checker specializes a generic host binding without a body" {
-    // frontend §5.6: host-binding instances have no body to expand.
+    // Host-binding instances have no body to expand (phase3-cfg-lowering.md, System calls for host bindings).
     var t = try checkText(
         \\fn len[T](borrow xs: list[T]) -> int32;
         \\fn main() -> int32 { len([1, 2, 3]) }

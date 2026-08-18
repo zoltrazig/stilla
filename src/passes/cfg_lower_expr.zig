@@ -95,7 +95,7 @@ pub fn lowerSpecialize(self: *Lowerer, fs: *FuncState, s: *const ast.Specialize)
 }
 
 /// A `void`-typed expression result. `void` is a singleton type with no
-/// observable value (frontend.md §5.3, Pass 4.1): a void return is a bare
+/// observable value (phase3-cfg-lowering.md, Lowering rules; Pass 4.1): a void return is a bare
 /// `ret`, a void join produces no phi, and the checker rejects void in
 /// every typed operand position, so a void *value* is never an
 /// instruction operand. The result is therefore a phantom — a value with
@@ -234,7 +234,7 @@ pub fn lowerUnary(self: *Lowerer, fs: *FuncState, u: *const ast.Unary) LowerErro
 
 pub fn lowerBinary(self: *Lowerer, fs: *FuncState, b: *const ast.Binary) LowerError!?*cfg.Value {
     // Short-circuit and / or are control flow, never instructions
-    // (ir.md §10.3): the right operand is evaluated only when needed.
+    // (ir.md §14.2): the right operand is evaluated only when needed.
     switch (b.op) {
         .and_ => return cfg_lower_control.lowerAnd(self, fs, b),
         .or_ => return cfg_lower_control.lowerOr(self, fs, b),

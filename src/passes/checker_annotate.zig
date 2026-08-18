@@ -1,16 +1,16 @@
-//! Pass: block-level annotation — frontend.md §4.1 (cross-module name
-//! resolution), §4.3 (expression inference and annotation tables), §4.4
-//! (generic expansion: specializes generic calls and `::[...]` value
-//! expressions into `FuncInstance`s via `monomorphize`), §4.5 (ownership
-//! analysis / binding-state tracking, with conditional release and state
-//! merging delegated to `checker_ownership`, Core §10.10), and §4.6's
-//! non-capture, borrow-lifetime, and drop-hook destruction-view
-//! restrictions.
+//! Pass: block-level annotation — phase2-checker.md, Cross-module name
+//! resolution, Expression inference and annotation tables, Generic
+//! expansion (specializes generic calls and `::[...]` value expressions
+//! into `FuncInstance`s via `monomorphize`), Ownership analysis
+//! (binding-state tracking, with conditional release and state merging
+//! delegated to `checker_ownership`, Core §10.10), and the non-capture,
+//! borrow-lifetime, and drop-hook destruction-view restrictions
+//! (Checks enabled by annotation).
 //! In: phase-1 `ModuleInfo` + the phase-2 driver `Checker`.
 //! Out: the module's `ModuleAnnotation` side tables — `expr_of`,
 //! `binding_of`, `bindings`, `call_sig`, `call_of`, `spec_of`, `names` —
 //! and, as a side effect, the static ownership transitions (`move`/`drop`,
-//! `released` and the conditional-construct merges) that §4.5 tracks.
+//! `released` and the conditional-construct merges) that Ownership analysis tracks.
 //!
 //! Type shapes (`structDecl`, `unionDecl`, `fieldIndex`, `variantIndex`,
 //! `ownershipOf`) and module-scope resolution (`resolvePathMember`,
@@ -78,7 +78,7 @@ pub fn annotateModule(ck: *checker.Checker, info: *ModuleInfo) CheckError!void {
             try ma.names.put(ck.alloc(), f.name.text, &f.name);
             // Generic templates are never checked unspecialized (Core
             // §12.4); each used specialization is expanded and checked
-            // under the concrete substitution (§4.4).
+            // under the concrete substitution (phase2-checker.md, Generic expansion).
             if (f.body) |body| {
                 if (f.type_params.len == 0) try checkFuncBody(frame, f, body);
             }
@@ -219,7 +219,7 @@ fn checkBlock(frame: *Frame, b: *const ast.Block) CheckError!cfg.Type {
 
 fn checkLet(frame: *Frame, l: *const ast.LetStmt) CheckError!void {
     // Resolve the declared type eagerly so the validate pass can compare
-    // it against the initializer (frontend §4.6, Core §5); it is also the
+    // it against the initializer (phase2-checker.md, Checks enabled by annotation; Core §5); it is also the
     // initializer's goal type (Core §11), so an under-determined
     // construction fills its type arguments from it.
     var declared: ?cfg.Type = null;
@@ -554,11 +554,11 @@ fn checkArgsOwnership(frame: *Frame, c: *const ast.Call, arg_types: []const cfg.
 }
 
 // ---------------------------------------------------------------------------
-// Expression inference (frontend §4.3)
+// Expression inference (phase2-checker.md, Expression inference)
 // ---------------------------------------------------------------------------
 
 /// Infer the type an expression produces, recording it in `expr_of`
-/// (frontend §4.3). Returns null when the type is not inferable; the node
+/// (phase2-checker.md, Expression inference). Returns null when the type is not inferable; the node
 /// is still visited so every child's type is recorded.
 fn inferExpr(frame: *Frame, e: *const ast.Expr) CheckError!?cfg.Type {
     const t = try inferExprInner(frame, e);
@@ -626,7 +626,18 @@ fn inferExprInner(frame: *Frame, e: *const ast.Expr) CheckError!?cfg.Type {
                 _ = try bindLocal(frame, p.name.text, t, p.mode == .borrow);
             }
             const old = frame.expect;
-            frame.expect = null; // a lambda's body has its own goal
+            // A lambda's body has its own goal: the enclosing context's
+            // expected type must not leak into the lambda (the lambda is
+            // a value, not the enclosing expression's result). But a
+            // lambda that declares a return type — `fn(...) -> Result[S,
+            // R] { ... }` — uses that type as the body's goal (Core §11),
+            // so a construction in the body fills its unbound type
+            // arguments from it (`Result::Break(r)` takes `S` from the
+            // declared ret instead of collapsing to a wildcard).
+            frame.expect = if (lam.ret) |*rt|
+                try frame.ck.resolveTypeOf(frame.ma, frame.info, rt)
+            else
+                null;
             defer frame.expect = old;
             const ret = try checkBlock(frame, lam.body);
             const ret_ptr = try alloc.create(cfg.Type);
@@ -969,7 +980,7 @@ fn inferConstructArgs(frame: *Frame, id: moduleinfo.TypeId, sc: ?*const ast.Stru
 }
 
 // ---------------------------------------------------------------------------
-// Calls (frontend §4.3, §4.4)
+// Calls (phase2-checker.md, Expression inference; Generic expansion)
 // ---------------------------------------------------------------------------
 
 fn inferCall(frame: *Frame, c: *const ast.Call) CheckError!?cfg.Type {
@@ -1033,7 +1044,7 @@ fn inferCall(frame: *Frame, c: *const ast.Call) CheckError!?cfg.Type {
 }
 
 // ---------------------------------------------------------------------------
-// Generic expansion (frontend §4.4, Core §12)
+// Generic expansion (phase2-checker.md, Generic expansion; Core §12)
 // ---------------------------------------------------------------------------
 
 /// A `::[...]` specialization in value position (Core §12.3, §12.4):
@@ -1106,7 +1117,7 @@ fn resolveSpecializeArgs(frame: *Frame, s: *const ast.Specialize) CheckError![]c
 /// generic function: type arguments from the explicit list or inferred
 /// from the argument types, a monomorphic signature, and — for Stilla
 /// bodies — a monomorphized clone checked under the concrete substitution
-/// (frontend §4.4). Host bindings get `mono = null` (frontend §5.6).
+/// (phase2-checker.md, Generic expansion). Host bindings get `mono = null` (phase3-cfg-lowering.md, System calls for host bindings).
 fn specializeInstance(
     frame: *Frame,
     target: moduleinfo.PathTarget,
@@ -1149,7 +1160,7 @@ fn specializeInstance(
     }
 
     // Deduplicate per (declaration, type arguments): each specialization is
-    // expanded and checked exactly once (frontend §4.4).
+    // expanded and checked exactly once (phase2-checker.md, Generic expansion).
     for (ck.annotation.instances.items) |inst| {
         if (inst.decl != decl) continue;
         if (!typeArgsEqual(inst.type_args, type_args)) continue;
@@ -1196,7 +1207,7 @@ fn typeArgsEqual(a: []const cfg.Type, b: []const cfg.Type) bool {
 
 /// Check one monomorphized instance body under its concrete substitution:
 /// annotate it (against the defining module, so cross-module types resolve
-/// correctly) and run the §4.6 checks on it. Unspecialized generic bodies
+/// correctly) and run the checks on it (phase2-checker.md, Checks enabled by annotation). Unspecialized generic bodies
 /// are never checked (Core §12.4).
 fn checkInstanceBody(ck: *checker.Checker, info: *ModuleInfo, ma: *ModuleAnnotation, f: *const ast.FuncDef) CheckError!void {
     const root = try ck.alloc().create(Scope);
@@ -1319,7 +1330,7 @@ fn moduleValueOf(frame: *Frame, object: *const ast.Expr) CheckError!?*ModuleInfo
 }
 
 // ---------------------------------------------------------------------------
-// Patterns (frontend §4.3)
+// Patterns (phase2-checker.md, Expression inference)
 // ---------------------------------------------------------------------------
 
 /// Bind the names a pattern introduces, given the value type it matches.

@@ -22,9 +22,9 @@ fn count_list(xs: list[int32]) -> int32 {
 }
 
 fn main() -> void {
-    // `builtin.range` is inclusive: [0, 10] → 11 elements.
-    let xs = builtin.range(0, 10);
-    builtin.assert(builtin.len(xs) == 11, "range length");
+    // `list.range` is inclusive: [0, 10] → 11 elements.
+    let xs = lists.range(0, 10);
+    builtin.assert(lists.len(xs) == 11, "range length");
     builtin.assert(lists.get(xs, 0) == 0 and lists.get(xs, 10) == 10, "read_index");
 
     // A fold over int32: sum 0..10.

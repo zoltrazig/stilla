@@ -32,7 +32,7 @@ pub fn lowerCall(self: *Lowerer, fs: *FuncState, e: *const ast.Call) LowerError!
                         .func => |f| {
                             if (f.body == null) {
                                 // Host binding: a system call, never
-                                // an in-IR call (frontend §5.6).
+                                // an in-IR call (phase3-cfg-lowering.md, System calls for host bindings).
                                 return try lowerHostCall(self, fs, e, target);
                             }
                             return try lowerDirectCall(self, fs, e, target);
@@ -65,11 +65,18 @@ pub fn lowerDirectCall(self: *Lowerer, fs: *FuncState, e: *const ast.Call, targe
         const mode = if (i < sig.params.len) sig.params[i].mode else .plain;
         const expected = if (i < sig.params.len) sig.params[i].type_ else cfg.Type{ .primitive = .any };
         const a2 = try lowerCallArg(self, fs, av, mode, expected);
-        try args.append(self.arena, a2);
         try arg_types.append(self.arena, a2.type_);
+        // A void-typed argument carries no observable value (phase3-cfg-lowering.md,
+        // Lowering rules; Pass 4.1): the lowering emits no operand for it —
+        // `emitVoid`'s phantom id must never reach the text form (the
+        // value has no table entry, so the printed `%4294967295` could
+        // not re-parse). The argument still contributes its type to
+        // `arg_types`, keeping them aligned with the source arguments.
+        if (a2.type_ == .primitive and a2.type_.primitive == .void) continue;
+        try args.append(self.arena, a2);
     }
     // Generic signatures are specialized from the argument types
-    // (frontend §4.4) — or, for a generic call, taken from the checker's
+    // (phase2-checker.md, Generic expansion) — or, for a generic call, taken from the checker's
     // recorded `FuncInstance` signature, which honors explicit `::[...]`
     // arguments the argument types alone cannot express.
     const ret = try specializedRet(self, fs, e, vm.type_, arg_types.items);
@@ -112,8 +119,9 @@ pub fn lowerValueCall(self: *Lowerer, fs: *FuncState, e: *const ast.Call, fv: *c
         const mode = if (i < ft.params.len) ft.params[i].mode else .plain;
         const expected = if (i < ft.params.len) ft.params[i].type_ else cfg.Type{ .primitive = .any };
         const a2 = try lowerCallArg(self, fs, av, mode, expected);
-        try args.append(self.arena, a2);
         try arg_types.append(self.arena, a2.type_);
+        if (a2.type_ == .primitive and a2.type_.primitive == .void) continue; // void args emit no operand
+        try args.append(self.arena, a2);
     }
     const specialized = moduleinfo.specializeSignature(self.resolve, fs.module, ft, arg_types.items);
     const ret = switch (specialized) {
@@ -123,27 +131,36 @@ pub fn lowerValueCall(self: *Lowerer, fs: *FuncState, e: *const ast.Call, fv: *c
     return try emitCall(self, fs, e.span, .{ .value = fv }, args.items, ret);
 }
 
-/// The concrete return type of a call: the checker's recorded
+/// The concrete signature of a call: the checker's recorded
 /// `FuncInstance` signature when the call is a generic specialization
 /// (explicit or inferred, Core §12.2/§12.3), otherwise the signature
-/// specialized from the argument types.
-pub fn specializedRet(self: *Lowerer, fs: *FuncState, e: *const ast.Call, sig: cfg.Type, arg_types: []const cfg.Type) LowerError!cfg.Type {
+/// specialized from the argument types. Mirrors `specializedRet` but
+/// returns the whole signature — the mode/type contract a syscall or
+/// callee carries into the IR (ir.md §8.2, §9.3).
+pub fn specializedSig(self: *Lowerer, fs: *FuncState, e: *const ast.Call, sig: cfg.Type, arg_types: []const cfg.Type) LowerError!cfg.FunctionType {
     if (self.ann) |a| {
         if (a.per_module.get(fs.module.specifier)) |ma| {
             if (ma.call_of.get(e)) |inst| {
-                if (inst.signature == .function) return inst.signature.function.ret.*;
+                if (inst.signature == .function) return inst.signature.function;
             }
         }
     }
     const specialized = moduleinfo.specializeSignature(self.resolve, fs.module, sig.function, arg_types);
     return switch (specialized) {
-        .function => |sft| sft.ret.*,
+        .function => |sft| sft,
         else => self.fail(e.span, "callee is not a function", .{}),
     };
 }
 
+/// The concrete return type of a call: the specialized signature's
+/// return (generic specializations honor explicit `::[...]` arguments
+/// via the checker's recorded `FuncInstance` signature).
+pub fn specializedRet(self: *Lowerer, fs: *FuncState, e: *const ast.Call, sig: cfg.Type, arg_types: []const cfg.Type) LowerError!cfg.Type {
+    return (try specializedSig(self, fs, e, sig, arg_types)).ret.*;
+}
+
 /// A call to a host binding: a `syscall` instruction carrying the
-/// resolved concrete signature (frontend §5.6, ir.md §8.2).
+/// resolved concrete signature (phase3-cfg-lowering.md, System calls for host bindings; ir.md §8.2).
 pub fn lowerHostCall(self: *Lowerer, fs: *FuncState, e: *const ast.Call, target: moduleinfo.PathTarget) LowerError!?*cfg.Value {
     const vm = target.vm;
     const sig = vm.type_.function;
@@ -154,10 +171,16 @@ pub fn lowerHostCall(self: *Lowerer, fs: *FuncState, e: *const ast.Call, target:
         const mode = if (i < sig.params.len) sig.params[i].mode else .plain;
         const expected = if (i < sig.params.len) sig.params[i].type_ else cfg.Type{ .primitive = .any };
         const a2 = try lowerCallArg(self, fs, av, mode, expected);
-        try args.append(self.arena, a2);
         try arg_types.append(self.arena, a2.type_);
+        if (a2.type_ == .primitive and a2.type_.primitive == .void) continue; // void args emit no operand
+        try args.append(self.arena, a2);
     }
-    const ret = try specializedRet(self, fs, e, vm.type_, arg_types.items);
+    // The specialized concrete signature (modes, parameter types, return
+    // type) rides on the syscall itself (ir.md §8.2, §9.3): the runtime
+    // and the validator resolve the call's copy/borrow/move contract
+    // without the module graph.
+    const sig_fn = try specializedSig(self, fs, e, vm.type_, arg_types.items);
+    const ret = sig_fn.ret.*;
     // `list.get(xs, i)` is the bounds-checked list read (Runtime §4.10,
     // §7.2, StdLib §8) — the same `read_index` op the removed `@[i]`
     // suffix lowered to — not a system call: a syscall's vtable slot
@@ -174,7 +197,7 @@ pub fn lowerHostCall(self: *Lowerer, fs: *FuncState, e: *const ast.Call, target:
             return self.fail(e.span, "unknown builtin member '{s}'", .{vm.name.text}) }
     else
         .{ .host_module = .{ .module = target.module.specifier, .member = vm.name.text } };
-    return try emitSyscall(self, fs, e.span, call_target, args.items, ret);
+    return try emitSyscall(self, fs, e.span, call_target, args.items, sig_fn);
 }
 
 /// Emit a `call` instruction, trapping when the callee is `never`.
@@ -193,19 +216,20 @@ pub fn emitCall(self: *Lowerer, fs: *FuncState, span: ast.Span, callee: cfg.Call
 
 /// Emit a `syscall` instruction, trapping when the host binding is
 /// `never` (no destruction runs after it — Runtime §7.1, ir.md §8.3).
-pub fn emitSyscall(self: *Lowerer, fs: *FuncState, span: ast.Span, target: cfg.SysCallTarget, args: []*cfg.Value, ret: cfg.Type) LowerError!?*cfg.Value {
+pub fn emitSyscall(self: *Lowerer, fs: *FuncState, span: ast.Span, target: cfg.SysCallTarget, args: []*cfg.Value, sig: cfg.FunctionType) LowerError!?*cfg.Value {
+    const ret = sig.ret.*;
     if (cfg_lower_emit.isNever(ret)) {
         // `builtin.panic` and friends: the call is followed by a trap,
         // and no destruction runs after it (Runtime §7.1, ir.md §8.3).
-        _ = try cfg_lower_emit.emit(self, fs, span, .{ .syscall = .{ .span = span, .target = target, .args = args, .ret = ret } }, null);
+        _ = try cfg_lower_emit.emit(self, fs, span, .{ .syscall = .{ .span = span, .target = target, .args = args, .sig = sig } }, null);
         try cfg_lower_emit.setTerminator(self, fs, .trap);
         return null;
     }
     if (cfg_lower_emit.isVoid(ret)) {
-        _ = try cfg_lower_emit.emit(self, fs, span, .{ .syscall = .{ .span = span, .target = target, .args = args, .ret = ret } }, null);
+        _ = try cfg_lower_emit.emit(self, fs, span, .{ .syscall = .{ .span = span, .target = target, .args = args, .sig = sig } }, null);
         return try cfg_lower_expr.emitVoid(self, fs, span);
     }
-    return try cfg_lower_emit.emit(self, fs, span, .{ .syscall = .{ .span = span, .target = target, .args = args, .ret = ret } }, ret);
+    return try cfg_lower_emit.emit(self, fs, span, .{ .syscall = .{ .span = span, .target = target, .args = args, .sig = sig } }, ret);
 }
 
 /// Apply a parameter mode at a call site (Core §10.6, ir.md §8.1), after

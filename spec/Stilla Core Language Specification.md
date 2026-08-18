@@ -448,8 +448,8 @@ Core helpers include:
 ```stilla
 builtin.print
 builtin.str
-builtin.len
-builtin.range
+list.len
+list.range
 builtin.box
 builtin.peek
 builtin.unbox
@@ -469,10 +469,14 @@ The explicit forms are always:
 
 ```stilla
 const builtin = import("builtin");
+const lists = import("list");
 
 builtin.print(...)
-builtin.len(...)
+lists.len(...)
 ```
+
+(`list` is the language's type keyword, so a source binding for the
+`list` module must use another name — here `lists`, StdLib §8.)
 
 The required signatures and behavioral contracts of these helpers are defined in the Runtime specification.
 

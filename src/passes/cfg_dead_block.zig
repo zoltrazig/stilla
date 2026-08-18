@@ -1,4 +1,4 @@
-//! Pass: dead-block elimination (frontend.md §8.5). In: a lowered
+//! Pass: dead-block elimination (optimizer.md, Pass 8.3). In: a lowered
 //! `cfg.IrProgram` (after constant folding, common subexpression
 //! elimination, partial redundancy elimination, and copy propagation). Out:
 //! the same program, with every block unreachable from the entry removed.

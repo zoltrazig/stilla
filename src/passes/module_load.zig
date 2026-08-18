@@ -1,7 +1,7 @@
 //! Pass: module loading. In: Builder + written specifier + import span.
 //! Out: a `RawModule` registered in `raws`/`by_specifier`/`raw_of`, parsed
 //! and scanned for module values (`module_scan.zig`).
-//! Resolution (frontend §3.1, Runtime §2.6) maps a written specifier to
+//! Resolution (phase1-module-graph.md, Module identity and specifier resolution; Runtime §2.6) maps a written specifier to
 //! exactly one of a Stilla source module, a standard-library module, or a
 //! host-provided module, deduplicated by resolved specifier (Runtime §2.1).
 //! Priority order (moduleinfo.zig): embedding source map, then the

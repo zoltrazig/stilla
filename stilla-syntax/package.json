@@ -3,8 +3,6 @@
   "displayName": "Stilla Syntax Highlighting",
   "description": "TextMate syntax highlighting and language support for the Stilla language",
   "version": "0.1.0",
-  "publisher": "zoltrazig",
-  "license": "MIT",
   "engines": {
     "vscode": "^1.75.0"
   },
@@ -16,8 +14,7 @@
       {
         "id": "stilla",
         "aliases": [
-          "Stilla",
-          "stilla"
+          "Stilla"
         ],
         "extensions": [
           ".st",

@@ -33,8 +33,10 @@
 //!   A payload-less variant destroys nothing and is a bare `j` to the
 //!   join — matching the existing consuming-match lowering.
 //!
-//! The pass needs the phase-1 module graph (the IR type environment is
-//! name-only, ir.md §11): field/variant types and ownership resolve
+//! The pass still resolves through the phase-1 module graph (the IR's
+//! `TypeDecl` environment carries the declared field/variant types, but
+//! the drop expansion runs here on the graph for its `substParams` and
+//! ownership helpers): field/variant types and ownership resolve
 //! through the graph, and generic instantiations substitute their type
 //! arguments (`moduleinfo.substParams`). It runs after the optimizer —
 //! the optimizer never sees the expanded form, and the expansion is
@@ -353,17 +355,18 @@ fn emitDestroy(seq: *Seq, v: *cfg.Value) error{OutOfMemory}!void {
         .list, .param => _ = try seq.appendOp(span, .{ .drop_ = v }, &.{}),
         .function, .module, .cleanup => {}, // Copy — defensive.
         .box => |inner| {
-            // `builtin#unbox` consumes the box at runtime (Runtime §4.6)
-            // even though the syscall schema models `.consumes = .none`
-            // (call modes come from the host signature, which the IR
-            // does not carry) — so the expanded CFG leaves the box
-            // unconsumed in the ownership dataflow, matching the
-            // frontend's own `unbox` lowering. Do not "fix" this: the
-            // box is runtime-consumed, and a `move` would be a second
-            // consumption.
+            // `builtin#unbox` consumes the box at runtime (Runtime §4.6);
+            // the syscall carries the specialized signature
+            // `fn unbox[T](move b: box[T]) -> T`, so the validator's
+            // move-mode argument check consumes the box here — the
+            // expansion's own consumption, no separate `move` is needed.
             const args = try seq.c.allocator.alloc(*cfg.Value, 1);
             args[0] = v;
-            const r = try seq.appendOp(span, .{ .syscall = .{ .span = span, .target = .{ .builtin = .unbox }, .args = args, .ret = inner.* } }, &.{inner.*});
+            const ret_ptr = try seq.c.allocator.create(cfg.Type);
+            ret_ptr.* = inner.*;
+            const params = try seq.c.allocator.alloc(cfg.Param, 1);
+            params[0] = cfg.syntheticParam(span, .move, v.type_);
+            const r = try seq.appendOp(span, .{ .syscall = .{ .span = span, .target = .{ .builtin = .unbox }, .args = args, .sig = .{ .params = params, .ret = ret_ptr } } }, &.{inner.*});
             try emitDestroy(seq, r[0]);
         },
         .tuple => |elems| {

@@ -88,8 +88,8 @@ fn run(io: std.Io, gpa: std.mem.Allocator, args: []const []const u8) u8 {
         .entry_fn = opts.entry_fn,
         .entry_fn_explicit = opts.entry_fn_explicit,
         .io = io,
-        // The executable ships the optimized IR by default (frontend.md
-        // §6): the toggle is code-only, so there is no CLI flag to turn
+        // The executable ships the optimized IR by default (optimizer.md):
+        // the toggle is code-only, so there is no CLI flag to turn
         // it off; embedders of the library control it via Options.
         .optimize = true,
     };
@@ -98,13 +98,26 @@ fn run(io: std.Io, gpa: std.mem.Allocator, args: []const []const u8) u8 {
 
     if (compilation.program) |*program| {
         const ir = stilla.cfg.print(program, arena) catch return 1;
+        // Prepend the source of every compiling module (the entry plus any
+        // `-I` imports; embedded stdlib sources are excluded) as `;`
+        // comments, so the IR file carries the Stilla that produced it for
+        // reference. The IR lexer skips `;` comments, so the decorated
+        // output still re-parses.
+        var ir_text = std.ArrayList(u8).empty;
+        if (compilation.graph) |g| {
+            for (g.modules) |m| {
+                if (m.kind != .source) continue;
+                if (m.source) |src| commentSource(&ir_text, arena, m.specifier, src.text) catch return 1;
+            }
+        }
+        ir_text.appendSlice(arena, ir) catch return 1;
         if (opts.output) |path| {
-            std.Io.Dir.cwd().writeFile(io, .{ .sub_path = path, .data = ir }) catch |err| {
+            std.Io.Dir.cwd().writeFile(io, .{ .sub_path = path, .data = ir_text.items }) catch |err| {
                 errPrint(io, gpa, "stilla: cannot write '{s}': {s}\n", .{ path, @errorName(err) }) catch {};
                 return 1;
             };
         } else {
-            std.Io.File.writeStreamingAll(std.Io.File.stdout(), io, ir) catch return 1;
+            std.Io.File.writeStreamingAll(std.Io.File.stdout(), io, ir_text.items) catch return 1;
         }
         return 0;
     } else {
@@ -187,6 +200,21 @@ fn errPrint(io: std.Io, gpa: std.mem.Allocator, comptime fmt: []const u8, args: 
 /// Write raw bytes to stderr.
 fn errWrite(io: std.Io, bytes: []const u8) !void {
     try std.Io.File.writeStreamingAll(std.Io.File.stderr(), io, bytes);
+}
+
+/// Write `text` as `; `-prefixed comment lines, labeled with the module
+/// specifier, for the source-reference header of the IR output.
+fn commentSource(out: *std.ArrayList(u8), allocator: std.mem.Allocator, spec: []const u8, text: []const u8) !void {
+    try out.appendSlice(allocator, "; === source: module \"");
+    try out.appendSlice(allocator, spec);
+    try out.appendSlice(allocator, "\" ===\n");
+    var lines = std.mem.splitScalar(u8, text, '\n');
+    while (lines.next()) |line| {
+        try out.appendSlice(allocator, "; ");
+        try out.appendSlice(allocator, line);
+        try out.appendSlice(allocator, "\n");
+    }
+    try out.appendSlice(allocator, "; ===\n");
 }
 
 /// Render a diagnostic as `<source>:<line>:<col>: error: <message>`. The

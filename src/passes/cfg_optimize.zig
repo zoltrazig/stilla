@@ -1,14 +1,14 @@
-//! Pass: mid-level CFG optimizer driver (frontend.md §7, §8). In: the
+//! Pass: mid-level CFG optimizer driver (optimizer.md, Pass 7–8). In: the
 //! lowered `cfg.IrProgram` (already optimized on-the-fly during
 //! construction — constant folding, arithmetic simplification, common
 //! subexpression elimination, and copy propagation happen at each emit
-//! site, braun13cc.pdf §3.1 / frontend.md §4.3). Out: the same program,
+//! site, braun13cc.pdf §3.1 / optimizer.md, On-the-fly optimizations). Out: the same program,
 //! rewritten in place by the optimization sub-passes in order — 7 tail
 //! call elimination, 8.4 module/member CSE, 8.4 copy propagation, 8.3
 //! partial redundancy elimination, 8.5 dead block elimination, 8.6 drop
 //! elision, 8.4 dead-instruction elimination, 8.8 jump threading, 8.7
 //! phi simplification. The sequence runs as a single ordered pass — no
-//! iteration to fixpoint (frontend.md §6).
+//! iteration to fixpoint (optimizer.md).
 const std = @import("std");
 const cfg = @import("../cfg.zig");
 const cfg_validate = @import("cfg_validate.zig");
@@ -43,7 +43,7 @@ fn check(program: *cfg.IrProgram, allocator: std.mem.Allocator, pass: []const u8
 }
 
 /// Run every enabled optimization pass in fixed order, exactly once
-/// (no fixpoint — compile time stays near-linear; frontend.md §6).
+/// (no fixpoint — compile time stays near-linear; optimizer.md).
 /// `allocator` is the program's backing allocator (the arena). The
 /// ir.md §13 validator runs before the sequence and after every pass:
 /// an optimizer bug that violates structure, SSA, typing, or the

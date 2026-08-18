@@ -13,6 +13,7 @@
 //! system; `--dep` cannot attach to the main module from the CLI).
 
 const std = @import("std");
+const ast = @import("ast.zig");
 const cfg = @import("cfg.zig");
 const frontend = @import("frontend.zig");
 const moduleinfo = @import("moduleinfo.zig");
@@ -83,7 +84,7 @@ fn compileOpt(entry: []const u8, texts: []const struct { []const u8, []const u8 
 }
 
 /// Test-only driver for the construction-time constant folding
-/// (frontend.md §4.3): applies the same `tryFoldOp` that every `emit`
+/// (optimizer.md, On-the-fly optimizations): applies the same `tryFoldOp` that every `emit`
 /// site uses to a parsed program, so the fold math (IEEE float
 /// semantics, trap preservation) can be tested without the lowering.
 /// Not a pipeline pass — the frontend has no folding pass.
@@ -108,7 +109,7 @@ test "frontend compiles a single module to IR" {
     const program = c.program.?;
     // Two modules in phase-1 topological order: `app` and the `builtin`
     // stdbundle module it imports, which is loaded like any source module
-    // (frontend.md §3.1; ir.md §11).
+    // (phase1-module-graph.md, Data structures; ir.md §11).
     try testing.expectEqual(@as(usize, 2), program.modules.len);
     // app's @init plus its two function definitions; builtin contributes no
     // funcs because its init is null (nothing to evaluate, ir.md §11).
@@ -240,6 +241,7 @@ test "frontend lowers a union match to a switch" {
         .{
             "app",
             \\const builtin = import("builtin");
+            \\const lists = import("list");
             \\union Result { Ok(int32), Err(str) }
             \\fn describe(r: Result) -> str {
             \\    match (r) {
@@ -513,10 +515,11 @@ test "frontend lowers a type-test match over any to type_is + any_unpack" {
         .{
             "app",
             \\const builtin = import("builtin");
+            \\const lists = import("list");
             \\fn describe(a: any) -> int32 {
             \\    match (a) {
             \\        int32 n => n,
-            \\        str s => builtin.len(["x"]),
+            \\        str s => lists.len(["x"]),
             \\        _ => -1
             \\    }
             \\}
@@ -532,8 +535,8 @@ test "frontend lowers a type-test match over any to type_is + any_unpack" {
     try testing.expect(std.mem.indexOf(u8, out, "any_unpack") != null);
     try testing.expect(std.mem.indexOf(u8, out, "type_is %") != null);
     try testing.expect(std.mem.indexOf(u8, out, " = any_unpack_copy %") != null);
-    // The arm bodies are lowered (syscall for builtin.len).
-    try testing.expect(std.mem.indexOf(u8, out, "syscall builtin#len") != null);
+    // The arm bodies are lowered (syscall for list.len).
+    try testing.expect(std.mem.indexOf(u8, out, "syscall list#len") != null);
 }
 
 test "frontend rejects a type-test match without a wildcard arm" {
@@ -739,13 +742,14 @@ test "frontend IR round-trips through the standalone cfg parser" {
         .{
             "app",
             \\const builtin = import("builtin");
+            \\const lists = import("list");
             \\union Result { Ok(int32), Err(str) }
             \\fn sign(v: int32) -> int32 { if (v >= 0) { 1 } else { -1 } }
             \\fn describe(r: Result) -> str {
             \\    match (r) { Result::Ok(x) => builtin.str(x), Result::Err(e) => e }
             \\}
-            \\fn dump(xs: list[int32]) -> void { let n = builtin.len(xs); builtin.print(builtin.str(n)); }
-            \\fn main() -> void { dump(builtin.range(0, 2)); }
+            \\fn dump(xs: list[int32]) -> void { let n = lists.len(xs); builtin.print(builtin.str(n)); }
+            \\fn main() -> void { dump(lists.range(0, 2)); }
         },
     });
     defer c.deinit();
@@ -755,8 +759,8 @@ test "frontend IR round-trips through the standalone cfg parser" {
     var p = cfg.Parser.init(testing.allocator);
     defer p.deinit();
     const prog = try p.parse(text);
-    try testing.expectEqual(@as(usize, 2), prog.modules.len);
-    try testing.expectEqual(@as(usize, 5), prog.funcs.len);
+    try testing.expectEqual(@as(usize, 3), prog.modules.len);
+    try testing.expectEqual(@as(usize, 6), prog.funcs.len);
     // The parser leaves the entry unselected; every function and block
     // survives, and the unique ids round-trip in order.
     for (prog.funcs) |f| {
@@ -1007,6 +1011,68 @@ test "iter.try_fold is Stilla source and short-circuits on Break" {
     try testing.expect(std.mem.indexOf(u8, text, "construct #1") != null); // Break
 }
 
+test "iter.try_fold_with with an inline step lambda and a void context compiles" {
+    // Two regressions in one: an inline lambda with a declared return type
+    // uses it as its body's goal (Core §11) — `Result::Complete`/`Break`
+    // inside the step fill their unbound type argument from it instead of
+    // collapsing to a wildcard `Result<>` (which crashed `substParams`) —
+    // and a `()` void argument carries no observable value, so the call
+    // emits no operand for it (the phantom id `%4294967295` never reaches
+    // the text form and the optimized IR round-trips).
+    var c = try compileOpt("app", &.{
+        .{
+            "app",
+            \\const builtin = import("builtin");
+            \\const iter = import("iter");
+            \\using iter.Result;
+            \\fn run(xs: list[int32]) -> void {
+            \\    let r = iter.try_fold_with::[int32, int32, int32, void](
+            \\        xs, 0, (),
+            \\        fn(move acc: int32, borrow ctx: void, borrow x: int32) -> Result[int32, int32] {
+            \\            if (acc + x > 10) { Result::Break(acc) } else { Result::Complete(acc + x) }
+            \\        }
+            \\    );
+            \\}
+            \\fn main() -> void { builtin.print("x"); }
+        },
+    });
+    defer c.deinit();
+
+    const program = c.program.?;
+    const text = try irText(&program);
+    defer testing.allocator.free(text);
+    try testing.expect(std.mem.indexOf(u8, text, "func @iter.try_fold_with") != null);
+    // The void context emits no operand: the phantom id must never print.
+    try testing.expect(std.mem.indexOf(u8, text, "%4294967295") == null);
+}
+
+test "calling a function with a void parameter emits no operand" {
+    // A `()` argument to a void-typed parameter produces no instruction
+    // operand (phase3-cfg-lowering.md, Lowering rules): the call's operand list carries one
+    // entry per non-void parameter, so the optimized IR round-trips.
+    var c = try compileOpt("app", &.{
+        .{
+            "app",
+            \\const builtin = import("builtin");
+            \\fn g(ctx: void) -> int32 { 7 }
+            \\fn mid(x: int32, ctx: void, y: int32) -> int32 { x + y }
+            \\fn main() -> void {
+            \\    let a = g(());
+            \\    let b = mid(1, (), 2);
+            \\    builtin.assert(a + b == 10, "void args");
+            \\}
+        },
+    });
+    defer c.deinit();
+
+    const program = c.program.?;
+    const text = try irText(&program);
+    defer testing.allocator.free(text);
+    try testing.expect(std.mem.indexOf(u8, text, "%4294967295") == null);
+    try testing.expect(std.mem.indexOf(u8, text, "call @app.g") != null);
+    try testing.expect(std.mem.indexOf(u8, text, "call @app.mid") != null);
+}
+
 test "frontend IR round-trips with duplicate-block-producing constructs" {
     // Block labels must be unique in the printed IR (ir.md §9): the
     // standalone cfg parser rejects duplicate labels. Repeated control
@@ -1016,6 +1082,7 @@ test "frontend IR round-trips with duplicate-block-producing constructs" {
         .{
             "app",
             \\const builtin = import("builtin");
+            \\const lists = import("list");
             \\fn classify(n: int32) -> str {
             \\    match (n) { 0 => "zero", 1 => "one", 2 => "two", _ => "other" }
             \\}
@@ -1025,7 +1092,7 @@ test "frontend IR round-trips with duplicate-block-producing constructs" {
             \\    if (c) { x } else { y }
             \\}
             \\fn sum2(a: list[int32], b: list[int32]) -> int32 {
-            \\    if (builtin.len(a) > 0) { builtin.print("a"); } else { builtin.print("b"); };
+            \\    if (lists.len(a) > 0) { builtin.print("a"); } else { builtin.print("b"); };
             \\    0
             \\}
             \\fn describe(a: any) -> int32 {
@@ -1055,10 +1122,11 @@ test "frontend compiles the standard-library bundle as host bindings" {
         .{
             "app",
             \\const builtin = import("builtin");
+            \\const lists = import("list");
             \\const m = import("math");
             \\const s = import("string");
             \\fn main() -> int32 {
-            \\    builtin.len(builtin.range(0, 10)) + m.sqrt(2.0) as int32 + s.len("hi")
+            \\    lists.len(lists.range(0, 10)) + m.sqrt(2.0) as int32 + s.len("hi")
             \\}
         },
     });
@@ -1067,10 +1135,10 @@ test "frontend compiles the standard-library bundle as host bindings" {
     try testing.expect(c.graph != null);
     const out = try irText(&c.program.?);
     defer testing.allocator.free(out);
-    try testing.expect(std.mem.indexOf(u8, out, "syscall builtin#len") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "syscall list#len") != null);
     try testing.expect(std.mem.indexOf(u8, out, "syscall math#sqrt") != null);
     try testing.expect(std.mem.indexOf(u8, out, "syscall string#len") != null);
-    try testing.expect(std.mem.indexOf(u8, out, "syscall builtin#range") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "syscall list#range") != null);
 }
 
 test "frontend compiles the StdLib array/hashmap container examples" {
@@ -1463,7 +1531,7 @@ test "spec examples compile: Core 12 generics" {
 }
 
 test "frontend lowers only monomorphic functions: instances, not templates" {
-    // Core §12, frontend §4.4: the IR carries one monomorphic function per
+    // Core §12, phase2-checker.md, Generic expansion: the IR carries one monomorphic function per
     // used specialization (`{module}.{fn}.{id}`) with concrete signatures;
     // the unspecialized template never appears, and no `.param` type
     // survives. Calls target the instances; recursion inside a generic
@@ -1472,9 +1540,10 @@ test "frontend lowers only monomorphic functions: instances, not templates" {
         .{
             "app",
             \\const iter = import("iter");
+            \\const lists = import("list");
             \\const builtin = import("builtin");
             \\fn main() -> int32 {
-            \\    iter.fold(builtin.range(1, 10), 0, fn(move a: int32, borrow x: int32) -> int32 { a + x })
+            \\    iter.fold(lists.range(1, 10), 0, fn(move a: int32, borrow x: int32) -> int32 { a + x })
             \\}
         },
     });
@@ -1533,6 +1602,7 @@ test "spec examples compile: Core 13.3 match" {
         .{
             "app",
             \\const builtin = import("builtin");
+            \\const lists = import("list");
             \\union Result { Ok(str), Err(str) }
             \\fn main() -> void {
             \\    let result = Result::Ok("done");
@@ -1605,10 +1675,11 @@ test "spec examples compile: StdLib 7 iter" {
         .{
             "app",
             \\const iter = import("iter");
+            \\const lists = import("list");
             \\const builtin = import("builtin");
             \\fn main() -> void {
             \\    let total = iter.fold(
-            \\        builtin.range(1, 10),
+            \\        lists.range(1, 10),
             \\        0,
             \\        fn(move acc: int32, borrow x: int32) -> int32 { acc + x }
             \\    );
@@ -1708,7 +1779,7 @@ test "frontend lowers shadowing with the previous binding read first" {
 
     const out = try irText(&c.program.?);
     defer testing.allocator.free(out);
-    // 10 + 1 folds at construction (frontend.md §4.3) to the constant.
+    // 10 + 1 folds at construction (optimizer.md, On-the-fly optimizations) to the constant.
     try testing.expect(std.mem.indexOf(u8, out, " = const 11") != null);
 }
 
@@ -1740,7 +1811,8 @@ test "frontend lowers tuple destructuring to read_tuple projections" {
         .{
             "app",
             \\const builtin = import("builtin");
-            \\fn f(t: tuple[int32, str]) -> int32 { let (a, b) = t; builtin.len(["x"]) }
+            \\const lists = import("list");
+            \\fn f(t: tuple[int32, str]) -> int32 { let (a, b) = t; lists.len(["x"]) }
             \\fn main() -> void {}
         },
     });
@@ -1922,15 +1994,15 @@ test "frontend rejects dropping an unknown binding" {
     try testing.expect(std.mem.indexOf(u8, c.diag.?.message, "drop of unknown binding") != null);
 }
 
-test "frontend lowers builtin.range and builtin.len with generics" {
+test "frontend lowers list.range and list.len with generics" {
     // Core §12.2: inferred specialization resolves `len[T]` against the
     // concrete `list[int32]` from `range` (Runtime §4.3–§4.4).
     var c = try compileText("app", &.{
         .{
             "app",
-            \\const builtin = import("builtin");
+            \\const lists = import("list");
             \\fn main() -> void {
-            \\    let n = builtin.len(builtin.range(0, 5));
+            \\    let n = lists.len(lists.range(0, 5));
             \\}
         },
     });
@@ -1938,8 +2010,8 @@ test "frontend lowers builtin.range and builtin.len with generics" {
 
     const out = try irText(&c.program.?);
     defer testing.allocator.free(out);
-    try testing.expect(std.mem.indexOf(u8, out, "syscall builtin#len") != null);
-    try testing.expect(std.mem.indexOf(u8, out, "syscall builtin#range") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "syscall list#len") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "syscall list#range") != null);
 }
 
 test "frontend lowers a never-returning call to a trap path" {
@@ -2431,7 +2503,7 @@ test "frontend lowers nested all-trap branches without a crash" {
 }
 
 // ---------------------------------------------------------------------------
-// Pass 7 — tail call elimination (frontend.md §7)
+// Pass 7 — tail call elimination (optimizer.md, Pass 7)
 // ---------------------------------------------------------------------------
 
 test "Pass 7 rewrites a self-recursive tail call into a loop" {
@@ -2754,7 +2826,7 @@ test "Pass 7 leaves a tail call with live unique state alone" {
 }
 
 test "Pass 7 runs before the Pass 8 pipeline" {
-    // frontend.md §8: the optimizer runs Pass 7 before Pass 8. `optimize`
+    // optimizer.md: the optimizer runs Pass 7 before Pass 8. `optimize`
     // therefore rewrites the tail call into a loop first, and the later
     // passes (which keep the loop reachable) leave the rewrite intact.
     var c = try compileText("app", &.{
@@ -2789,13 +2861,13 @@ test "Pass 7 runs before the Pass 8 pipeline" {
 }
 
 // ---------------------------------------------------------------------------
-// Pass 8.1 — constant folding (frontend.md §8.1)
+// On-the-fly constant folding (optimizer.md, On-the-fly optimizations)
 // ---------------------------------------------------------------------------
 
 test "Pass 8.1 folds constant arithmetic, comparison, and logic" {
     // 3 * 2 = 6, 6 + 5 = 11, 11 > 2 = true, !true = false — each rewritten
     // to a const instruction in place; ids and block structure are
-    // unchanged (frontend.md §8.1).
+    // unchanged (optimizer.md, On-the-fly optimizations).
     var t = try cfg_parse.parseText(
         \\module "app" {
         \\func @f() -> bool {
@@ -3185,8 +3257,9 @@ test "Pass 8.1 folded IR round-trips through the standalone cfg parser" {
 }
 
 // ---------------------------------------------------------------------------
-// On-the-fly common subexpression elimination at construction (frontend.md
-// §4.3) — the frontend has no separate CSE pass (braun13cc.pdf §3.1): an
+// On-the-fly common subexpression elimination at construction
+// (optimizer.md, On-the-fly optimizations) — the frontend has no
+// separate CSE pass (braun13cc.pdf §3.1): an
 // identical pure computation earlier in the same block is reused at its
 // emit site, so no `copy` instructions are involved.
 // ---------------------------------------------------------------------------
@@ -3338,14 +3411,14 @@ test "construction-time optimized IR round-trips through the standalone cfg pars
     try testing.expectEqualStrings(out, out2);
 }
 
-// Pass 8.3 — partial redundancy elimination (frontend.md §8.3)
+// Pass 8.1 — partial redundancy elimination (optimizer.md, Pass 8.1)
 // ---------------------------------------------------------------------------
 
 test "Pass 8.3 hoists a partially redundant comparison into a join phi" {
     // `lt %0, %1` runs on the `neg` edge but not on `pos`, so the join's
     // copy is partially redundant: PRE inserts the computation at the end
-    // of `pos` and turns the join's computation into a phi (frontend.md
-    // §8.3).
+    // of `pos` and turns the join's computation into a phi (optimizer.md,
+    // Pass 8.1).
     var t = try cfg_parse.parseText(
         \\module "app" {
         \\func @f(a: int32, b: int32, c: bool) -> bool {
@@ -3709,7 +3782,7 @@ test "Pass 8.3 lower.optimize on a full program round-trips through the standalo
 
 // ---------------------------------------------------------------------------
 // ---------------------------------------------------------------------------
-// On-the-fly copy elision at construction (frontend.md §4.3) — the frontend
+// On-the-fly copy elision at construction (optimizer.md, On-the-fly optimizations) — the frontend
 // has no separate copy-propagation pass (braun13cc.pdf §3.1): a `move` of a
 // Copy value lowers directly to the value itself (a copy of a
 // Copy value is the value, ir.md §5.4), so no `copy` instructions
@@ -3748,7 +3821,7 @@ test "frontend emits no copies for Copy moves, keeps move_ for unique" {
     try testing.expectEqualStrings(out, out2);
 }
 
-// Pass 8.5 — dead-block elimination (frontend.md §8.5)
+// Pass 8.3 — dead-block elimination (optimizer.md, Pass 8.3)
 // ---------------------------------------------------------------------------
 
 test "Pass 8.5 removes a block unreachable from the entry" {
@@ -4606,7 +4679,7 @@ test "Pass 8.4 copy propagation collapses box round-trip copies" {
     // `Token` is a plain Copy struct, so `box[Token]` is a Copy container
     // (Core §10.3) and `move` of it is an ordinary copy (Core §10.2). The
     // frontend's on-the-fly copy propagation folds that `copy` at the
-    // emit site (frontend.md §4.3), so the round-trip compiles to a
+    // emit site (optimizer.md, On-the-fly optimizations), so the round-trip compiles to a
     // direct `unbox` with no `copy` instruction anywhere; the mid-level
     // pass keeps it that way.
     var c = try compileText("app", &.{
@@ -4678,7 +4751,7 @@ test "Pass 8.4 dead-instruction elimination drops unused match payloads" {
 test "Pass 8.9 optimization harness: corpus compile, optimize, and measure" {
     // Compiles each example in the optimizer corpus once without and once
     // with the optimizer, printing instruction / block / text-byte counts
-    // (frontend.md §8.9). The optimizer must never grow the CFG, and the
+    // (optimizer.md, Pass 8.7). The optimizer must never grow the CFG, and the
     // optimized IR must re-parse and re-print identically (ir.md §13).
     const corpus = [_][]const u8{
         "examples/fib.st",
@@ -4764,10 +4837,10 @@ test "frontend dispatches a two-arm list match on an emptiness test" {
     const out = try irText(&c.program.?);
     defer testing.allocator.free(out);
     const body = funcBody(out, "func @app.count_list");
-    // The emptiness test: `builtin#len` of the scrutinee == 0, then a
+    // The emptiness test: `list#len` of the scrutinee == 0, then a
     // conditional dispatch — the `[]` arm must not be reachable
     // unconditionally.
-    try testing.expect(std.mem.indexOf(u8, body, "syscall builtin#len") != null);
+    try testing.expect(std.mem.indexOf(u8, body, "syscall list#len") != null);
     try testing.expect(std.mem.indexOf(u8, body, "br %") != null);
     try testing.expect(std.mem.indexOf(u8, body, " ? ") != null);
 }
@@ -4791,4 +4864,487 @@ test "float fold to inf survives the optimizer round-trip" {
     const text = try cfg.print(&c.program.?, testing.allocator);
     defer testing.allocator.free(text);
     try testing.expect(std.mem.indexOf(u8, text, "inf") != null);
+}
+
+// ---------------------------------------------------------------------------
+// Phase 0 — self-contained IR (TODO.md): concrete TypeDecls, the module
+// member table, and syscall signatures, all queryable from `IrProgram`
+// alone (ir.md §9.1, §7, §8.2).
+// ---------------------------------------------------------------------------
+
+/// The `TypeId` of a named type by (module specifier, written name), or
+/// null.
+fn typeIdOf(program: *const cfg.IrProgram, module: []const u8, name: []const u8) ?u32 {
+    for (program.types, 0..) |d, id| {
+        const dmod: ?[]const u8 = switch (d) {
+            .struct_ => |s| s.module,
+            .union_ => |u| u.module,
+            .opaque_ => |o| o.module,
+            .unknown => null,
+        };
+        if (dmod) |m| {
+            if (std.mem.eql(u8, m, module) and std.mem.eql(u8, d.name(), name)) return @intCast(id);
+        }
+    }
+    return null;
+}
+
+/// The `TypeDecl` of a named type by (module, written name), or null.
+fn typeDeclOf(program: *const cfg.IrProgram, module: []const u8, name: []const u8) ?cfg.TypeDecl {
+    const id = typeIdOf(program, module, name) orelse return null;
+    return program.typeDecl(@intCast(id));
+}
+
+/// The module with a resolved specifier, or null.
+fn moduleByName2(program: *const cfg.IrProgram, spec: []const u8) ?*const cfg.IrModule {
+    for (program.modules) |m| {
+        if (std.mem.eql(u8, m.name, spec)) return m;
+    }
+    return null;
+}
+
+test "frontend type environment carries concrete TypeDecls (fields, variants, ownership, drop hook, opaque host ids)" {
+    // ir.md §9.1: the program's type environment resolves every nominal
+    // type's layout, ownership, and destruction info without the module
+    // graph — struct fields, union variants, drop-hook names, opaque
+    // host ids, and generic ownership via argument substitution.
+    var c = try compileText("app", &.{
+        .{
+            "app",
+            \\const builtin = import("builtin");
+            \\const array = import("array");
+            \\using builtin.Option;
+            \\struct File {
+            \\    fd: int32;
+            \\    path: str;
+            \\    drop(f) {
+            \\        builtin.print(f.path);
+            \\    }
+            \\}
+            \\union Result {
+            \\    Ok(int32),
+            \\    Err(str),
+            \\}
+            \\fn main() -> void {
+            \\    let f = File{ fd: 3, path: "x" };
+            \\    let r = Result::Ok(1);
+            \\    builtin.print(builtin.str(1));
+            \\}
+        },
+    });
+    defer c.deinit();
+    const program = c.program orelse return error.TestUnexpectedResult;
+
+    // Struct: fields in declaration order, unique by the drop hook, with
+    // the hidden hook function name.
+    const file = typeDeclOf(&program, "app", "File") orelse return error.TestUnexpectedResult;
+    try testing.expect(file == .struct_);
+    const sd = file.struct_;
+    try testing.expectEqualStrings("File", sd.name);
+    try testing.expectEqualStrings("app", sd.module);
+    try testing.expect(sd.ownership == .unique); // drop hook implies unique
+    try testing.expectEqualStrings("app.File.drop", sd.drop.?);
+    try testing.expectEqual(@as(usize, 0), sd.type_params.len);
+    try testing.expectEqual(@as(usize, 2), sd.fields.len);
+    try testing.expectEqualStrings("fd", sd.fields[0].name);
+    try testing.expectEqual(@as(cfg.Type, .{ .primitive = .int32 }), sd.fields[0].type_);
+    try testing.expectEqualStrings("path", sd.fields[1].name);
+    try testing.expectEqual(@as(cfg.Type, .{ .primitive = .str }), sd.fields[1].type_);
+
+    // Union: variants in declaration order with payload types; Copy
+    // ownership (all payloads Copy).
+    const result = typeDeclOf(&program, "app", "Result") orelse return error.TestUnexpectedResult;
+    try testing.expect(result == .union_);
+    const ud = result.union_;
+    try testing.expect(ud.ownership == .copy);
+    try testing.expectEqual(@as(usize, 2), ud.variants.len);
+    try testing.expectEqualStrings("Ok", ud.variants[0].name);
+    try testing.expectEqual(@as(usize, 1), ud.variants[0].payloads.len);
+    try testing.expectEqual(@as(cfg.Type, .{ .primitive = .int32 }), ud.variants[0].payloads[0]);
+    try testing.expectEqualStrings("Err", ud.variants[1].name);
+    try testing.expectEqual(@as(cfg.Type, .{ .primitive = .str }), ud.variants[1].payloads[0]);
+
+    // Opaque host type (Core §11.8): unique by declaration, host identity
+    // naming the declaring module and the written type name.
+    const array_ty = typeDeclOf(&program, "array", "Array") orelse return error.TestUnexpectedResult;
+    try testing.expect(array_ty == .opaque_);
+    const od = array_ty.opaque_;
+    try testing.expect(od.ownership == .unique);
+    try testing.expectEqualStrings("array", od.host_id.host_module);
+    try testing.expectEqualStrings("Array", od.host_id.type_name);
+
+    // Generic union: ownership deferred on the declaration, resolved per
+    // instantiation by `IrProgram.namedOwnership` (Option[int32] is Copy,
+    // Option[File] is unique).
+    const option = typeDeclOf(&program, "builtin", "Option") orelse return error.TestUnexpectedResult;
+    try testing.expect(option == .union_);
+    const ou = option.union_;
+    try testing.expect(ou.ownership == null); // generic: deferred
+    try testing.expectEqual(@as(usize, 1), ou.type_params.len);
+    try testing.expectEqualStrings("T", ou.type_params[0]);
+    try testing.expectEqual(@as(usize, 2), ou.variants.len);
+    try testing.expectEqualStrings("Some", ou.variants[0].name);
+    try testing.expectEqual(@as(usize, 1), ou.variants[0].payloads.len);
+    try testing.expectEqualStrings("T", ou.variants[0].payloads[0].param);
+
+    const file_id = typeIdOf(&program, "app", "File") orelse return error.TestUnexpectedResult;
+    const option_id = typeIdOf(&program, "builtin", "Option") orelse return error.TestUnexpectedResult;
+    const arena = c.arena.allocator();
+    var int_args = [_]cfg.Type{.{ .primitive = .int32 }};
+    const int_arg: []cfg.Type = &int_args;
+    try testing.expect(program.namedOwnership(arena, .{ .id = @intCast(option_id), .args = int_arg }) == .copy);
+    var file_args = [_]cfg.Type{.{ .named = .{ .id = @intCast(file_id), .args = &.{} } }};
+    const file_arg: []cfg.Type = &file_args;
+    try testing.expect(program.namedOwnership(arena, .{ .id = @intCast(option_id), .args = file_arg }) == .unique);
+}
+
+test "frontend materializes the module member table with distinct member and slot index spaces" {
+    // ir.md §7, §9.6: every runtime value member gets one row in member
+    // index order (the `load_member` operand space); a constant member's
+    // storage slot is a *separate* index space (`store_member`).
+    var c = try compileText("app", &.{
+        .{
+            "app",
+            \\const builtin = import("builtin");
+            \\const greeting: str = "hello";
+            \\fn add(a: int32, b: int32) -> int32 { a + b }
+            \\fn main() -> void {
+            \\    let s = greeting;
+            \\    let x = add(1, 2);
+            \\    builtin.print(s);
+            \\}
+        },
+    });
+    defer c.deinit();
+    const program = c.program orelse return error.TestUnexpectedResult;
+
+    const app = moduleByName2(&program, "app") orelse return error.TestUnexpectedResult;
+    // Functions first (declaration order), then consts: add, main, the
+    // `builtin` module value, greeting — so the greeting *member* index
+    // (3) differs from its storage *slot* (0).
+    const members = app.members.?;
+    try testing.expectEqual(@as(usize, 4), members.len);
+    try testing.expectEqualStrings("add", members[0].name);
+    try testing.expect(members[0].kind == .function);
+    try testing.expect(members[0].kind.function != null);
+    try testing.expectEqualStrings("app.add", members[0].kind.function.?.name.text);
+    try testing.expect(members[0].type_ == .function);
+    try testing.expectEqualStrings("main", members[1].name);
+    try testing.expect(members[1].kind == .function);
+    try testing.expectEqualStrings("builtin", members[2].name);
+    try testing.expect(members[2].kind == .module_ref);
+    try testing.expectEqualStrings("builtin", members[2].kind.module_ref);
+    try testing.expectEqual(@as(cfg.Type, .module), members[2].type_);
+    try testing.expectEqualStrings("greeting", members[3].name);
+    try testing.expect(members[3].kind == .const_slot);
+    try testing.expectEqual(@as(?u32, 0), members[3].kind.const_slot);
+    try testing.expectEqual(@as(cfg.Type, .{ .primitive = .str }), members[3].type_);
+    // The storage layout holds exactly the constant member, in slot
+    // order — slot 0, distinct from member index 3.
+    try testing.expectEqual(@as(usize, 1), app.slots.len);
+    try testing.expectEqual(@as(u32, 0), app.slots[0].init_order);
+    try testing.expectEqual(@as(cfg.Type, .{ .primitive = .str }), app.slots[0].type_);
+
+    // `load_member` resolves through the module identity of its base
+    // (a `module_ref` value here): main's `greeting` read is member #3.
+    const main = for (program.funcs) |f| {
+        if (std.mem.eql(u8, f.name.text, "app.main")) break f;
+    } else return error.TestUnexpectedResult;
+    var found_load: ?*const cfg.Instr = null;
+    for (main.blocks) |b| for (b.instrs) |instr| {
+        if (instr.op == .load_member and instr.op.load_member.member == 3) found_load = instr;
+    };
+    const load = found_load orelse return error.TestUnexpectedResult;
+    try testing.expectEqual(app, program.moduleOf(load.op.load_member.module).?);
+}
+
+test "validator rejects out-of-range member and slot indices by itself" {
+    // The acceptance: every `load_member` / `store_member` resolves to a
+    // legal member/slot via `IrProgram` alone — a mutated index is
+    // rejected by `cfg.validate` with no checker involvement.
+    var c = try compileText("app", &.{
+        .{
+            "app",
+            \\const builtin = import("builtin");
+            \\const greeting: str = "hello";
+            \\fn main() -> void {
+            \\    let s = greeting;
+            \\    builtin.print(s);
+            \\}
+        },
+    });
+    defer c.deinit();
+    const program = &c.program.?;
+
+    // The module: main (0), builtin (1, module value), greeting (2,
+    // const slot 0).
+    const app = moduleByName2(program, "app") orelse return error.TestUnexpectedResult;
+    const main = for (program.funcs) |f| {
+        if (std.mem.eql(u8, f.name.text, "app.main")) break f;
+    } else return error.TestUnexpectedResult;
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+
+    // Out-of-range member index.
+    var lm: ?*cfg.Instr = null;
+    for (main.blocks) |b| for (b.instrs) |instr| {
+        if (instr.op == .load_member) lm = instr;
+    };
+    const load = lm orelse return error.TestUnexpectedResult;
+    load.op.load_member.member = 99;
+    var m = try lower.validate(program, arena.allocator());
+    try testing.expect(m != null);
+    try testing.expect(std.mem.indexOf(u8, m.?, "out of range") != null);
+    load.op.load_member.member = 2; // restore
+
+    // A member kind/type mismatch: load member #0 (the `main` function)
+    // where the IR expects a `str` constant — the member's type is a
+    // function type, the result is str.
+    load.op.load_member.member = 0;
+    m = try lower.validate(program, arena.allocator());
+    try testing.expect(m != null);
+    try testing.expect(std.mem.indexOf(u8, m.?, "produces") != null);
+    load.op.load_member.member = 2; // restore
+
+    // Out-of-range store slot in @init.
+    const init = app.init.?;
+    var sm: ?*cfg.Instr = null;
+    for (init.blocks) |b| for (b.instrs) |instr| {
+        if (instr.op == .store_member) sm = instr;
+    };
+    const store = sm orelse return error.TestUnexpectedResult;
+    store.op.store_member.slot = 7;
+    m = try lower.validate(program, arena.allocator());
+    try testing.expect(m != null);
+    try testing.expect(std.mem.indexOf(u8, m.?, "out of range") != null);
+    store.op.store_member.slot = 0; // restore
+
+    // A store/load of the right shape validates again.
+    m = try lower.validate(program, arena.allocator());
+    try testing.expect(m == null);
+}
+
+test "store_member into an any-typed constant slot validates" {
+    // The `T -> any` coercion is implicit at the constant boundary (ir.md
+    // §4.4): a concrete initializer is stored into the declared `any`
+    // slot as-is, so the validator's store type check accepts any value
+    // type for an `any`-typed slot (a regression guard — the member
+    // table materialization must not reject it).
+    var c = try compileText("app", &.{
+        .{
+            "app",
+            \\const builtin = import("builtin");
+            \\const x: any = 42;
+            \\fn main() -> void { builtin.print(builtin.str(1)); }
+        },
+    });
+    defer c.deinit();
+    try testing.expect(c.program != null);
+    const program = c.program.?;
+    const app = moduleByName2(&program, "app") orelse return error.TestUnexpectedResult;
+    const x_member = app.members.?[2]; // [main, builtin, x]
+    try testing.expect(x_member.kind == .const_slot);
+    try testing.expectEqual(@as(cfg.Type, .{ .primitive = .any }), x_member.type_);
+    try testing.expectEqual(@as(?u32, 0), x_member.kind.const_slot);
+}
+
+test "module identity resolves through chained module-valued member loads" {
+    // lib's members: math (module value) only; math's members: sqrt.
+    var c = try compileText("app", &.{
+        .{ "math", "fn sqrt(x: int32) -> int32 { x }" },
+        .{
+            "lib",
+            \\const math = import("math");
+        },
+        .{
+            "app",
+            \\const builtin = import("builtin");
+            \\const lib = import("lib");
+            \\fn main() -> void {
+            \\    let s = lib.math.sqrt;
+            \\    let r = s(4);
+            \\    builtin.print(builtin.str(r));
+            \\}
+        },
+    });
+    defer c.deinit();
+    const program = c.program orelse return error.TestUnexpectedResult;
+
+    // lib's members: math (module value) only; math's members: sqrt.
+    const lib = for (program.modules) |m| {
+        if (std.mem.eql(u8, m.name, "lib")) break m;
+    } else return error.TestUnexpectedResult;
+    try testing.expectEqual(@as(usize, 1), lib.members.?.len);
+    try testing.expect(lib.members.?[0].kind == .module_ref);
+    try testing.expectEqualStrings("math", lib.members.?[0].kind.module_ref);
+    const math = for (program.modules) |m| {
+        if (std.mem.eql(u8, m.name, "math")) break m;
+    } else return error.TestUnexpectedResult;
+    try testing.expectEqual(@as(usize, 1), math.members.?.len);
+    try testing.expect(math.members.?[0].kind == .function);
+
+    // The chain `module_ref "lib" -> load_member #0 -> load_member #0`:
+    // both loads resolve their module from the IR alone.
+    const main = for (program.funcs) |f| {
+        if (std.mem.eql(u8, f.name.text, "app.main")) break f;
+    } else return error.TestUnexpectedResult;
+    var loads = std.ArrayList(*const cfg.Instr).empty;
+    defer loads.deinit(testing.allocator);
+    for (main.blocks) |b| for (b.instrs) |instr| {
+        if (instr.op == .load_member) try loads.append(testing.allocator, instr);
+    };
+    try testing.expectEqual(@as(usize, 2), loads.items.len);
+    try testing.expectEqual(lib, program.moduleOf(loads.items[0].op.load_member.module).?);
+    try testing.expectEqual(math, program.moduleOf(loads.items[1].op.load_member.module).?);
+}
+
+test "compiled syscalls carry the specialized signature" {
+    // ir.md §8.2, §9.3: `builtin.str`'s generic type parameter is
+    // specialized from the argument, and the whole signature rides on the
+    // syscall instruction.
+    var c = try compileText("app", &.{
+        .{
+            "app",
+            \\const builtin = import("builtin");
+            \\fn main() -> void {
+            \\    builtin.print(builtin.str(42));
+            \\}
+        },
+    });
+    defer c.deinit();
+    const program = c.program orelse return error.TestUnexpectedResult;
+
+    const main = for (program.funcs) |f| {
+        if (std.mem.eql(u8, f.name.text, "app.main")) break f;
+    } else return error.TestUnexpectedResult;
+    var str_sc: ?cfg.SysCall = null;
+    var print_sc: ?cfg.SysCall = null;
+    for (main.blocks) |b| for (b.instrs) |instr| {
+        if (instr.op != .syscall) continue;
+        const sc = instr.op.syscall;
+        if (sc.target == .builtin and sc.target.builtin == .str) str_sc = sc;
+        if (sc.target == .builtin and sc.target.builtin == .print) print_sc = sc;
+    };
+    const s = str_sc orelse return error.TestUnexpectedResult;
+    const sig = s.sig.?;
+    try testing.expectEqual(@as(usize, 1), sig.params.len);
+    try testing.expect(sig.params[0].mode == .plain);
+    // T specialized to int32 from the literal argument.
+    try testing.expectEqual(@as(cfg.Type, .{ .primitive = .int32 }), sig.params[0].type_);
+    try testing.expectEqual(@as(cfg.Type, .{ .primitive = .str }), sig.ret.*);
+    const p = print_sc orelse return error.TestUnexpectedResult;
+    try testing.expectEqual(@as(cfg.Type, .{ .primitive = .str }), p.sig.?.params[0].type_);
+    try testing.expectEqual(@as(cfg.Type, .{ .primitive = .void }), p.sig.?.ret.*);
+}
+
+test "validator rejects a syscall mode/type/return mismatch from its signature alone" {
+    // The acceptance: a plain/borrow/move mismatch is rejected by
+    // `cfg.validate` independently — no checker annotation involved. The
+    // text form carries no syscall signature, so the test attaches one
+    // and mutates it, exactly as a corrupt producer would.
+    const parse = struct {
+        fn parseAndFindSyscall(text: []const u8) !struct { p: *cfg_parse.Parser, program: cfg.IrProgram, syscall: *cfg.Instr } {
+            const parser = try testing.allocator.create(cfg_parse.Parser);
+            parser.* = cfg_parse.Parser.init(testing.allocator);
+            errdefer {
+                parser.deinit();
+                testing.allocator.destroy(parser);
+            }
+            const program = try parser.parse(text);
+            const f = program.funcs[0];
+            for (f.blocks) |b| for (b.instrs) |instr| {
+                if (instr.op == .syscall) return .{ .p = parser, .program = program, .syscall = instr };
+            };
+            return error.TestUnexpectedResult;
+        }
+    }.parseAndFindSyscall;
+
+    // A move-mode parameter fed a borrowed argument (a borrow-mode
+    // parameter's value): a borrowed value can never be moved (Core
+    // §10.7, ir.md §6.2).
+    {
+        var t = try parse(
+            \\module "app" {
+            \\    func @f(borrow x: File) -> box[File] {
+            \\    entry:
+            \\        %1: box[File] = syscall builtin#box, %0
+            \\        ret %1
+            \\    }
+            \\}
+        );
+        defer {
+            t.p.deinit();
+            testing.allocator.destroy(t.p);
+        }
+        const sc = &t.syscall.op.syscall;
+        const ret_ptr = try testing.allocator.create(cfg.Type);
+        const box_inner = try testing.allocator.create(cfg.Type);
+        ret_ptr.* = .{ .box = box_inner };
+        ret_ptr.*.box.* = .{ .named = .{ .id = 0, .args = &.{} } };
+        const params = try testing.allocator.alloc(cfg.Param, 1);
+        defer testing.allocator.free(params);
+        defer testing.allocator.destroy(box_inner);
+        defer testing.allocator.destroy(ret_ptr);
+        params[0] = .{
+            .span = ast.Span.init(0, 0, 0),
+            .name = .{ .span = ast.Span.init(0, 0, 0), .text = "" },
+            .mode = .move,
+            .type_ = .{ .named = .{ .id = 0, .args = &.{} } },
+        };
+        sc.sig = .{ .params = params, .ret = ret_ptr };
+        var arena = std.heap.ArenaAllocator.init(testing.allocator);
+        defer arena.deinit();
+        const m = try lower.validate(&t.program, arena.allocator());
+        try testing.expect(m != null);
+        try testing.expect(std.mem.indexOf(u8, m.?, "borrowed") != null);
+    }
+
+    // An argument type that does not match the signature's parameter
+    // type, and a return type that does not match the signature's.
+    {
+        var t = try parse(
+            \\module "app" {
+            \\    func @main(xs: list[int32]) -> void {
+            \\    entry:
+            \\        %1: int32 = syscall list#len, %0
+            \\        ret
+            \\    }
+            \\}
+        );
+        defer {
+            t.p.deinit();
+            testing.allocator.destroy(t.p);
+        }
+        const sc = &t.syscall.op.syscall;
+        const ret_ptr = try testing.allocator.create(cfg.Type);
+        ret_ptr.* = .{ .primitive = .int32 };
+        const params = try testing.allocator.alloc(cfg.Param, 1);
+        defer testing.allocator.free(params);
+        defer testing.allocator.destroy(ret_ptr);
+        const xs_type = t.syscall.op.syscall.args[0].type_;
+        params[0] = .{
+            .span = ast.Span.init(0, 0, 0),
+            .name = .{ .span = ast.Span.init(0, 0, 0), .text = "" },
+            .mode = .borrow,
+            .type_ = xs_type,
+        };
+        sc.sig = .{ .params = params, .ret = ret_ptr };
+        var arena = std.heap.ArenaAllocator.init(testing.allocator);
+        defer arena.deinit();
+        // Valid as attached: argument and return types match.
+        try testing.expect((try lower.validate(&t.program, arena.allocator())) == null);
+
+        // Parameter type mismatch.
+        sc.sig.?.params[0].type_ = .{ .primitive = .str };
+        const m1 = try lower.validate(&t.program, arena.allocator());
+        try testing.expect(m1 != null);
+        try testing.expect(std.mem.indexOf(u8, m1.?, "does not match parameter type") != null);
+
+        // Return type mismatch.
+        sc.sig.?.params[0].type_ = xs_type; // restore
+        sc.sig.?.ret.* = .{ .primitive = .str };
+        const m2 = try lower.validate(&t.program, arena.allocator());
+        try testing.expect(m2 != null);
+        try testing.expect(std.mem.indexOf(u8, m2.?, "does not match return type") != null);
+    }
 }

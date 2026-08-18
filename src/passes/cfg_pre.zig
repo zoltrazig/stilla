@@ -1,4 +1,4 @@
-//! Pass: partial redundancy elimination (frontend.md §8.3). In: a lowered
+//! Pass: partial redundancy elimination (optimizer.md, Pass 8.1). In: a lowered
 //! `cfg.IrProgram` (after constant folding and common subexpression
 //! elimination). Out: the same program, with a computation that is
 //! available on some — but not all — incoming edges of a join rewritten to

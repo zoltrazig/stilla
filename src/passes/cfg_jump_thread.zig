@@ -1,4 +1,4 @@
-//! Pass: jump threading (frontend.md §8.8). In: a lowered `cfg.IrProgram`
+//! Pass: jump threading (optimizer.md, Pass 8.6). In: a lowered `cfg.IrProgram`
 //! (after dead-block elimination and drop elision). Out: the same program,
 //! with empty forwarding blocks removed.
 //!
@@ -22,7 +22,7 @@
 //! target is skipped, so threading never creates a duplicate predecessor
 //! edge (which the printer's phi ordering cannot distinguish).
 //!
-//! The pass is single-pass (no fixpoint — frontend.md §6): a chain
+//! The pass is single-pass (no fixpoint — optimizer.md): a chain
 //! collapsed in one pass may leave one forwarding block behind, which a
 //! later optimization invocation removes. Allocations use the program's
 //! backing allocator (the arena); the pass frees nothing.

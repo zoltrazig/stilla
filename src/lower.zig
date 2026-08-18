@@ -1,4 +1,4 @@
-//! Annotated AST → CFG IR lowering — frontend Phase 3 (frontend.md §5,
+//! Annotated AST → CFG IR lowering — frontend Phase 3 (phase3-cfg-lowering.md,
 //! ir.md §12).
 //!
 //! Phase 3 consumes the phase-1 module graph (with its module-level
@@ -6,12 +6,12 @@
 //! `@init` function plus one `IrFunc` per Stilla function, all host
 //! binding calls lowered to `syscall` instructions, ownership operations
 //! explicit (`move`/`copy`/`drop`), and destruction materialized in the
-//! CFG (frontend §5.4, ir.md §6.4).
+//! CFG (phase3-cfg-lowering.md, Destruction placement; ir.md §6.4).
 //!
 //! This module is the phase-3 driver: the `Lowerer` context plus the
 //! per-pass logic in `src/passes/` (the `cfg_lower_*` passes, one file
 //! per pass: program, module, func, expr, control, call, pattern, path,
-//! emit, validate — see frontend.md §5.7). The passes import each other
+//! emit, validate — see frontend.md §4). The passes import each other
 //! directly and share the `Lowerer` context, the `Local`/`Scope`/
 //! `FuncState` types, and the optimizer entry points below.
 //!
@@ -112,7 +112,7 @@ pub const Lowerer = struct {
     resolve: moduleinfo.Resolve,
     /// The phase-2 annotation: per-module side tables (types, ownership,
     /// generic `FuncInstance`s) the lowering reads for concrete signatures
-    /// and instantiated types (frontend §4.7, §5.7).
+    /// and instantiated types (phase2-checker.md, Data structures; frontend.md §2).
     ann: ?*checker.Annotation = null,
     /// Which module a module-typed SSA value refers to (`module_ref`
     /// values and module-valued member loads).
@@ -145,7 +145,7 @@ pub const Lowerer = struct {
 
     // No deinit: `module_of` is arena-owned.
 
-    /// The checker's annotated type of an expression (frontend §4.3): the
+    /// The checker's annotated type of an expression (phase2-checker.md, Expression inference): the
     /// instantiated type of a construction, the resolved type of a use
     /// site. Null when the annotation is unavailable (or the expression
     /// was not annotated — e.g. inside an unspecialized generic template).
@@ -170,7 +170,7 @@ pub const Lowerer = struct {
 };
 
 // -----------------------------------------------------------------
-// Entry points (frontend.md §5.7, §8)
+// Entry points (frontend.md §2, optimizer.md)
 // -----------------------------------------------------------------
 
 pub const lowerProgram = cfg_lower_program.lowerProgram;

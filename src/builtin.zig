@@ -22,12 +22,6 @@ pub const VTable = struct {
     /// Outputs a line of text to the host's standard output.
     print: *const fn (userdata: *const anyopaque, message: []const u8) void = defaultPrint,
 
-    /// `builtin.len[T]: fn(borrow list[T]) -> int32` — Runtime §4.3.
-    ///
-    /// The list is borrowed and never consumed. The `count` / `elem_size`
-    /// pair describes the borrowed list storage.
-    len: *const fn (userdata: *const anyopaque, count: usize, elem_size: usize) i64 = defaultLen,
-
     /// `builtin.panic: fn(str) -> never` — Runtime §4.9.
     ///
     /// Terminates the current execution context immediately; no unwinding
@@ -35,17 +29,17 @@ pub const VTable = struct {
     /// interpreter propagate control back to the host.
     panic: *const fn (userdata: *const anyopaque, message: []const u8) panic.Termination = defaultPanic,
 
-    // TODO(runtime): the remaining §4 interface — list construction and
-    // access, box `peek` / `unbox` (Runtime §4.8), and the trap-raising
-    // conversion primitives (Runtime §7.2).
+    // TODO(runtime): the remaining §4 interface — conversion `str`,
+    // box `peek` / `unbox` (Runtime §4.8), `assert`, `hash`, and the
+    // trap-raising conversion primitives (Runtime §7.2).
+    // List length and integer range moved out of `builtin` into the
+    // standard-library `list` module (`list.len` Runtime §4.3,
+    // `list.range` Runtime §4.4): they dispatch as the `list#len` /
+    // `list#range` host-module system calls, not through this vtable.
 };
 
 fn defaultPrint(_: *const anyopaque, message: []const u8) void {
     std.debug.print("{s}\n", .{message});
-}
-
-fn defaultLen(_: *const anyopaque, count: usize, _: usize) i64 {
-    return @intCast(count);
 }
 
 fn defaultPanic(_: *const anyopaque, message: []const u8) panic.Termination {
@@ -79,8 +73,6 @@ test "builtin.VTable routes calls through userdata" {
 test "builtin.VTable supplies default implementations" {
     const vt: VTable = .{};
     var userdata: u8 = 0;
-
-    try std.testing.expect(vt.len(&userdata, 3, 8) == 3);
 
     const t = vt.panic(&userdata, "boom");
     try std.testing.expect(t == .panic);

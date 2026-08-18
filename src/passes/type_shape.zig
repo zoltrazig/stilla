@@ -1,4 +1,4 @@
-//! Pass: type shape queries — frontend.md §4.2.
+//! Pass: type shape queries — phase2-checker.md, Type resolution.
 //! In: `Resolve` view + `from` module + written type name or IR-native
 //! `cfg.Type`. Out: the struct/union declaration behind a name, the index
 //! of a field or variant, and the structural ownership of a type.

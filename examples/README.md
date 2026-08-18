@@ -15,7 +15,7 @@ zig build run -- examples/<name>.st
 | [`ownership.st`](ownership.st) | unique values, a user `drop` hook, borrow/move/drop |
 | [`strings.st`](strings.st) | the `string` module: code-point lengths, concat/repeat, substring predicates, split/join, case conversion, trim; `builtin.assert` |
 | [`floats.st`](floats.st) | the `math` module: float32 constants, IEEE 754 functions, rounding, min/max/abs, trigonometry, explicit `as` conversions (Core §16.3) |
-| [`fold.st`](fold.st) | lists and the `iter` module: `builtin.range`, indexing, `fold` with int and tuple accumulators, `each` with a lambda, recursive `[head, ..tail]` patterns |
+| [`fold.st`](fold.st) | lists and the `iter` module: `list.range`, indexing, `fold` with int and tuple accumulators, `each` with a lambda, recursive `[head, ..tail]` patterns |
 | [`box.st`](box.st) | ownership extraction with `builtin.box`/`peek`/`unbox`, explicit `move` at the unbox site |
 | [`arrays.st`](arrays.st) | the `array` module: opaque `Array[T]` creation, borrowed `len`/`get`, move-consuming `set`, `clone`, index recursion as iteration |
 | [`maps.st`](maps.st) | unique opaque `hashmap` container: move-consuming `insert`/`remove`, borrowed `get`/`contains`/`len`, `clone`, explicit generic specialization `::[K, V]`, tuple destructuring from `remove`, `Option` matching |

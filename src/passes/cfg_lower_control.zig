@@ -1,5 +1,5 @@
 //! Pass: control-flow lowering — `if-expression`, `match-expression`,
-//! and short-circuit `and`/`or` (Core §10, §11, §13; ir.md §10.3–§10.4).
+//! and short-circuit `and`/`or` (Core §10, §11, §13; ir.md §14.2–§14.3).
 //! In: Lowerer + FuncState + AST control-flow nodes, module graph. Out:
 //! CFG blocks, `br`/`switch`/`branch` terminators, and join phis.
 
@@ -30,7 +30,7 @@ pub const JoinIn = struct {
 };
 
 /// `a and b`: the right operand is evaluated only when `a` is true —
-/// a `br` diamond with a join phi (ir.md §10.3, Runtime §5).
+/// a `br` diamond with a join phi (ir.md §14.2, Runtime §5).
 pub fn lowerAnd(self: *Lowerer, fs: *FuncState, b: *const ast.Binary) LowerError!?*cfg.Value {
     const lhs = (try cfg_lower_expr.lowerExpr(self, fs, b.lhs)) orelse return null;
     const track = try cfg_lower_emit.beginCond(self, fs, b.span);
@@ -297,7 +297,7 @@ pub fn lowerMatch(self: *Lowerer, fs: *FuncState, e: *const ast.MatchExpr) Lower
 }
 
 /// A union match: `read_tag` + `switch` over the variant
-/// discriminants; per-arm payload binds; join phi (ir.md §10.4).
+/// discriminants; per-arm payload binds; join phi (ir.md §14.3).
 pub fn lowerUnionMatch(
     self: *Lowerer,
     fs: *FuncState,
@@ -438,7 +438,23 @@ fn emitArmTest(self: *Lowerer, fs: *FuncState, scrut: *cfg.Value, arm: *const as
                 const n_const = (try cfg_lower_expr.emitConst(self, fs, span, .{ .int = target }, .{ .primitive = .int32 })).?;
                 const len_args = try self.arena.alloc(*cfg.Value, 1);
                 len_args[0] = scrut;
-                const len = (try cfg_lower_emit.emit(self, fs, span, .{ .syscall = .{ .span = span, .target = .{ .builtin = .len }, .args = len_args, .ret = .{ .primitive = .int32 } } }, .{ .primitive = .int32 })).?;
+                // The length query is the `list.len` host binding
+                // (Runtime §4.3) — the same `list#len` syscall a source
+                // `list.len(xs)` call lowers to, so list-pattern matches
+                // and explicit length queries dispatch identically. The
+                // syscall carries the specialized signature
+                // `fn len[T](borrow xs: list[T]) -> int32` (ir.md §8.2).
+                const elem_type = switch (scrut.type_) {
+                    .list => |inner| inner.*,
+                    else => return self.fail(span, "list pattern requires a list value", .{}),
+                };
+                const elem_ptr = try self.arena.create(cfg.Type);
+                elem_ptr.* = elem_type;
+                const len_params = try self.arena.alloc(cfg.Param, 1);
+                len_params[0] = cfg.syntheticParam(span, .borrow, .{ .list = elem_ptr });
+                const len_ret = try self.arena.create(cfg.Type);
+                len_ret.* = .{ .primitive = .int32 };
+                const len = (try cfg_lower_emit.emit(self, fs, span, .{ .syscall = .{ .span = span, .target = .{ .host_module = .{ .module = "list", .member = "len" } }, .args = len_args, .sig = .{ .params = len_params, .ret = len_ret } } }, .{ .primitive = .int32 })).?;
                 if (lp.rest != null) {
                     return try cfg_lower_emit.emit(self, fs, span, .{ .ge = .{ .a = len, .b = n_const } }, .{ .primitive = .bool });
                 }
@@ -561,7 +577,7 @@ pub fn bindUnionPattern(self: *Lowerer, fs: *FuncState, pattern: *const ast.Patt
 
 /// A non-union match: literal arms become `eq` tests and type-test
 /// arms become `type_is` tests; the first arm that is neither (or the
-/// last arm) is the fallthrough (ir.md §10.4: `_`, literal, tuple,
+/// last arm) is the fallthrough (ir.md §14.3: `_`, literal, tuple,
 /// struct, and list patterns lower to the same primitives; Core
 /// §11.6.2 type-test patterns test the runtime tag of an `any`).
 pub fn lowerPatternMatch(self: *Lowerer, fs: *FuncState, e: *const ast.MatchExpr, scrut: *cfg.Value, moving: bool) LowerError!?*cfg.Value {

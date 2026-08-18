@@ -9,6 +9,7 @@ const cfg = @import("../cfg.zig");
 const moduleinfo = @import("../moduleinfo.zig");
 const lower = @import("../lower.zig");
 const cfg_lower_func = @import("cfg_lower_func.zig");
+const cfg_lower_program = @import("cfg_lower_program.zig");
 const cfg_lower_validate = @import("cfg_lower_validate.zig");
 const cfg_lower_path = @import("cfg_lower_path.zig");
 const cfg_lower_expr = @import("cfg_lower_expr.zig");
@@ -26,7 +27,7 @@ pub fn lowerModule(self: *Lowerer, info: *moduleinfo.ModuleInfo) LowerError!*cfg
     // Every source / standard-library module has an @init, even when
     // empty — except `builtin`, whose members are all host bindings
     // with nothing to evaluate (ir.md §11: init is null for host
-    // modules and builtin; frontend §5.5).
+    // modules and builtin; phase3-cfg-lowering.md, Module init functions).
     if (info.kind != .host and !std.mem.eql(u8, info.specifier, "builtin")) {
         init_func = try lowerInit(self, info);
         try funcs.append(self.arena, init_func.?);
@@ -42,7 +43,7 @@ pub fn lowerModule(self: *Lowerer, info: *moduleinfo.ModuleInfo) LowerError!*cfg
         else => {},
     };
     // The used specializations of generic functions declared by this
-    // module (frontend §4.4): each is a monomorphic function named
+    // module (phase2-checker.md, Generic expansion): each is a monomorphic function named
     // `{module}.{fn}.{id}` (ir.md §11). Host bindings have no body
     // (`mono == null`) and are never lowered here.
     if (self.ann) |a| {
@@ -84,14 +85,55 @@ pub fn lowerModule(self: *Lowerer, info: *moduleinfo.ModuleInfo) LowerError!*cfg
             try slots.append(self.arena, .{ .type_ = vm.*.type_, .init_order = slot });
         }
     }
+    // The member table (ir.md §7, §9.6): every runtime value member in
+    // declaration order — exactly one row per member index, the
+    // `load_member` operand space (`ValueMember.slot`). Function,
+    // module-valued, and host-binding members are static references and
+    // occupy no storage; a constant member's storage slot is a *distinct
+    // index space* from its member index (ir.md §7).
+    var members = std.ArrayListUnmanaged(cfg.ModuleMember).empty;
+    for (info.values) |*vm| {
+        const kind: cfg.MemberKind = switch (vm.decl) {
+            .func => |f| blk: {
+                if (vm.host) break :blk .host_binding;
+                // A non-generic Stilla function member lowers to one
+                // `IrFunc` named `{spec}.{fn}`; a generic template is
+                // never lowered (each used specialization is a separate
+                // `IrFunc`, ir.md §11), so its row carries a null
+                // function reference.
+                if (f.type_params.len != 0) break :blk .{ .function = null };
+                const qname = try cfg_lower_program.qualifiedName(self, info.specifier, vm.name.text);
+                break :blk .{ .function = findFunc(funcs.items, qname) };
+            },
+            .const_ => |c| blk: {
+                _ = c;
+                // Module-valued members resolve statically (their
+                // specifier); void-typed constants occupy no storage
+                // (`constSlot` null).
+                if (vm.module_spec) |spec| break :blk .{ .module_ref = spec };
+                break :blk .{ .const_slot = constSlot(info, vm) };
+            },
+        };
+        try members.append(self.arena, .{ .name = vm.name.text, .type_ = vm.type_, .kind = kind });
+    }
     m.* = .{
         .span = ast.Span.init(0, 0, 0),
         .name = info.specifier,
         .init = init_func,
         .funcs = try self.arena.dupe(*cfg.IrFunc, funcs.items),
+        .members = try self.arena.dupe(cfg.ModuleMember, members.items),
         .slots = try self.arena.dupe(cfg.SlotMeta, slots.items),
     };
     return m;
+}
+
+/// The lowered `IrFunc` of a qualified function name, or null when the
+/// name is not among the module's lowered functions (a generic template).
+fn findFunc(funcs: []*cfg.IrFunc, name: []const u8) ?*cfg.IrFunc {
+    for (funcs) |f| {
+        if (std.mem.eql(u8, f.name.text, name)) return f;
+    }
+    return null;
 }
 
 /// The storage slot of a constant member: its position among the
@@ -140,7 +182,7 @@ pub fn lowerInit(self: *Lowerer, info: *moduleinfo.ModuleInfo) LowerError!*cfg.I
                     // A void-typed constant has no observable value and
                     // its value is a phantom (no defining instruction);
                     // storing it would leave a dangling operand, so
-                    // nothing is stored for it (frontend.md §4.1, §5.3).
+                    // nothing is stored for it (phase3-cfg-lowering.md, Lowering rules).
                     if (cfg_lower_emit.isVoid(v.type_)) continue;
                     const slot = constSlot(info, vm) orelse continue;
                     _ = try cfg_lower_emit.emit(self, &fs, c.span, .{ .store_member = .{ .slot = slot, .value = v } }, null);

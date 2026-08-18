@@ -184,11 +184,13 @@ Stilla 的函数和 lambda **不能捕获外围局部绑定**（Core §6.2）。
 2. **上下文线程化（context threading）**——`iter` 模块的 `*_with` 组合子额外接受一个被借用的上下文，每次调用都传给操作函数：
 
 ```stilla
-let sum = iter.fold[int32, int32](builtin.range(1, 10), 0,
+const lists = import("list");
+
+let sum = iter.fold[int32, int32](lists.range(1, 10), 0,
     fn(move acc: int32, borrow x: int32) -> int32 { acc + x });
 ```
 
-（`builtin.range` 是闭区间。）
+（`lists.range` 是闭区间。`list` 是类型关键字，不能作为模块绑定名，所以这里用 `lists` 绑定 `list` 模块——StdLib §8。）
 
 `iter` 提供 `each` / `fold` / `try_fold`（短路折叠）及其 `*_with` 和 `consume_*` 变体（StdLib §7）。`try_fold` 用 `Result[S, R]` 表达提前停止——这也顺带给出了标准库的 `Result` 类型。
 
@@ -249,7 +251,7 @@ let m = hm.insert(move m, 2, "two");
 
 ### 4.12 标准库
 
-`builtin`（print、str、len、range、box/peek/unbox、panic、assert、hash）、`math`（IEEE 754 float32 函数）、`string`（按 Unicode 码点操作，永不暴露字节偏移）、`iter`（列表组合子）、`array`、`hashmap`。全部是**普通可导入的模块**——没有隐式注入的 `print()`，`str` 的字符串拼接只允许 `str + str`，没有隐式数值转换（Core §16）。语言核心刻意保持很小：只有 `list[T]` 是抽象内建类型，`array`/`hashmap` 是库类型，想替换它们不需要改语言。
+`builtin`（print、str、box/peek/unbox、panic、assert、hash）、`list`（len、range、get）、`math`（IEEE 754 float32 函数）、`string`（按 Unicode 码点操作，永不暴露字节偏移）、`iter`（列表组合子）、`array`、`hashmap`。全部是**普通可导入的模块**——没有隐式注入的 `print()`，`str` 的字符串拼接只允许 `str + str`，没有隐式数值转换（Core §16）。语言核心刻意保持很小：只有 `list[T]` 是抽象内建类型，`array`/`hashmap` 是库类型，想替换它们不需要改语言。
 
 ## 5. 设计取舍总览
 

@@ -1,4 +1,4 @@
-//! Pass: phase-2 driver — module annotation and checks (frontend.md §4).
+//! Pass: phase-2 driver — module annotation and checks (phase2-checker.md).
 //! In: phase-1 `ModuleGraph` (`moduleinfo`).
 //! Out: `checker.Annotation` — per-module side tables of resolved types,
 //! expression types, binding states, and concrete call signatures — and,
@@ -6,8 +6,8 @@
 //!
 //! Phase 2 is split into two passes over this driver's context:
 //! `checker_annotate` (block-level name resolution, expression/pattern
-//! inference, binding-state tracking — frontend §4.1, §4.3, §4.5) and
-//! `checker_validate` (the consumer checks — §4.6: type mismatch, match
+//! inference, binding-state tracking — phase2-checker.md, Cross-module name resolution / Expression inference / Ownership analysis) and
+//! `checker_validate` (the consumer checks — Checks enabled by annotation: type mismatch, match
 //! exhaustiveness, refutable patterns). This file is the data home: the
 //! `Annotation` side tables, the `Checker` context, and the ordering
 //! contract (annotate every module, then validate every module, in phase-1
@@ -23,7 +23,7 @@ const validate = @import("checker_validate.zig");
 
 pub const CheckError = error{ OutOfMemory, Diagnostic };
 
-/// The static ownership state of one binding (frontend §4.5): `borrowed`
+/// The static ownership state of one binding (phase2-checker.md, Ownership analysis): `borrowed`
 /// (a `borrow` parameter or a non-consuming `match`/`for` binding),
 /// `consumed` (ownership transferred by `move`, or destroyed by `drop`),
 /// `released` (definitely released on every path through a conditional
@@ -33,11 +33,11 @@ pub const CheckError = error{ OutOfMemory, Diagnostic };
 /// destruction, Core §10.10).
 pub const BindingState = enum { owned, borrowed, consumed, released, maybe };
 
-/// One used specialization of a generic function (frontend §4.4, Core §12):
+/// One used specialization of a generic function (phase2-checker.md, Generic expansion; Core §12):
 /// the concrete type arguments, the monomorphic signature, and — for
 /// Stilla-defined generics — the monomorphized body clone, checked under
 /// the concrete substitution. Host bindings have no body (`mono = null`):
-/// there is nothing to expand (frontend §5.6). Instances are deduplicated
+/// there is nothing to expand (phase3-cfg-lowering.md, System calls for host bindings). Instances are deduplicated
 /// per (declaration, type arguments).
 pub const FuncInstance = struct {
     decl: *const ast.FuncDef,
@@ -53,27 +53,27 @@ pub const FuncInstance = struct {
     id: u32,
 };
 
-/// Phase-2 side tables for one module (frontend §4.7 `ModuleAnnotation`).
+/// Phase-2 side tables for one module (phase2-checker.md, Data structures).
 pub const ModuleAnnotation = struct {
     module: *moduleinfo.ModuleInfo,
-    /// Written `ast.Type` → resolved `cfg.Type` (frontend §4.2).
+    /// Written `ast.Type` → resolved `cfg.Type` (phase2-checker.md, Type resolution).
     type_of: std.AutoHashMapUnmanaged(*const ast.Type, cfg.Type) = .empty,
-    /// `ast.Expr` → produced `cfg.Type` (frontend §4.3).
+    /// `ast.Expr` → produced `cfg.Type` (phase2-checker.md, Expression inference).
     expr_of: std.AutoHashMapUnmanaged(*const ast.Expr, cfg.Type) = .empty,
     /// Binding id → resolved type.
     binding_of: std.AutoHashMapUnmanaged(u32, cfg.Type) = .empty,
-    /// Binding id → static ownership state (frontend §4.5).
+    /// Binding id → static ownership state (phase2-checker.md, Ownership analysis).
     bindings: std.AutoHashMapUnmanaged(u32, BindingState) = .empty,
     /// Call → the callee's concrete signature, when the callee resolves
     /// statically to a non-generic function. The validate pass checks
-    /// argument count and types against it (§4.6 type mismatch).
+    /// argument count and types against it (Checks enabled by annotation: type mismatch).
     call_sig: std.AutoHashMapUnmanaged(*const ast.Call, cfg.Type) = .empty,
-    /// Call → the generic specialization it triggers (frontend §4.4): the
+    /// Call → the generic specialization it triggers (phase2-checker.md, Generic expansion): the
     /// `FuncInstance` whose signature and (checked) monomorphized body the
     /// call uses. Present for calls to generic functions only.
     call_of: std.AutoHashMapUnmanaged(*const ast.Call, *FuncInstance) = .empty,
     /// Value-position `::[...]` specialization → its `FuncInstance`
-    /// (frontend §4.4): `identity::[int32]` is a first-class monomorphic
+    /// (phase2-checker.md, Generic expansion): `identity::[int32]` is a first-class monomorphic
     /// function value (Core §12.4).
     spec_of: std.AutoHashMapUnmanaged(*const ast.Specialize, *FuncInstance) = .empty,
     /// Module-member name → its declared identifier (name annotation).
@@ -82,15 +82,15 @@ pub const ModuleAnnotation = struct {
 };
 
 /// The result of phase 2: arena-owned side tables plus the set of host
-/// bindings (frontend §4.7, §5.6).
+/// bindings (phase2-checker.md, Data structures; phase3-cfg-lowering.md, System calls for host bindings).
 pub const Annotation = struct {
     arena: std.heap.ArenaAllocator,
     /// Function members that are declarations without a Stilla definition
-    /// (frontend §5.6): `builtin` members and host-provided module members.
+    /// (phase3-cfg-lowering.md, System calls for host bindings): `builtin` members and host-provided module members.
     /// Calls to these lower to system calls, never to in-IR calls.
     host_bindings: std.AutoHashMapUnmanaged(*const ast.FuncDef, void) = .empty,
     /// The used specializations of generic functions, deduplicated per
-    /// (declaration, type arguments) (frontend §4.4). Built after the
+    /// (declaration, type arguments) (phase2-checker.md, Generic expansion). Built after the
     /// per-module passes so every module's instances share one arena.
     instances: std.ArrayListUnmanaged(*FuncInstance) = .empty,
     /// One `ModuleAnnotation` per module, keyed by resolved specifier.
@@ -102,13 +102,13 @@ pub const Annotation = struct {
 };
 
 /// One block-level binding with its inferred type and static ownership
-/// state (frontend §4.5).
+/// state (phase2-checker.md, Ownership analysis).
 pub const Local = struct {
     name: []const u8,
     type_: cfg.Type,
     id: u32,
     state: BindingState = .owned,
-    /// A non-owning view (frontend §4.5): a `borrow` parameter or an unique
+    /// A non-owning view (phase2-checker.md, Ownership analysis): a `borrow` parameter or an unique
     /// binding produced by a non-consuming `match`/`for` (Core §13.4,
     /// §13.5). Borrowed unique values cannot be moved, dropped, returned as
     /// owned, or stored into an owning location (Core §10.7, §18).
@@ -161,7 +161,7 @@ pub fn isUnique(frame: *Frame, t: cfg.Type) bool {
 }
 
 /// Record a binding's static ownership state in both the `Local` and the
-/// per-module `bindings` side table (frontend §4.5, §4.7), so the
+/// per-module `bindings` side table (phase2-checker.md, Ownership analysis; Data structures), so the
 /// annotation always reflects the current state (owned/borrowed/consumed/
 /// released).
 pub fn setState(frame: *Frame, local: *Local, state: BindingState) CheckError!void {
@@ -169,8 +169,8 @@ pub fn setState(frame: *Frame, local: *Local, state: BindingState) CheckError!vo
     try frame.ma.bindings.put(frame.ck.alloc(), local.id, state);
 }
 
-/// The phase-2 checker: annotate the program (§4.1–§4.5), then run the
-/// consumer checks (§4.6). First error wins, matching the lexer/parser
+/// The phase-2 checker: annotate the program (phase2-checker.md), then run the
+/// consumer checks (Checks enabled by annotation). First error wins, matching the lexer/parser
 /// convention.
 pub const Checker = struct {
     allocator: std.mem.Allocator,
@@ -208,7 +208,7 @@ pub const Checker = struct {
     }
 
     /// Resolve a written `ast.Type` to a `cfg.Type`, cached per node
-    /// (frontend §4.2). Unresolvable types fall back to `any`, matching
+    /// (phase2-checker.md, Type resolution). Unresolvable types fall back to `any`, matching
     /// `funcSignature`'s convention; the lowerer reports resolution errors.
     pub fn resolveTypeOf(self: *Checker, ma: *ModuleAnnotation, info: *moduleinfo.ModuleInfo, t: *const ast.Type) CheckError!cfg.Type {
         if (ma.type_of.get(t)) |rt| return rt;
@@ -225,7 +225,7 @@ pub const Checker = struct {
         self.graph = graph;
         self.annotation = .{ .arena = std.heap.ArenaAllocator.init(self.allocator) };
 
-        // Host bindings: declarations without a Stilla definition (§5.6),
+        // Host bindings: declarations without a Stilla definition (phase3-cfg-lowering.md, System calls for host bindings),
         // gathered before annotation so the set is complete even when a
         // later module fails.
         for (graph.modules) |info| {

@@ -4,7 +4,7 @@
 //!
 //! Runs in topological order so cross-module lookups resolve; idempotent
 //! (guarded by the builder's `materialized` set). The five steps (frontend
-//! §3.3): 1. using aliases; 2. type members; 3. function members; 4. const
+//! phase1-module-graph.md, Module-level information): 1. using aliases; 2. type members; 3. function members; 4. const
 //! members (module values first); 5. import edges.
 
 const std = @import("std");

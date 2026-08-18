@@ -24,7 +24,7 @@ Resolution maps a written specifier to one of (Runtime §2.6):
    implementation's standard-library bundle;
 3. a host-provided module — no source is loaded; its interface is taken
    from the host interface registry as *declarations without definitions*
-   (see [Phase 3 §5.6](phase3-cfg-lowering.md#system-calls-for-host-bindings)).
+   (see [Phase 3 — System calls for host bindings](phase3-cfg-lowering.md#system-calls-for-host-bindings)).
 
 Resolution must be unambiguous before execution; ambiguity and unresolved
 specifiers are phase-1 diagnostics.
@@ -80,7 +80,7 @@ statically knowable **without analyzing function bodies**:
 - **host bindings** — members that have a *declaration and no Stilla
   definition*: `builtin` members (Runtime §4) and host-provided module
   members (Core §2.6, Runtime §3.1). These are flagged so phase 3 can
-  lower calls to them as system calls ([Phase 3 §5.6](phase3-cfg-lowering.md#system-calls-for-host-bindings)).
+  lower calls to them as system calls ([Phase 3 — System calls for host bindings](phase3-cfg-lowering.md#system-calls-for-host-bindings)).
 
 ### Module-level checks
 
@@ -150,7 +150,7 @@ a imports b imports c imports a" at the importing expression's span.
 > handled elsewhere: module-constant *initialization order* within a module
 > — an initializer may not transitively read a module constant declared
 > later, while function references are order-independent
-> (Core §5, §6.5 — checked in phase 2, see [Phase 2 §4.6](phase2-checker.md#checks-enabled-by-annotation))
+> (Core §5, §6.5 — checked in phase 2, see [Phase 2 — Checks enabled by annotation](phase2-checker.md#checks-enabled-by-annotation))
 > — and recursive *types*, which are legal only through indirection
 > (Core §18 — handled by type resolution).
 
@@ -170,8 +170,9 @@ pub const ModuleInfo = struct {
     program: ?*const ast.Program,
 
     /// The compiler-generated nominal struct type (Core §2.1): its
-    /// members are the module's runtime value members. Resolved to the
-    /// IR-native `cfg.Type` (there is no `typeinfo` module; see §4.7).
+    /// members are the module's runtime value members. There is no
+    /// `typeinfo` module — resolved types are the IR-native `cfg.Type`
+    /// (see [Phase 2 — Data structures](phase2-checker.md#data-structures)).
     struct_type: *cfg.Type,
 
     /// Dependency edges in declaration order (Runtime §2.3).
@@ -188,7 +189,7 @@ pub const ModuleInfo = struct {
 
     /// Members that are declarations without definitions — `builtin`
     /// members and host-module members. Phase 3 lowers calls to these as
-    /// system calls (§5.6).
+    /// system calls (phase 3 — System calls for host bindings).
     host_bindings: []HostBinding,
 };
 
@@ -243,4 +244,4 @@ Phase 1 output is consumed by:
   tables, host bindings, and the generated struct type;
 - **The runtime** — instantiates modules in topological order, each at
   most once (Runtime §2.1, §2.3), using the init order recorded by
-  phase 3 ([§5.5](phase3-cfg-lowering.md#module-init-functions)).
+  phase 3 ([Module init functions](phase3-cfg-lowering.md#module-init-functions)).

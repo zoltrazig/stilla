@@ -21,6 +21,7 @@ const parseText = cfg_parse.parseText;
 // IR structures (cfg.zig), brought into scope under the bare names the
 // printer uses.
 const Type = cfg.Type;
+const TypeDecl = cfg.TypeDecl;
 const Param = cfg.Param;
 const ValueState = cfg.ValueState;
 const ConstValue = cfg.ConstValue;
@@ -72,7 +73,7 @@ fn w(out: *std.ArrayList(u8), allocator: std.mem.Allocator, comptime fmt: []cons
     try out.print(allocator, fmt, args);
 }
 
-fn printFunc(out: *std.ArrayList(u8), allocator: std.mem.Allocator, types: []const []const u8, f: *const IrFunc) !void {
+fn printFunc(out: *std.ArrayList(u8), allocator: std.mem.Allocator, types: []const TypeDecl, f: *const IrFunc) !void {
     try w(out, allocator, "    func @{s}(", .{f.name.text});
     for (f.params, 0..) |p, i| {
         if (i > 0) try w(out, allocator, ", ", .{});
@@ -114,12 +115,12 @@ fn printFunc(out: *std.ArrayList(u8), allocator: std.mem.Allocator, types: []con
     try w(out, allocator, "    }}\n", .{});
 }
 
-fn printType(out: *std.ArrayList(u8), allocator: std.mem.Allocator, types: []const []const u8, t: Type) !void {
+fn printType(out: *std.ArrayList(u8), allocator: std.mem.Allocator, types: []const TypeDecl, t: Type) !void {
     switch (t) {
         .primitive => |k| try w(out, allocator, "{s}", .{@tagName(k)}),
         .named => |n| {
             if (n.id < types.len) {
-                try w(out, allocator, "{s}", .{types[n.id]});
+                try w(out, allocator, "{s}", .{types[n.id].name()});
             } else {
                 try w(out, allocator, "#{d}", .{n.id});
             }
@@ -228,7 +229,7 @@ fn opText(op: Op) []const u8 {
     return cfg.opInfo(std.meta.activeTag(op)).text;
 }
 
-fn printInstr(out: *std.ArrayList(u8), allocator: std.mem.Allocator, types: []const []const u8, instr: *const Instr, block_index: *const std.AutoHashMap(*const BasicBlock, u32)) !void {
+fn printInstr(out: *std.ArrayList(u8), allocator: std.mem.Allocator, types: []const TypeDecl, instr: *const Instr, block_index: *const std.AutoHashMap(*const BasicBlock, u32)) !void {
     // The lhs: one `%id: type` per result, comma-separated — a single
     // result for ordinary ops, several for the atomic destructure ops
     // (ir.md §5.3, §9).
@@ -369,7 +370,7 @@ fn printInstr(out: *std.ArrayList(u8), allocator: std.mem.Allocator, types: []co
     }
 }
 
-fn printTerminator(out: *std.ArrayList(u8), allocator: std.mem.Allocator, types: []const []const u8, term: Terminator) !void {
+fn printTerminator(out: *std.ArrayList(u8), allocator: std.mem.Allocator, types: []const TypeDecl, term: Terminator) !void {
     _ = types;
     switch (term) {
         .ret => |v| {

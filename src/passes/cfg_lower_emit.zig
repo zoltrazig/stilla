@@ -11,7 +11,7 @@
 //! common subexpression elimination (an identical pure computation
 //! earlier in the same block is reused), and copy propagation (a `copy`
 //! of a Copy value is the value itself). The frontend therefore
-//! needs no separate passes for these (frontend.md §4.3); partial
+//! needs no separate passes for these (optimizer.md, On-the-fly optimizations); partial
 //! redundancy elimination, dead-block elimination, drop elision, jump
 //! threading, and phi simplification still run as the Pass 8 sequence
 //! over the finished program.
@@ -73,7 +73,7 @@ pub fn emit(
         // On-the-fly optimization (braun13cc.pdf §3.1): each instruction
         // is simplified at its construction site, so the frontend needs
         // no separate folding / simplification / CSE / copy-propagation
-        // passes (frontend.md §4.3). Order: fold, then copy elision,
+        // passes (optimizer.md, On-the-fly optimizations). Order: fold, then copy elision,
         // then arithmetic simplification, then CSE.
         if (tryFoldOp(op2, rt)) |c| {
             // Constant folding: a pure op over constants becomes the
@@ -525,7 +525,7 @@ pub fn newPhi(self: *lower.Lowerer, fs: *lower.FuncState, span: ast.Span, type_:
 }
 
 // -----------------------------------------------------------------
-// On-the-fly optimization (braun13cc.pdf §3.1; frontend.md §4.3)
+// On-the-fly optimization (braun13cc.pdf §3.1; optimizer.md, On-the-fly optimizations)
 // -----------------------------------------------------------------
 
 /// The arithmetic ops of ir.md §5.2 over numbers.

@@ -1,4 +1,4 @@
-//! Module graph construction — frontend Phase 1 (frontend.md §3).
+//! Module graph construction — frontend Phase 1 (phase1-module-graph.md).
 //!
 //! Phase 1 loads the transitive closure of modules reachable from the
 //! entry point, checks and annotates their **module-level** information
@@ -9,28 +9,28 @@
 //! The algorithms are split out into `src/passes/` and used from here:
 //!
 //! - `src/passes/module_load.zig` — specifier resolution and module
-//!   registration (frontend §3.1–§3.4, Runtime §2.1, §2.6);
+//!   registration (phase1-module-graph.md; Runtime §2.1, §2.6);
 //! - `src/passes/module_scan.zig` — module-value pre-scanning of consts
-//!   (frontend §3.3, Core §2.2–§2.3);
+//!   (phase1-module-graph.md, Module-level information; Core §2.2–§2.3);
 //! - `src/passes/topo_sort.zig` — the three-color DFS cycle detection and
-//!   reverse-postorder topological sort of frontend §3.5;
+//!   reverse-postorder topological sort (phase1-module-graph.md, Import-cycle detection);
 //! - `src/passes/module_materialize.zig` — member-table materialization
-//!   (frontend §3.3);
-//! - `src/passes/module_check.zig` — module-level checks (frontend §3.3);
+//!   (phase1-module-graph.md, Module-level information);
+//! - `src/passes/module_check.zig` — module-level checks (phase1-module-graph.md, Module-level checks);
 //! - `src/passes/type_resolve.zig` — the type-resolution / module-scope
-//!   inference helpers (frontend §4.2–§4.4) that `materialize` uses for
+//!   inference helpers (phase2-checker.md, Type resolution — Generic expansion) that `materialize` uses for
 //!   member types; the public API is re-exported below so callers keep
 //!   using `moduleinfo.resolveType` and friends.
 //!
-//! Resolution (frontend §3.1, Runtime §2.6) maps a written specifier to
+//! Resolution (phase1-module-graph.md, Module identity and specifier resolution; Runtime §2.6) maps a written specifier to
 //! exactly one of, in priority order:
 //!
 //! 1. a Stilla source module supplied by the embedding host's source map;
 //! 2. the embedded `std/` bundle, then any host-supplied standard-library
 //!    sources (the standard library cannot be shadowed by search dirs);
 //! 3. a host-provided module (no source is loaded; its interface comes
-//!    from the host interface registry — host-side policy, frontend §2,
-//!    §5.6);
+//!    from the host interface registry — host-side policy, frontend.md §2,
+//!    phase3-cfg-lowering.md, System calls for host bindings);
 //! 4. the search directories in `Sources.search_dirs`, read as
 //!    `<dir>/<specifier>.st`.
 //!
@@ -43,12 +43,12 @@
 //! statically known aliases (`const b = a;` where `a` is a module-valued
 //! const records the resolved module reference, Core §2.4 / Runtime §2.4).
 //!
-//! Module-level *checks* performed here (frontend §3.3): import
+//! Module-level *checks* performed here (phase1-module-graph.md, Module-level checks): import
 //! expressions appear only as module-level `const` initializers with a
 //! string-literal argument (the parser already guarantees the literal);
 //! module-valued const initializers are `import(...)` or a statically
 //! known module binding; member names of the generated module struct are
-//! unique; import cycles are rejected (§3.5).
+//! unique; import cycles are rejected (phase1-module-graph.md, Import-cycle detection).
 //!
 //! All data is arena-owned and lives for the compilation. Diagnostics
 //! follow the first-error-wins convention (span + message).
@@ -99,7 +99,7 @@ pub const ValueMember = struct {
     module_spec: ?[]const u8 = null,
     /// True when the member is a declaration without a Stilla definition:
     /// a function with no body, or a constant with no initializer
-    /// (frontend §5.6). Calls to `host` function members lower to system
+    /// (phase3-cfg-lowering.md, System calls for host bindings). Calls to `host` function members lower to system
     /// calls.
     host: bool = false,
 };
@@ -152,7 +152,7 @@ pub const UsingAlias = struct {
 };
 
 /// A host binding: a function member with a *declaration and no Stilla
-/// definition* (frontend §5.6). Every `builtin` member (Runtime §4) and
+/// definition* (phase3-cfg-lowering.md, System calls for host bindings). Every `builtin` member (Runtime §4) and
 /// every member of a host-provided module (Core §2.6) is one. Phase 3
 /// lowers calls to these as system calls, never as in-IR calls.
 pub const HostBinding = struct {
@@ -169,7 +169,7 @@ pub const HostBinding = struct {
 // ModuleInfo and ModuleGraph
 // ---------------------------------------------------------------------------
 
-/// One loaded module with its phase-1 annotation (frontend §3.6).
+/// One loaded module with its phase-1 annotation (phase1-module-graph.md, Data structures).
 pub const ModuleInfo = struct {
     /// Resolved specifier; the graph key (Runtime §2.1).
     specifier: []const u8,
@@ -194,7 +194,7 @@ pub const ModuleInfo = struct {
     /// not members.
     using_aliases: []UsingAlias,
     /// Function members that are declarations without definitions
-    /// (frontend §5.6) — the syscall surface of this module.
+    /// (phase3-cfg-lowering.md, System calls for host bindings) — the syscall surface of this module.
     host_bindings: []HostBinding,
 
     /// Name → resolved specifier for module-valued consts (imports and
@@ -220,7 +220,7 @@ pub const ModuleInfo = struct {
     }
 
     /// True when this module has a function member of the given name that
-    /// is a declaration without a body (frontend §5.6).
+    /// is a declaration without a body (phase3-cfg-lowering.md, System calls for host bindings).
     pub fn isHostBinding(self: *const ModuleInfo, name: []const u8) bool {
         for (self.host_bindings) |hb| {
             if (std.mem.eql(u8, hb.name.text, name)) return true;
@@ -241,7 +241,7 @@ pub const ModuleInfo = struct {
     }
 };
 
-/// The result of phase 1 (frontend §3.6): every module of the program, in
+/// The result of phase 1 (phase1-module-graph.md, Data structures): every module of the program, in
 /// dependency order, with module-level info computed.
 pub const TypeId = u32;
 
@@ -275,7 +275,7 @@ pub const TypeInterner = struct {
 
 pub const ModuleGraph = struct {
     arena: std.mem.Allocator,
-    /// Topological order: dependencies before dependents (frontend §3.5).
+    /// Topological order: dependencies before dependents (phase1-module-graph.md, Import-cycle detection).
     modules: []*ModuleInfo,
     by_specifier: std.StringHashMapUnmanaged(*ModuleInfo),
     entry: *ModuleInfo,
@@ -303,7 +303,7 @@ pub const ModuleGraph = struct {
 // Resolution policy
 // ---------------------------------------------------------------------------
 
-/// The frontend's resolution policy (frontend §3.1, Runtime §2.6): maps a
+/// The frontend's resolution policy (phase1-module-graph.md, Module identity and specifier resolution; Runtime §2.6): maps a
 /// written specifier to exactly one of a Stilla source module, a
 /// standard-library module, or a host-provided module. The embedded
 /// `std/` bundle is always available; `standard_library` extends it. All
@@ -364,7 +364,7 @@ pub const RawModule = struct {
 };
 
 /// Loads, parses, and annotates the transitive closure of modules
-/// reachable from an entry point (frontend §3.4).
+/// reachable from an entry point (phase1-module-graph.md, Recursive expansion).
 pub const Builder = struct {
     // pass-internal: Builder fields are the shared context for the
     // load/scan/materialize/check passes in `src/passes/`. (Zig 0.16
@@ -400,7 +400,7 @@ pub const Builder = struct {
         const entry_span = ast.Span.init(0, 0, 0);
         const entry_raw = (try module_load.load(self, entry, entry_span)) orelse return error.Diagnostic;
 
-        // Worklist expansion (frontend §3.4): load every imported module,
+        // Worklist expansion (phase1-module-graph.md, Recursive expansion): load every imported module,
         // transitively. Each module is loaded at most once (Runtime §2.1);
         // a queued set keeps cyclic import graphs from re-queueing the
         // same modules forever (the cycle is reported by topoSort below).
@@ -420,12 +420,12 @@ pub const Builder = struct {
             }
         }
 
-        // Cycle detection + deterministic topological sort (§3.5). The
+        // Cycle detection + deterministic topological sort (phase1-module-graph.md, Import-cycle detection). The
         // order makes every cross-module lookup in materialization
         // resolvable: dependencies are materialized before dependents.
         const order = try self.topoSort();
 
-        // Member-type resolution (frontend §3.3), dependencies first.
+        // Member-type resolution (phase1-module-graph.md, Module-level information), dependencies first.
         for (order.items) |raw| try module_materialize.materialize(self, raw);
 
         // Module-level checks.
@@ -464,11 +464,11 @@ pub const Builder = struct {
     }
 
     // -----------------------------------------------------------------
-    // Cycle detection and topological sort (frontend §3.5)
+    // Cycle detection and topological sort (phase1-module-graph.md, Import-cycle detection)
     // -----------------------------------------------------------------
 
     /// Three-color DFS over the import graph; the algorithm itself lives
-    /// in `src/passes/topo_sort.zig` (frontend §3.5). Returns modules in
+    /// in `src/passes/topo_sort.zig` (phase1-module-graph.md, Import-cycle detection). Returns modules in
     /// reverse postorder (dependencies before dependents), deterministic:
     /// ties (sibling modules) are broken by resolved specifier. On a
     /// cycle, records a diagnostic and returns `error.Diagnostic`.
@@ -503,7 +503,7 @@ pub const Builder = struct {
                 return out;
             },
             .cycle => |cyc| {
-                // Name the full cycle in import order (frontend §3.5),
+                // Name the full cycle in import order (phase1-module-graph.md, Import-cycle detection),
                 // from the module the back edge points at back to itself.
                 return self.cycleDiag(cyc.path, cyc.span);
             },
@@ -540,9 +540,9 @@ pub const Builder = struct {
 // ---------------------------------------------------------------------------
 // Type resolution and module-scope inference — implemented in
 // src/passes/type_resolve.zig (written-name and ast.Type resolution,
-// frontend.md §4.2), src/passes/type_shape.zig (shape queries and
-// structural ownership, §4.2), and src/passes/type_infer.zig
-// (module-scope const inference and generic specialization, §4.3–§4.4).
+// phase2-checker.md, Type resolution), src/passes/type_shape.zig (shape queries and
+// structural ownership, phase2-checker.md Type resolution), and src/passes/type_infer.zig
+// (module-scope const inference and generic specialization, phase2-checker.md Expression inference — Generic expansion).
 // Re-exported here so the phase-3 lowerer and the tests keep calling
 // `moduleinfo.resolveType` and friends; the phase-1 builder itself calls
 // the two shared helpers (`funcSignature`, `resolveAliasTarget`) through

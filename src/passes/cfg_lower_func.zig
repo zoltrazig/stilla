@@ -45,7 +45,7 @@ pub fn lowerFunc(self: *Lowerer, info: *moduleinfo.ModuleInfo, vm: *const module
 }
 
 /// Lower one used specialization of a generic function: the monomorphized
-/// body clone, annotated under the concrete substitution (frontend §4.4),
+/// body clone, annotated under the concrete substitution (phase2-checker.md, Generic expansion),
 /// named `{module}.{fn}.{id}`. Generic templates are never lowered — the
 /// IR receives only specialized, monomorphic functions (Core §12, §12.4).
 pub fn lowerInstance(self: *Lowerer, info: *moduleinfo.ModuleInfo, inst: *checker.FuncInstance) LowerError!*cfg.IrFunc {

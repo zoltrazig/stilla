@@ -58,7 +58,6 @@ test "host.Host carries an allocator and a default builtin vtable" {
     try testing.expect(host.allocator.ptr == testing.allocator.ptr);
     // The vtable defaults are always present (Runtime §4).
     _ = host.builtin.print;
-    _ = host.builtin.len;
     _ = host.builtin.panic;
 }
 
@@ -66,12 +65,8 @@ test "host.Host forwards userdata to builtin calls" {
     // Runtime §3.4: control returns to the host; userdata reaches every
     // builtin call so the host can reach its own state.
     const marker: u8 = 42;
-    var host: Host = .{ .allocator = testing.allocator, .userdata = &marker };
+    const host: Host = .{ .allocator = testing.allocator, .userdata = &marker };
     try testing.expect(@intFromPtr(host.userdata) == @intFromPtr(&marker));
-
-    // The default builtin implementations accept any userdata.
-    const len = host.builtin.len(host.userdata, 7, 4);
-    try testing.expectEqual(@as(i64, 7), len);
 }
 
 test "host.Host lets an embedding replace the panic handler" {

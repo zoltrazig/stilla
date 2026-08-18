@@ -200,19 +200,128 @@ pub const Param = struct {
     type_: Type,
 };
 
+/// A synthetic parameter for a syscall signature the frontend itself
+/// constructs (the list `len` in list patterns, `unbox` in drop
+/// lowering): no written name.
+pub fn syntheticParam(span: ast.Span, mode: ast.ParamMode, type_: Type) Param {
+    return .{ .span = span, .name = .{ .span = span, .text = "" }, .mode = mode, .type_ = type_ };
+}
+
 pub const FunctionType = struct {
     params: []Param,
     ret: *Type,
 };
 
 // ---------------------------------------------------------------------------
-// Type environment (ir.md §11)
+// Type environment (ir.md §9.1)
 // ---------------------------------------------------------------------------
 
-// The type environment is a name-only table: one written name per
-// `TypeId` (`Type.named` carries the index), for printing and
-// diagnostics. Struct/union payloads (fields, variants, ownership, drop
-// hooks) are runtime-facing and not modeled in the IR yet.
+/// One nominal type declaration behind a `TypeId` (ir.md §9.1): the
+/// concrete layout, declared ownership, and destruction information a
+/// backend needs to interpret `construct` / `unpack_*` / `drop` over a
+/// named type — without reference to the source module graph. The
+/// frontend lowering fills these from the module graph; the IR text
+/// parser interns only `.unknown` names (the text form carries no type
+/// declarations, ir.md §10), so a text-parsed program's layout queries
+/// return null.
+pub const TypeDecl = union(enum) {
+    struct_: StructDecl,
+    union_: UnionDecl,
+    opaque_: OpaqueDecl,
+    /// A name interned by the IR text parser (ir.md §10): the text form
+    /// carries no type declarations, so the layout is unknown. The
+    /// frontend never emits this form.
+    unknown: []const u8,
+
+    /// The written declaration name (printing and diagnostics only;
+    /// canonical identity is the `TypeId`, ir.md §9.1).
+    pub fn name(self: TypeDecl) []const u8 {
+        return switch (self) {
+            .struct_ => |d| d.name,
+            .union_ => |d| d.name,
+            .opaque_ => |d| d.name,
+            .unknown => |n| n,
+        };
+    }
+};
+
+/// A struct declaration (ir.md §9.1 `StructDecl`): fields in declaration
+/// order, the declared ownership, and the hidden drop-hook function.
+pub const StructDecl = struct {
+    /// Written declaration name (printing/diagnostics only).
+    name: []const u8,
+    /// The declaring module's resolved specifier.
+    module: []const u8,
+    /// Declaration type-parameter names, in declaration order (empty for
+    /// non-generic structs). Field types reference them as `Type.param`;
+    /// an instantiation's concrete layout substitutes the arguments.
+    type_params: []const []const u8,
+    /// The declared ownership class, concrete for non-generic structs.
+    /// Null when the struct is generic: the class of an instantiation
+    /// depends on its type arguments (`Option[int32]` is Copy,
+    /// `Option[File]` is unique) — resolve via `IrProgram.namedOwnership`.
+    ownership: ?Ownership,
+    /// The hidden drop-hook function name (`{module}.{Type}.drop`, ir.md
+    /// §6.4), when the struct declares a hook (Core §9.1); null otherwise.
+    /// A struct with a hook is unique by declaration.
+    drop: ?[]const u8,
+    /// Fields in declaration order.
+    fields: []FieldDecl,
+};
+
+/// One struct field: the written name and the resolved field type (a
+/// generic declaration's field types may reference its type parameters
+/// as `Type.param`).
+pub const FieldDecl = struct {
+    name: []const u8,
+    type_: Type,
+};
+
+/// A union declaration (ir.md §9.1 `UnionDecl`): variants in declaration
+/// order, the declared ownership, and the discriminant layout.
+pub const UnionDecl = struct {
+    name: []const u8,
+    /// The declaring module's resolved specifier.
+    module: []const u8,
+    /// Declaration type-parameter names, in declaration order (see
+    /// `StructDecl.type_params`; null ownership when generic).
+    type_params: []const []const u8,
+    ownership: ?Ownership,
+    /// Variants in declaration order; the discriminant of a variant is
+    /// its position.
+    variants: []VariantDecl,
+};
+
+/// One union variant: the written name and its payload types in
+/// declaration order (empty for a payload-less variant).
+pub const VariantDecl = struct {
+    name: []const u8,
+    payloads: []Type,
+};
+
+/// A host-backed opaque nominal type declaration (ir.md §9.1
+/// `OpaqueDecl`, Core §11.8): no fields, no variants, unique by
+/// declaration; the host type implementation is named by `host_id`.
+pub const OpaqueDecl = struct {
+    name: []const u8,
+    /// The declaring module's resolved specifier.
+    module: []const u8,
+    /// Unique by declaration (Core §11.8): opaque types never take type
+    /// arguments that change their ownership.
+    ownership: Ownership,
+    /// The host type implementation behind the opaque type (Runtime
+    /// §3.1): the declaring module's specifier plus the type's written
+    /// name — a stable (host_module, type_name) pair.
+    host_id: HostTypeId,
+};
+
+/// The host identity of an opaque nominal type (ir.md §9.1 `HostTypeId`):
+/// names the host type implementation of the declaring module.
+pub const HostTypeId = struct {
+    host_module: []const u8,
+    type_name: []const u8,
+};
+
 // ---------------------------------------------------------------------------
 // CFG data structures (ir.md §11)
 // ---------------------------------------------------------------------------
@@ -662,14 +771,13 @@ pub const Call = struct {
 };
 
 /// The required `builtin` members (Runtime §4) — the syscall dispatch
-/// names of the standard `builtin` module (Core §3).
+/// names of the standard `builtin` module (Core §3). This mirrors
+/// `std/builtin.st` exactly: the list operations `len`, `range`, and
+/// `get` are not builtins — they live in the `list` module and dispatch
+/// as `list#…` host-module syscalls (Runtime §4.3, §4.4, §4.10).
 pub const BuiltinId = enum {
     print,
     str,
-    len,
-    range,
-    map,
-    fold,
     box,
     peek,
     unbox,
@@ -687,7 +795,14 @@ pub const SysCall = struct {
     span: ast.Span,
     target: SysCallTarget,
     args: []*Value,
-    ret: Type, // `never` for panicking bindings (Runtime §4.9)
+    /// The host binding's specialized concrete signature (ir.md §8.2,
+    /// §9.3): parameter modes and types plus the result type. Generic
+    /// builtins (`box`, `peek`, `unbox`, `str`, `hash`) were specialized
+    /// in phase 2, so the call site carries the resolved signature;
+    /// `sig.ret` is `never` for panicking bindings. Null only for
+    /// text-form-parsed IR (the text form carries no parameter modes,
+    /// ir.md §10); the frontend always writes the signature.
+    sig: ?FunctionType,
 };
 
 pub const Phi = struct {
@@ -983,6 +1098,39 @@ pub const SlotMeta = struct {
     init_order: u32,
 };
 
+/// One row of a module's member table (ir.md §9.6 `ModuleMember`): a
+/// runtime value member in declaration order, with its kind and type.
+pub const ModuleMember = struct {
+    /// Written member name (diagnostics only).
+    name: []const u8,
+    /// The member's resolved type: the constant's type, the function's
+    /// monomorphic signature, or the module type of a module value.
+    type_: Type,
+    kind: MemberKind,
+};
+
+/// The four member kinds (ir.md §7, §9.6 `MemberKind`). Only `const_slot`
+/// members occupy runtime storage.
+pub const MemberKind = union(enum) {
+    /// A runtime constant: occupies storage slot `slot` (an index into
+    /// `IrModule.slots` — a *distinct index space* from member indices,
+    /// ir.md §7). A void-typed constant occupies no storage and carries
+    /// null. A host constant (a `const` declaration without an
+    /// initializer) is a const slot `@init` never writes and no
+    /// `store_member` targets.
+    const_slot: ?u32,
+    /// A function declaration: a direct reference to its `IrFunc`
+    /// (null for a generic template — templates are never lowered, each
+    /// used specialization is a separate `IrFunc`, ir.md §11).
+    function: ?*IrFunc,
+    /// A module-valued constant: a static reference to the resolved
+    /// module specifier.
+    module_ref: []const u8,
+    /// A declaration without a Stilla body: a syscall target; the
+    /// runtime dispatches on (module, member_index).
+    host_binding,
+};
+
 pub const IrModule = struct {
     span: ast.Span,
     /// Resolved specifier of the module.
@@ -990,6 +1138,12 @@ pub const IrModule = struct {
     /// The module init function (a `func @init`), when one is defined.
     init: ?*IrFunc,
     funcs: []*IrFunc,
+    /// The member table (ir.md §7, §9.6): every runtime value member in
+    /// declaration order, exactly one row per member index — the
+    /// `load_member` operand space. Null only for text-form-parsed IR
+    /// (the text form carries no member declarations, ir.md §10); the
+    /// frontend always materializes it, possibly empty.
+    members: ?[]ModuleMember,
     /// Module storage layout: the constant members only, derived from
     /// `@init`'s `store_member` ops (Runtime §2.2). Stored in slot order.
     slots: []SlotMeta,
@@ -998,17 +1152,46 @@ pub const IrModule = struct {
 pub const IrProgram = struct {
     modules: []*IrModule, // text order
     funcs: []*IrFunc, // all functions, in module order
-    /// The type environment (ir.md §11): one written name per `TypeId`
-    /// (`Type.named` carries the index), for printing and diagnostics.
-    /// Populated by the frontend lowering (declaration names) and, for
-    /// text-form-parsed programs, by the parser as it interns each
-    /// first-seen name (ir.md §9).
-    types: []const []const u8,
+    /// The type environment (ir.md §9.1): one `TypeDecl` per nominal type
+    /// in use, indexed by the `TypeId` that `Type.named` carries.
+    /// Populated by the frontend lowering (concrete layout — struct
+    /// fields, union variants, ownership, drop hooks, opaque `host_id`)
+    /// and, for text-form-parsed programs, by the parser as it interns
+    /// each first-seen name (`TypeDecl.unknown` — the text form carries
+    /// no type declarations, ir.md §10).
+    types: []TypeDecl,
     entry: ?*IrFunc, // host-selected entry, when present
 
-    /// Resolve `Call.callee.direct` references (forward references in the
-    /// text) against every parsed function. Same-module names win; the
-    /// first definition of a duplicated name wins program-wide.
+    /// The declaration behind a `TypeId`, or null when the id is out of
+    /// range (a `Type.named` referencing an interned name always has a
+    /// row; null is the defensive answer for a corrupt id).
+    pub fn typeDecl(self: *const IrProgram, id: TypeId) ?TypeDecl {
+        if (id >= self.types.len) return null;
+        return self.types[id];
+    }
+
+    /// The declared ownership class of a named instantiation (ir.md
+    /// §9.1): opaque types and drop-hooked structs are unique by
+    /// declaration; a struct or union is Copy iff every owned component
+    /// is Copy. Resolved structurally through the declarations with the
+    /// instantiation's type arguments substituted, without reference to
+    /// the source module graph. `null` when the declaration is unknown
+    /// (text-form-parsed IR) or a type argument stays unresolved.
+    pub fn namedOwnership(self: *const IrProgram, allocator: std.mem.Allocator, n: Type.Named) ?Ownership {
+        var visited = std.ArrayListUnmanaged(Type.Named).empty;
+        return ownershipNamed(self, allocator, n, &visited);
+    }
+
+    /// Resolve the module a value refers to — the module identity the
+    /// value's `module_ref` / module-valued `load_member` chain names
+    /// (ir.md §7: chained library paths lower to a chain of
+    /// `load_member` ops) — or null when the value is not a statically
+    /// known module reference. A phi over module values resolves when
+    /// every incoming names the same module.
+    pub fn moduleOf(self: *const IrProgram, v: *const Value) ?*const IrModule {
+        return moduleIdentity(self, v);
+    }
+
     pub fn resolveDirectCalls(self: *IrProgram, allocator: std.mem.Allocator) !void {
         var map = std.StringHashMap(*IrFunc).init(allocator);
         for (self.funcs) |f| {
@@ -1037,6 +1220,196 @@ pub const IrProgram = struct {
         }
     }
 };
+
+// ---------------------------------------------------------------------------
+// Type environment queries (ir.md §9.1) — ownership and module identity
+// resolved from the program alone, without the source module graph.
+// ---------------------------------------------------------------------------
+
+/// Least-fixpoint ownership of a named instantiation (Core §10.3): a
+/// back-edge to a named type currently being classified — a recursive
+/// occurrence reached through an owned component — is unique; a cycle
+/// that passes only through function types is Copy. The ancestor stack is
+/// a path set, not a grow-only seen set: sibling instantiations of one
+/// declaration (`Option[int32]` and `Option[str]`) are distinct types.
+fn ownershipNamed(self: *const IrProgram, allocator: std.mem.Allocator, n: Type.Named, visited: *std.ArrayListUnmanaged(Type.Named)) ?Ownership {
+    const decl = self.typeDecl(n.id) orelse return null;
+    return switch (decl) {
+        .unknown => return null, // text-form IR: layout unknown
+        .opaque_ => return .unique, // unique by declaration (Core §11.8)
+        .struct_ => |s| blk: {
+            if (s.drop != null) break :blk .unique; // a hook implies unique
+            if (s.ownership) |ow| break :blk ow; // non-generic: declared class
+            // Generic: substitute the instantiation's arguments and walk
+            // the fields (the fixpoint guard must see the instantiated
+            // form, not the raw declaration).
+            for (visited.items) |anc| if (Type.namedEql(n, anc)) break :blk .unique;
+            visited.append(allocator, n) catch break :blk null;
+            defer _ = visited.pop();
+            var acc: ?Ownership = .copy;
+            for (s.fields) |f| {
+                const ft = substParams(allocator, s.type_params, n.args, f.type_);
+                const ow = ownershipType(self, allocator, ft, visited) orelse {
+                    acc = .unique;
+                    break;
+                };
+                if (ow == .unique) acc = .unique;
+            }
+            break :blk acc;
+        },
+        .union_ => |u| blk: {
+            if (u.ownership) |ow| break :blk ow;
+            for (visited.items) |anc| if (Type.namedEql(n, anc)) break :blk .unique;
+            visited.append(allocator, n) catch break :blk null;
+            defer _ = visited.pop();
+            var acc: ?Ownership = .copy;
+            for (u.variants) |v| for (v.payloads) |pt| {
+                const pt_sub = substParams(allocator, u.type_params, n.args, pt);
+                const ow = ownershipType(self, allocator, pt_sub, visited) orelse {
+                    acc = .unique;
+                    break;
+                };
+                if (ow == .unique) acc = .unique;
+            };
+            break :blk acc;
+        },
+    };
+}
+
+/// Structural ownership of an arbitrary type (ir.md §6.1): primitives
+/// are Copy except `any` / `hostdata`; function and module values are
+/// Copy; containers join their components; named types resolve through
+/// the declarations; `null` for a deferred type parameter.
+fn ownershipType(self: *const IrProgram, allocator: std.mem.Allocator, t: Type, visited: *std.ArrayListUnmanaged(Type.Named)) ?Ownership {
+    return switch (t) {
+        .primitive => |k| if (k == .any or k == .hostdata) .unique else .copy,
+        .module, .function, .cleanup => .copy,
+        .param => null,
+        .list, .box => |inner| ownershipType(self, allocator, inner.*, visited),
+        .tuple => |elems| blk: {
+            var acc: ?Ownership = .copy;
+            for (elems) |e| {
+                const ow = ownershipType(self, allocator, e, visited) orelse break :blk null;
+                if (ow == .unique) acc = .unique;
+            }
+            break :blk acc;
+        },
+        .named => |nn| ownershipNamed(self, allocator, nn, visited),
+    };
+}
+
+/// Substitute a type's `.param` occurrences with the instantiation's
+/// type arguments (ir.md §9.1): a generic struct/union declaration's
+/// fields and payloads reference the declaration's type parameters, and
+/// resolving an instantiation replaces each `.param` with its argument
+/// (`Option[int32]`'s `Some` payload becomes `int32`). Parameters with
+/// no matching argument are left unresolved. Best-effort allocation: on
+/// OOM the original type is returned unchanged (the queries run in
+/// arena contexts where OOM is not recoverable anyway).
+pub fn substParams(allocator: std.mem.Allocator, params: []const []const u8, args: []const Type, t: Type) Type {
+    return switch (t) {
+        .param => |p| blk: {
+            // `args` may be shorter than `params` for a wildcard
+            // instantiation; parameters past the provided arguments are
+            // left unresolved rather than crashing the zip.
+            for (params, 0..) |prm, i| {
+                if (i >= args.len) break;
+                if (std.mem.eql(u8, p, prm)) break :blk args[i];
+            }
+            break :blk t;
+        },
+        .named => |n| blk: {
+            if (n.args.len == 0) break :blk t;
+            const out = allocator.alloc(Type, n.args.len) catch break :blk t;
+            for (n.args, 0..) |a, i| out[i] = substParams(allocator, params, args, a);
+            break :blk .{ .named = .{ .id = n.id, .args = out } };
+        },
+        .list => |inner| blk: {
+            const sub = substParams(allocator, params, args, inner.*);
+            if (Type.eql(sub, inner.*)) break :blk t;
+            const ptr = allocator.create(Type) catch break :blk t;
+            ptr.* = sub;
+            break :blk .{ .list = ptr };
+        },
+        .box => |inner| blk: {
+            const sub = substParams(allocator, params, args, inner.*);
+            if (Type.eql(sub, inner.*)) break :blk t;
+            const ptr = allocator.create(Type) catch break :blk t;
+            ptr.* = sub;
+            break :blk .{ .box = ptr };
+        },
+        .tuple => |elems| blk: {
+            var changed = false;
+            const out = allocator.alloc(Type, elems.len) catch break :blk t;
+            for (elems, 0..) |e, i| {
+                out[i] = substParams(allocator, params, args, e);
+                if (!Type.eql(out[i], e)) changed = true;
+            }
+            break :blk if (changed) .{ .tuple = out } else t;
+        },
+        .function => |f| blk: {
+            var changed = false;
+            const params_out = allocator.alloc(Param, f.params.len) catch break :blk t;
+            for (f.params, 0..) |*p, i| {
+                params_out[i] = .{
+                    .span = p.span,
+                    .name = p.name,
+                    .mode = p.mode,
+                    .type_ = substParams(allocator, params, args, p.type_),
+                };
+                if (!Type.eql(params_out[i].type_, p.type_)) changed = true;
+            }
+            const ret_ptr = allocator.create(Type) catch break :blk t;
+            ret_ptr.* = substParams(allocator, params, args, f.ret.*);
+            if (!Type.eql(ret_ptr.*, f.ret.*)) changed = true;
+            if (!changed) break :blk t;
+            break :blk .{ .function = .{ .params = params_out, .ret = ret_ptr } };
+        },
+        .primitive, .module, .cleanup => t,
+    };
+}
+
+/// The module a value refers to (ir.md §7): a `module_ref` names its
+/// module directly; a module-valued `load_member` names the member's
+/// resolved module. The def chain is acyclic by SSA construction. A phi
+/// over module values resolves only when every incoming names the same
+/// module.
+fn moduleIdentity(self: *const IrProgram, v: *const Value) ?*const IrModule {
+    const def = v.def orelse return null;
+    switch (def.op) {
+        .module_ref => |spec| return moduleByName(self, spec),
+        .load_member => |lm| {
+            const parent = moduleIdentity(self, lm.module) orelse return null;
+            const members = parent.members orelse return null;
+            if (lm.member >= members.len) return null;
+            switch (members[lm.member].kind) {
+                .module_ref => |spec| return moduleByName(self, spec),
+                else => return null,
+            }
+        },
+        .phi => |p| {
+            var resolved: ?*const IrModule = null;
+            for (p.incoming) |inc| {
+                const m = moduleIdentity(self, inc.value) orelse return null;
+                if (resolved) |r| {
+                    if (r != m) return null;
+                } else {
+                    resolved = m;
+                }
+            }
+            return resolved;
+        },
+        else => return null,
+    }
+}
+
+/// The module with a resolved specifier, or null when not loaded.
+pub fn moduleByName(self: *const IrProgram, spec: []const u8) ?*const IrModule {
+    for (self.modules) |m| {
+        if (std.mem.eql(u8, m.name, spec)) return m;
+    }
+    return null;
+}
 
 // ---------------------------------------------------------------------------
 // Text form: lexer, parser, and canonical printer — implemented in

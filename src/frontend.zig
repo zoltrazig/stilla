@@ -1,4 +1,4 @@
-//! Frontend pipeline driver — frontend.md §1–§3, §5.
+//! Frontend pipeline driver — frontend.md §1–§3, phase3-cfg-lowering.md.
 //!
 //! `compile` runs the whole frontend in one call: load and parse the
 //! transitive closure of modules reachable from the entry point (phase 1,
@@ -42,7 +42,7 @@ pub const Options = struct {
     /// as in-memory text.
     io: ?std.Io = null,
     /// Run the mid-level optimizer (Passes 7–8) over the lowered CFG
-    /// before returning (frontend.md §6): tail call elimination, constant
+    /// before returning (optimizer.md): tail call elimination, constant
     /// folding, CSE, PRE, copy propagation, dead-block elimination, jump
     /// threading, phi simplification, and drop elision — followed by the
     /// post-optimization drop lowering, which expands every
@@ -73,7 +73,7 @@ pub const Compilation = struct {
     }
 };
 
-/// Compile a program: entry module → IR (frontend.md §1, §5.7).
+/// Compile a program: entry module → IR (frontend.md §1, §2).
 pub fn compile(allocator: std.mem.Allocator, options: Options) CompileError!Compilation {
     var arena = std.heap.ArenaAllocator.init(allocator);
     errdefer arena.deinit();
@@ -95,7 +95,7 @@ pub fn compile(allocator: std.mem.Allocator, options: Options) CompileError!Comp
         error.OutOfMemory => return error.OutOfMemory,
     };
 
-    // Phase 2: annotation and checks (frontend §4).
+    // Phase 2: annotation and checks (phase2-checker.md).
     var ck = checker.Checker.init(arena_alloc);
     _ = ck.check(graph) catch |err| switch (err) {
         error.Diagnostic => {
@@ -142,7 +142,7 @@ pub fn compile(allocator: std.mem.Allocator, options: Options) CompileError!Comp
         };
     }
 
-    // Mid-level optimizer (Passes 7–8, frontend.md §6): a single ordered
+    // Mid-level optimizer (Passes 7–8, optimizer.md): a single ordered
     // pass over the lowered CFG. The lowering validator already ran inside
     // lowerProgram (before the sequence); afterwards the optimized program
     // is re-validated structurally by round-tripping it through the

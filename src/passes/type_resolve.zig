@@ -1,4 +1,4 @@
-//! Pass: type resolution (ast.Type → cfg.Type) — frontend.md §4.2.
+//! Pass: type resolution (ast.Type → cfg.Type) — phase2-checker.md, Type resolution.
 //! In: `Resolve` view (arena + specifier → ModuleInfo map) and a `from`
 //! module. Out: a `cfg.Type` for a written `ast.Type`, module-member lookups
 //! for written names, alias chains to the underlying declaration, and the
@@ -264,7 +264,7 @@ pub fn followAlias(resolve: Resolve, from: *ModuleInfo, tm0: *TypeMember) ?*Type
     return null;
 }
 
-/// Resolve a syntactic type to an IR-native type (frontend §4.2).
+/// Resolve a syntactic type to an IR-native type (phase2-checker.md, Type resolution).
 /// Transparent aliases expand and leave no node (Core §11.2); named
 /// struct/union references keep their written name (decl lookup and
 /// ownership defer to the graph). Returns null when a component cannot be
@@ -361,60 +361,11 @@ pub fn substParams(
     args: []const cfg.Type,
     t: cfg.Type,
 ) cfg.Type {
-    return switch (t) {
-        .param => |p| blk: {
-            for (params, args) |prm, arg| {
-                if (std.mem.eql(u8, p, prm.text)) break :blk arg;
-            }
-            break :blk t;
-        },
-        .named => |n| blk: {
-            if (n.args.len == 0) break :blk t;
-            const out = arena.alloc(cfg.Type, n.args.len) catch break :blk t;
-            for (n.args, 0..) |a, i| out[i] = substParams(arena, params, args, a);
-            break :blk .{ .named = .{ .id = n.id, .args = out } };
-        },
-        .list => |inner| blk: {
-            const sub = substParams(arena, params, args, inner.*);
-            if (cfg.Type.eql(sub, inner.*)) break :blk t;
-            const ptr = arena.create(cfg.Type) catch break :blk t;
-            ptr.* = sub;
-            break :blk .{ .list = ptr };
-        },
-        .box => |inner| blk: {
-            const sub = substParams(arena, params, args, inner.*);
-            if (cfg.Type.eql(sub, inner.*)) break :blk t;
-            const ptr = arena.create(cfg.Type) catch break :blk t;
-            ptr.* = sub;
-            break :blk .{ .box = ptr };
-        },
-        .tuple => |elems| blk: {
-            var changed = false;
-            const out = arena.alloc(cfg.Type, elems.len) catch break :blk t;
-            for (elems, 0..) |e, i| {
-                out[i] = substParams(arena, params, args, e);
-                if (!cfg.Type.eql(out[i], e)) changed = true;
-            }
-            break :blk if (changed) .{ .tuple = out } else t;
-        },
-        .function => |f| blk: {
-            var changed = false;
-            const params_out = arena.alloc(cfg.Param, f.params.len) catch break :blk t;
-            for (f.params, 0..) |*p, i| {
-                params_out[i] = .{
-                    .span = p.span,
-                    .name = p.name,
-                    .mode = p.mode,
-                    .type_ = substParams(arena, params, args, p.type_),
-                };
-                if (!cfg.Type.eql(params_out[i].type_, p.type_)) changed = true;
-            }
-            const ret_ptr = arena.create(cfg.Type) catch break :blk t;
-            ret_ptr.* = substParams(arena, params, args, f.ret.*);
-            if (!cfg.Type.eql(ret_ptr.*, f.ret.*)) changed = true;
-            if (!changed) break :blk t;
-            break :blk .{ .function = .{ .params = params_out, .ret = ret_ptr } };
-        },
-        .primitive, .module, .cleanup => t,
-    };
+    // Single implementation lives in `cfg.substParams` (the data layer);
+    // the declaration's parameter names here are source idents, so copy
+    // the name strings into a names slice and delegate. Best-effort like
+    // the underlying pass: on OOM the type is returned unchanged.
+    const names = arena.alloc([]const u8, params.len) catch return t;
+    for (params, 0..) |p, i| names[i] = p.text;
+    return cfg.substParams(arena, names, args, t);
 }

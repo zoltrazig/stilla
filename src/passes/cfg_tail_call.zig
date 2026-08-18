@@ -1,4 +1,4 @@
-//! Pass: tail-call optimization (frontend.md §7, ir.md §10.10). In: a
+//! Pass: tail-call optimization (optimizer.md, Pass 7; ir.md §14.7). In: a
 //! lowered `cfg.IrProgram`. Out: the same program, with every direct call
 //! in tail position to the enclosing function rewritten into a
 //! frame-reusing jump back to a loop header, so self-recursion becomes

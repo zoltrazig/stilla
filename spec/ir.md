@@ -38,7 +38,7 @@ The IR must carry, without reference to source text:
 - the **destruction schedule** — when and in what order values are destroyed (per the Stilla Runtime Specification);
 - **module storage** — module members as a statically known member table: runtime constants occupy laid-out storage slots, while function, module-valued, and host-binding members are static references.
 
-The IR is produced by the frontend (Phase 3 of the pipeline described in frontend.md, kept at `docs/frontend.md`) and consumed by the runtime. It is **not** an optimizer IR, not a register-based IR, and not target code. The frontend emits a direct, semantically faithful CFG; all optimization is a later consumer.
+The IR is produced by the frontend (Phase 3 of the pipeline described in frontend.md, kept at `docs/frontend.md`) and consumed by the runtime and every downstream analysis or backend. It is the **runtime boundary**: consumers receive the IR alone, so its data model — the type environment (§9.1), the module member tables (§9.6), the syscall signatures (§9.3) — must be interpretable without reference to source text or the source module graph. The IR is **not** an optimizer IR, not a register-based IR, and not target code: it fixes no registers, frame layouts, encodings, or ABI, and a consumer is free to interpret it directly, lower it further, or compile it. The frontend emits a direct, semantically faithful CFG; all optimization is a later consumer.
 
 ## 1.2 Conventions
 
@@ -51,7 +51,7 @@ The IR is produced by the frontend (Phase 3 of the pipeline described in fronten
 
 # 2. Design principles
 
-1. **Three-address code.** The IR is predominantly three-address and single-result: every instruction computes **one result** from **at most two source operands**, with explicit **atomic multi-result destructuring** operations (`unpack_*` / `split_list`). The n-ary exceptions — aggregate `construct`, `call`, `syscall`, and `phi` — are n-ary in operands but single-result (or pure effects). A strict canonization into ≤2-operand form is always available by introducing intermediate values, so the property is not lost, merely elided where the operand list is statically typed.
+1. **Three-address code.** The IR is predominantly three-address and single-result: every instruction computes **one result** from **at most two source operands**, with explicit **atomic multi-result destructuring** operations (`unpack_*` / `split_list`) and the multi-result `borrow_variant` projection. The n-ary exceptions — aggregate `construct`, `call`, `syscall`, and `phi` — are n-ary in operands but single-result (or pure effects). A strict canonization into ≤2-operand form is always available by introducing intermediate values, so the property is not lost, merely elided where the operand list is statically typed.
 2. **Static single assignment.** Every value is defined exactly once; control-flow merges join values with `phi`. Stilla's immutable bindings and shadowing map onto SSA without any renaming pass: each `let` is a fresh definition, shadowing is a fresh name.
 3. **Exactly-once, left-to-right evaluation.** Inside a block, instruction order is source evaluation order (per the Stilla Runtime Specification). Short-circuit `and` / `or` never become instructions — they lower to conditional-branch diamonds so the right operand is evaluated only when required.
 4. **Ownership is explicit.** `move`, `borrow`, `copy`, and `drop` are instructions. Every *Unique* value is used at most once per path and destroyed exactly once per path; destruction is materialized in the CFG, not left to the runtime to infer.
@@ -73,7 +73,7 @@ terminator ::= "ret" value?                  -- return; bare "ret" for void
              | "j" label
              | "br" value "?" label ":" label
              | "switch" value "{" tag "->" label ("," tag "->" label)* "}"
-             | "tailcall" label value ("," value)*   -- frame-reusing self call
+             | "tailcall" "@" ident ("," value)*   -- frame-reusing self call
              | "trap"
 ```
 
@@ -92,18 +92,18 @@ terminator ::= "ret" value?                  -- return; bare "ret" for void
 ## 4.1 Definitions
 
 - **Value** — one SSA definition: the result of exactly one instruction. Values carry an IR-native type, an **ownership class** inherited from the type (*Copy* / *Unique*), and a **created state** (owned / borrowed). Whether a value is still *available* at a program point — alive, consumed, or consumed on some paths only — is not a value property: it is an edge-sensitive dataflow property computed by the validator and mirrored by the lowering's consumption bookkeeping. Values are numbered per function in definition order (`%0, %1, …`); the text form also permits symbolic names (`%sum`) for readability.
-- **Instruction** — a unit of computation. An instruction either *defines* one or more values (a single result for ordinary ops; several for the atomic destructure ops `unpack_*` / `split_list`) or is a **pure effect** with no results: `drop`, `store_member`, `cleanup_disarm`, `cleanup_drop`.
+- **Instruction** — a unit of computation. An instruction either *defines* one or more values (a single result for ordinary ops; several for the atomic destructure ops `unpack_*` / `split_list` and for the multi-result `borrow_variant` projection) or is a **pure effect** with no results: `drop`, `store_member`, `cleanup_disarm`, `cleanup_drop`.
 - **Use** — a reference to a value as an operand. SSA requires that every non-phi use of a value is **dominated** by its definition; a phi's operands are defined in the corresponding predecessor blocks.
 
 ```
-instr   ::= value ("," value)* "=" op   -- defining; several results for the atomic destructure ops
+instr   ::= value ("," value)* "=" op   -- defining; several results for the atomic destructure ops and borrow_variant
           | effect                   -- drop | store_member | cleanup_*
 value   ::= "%" ident | "%" number
 ```
 
 ## 4.2 The three-address property
 
-For every *defining* instruction except `construct`, `call`, `syscall`, and `phi`, the operand count is at most two; the atomic destructure ops are the only multi-*result* instructions:
+For every *defining* instruction except `construct`, `call`, `syscall`, and `phi`, the operand count is at most two; the atomic destructure ops and the `borrow_variant` projection are the only multi-*result* instructions:
 
 ```
 %r = op %a           -- unary
@@ -427,7 +427,7 @@ Return: `ret %v` transfers ownership of a *Unique* result to the caller. Borrowe
 A call to a **host binding** — a member with a declaration and no Stilla definition — lowers to `syscall`, never to `call`; a host binding has no function body and its body is never lowered. The target dispatches on (module, member):
 
 ```
-%n: int32  = syscall builtin#len, %values        -- builtin module member
+%n: int32  = syscall list#len, %values        -- std module host binding
 %t: File   = syscall os#open_file, "a.txt"       -- host-provided module member
 ```
 
@@ -436,7 +436,7 @@ syscallTarget ::= module "#" member_name   -- text form
                 | builtin                  -- shorthand for "builtin" module
 ```
 
-The target names a **host-binding member** of the module's member table — a declaration with no Stilla body. In memory, the syscall target carries the (module specifier, member name) pair; the runtime resolves it to a stable dispatch, and module member layout is static. Argument evaluation is identical to `call` (left to right, once); `move`/`borrow` modes apply; generic builtins (`len`, `box`, `peek`, `unbox`) were specialized in phase 2, so the syscall carries a concrete signature. A binding whose result is a borrowed view (`builtin.peek`) produces a value whose `BorrowOrigin` is the `peek` root: the view is bound to the syscall's boxed argument — the sole argument position, so the origin carries no index.
+The target names a **host-binding member** of the module's member table — a declaration with no Stilla body. In memory, the syscall target carries the (module specifier, member name) pair; the runtime resolves it to a stable dispatch, and module member layout is static. Argument evaluation is identical to `call` (left to right, once); `move`/`borrow` modes apply; generic builtins (`box`, `peek`, `unbox`) were specialized in phase 2, so the syscall carries a concrete signature. A binding whose result is a borrowed view (`builtin.peek`) produces a value whose `BorrowOrigin` is the `peek` root: the view is bound to the syscall's boxed argument — the sole argument position, so the origin carries no index.
 
 ## 8.3 `never` returns
 
@@ -482,8 +482,8 @@ FunctionType   ::= { params: [Param], ret: Type }
 
 **Semantics.**
 
-- **Type environment.** Every nominal struct, union, or opaque type used by the program has one entry in the program's type environment, indexed by a stable `TypeId`. Canonical type identity is the `TypeId`; the name strings in `StructDecl` / `UnionDecl` / `OpaqueDecl` are for printing and diagnostics only — the validator never compares names.
-- **Opaque types.** An `opaque(OpaqueDecl)` entry is a host-backed opaque nominal type (Core §11.8): it declares **no fields and no variants**, its `ownership` is the declared class — *Unique* for every v1.3 opaque type — and its `host_id` names the host type implementation behind it. The type is a normal nominal value type: it may be borrowed, moved, dropped, stored in containers, and `any`-packed; only the *inspection* operations are excluded (construct, field/tuple projection, unpack, read_tag/read_payload, read_index over it). The source-level checker rejects those before lowering (Core §11.8), so the IR never carries a construction or projection over an opaque type; the validator's schema checks are the same guard for text-form programs.
+- **Type environment.** Every nominal struct, union, or opaque type used by the program has one entry in the program's type environment, indexed by a stable `TypeId`. Canonical type identity is the `TypeId`; the name strings in `StructDecl` / `UnionDecl` / `OpaqueDecl` are for printing and diagnostics only — the validator never compares names. The frontend materializes the concrete `TypeDecl` for every entry (fields, variants, ownership, drop hook, opaque `host_id`); the IR text form carries no declarations (§10), so a text-parsed program's entries are name-only (`TypeDecl.unknown`) and every layout query on them returns null.
+- **Opaque types.** An `opaque(OpaqueDecl)` entry is a host-backed opaque nominal type (Core §11.8): it declares **no fields and no variants**, its `ownership` is the declared class — *Unique* for every v1.3 opaque type — and its `host_id` names the host type implementation behind it. The type is a normal nominal value type: it may be borrowed, moved, dropped, stored in containers, and `any`-packed; only the *inspection* operations are excluded (construct, field/tuple projection, unpack, read_tag/read_payload/borrow_variant, read_index over it). The source-level checker rejects those before lowering (Core §11.8), so the IR never carries a construction or projection over an opaque type; the validator's schema checks are the same guard for text-form programs.
 - **Transparent aliases** expand during type resolution and leave no entry; structural types (`list`, `box`, `tuple`, function types) stay inline in `Type`.
 - **Ownership resolution.** A named type's ownership resolves through its declaration: a struct or union is *Copy* iff every owned component is *Copy*; an opaque type is *Unique* by declaration, regardless of its type arguments. A struct with a user drop hook is always *Unique* — *Copy* destruction does nothing, so a drop hook implies *Unique*; the two never contradict.
 - **Type members are compile-time** (per the Stilla Core Language Specification): they exist here as declarations and never occupy module storage. The division is exact — type members go in the type environment (names), value members go in the member table.
@@ -502,7 +502,7 @@ Instr        ::= { results: [Value], op: Op }
 - `state` is the created state — a definition-time property; availability is an edge-sensitive dataflow property, not stored on the value.
 - `origin` is non-null iff the state is `borrowed`; it carries the borrow provenance.
 - `def` is the instruction that defines the value; it is null for parameter SSA roots.
-- `results` holds one value for single-result ops and several for the atomic destructure ops `unpack_*` / `split_list`; pure effects have no results.
+- `results` holds one value for single-result ops and several for the atomic destructure ops `unpack_*` / `split_list` and for `borrow_variant`; pure effects have no results.
 
 ## 9.3 Ops
 
@@ -520,6 +520,7 @@ Op ::= const(ConstValue) | module_ref(Spec) | fn_ref(Name)
      | read_index(Index) | tail(Value)
      | unpack_struct(Value) | unpack_tuple(Value) | unpack_variant(UnpackVariant)
      | split_list(Value) | read_tag(Value) | read_payload(Value)
+     | borrow_variant(BorrowVariant)
      | call(Call) | syscall(SysCall) | phi(Phi)
 
 ConstValue   ::= int(i64) | float(f32) | bool | string | void
@@ -530,15 +531,16 @@ Construct    ::= { tag: u32?, args: [Value] }
 LoadMember   ::= { module: Value, member: u32 }     -- member index: position in the module's value-member declaration order
 StoreMember  ::= { slot: u32, value: Value }        -- slot id: constant members only
 UnpackVariant::= { base: Value, tag: u32 }    -- the results are the variant's `payloads`, one per payload value, in declaration order
+BorrowVariant::= { base: Value, tag: u32 }    -- like `UnpackVariant`, but the base is never consumed (§5.3)
 Call         ::= { callee: direct(DirectCallee) | value(Value), args: [Value] }
 DirectCallee ::= { name: Name, func: IrFunc? }
-SysCall      ::= { target: SysCallTarget, args: [Value], sig: FunctionType }
+SysCall      ::= { target: SysCallTarget, args: [Value], sig: FunctionType? }
 SysCallTarget::= builtin(BuiltinId) | host_module({ module, member })
 Phi          ::= { incoming: [PhiIn] }              -- one per in-edge, in preds order
 PhiIn        ::= { value: Value, pred: BasicBlock }
 ```
 
-`SysCall.sig` is the binding's specialized concrete signature (parameter modes and types, result type): generic builtins were specialized in phase 2, so the call site carries the resolved signature; `sig.ret` is `never` for panicking bindings. It mirrors `call`'s callee signature (direct callee: the function's params/ret; value callee: the function type).
+`SysCall.sig` is the binding's specialized concrete signature (parameter modes and types, result type): generic builtins were specialized in phase 2, so the call site carries the resolved signature; `sig.ret` is `never` for panicking bindings. It mirrors `call`'s callee signature (direct callee: the function's params/ret; value callee: the function type). The signature is null only for text-form-parsed IR — the text form carries no parameter modes (§10) — and the validator skips signature checks for null (the frontend always writes it).
 
 ## 9.4 The op schema
 
@@ -550,7 +552,8 @@ OpInfo ::= { text: Name,             -- canonical spelling
              may_trap: Bool,         -- trap behavior per the Runtime specification
              effects: Bool,          -- observable beyond the result
              multi: Bool }           -- defines several results (the atomic
-                                     -- destructure ops unpack_* / split_list)
+                                     -- destructure ops unpack_* / split_list
+                                     -- and the borrow_variant projection)
 ```
 
 Every op has exactly one schema row. `arity` fixes the operand count. `consumes` declares which operands the op consumes. `created` declares the result's created state: `owned`, `borrowed`, `operand` (the result state depends on the operand — the `read_*` projections yield owned results over *Copy* bases and borrowed views over *Unique* bases), or `none` (pure effects). `may_trap` and `effects` together give the op's effect class; `multi` marks the ops that define several results.
@@ -558,11 +561,12 @@ Every op has exactly one schema row. `arity` fixes the operand count. `consumes`
 ## 9.5 Control flow
 
 ```
-Terminator ::= ret(Value?) | branch(BasicBlock)
-             | branch_cond({ cond: Value, then_: BasicBlock, else_: BasicBlock })
-             | switch(Switch) | trap
+Terminator ::= ret(Value?) | j(BasicBlock)
+             | br({ cond: Value, then_: BasicBlock, else_: BasicBlock })
+             | switch(Switch) | tailcall(TailCall) | trap
 Switch     ::= { disc: Value, arms: [SwitchArm] }   -- disc is a read_tag result
 SwitchArm  ::= { tag: u32, block: BasicBlock }      -- implicit trap default
+TailCall   ::= { name: Name, func: IrFunc?, args: [Value] }
 BasicBlock ::= { id: u32, name: Name, instrs: [Instr], terminator: Terminator,
                  preds: [BasicBlock] }              -- in-edges, in phi order
 Param      ::= { name: Name, mode: plain | borrow | move, type: Type }
@@ -575,23 +579,24 @@ IrFunc     ::= { id: u32, name: Name, params: [Param], ret: Type,
 - `preds` lists the in-edges in phi order.
 - `values` is the per-function value table in order; values `0..params.len-1` are the parameter SSA roots (`def == null`).
 - `module_spec` is the declaring module, set by the frontend.
+- `tailcall` is the frame-reusing direct self-call (§14.7.1): an **exit** like `ret`/`trap` — no out-edge. `func` resolves to the enclosing `IrFunc`.
 
 ## 9.6 Modules and the program
 
 ```
 SlotMeta     ::= { type: Type, init_order: u32 }   -- teardown destroys unique constant
                                                     -- slots in reverse rank
-ModuleMember ::= { name: Name, kind: MemberKind }
-MemberKind   ::= const_slot(u32) | function(IrFunc) | module_ref(Spec) | host_binding
+ModuleMember ::= { name: Name, type: Type, kind: MemberKind }
+MemberKind   ::= const_slot(u32?) | function(IrFunc?) | module_ref(Spec) | host_binding
 IrModule     ::= { name: Spec, init: IrFunc?, funcs: [IrFunc],
-                   members: [ModuleMember], slots: [SlotMeta] }
+                   members: [ModuleMember]?, slots: [SlotMeta] }
 IrProgram    ::= { modules: [IrModule], funcs: [IrFunc],
                    types: [TypeDecl], entry: IrFunc? }
 ```
 
 - `init` is the module's `@init` function; it is absent for host modules.
-- `members` is the member table in declaration order; `slots` is the module storage layout — constant members only.
-- The type environment is the program's `types`: one entry per nominal struct, union, or opaque type in use, including monomorphic generic specializations.
+- `members` is the member table in declaration order — exactly one row per member index, the `load_member` operand space; `slots` is the module storage layout — constant members only, a **distinct index space** from member indices. A `const_slot` member's `type` is the constant's type and its null slot marks a storage-less void constant; a `function` member's `type` is the monomorphic signature and its `func` is null for a generic template (templates are never lowered; each used specialization is a separate `IrFunc`). `members` is null only for text-form-parsed IR — the text form carries no member declarations (§10) — and the frontend always materializes it, possibly empty.
+- The type environment is the program's `types`: one entry per nominal struct, union, or opaque type in use, including monomorphic generic specializations. Each `TypeDecl` carries the concrete layout (§9.1) — the frontend fills them; a text-form-parsed program's entries are name-only (`TypeDecl.unknown`), and every layout query on them returns null.
 
 ---
 
@@ -607,6 +612,12 @@ params  ::= param ("," param)*
 param   ::= ("borrow" | "move")? ident ":" type
 block   ::= label ":" instr* terminator
 label   ::= ident
+terminator ::= "ret" value?                      -- bare "ret" for void
+             | "j" label
+             | "br" value "?" label ":" label
+             | "switch" value "{" tag "->" label ("," tag "->" label)* "}"
+             | "tailcall" "@" ident ("," value)*   -- frame-reusing direct self-call
+             | "trap"
 type    ::= "int32" | "uint32" | "float32" | "bool" | "str" | "byte"
           | "any" | "hostdata" | "void" | "never"   -- primitives
           | "module" | "cleanup"                    -- special types
@@ -615,7 +626,7 @@ type    ::= "int32" | "uint32" | "float32" | "bool" | "str" | "byte"
           | "list" "[" type "]" | "box" "[" type "]"
           | "tuple" "[" type ("," type)* "]"
           | "fn" "(" ("borrow" | "move")? type ("," ("borrow" | "move")? type)* ")" "->" type
-instr   ::= value ":" type ("," value ":" type)* "=" op   -- defining; multi-result for the atomic destructure ops
+instr   ::= value ":" type ("," value ":" type)* "=" op   -- defining; multi-result for the atomic destructure ops and borrow_variant
           | effect                     -- drop / store_member / cleanup_*
 op      ::= "const" literal
           | "module_ref" string
@@ -629,7 +640,7 @@ op      ::= "const" literal
           | ("read_field"|"read_tuple") value "," number
           | "read_index" value "," value
           | ("tail" | "unpack_struct" | "unpack_tuple" | "split_list") value
-          | "unpack_variant" value "," number
+          | ("unpack_variant" | "borrow_variant") value "," number
           | ("read_tag"|"read_payload") value
           | "construct" ("#" tag)? [ value ("," value)* ]
           | "call" ("@" ident | value) ("," value)*
@@ -641,7 +652,7 @@ effect  ::= "drop" value
           | "store_member" number "," value
 ```
 
-The op spellings are the canonical spellings from the op schema. The `load_member` and `store_member` indices are member and slot indices respectively; a named `type` is a reference into the type environment. The text form carries no member or type declarations, so interpreting the indices and names requires the module's member table and the program's type environment, which only the frontend supplies. Named types are interned in first-use order, so parse → print → parse round-trips exactly.
+The op spellings are the canonical spellings from the op schema. The `load_member` and `store_member` indices are member and slot indices respectively; a named `type` is a reference into the type environment. The text form carries no member or type declarations and no syscall signatures, so interpreting the indices and names requires the module's member table and the program's type environment, which only the frontend supplies; a text-parsed program's member tables are null, its type entries are name-only, and its syscall signatures are null. Named types are interned in first-use order, so parse → print → parse round-trips exactly.
 
 ---
 
@@ -664,7 +675,7 @@ The frontend walks the annotated, monomorphic AST with a builder that appends in
 | `let name = expr` | evaluate `expr`, bind result as a fresh value |
 | `let pattern = expr` | destructure: `read_*` views or the atomic `unpack_*` / `split_list` |
 | `if` | `br` then/else, join phi; no `else` → `void` join |
-| `match` (union) | `read_tag` + `switch`; per-arm payload binds; join phi |
+| `match` (union) | `read_tag` + `switch`; per-arm payload binds — `read_payload` (single payload) or `borrow_variant` (multi-payload, non-consuming); join phi |
 | `match` (other patterns) | `eq`/`br` chains, projections, `tail` |
 | `match (move s)` | `unpack_variant` binds (tag-carrying); scrutinee wholly consumed |
 | `move name` | `move` (or `copy` for *Copy*); old value dead |
@@ -694,9 +705,9 @@ These invariants are the contract every producer of the IR must uphold — the f
 - exactly one terminator per block, last instruction;
 - `phi` only at block heads; one incoming per predecessor, in `preds` order; a `trap`-terminated block has no out-edge and is therefore never a `phi` predecessor — its producing path contributes no `phi` input;
 - arity: every op has its declared operand count (≤2 except the four n-ary forms); `read_tuple` index < element count per the static type; `store_member` only in `@init`;
-- members: `load_member`'s member index names a member of the module's member table and the member's kind matches the load (a constant member is read from its slot, a function member yields a function value, a module-valued member yields a module value); `store_member`'s slot index names a constant member's slot;
+- members: `load_member`'s member index names a member of the module's member table and the member's kind matches the load (a constant member is read from its slot, a function member yields a function value, a module-valued member yields a module value); `store_member`'s slot index names a constant member's slot. The module identity of a `load_member` base resolves through its `module_ref` / module-valued `load_member` chain (a phi of module values resolves when every incoming names the same module). Modules without a member table (text-form IR) and unresolvable base identities skip the check;
 - types: `read_field` bases are structs and the field index names a field of the `StructDecl` (result typed as that field); `unpack_struct` consumes a struct and defines exactly its fields; `construct` with a `#tag` and `unpack_variant #k` keep the tag within the `UnionDecl`'s variants and match the payload arity; `read_tag` / `read_payload` / `borrow_variant` bases are unions; `switch` arm tags are exactly the union's variants — exhaustive, with the implicit `trap` default unreachable and no bogus tags;
-- opaque bases: no `construct`, `read_field` / `read_tuple`, `unpack_struct` / `unpack_tuple` / `unpack_variant`, `read_tag` / `read_payload`, or `read_index` may target an `opaque(OpaqueDecl)` type — an opaque value is only borrowed, moved, dropped, stored, passed, `ret`'d, phi-merged, or `any`-packed (Core §11.8; the checker rejects the excluded operations in source, and the schema applies the same rule to text-form programs);
+- opaque bases: no `construct`, `read_field` / `read_tuple`, `unpack_struct` / `unpack_tuple` / `unpack_variant`, `read_tag` / `read_payload` / `borrow_variant`, or `read_index` may target an `opaque(OpaqueDecl)` type — an opaque value is only borrowed, moved, dropped, stored, passed, `ret`'d, phi-merged, or `any`-packed (Core §11.8; the checker rejects the excluded operations in source, and the schema applies the same rule to text-form programs);
 
 **SSA**
 
@@ -724,14 +735,14 @@ These invariants are the contract every producer of the IR must uphold — the f
 **Semantics**
 
 - `div`/`rem` operand types are numeric; `num_cast` operands and result range over the Core §16.3 cast set (`int32 ↔ float32`, `int32 ↔ byte`, `int32 ↔ uint32`, `byte → int32`, `uint32 → int32`);
-- call arguments match the callee's signature in types and modes (direct callee: the function's params; value callee: the function-type signature), and the result is typed as the signature's return; syscall arguments match the syscall's signature;
+- call arguments match the callee's signature in types and modes (direct callee: the function's params; value callee: the function-type signature), and the result is typed as the signature's return; syscall arguments match the syscall's signature (a syscall without a signature — text-form IR — skips the check): a move-mode parameter consumes its argument, which must be owned and available (never borrowed); a plain/borrow parameter passes a view; the result type matches `sig.ret`;
 - `read_index` bases are lists; `read_tag` bases are unions;
 - no `ret` of a `borrowed` value.
 
 **Producer guarantees** — the checker enforces these at the source boundary; they need flow analysis the IR does not carry, so the validator checks their preconditions only:
 
 - the active-variant payload typing of `read_payload` inside a `switch` arm — the validator checks only that the base is a union, not which arm is live;
-- the payload *arity and types* of `borrow_variant` / `unpack_variant` — the tag is carried in the IR, so the variant is known, but the variant's declared payload list (which fixes the result count and each result's type) is not re-derived by the validator; it checks the base is nominal and the result count is ≥ 1, trusting the checker for the rest;
+- the payload *types* of `borrow_variant` / `unpack_variant` — the tag is carried in the IR, so the variant is known; the validator checks the base is a union, the tag names one of its variants, and the result count matches the variant's declared payload arity, but the payload *types* themselves (the variant's declared payload types with the instantiation's arguments substituted) are not re-derived — it trusts the checker for them;
 - the `any_unpack_*`-after-`type_is` discipline — recovery of a payload must follow a successful tag test.
 
 ---
@@ -824,7 +835,7 @@ join:
 }
 ```
 
-`_`, literal, tuple, struct, and list patterns lower to the same primitives: `eq` + `br` for literals, `read_*` projections and discriminant tests for shapes, `tail`/`read_index` for `[head, ..tail]`. A `match (move value)` binds payloads with `unpack_variant` (tag-carrying) and the scrutinee is wholly consumed.
+`_`, literal, tuple, struct, and list patterns lower to the same primitives: `eq` + `br` for literals, `read_*` projections and discriminant tests for shapes, `tail`/`read_index` for `[head, ..tail]`. A non-consuming `match` binds a single-payload variant with `read_payload` and a multi-payload variant with `borrow_variant` (non-consuming views of the scrutinee); a `match (move value)` binds payloads with `unpack_variant` (tag-carrying) and the scrutinee is wholly consumed.
 
 A `match` over an `any` value with **type-test** patterns does *not* lower to a `switch`: the tag space is open, so each arm becomes a `type_is` test followed by a `br` chain that falls through to the next test, and the selected arm recovers the payload with an `any_unpack_copy` (non-consuming match) or `any_unpack_move` (`match (move a)`). A wildcard `_` arm is required because the tag space is open.
 

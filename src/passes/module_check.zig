@@ -3,7 +3,7 @@
 //! member name.
 //!
 //! Member names of the generated module struct are unique (Core §2.1);
-//! type member names are unique too (frontend §3.3).
+//! type member names are unique too (phase1-module-graph.md, Module-level checks).
 
 const std = @import("std");
 const moduleinfo = @import("../moduleinfo.zig");

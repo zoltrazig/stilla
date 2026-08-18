@@ -1,10 +1,10 @@
-//! Standard-library bundle (frontend §3.2): the `std/` host-binding
+//! Standard-library bundle (phase1-module-graph.md, Loading, parsing, and deduplication): the `std/` host-binding
 //! modules, embedded at compile time.
 //!
 //! The standard library is a set of ordinary importable modules (StdLib
 //! §1). Resolution loads them like source modules *from the
-//! implementation's standard-library bundle* (frontend §3.2). These files
-//! are declaration-only host-binding modules (frontend §5.6): every
+//! implementation's standard-library bundle* (phase1-module-graph.md, Loading, parsing, and deduplication). These files
+//! are declaration-only host-binding modules (phase3-cfg-lowering.md, System calls for host bindings): every
 //! function member has a signature and no Stilla definition, every
 //! constant has a declared type and no initializer, and the frontend
 //! lowers calls to them as system calls. `builtin` is one of these modules
