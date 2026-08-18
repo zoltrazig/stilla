@@ -98,7 +98,8 @@ Each phase has its own detailed document:
 - **[Phase 3 — CFG Lowering](phase3-cfg-lowering.md)**
   IR model (IrModule/IrFunc/BasicBlock/Value), lowering rules for all
   expression and statement forms, destruction placement (scope-end, user
-  drop hooks, hostdata, temporaries, conditional), module init functions,
+  drop hooks, hostdata, opaque host types, temporaries, conditional),
+  module init functions,
   system calls for host bindings, integration with phase 2, outputs.
 
 - **[Optimizer — Tail Call and Mid-Level Rewrites](optimizer.md)**
@@ -135,6 +136,12 @@ The pipeline is implemented in **passes**. Passes 1–8 are complete.
 - [x] **Pass 8 — Mid-level optimizer** (`src/passes/cfg_optimize.zig` plus
       `cfg_pre`, `cfg_dead_instr`, `cfg_dead_block`, `cfg_drop_elide`,
       `cfg_jump_thread`, `cfg_phi_simplify`).
+- [x] **Drop lowering (post-optimization)** — expand every
+      statically-expandable `drop` in the CFG (`src/passes/cfg_lower_drop.zig`):
+      structs (hook call + `unpack_struct` + reverse field drops), tuples,
+      boxes (`builtin#unbox` + contained drop), and unions (`read_tag` +
+      `switch`); only opaque, `hostdata`, `list`, and `any` drops reach the
+      runtime. Runs after Pass 8, before the final IR round-trip.
 
 ## 5. Relationship to existing code
 
@@ -145,6 +152,7 @@ The pipeline is implemented in **passes**. Passes 1–8 are complete.
 | 2 — annotation | `src/passes/checker.zig` (phase-2 driver), `checker_annotate.zig` (name resolution, inference, binding states), `checker_validate.zig` (the checks), `checker_ownership.zig` (conditional-release state merging, Core §10.10), `src/passes/monomorphize.zig` (generic expansion) — resolved types are `cfg.Type` |
 | 3 — CFG IR | `src/cfg.zig` (op schema `opInfo`, types, `IrProgram`), `src/passes/cfg_lex.zig` + `cfg_parse.zig` + `cfg_print.zig` (IR text form, re-exported by `cfg`), `src/lower.zig` + `src/passes/cfg_lower_*.zig` (annotated AST → CFG, destruction placement, module init functions), `src/builtin.zig` (syscall dispatch vtable) |
 | optimizer + validator | `src/passes/cfg_optimize.zig` (+ `cfg_tail_call`, `cfg_pre`, `cfg_dead_instr`, `cfg_dead_block`, `cfg_drop_elide`, `cfg_jump_thread`, `cfg_phi_simplify`) and `src/passes/cfg_validate.zig` (ir.md §13 validator); on-the-fly constant folding, arithmetic simplification, CSE, and copy propagation in `cfg_lower_emit.zig` |
+| drop lowering | `src/passes/cfg_lower_drop.zig` — post-optimization expansion of statically-expandable `drop`s (struct/tuple/box/union) into explicit CFG operations; only opaque, `hostdata`, `list`, and `any` drops remain single instructions. Wired into `frontend.zig`'s optimize path after Pass 8, re-validated before the IR text round-trip |
 
 ## 6. Non-goals and open questions
 

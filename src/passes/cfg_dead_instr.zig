@@ -174,7 +174,7 @@ fn bump(allocator: std.mem.Allocator, uses: *std.AutoHashMapUnmanaged(*cfg.Value
 /// caller's walk of `f.blocks`; here the phi case is unreachable).
 fn collectInstrOperands(instr: *const cfg.Instr, out: *std.ArrayList(*cfg.Value), allocator: std.mem.Allocator) !void {
     switch (instr.op) {
-        .neg, .not_, .num_cast, .any_pack_copy, .any_pack_move, .any_unpack_copy, .any_unpack_move, .cleanup_owner, .cleanup_disable, .drop_cleanup, .copy, .borrow, .move_, .tail, .unpack_struct, .unpack_tuple, .split_list, .read_tag, .read_payload, .drop_ => |v| try out.append(allocator, v),
+        .neg, .not_, .num_cast, .any_pack_copy, .any_pack_move, .any_unpack_copy, .any_unpack_move, .cleanup_arm, .cleanup_disarm, .cleanup_drop, .copy, .borrow, .move_, .tail, .unpack_struct, .unpack_tuple, .split_list, .read_tag, .read_payload, .drop_ => |v| try out.append(allocator, v),
         .unpack_variant => |uv| try out.append(allocator, uv.base),
         .borrow_variant => |bv| try out.append(allocator, bv.base),
         .type_is => |x| try out.append(allocator, x.value),
@@ -204,8 +204,8 @@ fn collectInstrOperands(instr: *const cfg.Instr, out: *std.ArrayList(*cfg.Value)
 fn collectTermOperands(term: cfg.Terminator, out: *std.ArrayList(*cfg.Value), allocator: std.mem.Allocator) !void {
     switch (term) {
         .ret => |v| if (v) |val| try out.append(allocator, val),
-        .branch => {},
-        .branch_cond => |bc| try out.append(allocator, bc.cond),
+        .j => {},
+        .br => |bc| try out.append(allocator, bc.cond),
         .@"switch" => |s| try out.append(allocator, s.disc),
         .tailcall => |tc| for (tc.args) |a| try out.append(allocator, a),
         .trap => {},

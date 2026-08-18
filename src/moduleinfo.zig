@@ -23,17 +23,21 @@
 //!   using `moduleinfo.resolveType` and friends.
 //!
 //! Resolution (frontend §3.1, Runtime §2.6) maps a written specifier to
-//! exactly one of:
+//! exactly one of, in priority order:
 //!
-//! 1. a Stilla source module (a source map supplied by the embedding
-//!    host, then the search directories in `Sources.search_dirs`, which
-//!    are read as `<dir>/<specifier>.st`);
-//! 2. a standard-library module (the embedded `std/` bundle, consulted
-//!    first, then any host-supplied standard-library sources);
+//! 1. a Stilla source module supplied by the embedding host's source map;
+//! 2. the embedded `std/` bundle, then any host-supplied standard-library
+//!    sources (the standard library cannot be shadowed by search dirs);
 //! 3. a host-provided module (no source is loaded; its interface comes
 //!    from the host interface registry — host-side policy, frontend §2,
-//!    §5.6).
+//!    §5.6);
+//! 4. the search directories in `Sources.search_dirs`, read as
+//!    `<dir>/<specifier>.st`.
 //!
+//! The written specifier is canonicalized first (`normalizeSpecifier`): a
+//! leading `./`, interior `./` segments, and a trailing `.st` are
+//! stripped, so `import("m")`, `import("./m")`, and `import("m.st")` are
+//! the same module — deduplicated by resolved specifier (Runtime §2.1).
 //! Resolution is deduplicated by resolved specifier: the same module is
 //! loaded at most once (Runtime §2.1), preserving module identity through
 //! statically known aliases (`const b = a;` where `a` is a module-valued
@@ -179,8 +183,10 @@ pub const ModuleInfo = struct {
     /// Topological rank: dependencies have strictly lower rank.
     order: u32 = 0,
 
-    /// Value members in declaration order (consts and functions share the
-    /// generated module struct's member space, Core §2.1).
+    /// Value members: functions first (declaration order), then consts
+    /// (declaration order) — the generated module struct's member space
+    /// (Core §2.1). `member_index` values in the IR follow this order
+    /// (ir.md §7).
     values: []ValueMember,
     /// Type members (structs / unions / aliases).
     types: []TypeMember,
@@ -563,3 +569,17 @@ pub const specializeSignature = type_infer.specializeSignature;
 pub const bindTypeArgs = type_infer.bindTypeArgs;
 pub const substSignature = type_infer.substSignature;
 pub const specializeSignatureExplicit = type_infer.specializeSignatureExplicit;
+
+/// Canonical form of a written specifier: a leading `./`, interior
+/// `./` segments, and a trailing `.st` are stripped, so the written
+/// variants of one module dedup to a single registration (Runtime §2.1:
+/// dedup by resolved specifier). The search dirs append `.st` themselves,
+/// so `import("utils.st")` must not read `utils.st.st`.
+pub fn normalizeSpecifier(arena: std.mem.Allocator, written: []const u8) ![]const u8 {
+    var start: usize = 0;
+    var end = written.len;
+    if (end >= 3 and std.mem.eql(u8, written[end - 3 ..], ".st")) end -= 3;
+    while (std.mem.startsWith(u8, written[start..end], "./")) start += 2;
+    const stripped = try std.fmt.allocPrint(arena, "{s}", .{written[start..end]});
+    return std.mem.replaceOwned(u8, arena, stripped, "/./", "/");
+}

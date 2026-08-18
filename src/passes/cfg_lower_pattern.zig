@@ -23,8 +23,8 @@ pub fn lowerLiteralConst(self: *Lowerer, fs: *FuncState, lp: *const ast.LiteralP
     const v = switch (lp.value) {
         .int => |i| try cfg_lower_expr.emitConst(self, fs, lp.span, .{ .int = @intCast(i) }, .{ .primitive = .int32 }),
         .neg_int => |i| try cfg_lower_expr.emitConst(self, fs, lp.span, .{ .int = -@as(i64, @intCast(i)) }, .{ .primitive = .int32 }),
-        .float => |f| try cfg_lower_expr.emitConst(self, fs, lp.span, .{ .float = @floatCast(f) }, .{ .primitive = .float32 }),
-        .neg_float => |f| try cfg_lower_expr.emitConst(self, fs, lp.span, .{ .float = -@as(f32, @floatCast(f)) }, .{ .primitive = .float32 }),
+        .float => |f| try cfg_lower_expr.emitConst(self, fs, lp.span, .{ .float = try cfg_lower_expr.float32Literal(self, lp.span, f) }, .{ .primitive = .float32 }),
+        .neg_float => |f| try cfg_lower_expr.emitConst(self, fs, lp.span, .{ .float = -(try cfg_lower_expr.float32Literal(self, lp.span, f)) }, .{ .primitive = .float32 }),
         .string => |s| try cfg_lower_expr.emitConst(self, fs, lp.span, .{ .string = s }, .{ .primitive = .str }),
         .bool => |b| try cfg_lower_expr.emitConst(self, fs, lp.span, .{ .bool = b }, .{ .primitive = .bool }),
     };

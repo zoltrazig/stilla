@@ -44,7 +44,11 @@ pub const Options = struct {
     /// Run the mid-level optimizer (Passes 7–8) over the lowered CFG
     /// before returning (frontend.md §6): tail call elimination, constant
     /// folding, CSE, PRE, copy propagation, dead-block elimination, jump
-    /// threading, phi simplification, and drop elision. Default off —
+    /// threading, phi simplification, and drop elision — followed by the
+    /// post-optimization drop lowering, which expands every
+    /// statically-expandable `drop` in the CFG (structs, tuples, boxes,
+    /// unions), leaving only the drops that must reach the runtime
+    /// (opaque host types, `hostdata`, `list[T]`, `any`). Default off —
     /// embedders and tests keep the faithful raw CFG; the `stilla`
     /// executable enables it. The toggle is code-only (no CLI flag).
     optimize: bool = false,
@@ -161,6 +165,30 @@ pub fn compile(allocator: std.mem.Allocator, options: Options) CompileError!Comp
                 };
             },
         };
+        // Post-optimization drop lowering (ir.md §6.4, §14): expand every
+        // statically-expandable `drop` in the CFG — structs (hook call +
+        // reverse-declaration-order field drops), tuples, boxes, and
+        // unions — so the only drops reaching the runtime are the ones it
+        // must dispatch dynamically (opaque host types, `hostdata`,
+        // `list[T]`, `any`). It needs the phase-1 graph for field/variant
+        // types and ownership; the result is re-validated like any other
+        // rewrite.
+        lower.lowerDrop(&program, graph, arena_alloc) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+        };
+        if (lower.validate(&program, arena_alloc) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+        }) |msg| {
+            return Compilation{
+                .arena = arena,
+                .graph = graph,
+                .diag = .{
+                    .span = ast.Span.init(0, 0, 0),
+                    .message = msg,
+                },
+                .sources = builder.loaded_sources.items,
+            };
+        }
         const text = try cfg.print(&program, arena_alloc);
         var validator = cfg_parse.Parser.init(arena_alloc);
         defer validator.deinit();

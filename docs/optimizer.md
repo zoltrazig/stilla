@@ -26,7 +26,9 @@ passes — they run on-the-fly at each instruction's construction site
 during [Phase 3](phase3-cfg-lowering.md) (§4.3, braun13cc.pdf §3.1).
 The remaining Pass 8 sequence is: tail-call optimization, PRE,
 dead-block elimination, drop elision, jump threading, and phi
-simplification.
+simplification — followed by the post-optimization drop-lowering pass
+(§8.9), which expands every statically-expandable `drop` into explicit
+CFG operations.
 
 ## IR validator (Pass 6.1)
 
@@ -57,7 +59,7 @@ unique state afterwards and no armed cleanup token on the tail edge.
 
 ### Rewrite
 
-Replace `call` + `ret` with a `br` back to the function's own entry
+Replace `call` + `ret` with a `j` back to the function's own entry
 block, re-binding the callee's parameters from the call arguments and
 splicing in phis for the reused frame's SSA values (ir.md §10.9). The
 chain drop is guarded:
@@ -146,7 +148,7 @@ provably unobservable — the value is Copy, or already dead; must never
 remove a user `drop` hook that performs output (ir.md §14) and never
 moves a destruction earlier than its prescribed point (ir.md §6.4) — a
 type with a user hook is always classified unique, so only Copy drops are
-elided, and `drop_cleanup` / `cleanup_disable` (whose token's payload is
+elided, and `cleanup_drop` / `cleanup_disarm` (whose token's payload is
 an unique owner) are never elided.
 
 ### 8.7 Phi simplification
@@ -160,12 +162,28 @@ operands; pairs with 8.8 (threading produces single-incoming phis).
 ### 8.8 Jump threading
 
 `src/passes/cfg_jump_thread.zig` — merge empty forwarding blocks (a
-block whose only op is an unconditional `br` to a single successor) into
+block whose only op is an unconditional `j` to a single successor) into
 the successor, re-wiring its phi incoming edges, so trivial blocks like
 an `if`-then branch that just jumps to the join are eliminated; chains
 collapse to their ultimate successor, cycles are left alone, and a
 candidate whose predecessor already targets the ultimate successor is
 skipped (no duplicate edges).
+
+### 8.9 Drop lowering (post-optimization)
+
+`src/passes/cfg_lower_drop.zig` — after the Pass 8 sequence, expand every
+`drop` the CFG can express into explicit operations at the drop's
+program point: a struct drop becomes its hook call (when declared) +
+`unpack_struct` + reverse-declaration-order field drops (recursively); a
+tuple drop becomes `unpack_tuple` + reverse element drops; a `box[T]`
+drop becomes `builtin#unbox` + a drop of the contained value; a union
+drop becomes `read_tag` + a `switch` destroying the active variant's
+payload (payload-less variants destroy nothing). Only the drops that
+must dispatch dynamically stay single instructions: opaque host types
+(`host_drop`), `hostdata`, `list[T]`, and `any`. The expansion needs the
+phase-1 module graph (the IR type environment is name-only) and runs in
+the frontend's optimize path, re-validated before the IR text
+round-trip (ir.md §6.4, §14).
 
 ## Optimization harness
 
@@ -190,6 +208,7 @@ error, so the report is suppressed there to keep the log clean.
 | `src/passes/cfg_drop_elide.zig` | Pass 8.6 — drop elision |
 | `src/passes/cfg_phi_simplify.zig` | Pass 8.7 — phi simplification |
 | `src/passes/cfg_jump_thread.zig` | Pass 8.8 — jump threading |
+| `src/passes/cfg_lower_drop.zig` | 8.9 — post-optimization drop lowering (structural drop expansion) |
 | `src/passes/cfg_validate.zig` | IR validator (Pass 6.1) — structure, SSA, typing, ownership |
 | `src/passes/cfg_lower_emit.zig` | On-the-fly optimizations at construction (§4.3) |
 

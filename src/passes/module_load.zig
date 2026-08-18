@@ -1,10 +1,14 @@
 //! Pass: module loading. In: Builder + written specifier + import span.
 //! Out: a `RawModule` registered in `raws`/`by_specifier`/`raw_of`, parsed
 //! and scanned for module values (`module_scan.zig`).
-//!
 //! Resolution (frontend §3.1, Runtime §2.6) maps a written specifier to
 //! exactly one of a Stilla source module, a standard-library module, or a
 //! host-provided module, deduplicated by resolved specifier (Runtime §2.1).
+//! Priority order (moduleinfo.zig): embedding source map, then the
+//! embedded std bundle / host std sources, then host modules, then the
+//! search directories. The written specifier is canonicalized first
+//! (`moduleinfo.normalizeSpecifier`): `import("m")`, `import("./m")`, and
+//! `import("m.st")` name the same module.
 //! The registration half lives here; the scanner (`module_scan.zig`) seeds
 //! the module-value cache that materialization consumes.
 
@@ -24,26 +28,51 @@ const ModuleKind = moduleinfo.ModuleKind;
 /// loading and parsing it if new. Returns null (with `diag` set) when
 /// resolution fails.
 pub fn load(self: *Builder, written: []const u8, span: ast.Span) !?*RawModule {
-    if (self.by_specifier.get(written)) |_| return self.raw_of.get(written);
+    // Canonicalize before any lookup: `import("m")`, `import("./m")`,
+    // and `import("m.st")` are the same module (Runtime §2.1 dedups by
+    // resolved specifier), and the search dirs read `<dir>/<spec>.st`, so
+    // the `.st`/`./` forms must not silently load a different file.
+    const spec = try moduleinfo.normalizeSpecifier(self.arena, written);
+    if (self.by_specifier.get(spec)) |_| return self.raw_of.get(spec);
+    // The IR text form embeds the specifier in printed names (func
+    // refs, call/syscall targets — ir.md §9) whose identifier charset
+    // the IR lexer must lex. Reject specifiers that cannot round-trip
+    // here instead of failing later as an optimizer internal error.
+    if (!validSpecifier(spec)) {
+        return self.failSpan(span, "module specifier '{s}' is not representable in the IR text form (allowed: letters, digits, '_', '.')", .{written});
+    }
     const stdbundle_module: ?stdbundle.Module = blk: {
         for (stdbundle.modules) |m| {
-            if (std.mem.eql(u8, m.specifier, written)) break :blk m;
+            if (std.mem.eql(u8, m.specifier, spec)) break :blk m;
         }
         break :blk null;
     };
-    if (self.sources.source.get(written)) |text| {
-        return try newModule(self, written, .source, text);
+    if (self.sources.source.get(spec)) |text| {
+        return try newModule(self, spec, .source, text);
     } else if (stdbundle_module) |bm| {
-        return try newModule(self, written, .standard_library, bm.source);
-    } else if (self.sources.standard_library.get(written)) |text| {
-        return try newModule(self, written, .standard_library, text);
-    } else if (self.sources.host.contains(written)) {
-        return newHostModule(self, written);
+        return try newModule(self, spec, .standard_library, bm.source);
+    } else if (self.sources.standard_library.get(spec)) |text| {
+        return try newModule(self, spec, .standard_library, text);
+    } else if (self.sources.host.contains(spec)) {
+        return newHostModule(self, spec);
     }
     if (self.sources.search_dirs.len > 0 and self.io != null) {
-        if (try loadFromSearchDirs(self, written, span)) |raw| return raw;
+        if (try loadFromSearchDirs(self, spec, span)) |raw| return raw;
     }
     return self.failSpan(span, "unresolved import specifier '{s}'", .{written});
+}
+
+/// Whether a specifier survives the IR text round-trip: it appears in
+/// printed names (`func @<specifier>.<fn>`, syscall targets) and must
+/// lex as identifiers there (cfg_lex `isIdentCont`: alphanumerics, '_',
+/// '.'). In particular a '-' is forbidden — the IR lexer treats `-inf`
+/// as a float literal.
+fn validSpecifier(s: []const u8) bool {
+    if (s.len == 0) return false;
+    for (s) |c| {
+        if (!std.ascii.isAlphanumeric(c) and c != '_' and c != '.') return false;
+    }
+    return true;
 }
 
 /// Resolve a written specifier through the search directories, in

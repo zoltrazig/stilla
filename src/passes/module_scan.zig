@@ -30,7 +30,7 @@ pub fn scanModule(self: *Builder, raw: *RawModule, program: *const ast.Program) 
     // single-segment path aliases through other consts.
     for (raw.consts.items) |rc| {
         if (rc.def.init) |init_expr| switch (init_expr.*) {
-            .import => |imp| try raw.module_values.put(self.arena, rc.def.name.text, imp.module),
+            .import => |imp| try raw.module_values.put(self.arena, rc.def.name.text, try moduleinfo.normalizeSpecifier(self.arena, imp.module)),
             else => {},
         };
     }
@@ -45,8 +45,8 @@ fn collectConst(self: *Builder, raw: *RawModule, c: *const ast.ConstDef) !void {
     var rc = RawConst{ .def = c };
     if (c.init) |init_expr| switch (init_expr.*) {
         .import => |imp| {
-            try raw.import_specs.append(self.arena, .{ .spec = imp.module, .span = imp.span });
-            rc.import_spec = imp.module;
+            try raw.import_specs.append(self.arena, .{ .spec = try moduleinfo.normalizeSpecifier(self.arena, imp.module), .span = imp.span });
+            rc.import_spec = try moduleinfo.normalizeSpecifier(self.arena, imp.module);
             rc.import_span = imp.span;
         },
         .path => |path| {

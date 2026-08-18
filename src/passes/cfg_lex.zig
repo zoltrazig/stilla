@@ -135,6 +135,14 @@ pub const Lexer = struct {
                 try list.append(self.arena.allocator(), .{ .kind = .arrow, .span = sp(start, i), .text = "" });
                 continue;
             }
+            // the negative non-finite float literal `-inf` (the positive
+            // forms `inf`/`nan` lex as identifiers and are accepted by
+            // the parser's const readers)
+            if (ch == '-' and i + 4 <= text.len and std.mem.eql(u8, text[i + 1 .. i + 4], "inf")) {
+                i += 4;
+                try list.append(self.arena.allocator(), .{ .kind = .number, .span = sp(start, i), .text = "-inf" });
+                continue;
+            }
             // numbers, including negative literals
             if (isDigit(ch) or (ch == '-' and i + 1 < text.len and isDigit(text[i + 1]))) {
                 i += 1;

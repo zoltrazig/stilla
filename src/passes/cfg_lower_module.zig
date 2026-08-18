@@ -58,8 +58,10 @@ pub fn lowerModule(self: *Lowerer, info: *moduleinfo.ModuleInfo) LowerError!*cfg
     // and lowered like any other function. `drop %v` of such a struct
     // stays a single unexpanded instruction (ir.md §6.4); the runtime
     // invokes this function as part of the destruction sequence
-    // (Runtime §6.2). Generic templates are specialized (and their
-    // hooks lowered) by phase 2 (Core §12).
+    // (Runtime §6.2). Generic structs cannot carry hooks: phase 2
+    // rejects them at the declaration (checker_annotate), because
+    // monomorphize specializes function templates only and there is no
+    // per-specialization hook to lower here.
     for (info.types) |*tm| {
         switch (tm.decl) {
             .struct_ => |s| if (s.drop) |d| {

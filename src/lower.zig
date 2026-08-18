@@ -36,6 +36,7 @@ const cfg = @import("cfg.zig");
 const checker = @import("passes/checker.zig");
 const moduleinfo = @import("moduleinfo.zig");
 const cfg_lower_program = @import("passes/cfg_lower_program.zig");
+const cfg_lower_drop = @import("passes/cfg_lower_drop.zig");
 const cfg_optimize = @import("passes/cfg_optimize.zig");
 const cfg_tail_call = @import("passes/cfg_tail_call.zig");
 const cfg_pre = @import("passes/cfg_pre.zig");
@@ -86,10 +87,10 @@ pub const FuncState = struct {
     /// drop, take, move-call-arg, phi input, ret, construct arg).
     consumed: std.AutoHashMapUnmanaged(*cfg.Value, void) = .empty,
     /// Conditional-release tokens (Core §10.10, ir.md §6.4): value → its
-    /// cleanup token (a `cleanup_owner` result in the dominating block of
+    /// cleanup token (a `cleanup_arm` result in the dominating block of
     /// the construct that first made it a candidate). A consuming path
-    /// disarms the token (`cleanup_disable`); the scope-end destruction is
-    /// `drop_cleanup` of the token — conditional on the per-path armed
+    /// disarms the token (`cleanup_disarm`); the scope-end destruction is
+    /// `cleanup_drop` of the token — conditional on the per-path armed
     /// bit, so the maybe-unique value itself is never referenced after the
     /// construct's join.
     cleanup_tokens: std.AutoHashMapUnmanaged(*cfg.Value, *cfg.Value) = .empty,
@@ -173,6 +174,13 @@ pub const Lowerer = struct {
 // -----------------------------------------------------------------
 
 pub const lowerProgram = cfg_lower_program.lowerProgram;
+/// Post-optimization drop lowering (ir.md §6.4, §14): expand every
+/// statically-expandable `drop` in the CFG — structs (hook call +
+/// reverse-order field drops), tuples, boxes, and unions — leaving only
+/// the drops that must reach the runtime (opaque host types, `hostdata`,
+/// `list[T]`, `any`). Runs after the optimizer; requires the phase-1
+/// module graph for field/variant types and ownership.
+pub const lowerDrop = cfg_lower_drop.lowerDrop;
 
 pub const pre = cfg_pre.pre;
 pub const deadBlock = cfg_dead_block.deadBlock;

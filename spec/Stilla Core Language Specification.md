@@ -2353,7 +2353,7 @@ A new local binding may shadow an existing binding.
 
 Function arguments and return values must match exactly unless the source type is `never`, the required type is the top type `any`, or a transparent `type` alias expands to the required type (The top type `any`).
 
-`any` carries a runtime type tag identifying its payload type; recovery requires naming the type explicitly, via `a as T` (Recovery by `as`) or a `match` type-test pattern (Recovery by `match`). Stilla defines no equality on `any`. `hostdata` is opaque and tagless; no cast, pattern, or equality is defined on it (The `hostdata` type).
+`any` carries a runtime type tag identifying its payload type; recovery requires naming the type explicitly, via `a as T` (Recovery by `as`) or a `match` type-test pattern (Recovery by `match`). Stilla defines no equality on `any`. `hostdata` is opaque and tagless; no cast, pattern, or equality is defined on it (The `hostdata` type). A host-backed opaque nominal type is a nominal type with no fields or variants (Opaque host types): it is unique by declaration, may be moved, borrowed, stored, and `any`-packed, and may not be raw-constructed, field-accessed, or destructured in source.
 
 ## Conversion
 
@@ -2393,6 +2393,8 @@ A `match (move owner)` consumes the complete owner and may produce owning payloa
 `let` requires an irrefutable pattern.
 
 Refutable patterns are accepted only by `match` in Stilla v1.3.
+
+A struct pattern over an opaque host type is a compile-time error (Opaque host types).
 
 ## Ownership
 
@@ -2459,6 +2461,18 @@ Its destruction-view argument cannot be moved, dropped, returned, or used to tra
 ## Structural destruction
 
 After a struct's user hook completes normally, *Unique* fields are destroyed in reverse declaration order (the Runtime specification).
+
+## Opaque host types
+
+An opaque host type is declared only by a standard-library or host-provided module interface (Host-backed opaque nominal types).
+
+An opaque value is *Unique* by declaration, irrespective of its type arguments.
+
+No construction, member access, or destructuring is defined on an opaque value: a struct literal, variant construction, member access, struct pattern, or consuming destructure over an opaque type is a compile-time error.
+
+An opaque value may be a plain, `borrow`, or `move` parameter; a return value; an element of `list`, `box`, or `tuple`; and an `any` payload, recovered with the ordinary `as` / `match` operations.
+
+Destruction of an opaque value dispatches to the host type's destructor (the Runtime specification); an opaque type has no user `drop` hook.
 
 ## Panic and traps
 

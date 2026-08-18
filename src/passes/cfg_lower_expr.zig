@@ -31,10 +31,27 @@ pub fn lowerExpr(self: *Lowerer, fs: *FuncState, e: *const ast.Expr) LowerError!
     return result;
 }
 
+/// Convert a parsed f64 literal to float32, rejecting values that
+/// overflow float32: a saturating `@floatCast` would silently produce
+/// ±inf, which the IR text form cannot represent (cfg_print/cfg_parse
+/// round-trip would fail). The parser already rejects f64-overflowing
+/// literals (parser.floatValue); this closes the f64-finite but
+/// f32-overflowing window (e.g. `1e300`).
+pub fn float32Literal(self: *Lowerer, span: ast.Span, v: f64) LowerError!f32 {
+    const f: f32 = @floatCast(v);
+    if (!std.math.isFinite(f)) {
+        return self.fail(span, "float literal out of range for float32", .{});
+    }
+    return f;
+}
+
 pub fn lowerExprInner(self: *Lowerer, fs: *FuncState, e: *const ast.Expr) LowerError!?*cfg.Value {
     return switch (e.*) {
         .int => |lit| try emitConst(self, fs, lit.span, .{ .int = @intCast(lit.value) }, .{ .primitive = .int32 }),
-        .float => |lit| try emitConst(self, fs, lit.span, .{ .float = @floatCast(lit.value) }, .{ .primitive = .float32 }),
+        .float => |lit| blk: {
+            const f = try float32Literal(self, lit.span, lit.value);
+            break :blk try emitConst(self, fs, lit.span, .{ .float = f }, .{ .primitive = .float32 });
+        },
         .string => |lit| try emitConst(self, fs, lit.span, .{ .string = lit.value }, .{ .primitive = .str }),
         .bool => |lit| try emitConst(self, fs, lit.span, .{ .bool = lit.value }, .{ .primitive = .bool }),
         .void => |lit| try emitVoid(self, fs, lit.span),

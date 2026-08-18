@@ -64,13 +64,13 @@ The IR is produced by the frontend (Phase 3 of the pipeline described in fronten
 A function is a directed graph of **basic blocks**. A block is a linear sequence of instructions terminated by exactly one **terminator**.
 
 - **Entry block.** Every function has exactly one entry block, which has no predecessors; the parameter values `%0..%k-1` are defined there.
-- **Terminators.** Exactly one per block, and it is the last instruction. The six forms are `ret`, `br` (unconditional), `br_cond` (conditional), `switch` (union dispatch), `tailcall` (frame-reusing direct self-call, §14.7.1), and `trap` (panic / `never`).
-- **Layout.** Blocks are ordered so that fall-through is the common case: an unconditional `br` to the *next* block in layout may be elided by the printer; the in-memory form always carries an explicit terminator.
-- **Edges.** `br_cond` has exactly two out-edges; `switch` has one per arm plus an implicit default that is `trap`. Match exhaustiveness is guaranteed by the checker, so the default is unreachable.
+- **Terminators.** Exactly one per block, and it is the last instruction. The six forms are `ret`, `j` (unconditional), `br` (conditional), `switch` (union dispatch), `tailcall` (frame-reusing direct self-call, §14.7.1), and `trap` (panic / `never`).
+- **Layout.** Blocks are ordered so that fall-through is the common case: an unconditional `j` to the *next* block in layout may be elided by the printer; the in-memory form always carries an explicit terminator.
+- **Edges.** `br` has exactly two out-edges; `switch` has one per arm plus an implicit default that is `trap`. Match exhaustiveness is guaranteed by the checker, so the default is unreachable.
 
 ```
 terminator ::= "ret" value?                  -- return; bare "ret" for void
-             | "br" label
+             | "j" label
              | "br" value "?" label ":" label
              | "switch" value "{" tag "->" label ("," tag "->" label)* "}"
              | "tailcall" label value ("," value)*   -- frame-reusing self call
@@ -82,7 +82,7 @@ terminator ::= "ret" value?                  -- return; bare "ret" for void
 - every block except the entry has at least one predecessor;
 - every block ends in exactly one terminator; no instruction follows it;
 - every block is reachable from the entry;
-- every out-edge of `br_cond` / `switch` names an existing block;
+- every out-edge of `br` / `switch` names an existing block;
 - `phi` nodes appear only at the head of a block, one incoming per predecessor edge, in the same order as the block's predecessor list.
 
 ---
@@ -92,7 +92,7 @@ terminator ::= "ret" value?                  -- return; bare "ret" for void
 ## 4.1 Definitions
 
 - **Value** — one SSA definition: the result of exactly one instruction. Values carry an IR-native type, an **ownership class** inherited from the type (*Copy* / *Unique*), and a **created state** (owned / borrowed). Whether a value is still *available* at a program point — alive, consumed, or consumed on some paths only — is not a value property: it is an edge-sensitive dataflow property computed by the validator and mirrored by the lowering's consumption bookkeeping. Values are numbered per function in definition order (`%0, %1, …`); the text form also permits symbolic names (`%sum`) for readability.
-- **Instruction** — a unit of computation. An instruction either *defines* one or more values (a single result for ordinary ops; several for the atomic destructure ops `unpack_*` / `split_list`) or is a **pure effect** with no results: `drop`, `store_member`, `cleanup_disable`, `drop_cleanup`.
+- **Instruction** — a unit of computation. An instruction either *defines* one or more values (a single result for ordinary ops; several for the atomic destructure ops `unpack_*` / `split_list`) or is a **pure effect** with no results: `drop`, `store_member`, `cleanup_disarm`, `cleanup_drop`.
 - **Use** — a reference to a value as an operand. SSA requires that every non-phi use of a value is **dominated** by its definition; a phi's operands are defined in the corresponding predecessor blocks.
 
 ```
@@ -129,7 +129,7 @@ The phi's type is the **join type** of the merged values:
 - a mix coercible to `any` joins as `any`;
 - anything else is a compile-time error and never reaches the IR.
 
-The `T → any` coercion of a mixed join is **not** implicit at the phi: the lowering materializes it on each predecessor edge — `any_pack_copy %x` (*Copy* source) or `any_pack_move %x` (*Unique* source) is appended to the branch block before its `br join`, and the phi joins the homogeneous `any` values. Ownership stays explicit and the phi's operand types are verifiable.
+The `T → any` coercion of a mixed join is **not** implicit at the phi: the lowering materializes it on each predecessor edge — `any_pack_copy %x` (*Copy* source) or `any_pack_move %x` (*Unique* source) is appended to the branch block before its `j join`, and the phi joins the homogeneous `any` values. Ownership stays explicit and the phi's operand types are verifiable.
 
 ## 4.4 Coercions
 
@@ -181,7 +181,7 @@ Operand types and trap behavior (overflow, divide-by-zero, invalid `any` recover
 | `concat` | `%d = concat %a, %b` | `str` (source `str + str`) |
 | `eq ne lt le gt ge` | `%d = lt %a, %b` | `bool` |
 
-`and` and `or` have **no** instructions: they lower to `br_cond` diamonds. `!` is `not`. Comparison operators do not chain, so no IR constraint is needed beyond what the checker enforces.
+`and` and `or` have **no** instructions: they lower to `br` diamonds. `!` is `not`. Comparison operators do not chain, so no IR constraint is needed beyond what the checker enforces.
 
 ## 5.3 Aggregates and projections
 
@@ -218,11 +218,11 @@ Operand types and trap behavior (overflow, divide-by-zero, invalid `any` recover
 | `borrow` | `%d = borrow %a` | a non-owning view of `%a`; origin `root(%a)` |
 | `move` | `%d = move %a` | ownership of `%a` transferred; `%a` is dead |
 | `drop` | `drop %v` | effect: deterministic destruction; `%v` is dead; `%v` is never *Copy* — the frontend does not emit `drop` for *Copy* values |
-| `cleanup_owner` | `%d: cleanup = cleanup_owner %v` | a **cleanup token** (type `cleanup`) scheduling `%v`'s conditional destruction; a compiler-only value usable only by `cleanup_disable` / `drop_cleanup` |
-| `cleanup_disable` | `cleanup_disable %d` | effect: disarms the token without destroying the payload — emitted on the paths where the owner was consumed (moved, taken, transferred) |
-| `drop_cleanup` | `drop_cleanup %d` | effect: the scope-end conditional destruction — destroys the payload iff the token is still armed, then disarms it |
+| `cleanup_arm` | `%d: cleanup = cleanup_arm %v` | a **cleanup token** (type `cleanup`) scheduling `%v`'s conditional destruction; a compiler-only value usable only by `cleanup_disarm` / `cleanup_drop` |
+| `cleanup_disarm` | `cleanup_disarm %d` | effect: disarms the token without destroying the payload — emitted on the paths where the owner was consumed (moved, taken, transferred) |
+| `cleanup_drop` | `cleanup_drop %d` | effect: the scope-end conditional destruction — destroys the payload iff the token is still armed, then disarms it |
 
-`move` of a *Copy* value is semantically a copy with no invalidation — the lowering emits `copy` in that case. Because ownership is exactly *Copy* or *Unique*, `drop` of a *Copy* value does nothing and the frontend never emits it; the lowering's drop emission skips any value whose type is *Copy*. `drop` of a struct with a user drop hook executes the full destruction sequence (hook, then reverse-declaration-order field destruction) inside the runtime; the IR does not expand it. Conditional destruction of a maybe-*Unique* value is scheduled through its cleanup token: the maybe-*Unique* *value* itself is never referenced after its construct's join — only its token is, so the destruction instruction is SSA-clean on every path.
+`move` of a *Copy* value is semantically a copy with no invalidation — the lowering emits `copy` in that case. Because ownership is exactly *Copy* or *Unique*, `drop` of a *Copy* value does nothing and the frontend never emits it; the lowering's drop emission skips any value whose type is *Copy*. After the optimizer, a dedicated **drop-lowering pass** expands every statically-expandable `drop` in the CFG (§14.4): a struct drop becomes its hook call (when declared) plus an `unpack_struct` and per-field drops, a tuple drop becomes `unpack_tuple` plus element drops, a box drop becomes `builtin#unbox` plus a drop of the contained value, and a union drop becomes a `read_tag` + `switch` over its variants. Only the drops the CFG cannot express remain single instructions: opaque host types (`host_drop`), `hostdata`, `list[T]`, and `any`. Conditional destruction of a maybe-*Unique* value is scheduled through its cleanup token: the maybe-*Unique* *value* itself is never referenced after its construct's join — only its token is, so the destruction instruction is SSA-clean on every path.
 
 ## 5.5 Calls and system calls
 
@@ -253,8 +253,8 @@ host supplies the value at instantiation (Module storage and the member table).
 | --- | --- |
 | `phi` | `%d = phi [%v, L1], [%w, L2]` — n-ary, block head only |
 | `ret` | `ret %v` or `ret` — return, transferring ownership of a *Unique* result to the caller |
-| `br` | `br L` — unconditional |
-| `br_cond` | `br %c ? L1 : L2` — `%c: bool` |
+| `j` | `j L` — unconditional |
+| `br` | `br %c ? L1 : L2` — `%c: bool` |
 | `switch` | `switch %t { #a -> L1, #b -> L2 }` — dispatch on a tag value; implicit `trap` default |
 | `tailcall` | `tailcall @f, %a, …` — frame-reusing direct self-call; an exit like `ret`/`trap`, no out-edge (§14.7.1) |
 | `trap` | `trap` — panic / `never` / unreachable |
@@ -293,8 +293,8 @@ Whether a value is still *available* at a program point is **not** a value prope
 | `call` arg, plain/borrow | unchanged | — | borrow params take a view; no ownership change |
 | `call` arg, move | consumed | — | ownership transfers |
 | `drop` | `%v` consumed | — | effect |
-| `cleanup_owner` | `%v` unchanged | `owned` (a `cleanup`-typed token) | compiler-only capability, never a user value |
-| `cleanup_disable` / `drop_cleanup` | token only | — | effect; the scheduled owner is never referenced |
+| `cleanup_arm` | `%v` unchanged | `owned` (a `cleanup`-typed token) | compiler-only capability, never a user value |
+| `cleanup_disarm` / `cleanup_drop` | token only | — | effect; the scheduled owner is never referenced |
 | `phi` | incoming *Unique* values consumed on their edges | `owned` (join) | |
 | `ret %v` | `%v` (owned *Unique*) consumed | — | borrowed returns are a compile-time error |
 
@@ -311,7 +311,7 @@ A phi over *Unique* values is legal because CFG join edges are **exclusive by co
 
 ```
 then:  %a = …            else:  %b = …
-       br join                   br join
+       j join                   j join
 join:  %f = phi [%a, then], [%b, else]
        … uses of %f …           ; drops of %f at scope end drop the arrived value
 ```
@@ -331,14 +331,14 @@ Destruction is deterministic (per the Stilla Runtime Specification) and material
 - **Join locals.** A local created by an `if`/`match` expression is a phi result; its `drop` goes at the end of the *enclosing* scope.
 - **Unique temporaries.** A temporary surviving to the end of its full expression is destroyed in **reverse creation order** (per the Stilla Runtime Specification): the builder keeps a per-expression temporary stack and emits its `drop`s at the expression's end. `consume(open_file("f"))` moves the temporary into the call and destroys nothing; `open_file("f");` as a statement drops it.
 - **Explicit `drop`.** Source `drop name;` is one `drop` instruction at that point in control flow.
-- **Conditional destruction.** A maybe-*Unique* binding — released on some but not all paths through a conditional construct — is scheduled with a **cleanup token**. The lowering arms a token at the construct's entry (`%c: cleanup = cleanup_owner %v`, in the block that dominates every branch and the join); a path that consumes `%v` (moves, takes, transfers it) also disarms the token (`cleanup_disable %c`); the scope-end destruction is `drop_cleanup %c` — destroying the payload iff the token is still armed on the path that reached the scope exit. The per-path liveness lives in the token's armed bit (runtime state), not in an SSA value, so the maybe-*Unique* value itself is never referenced after the construct's join and the destruction schedule is SSA-clean on every path.
+- **Conditional destruction.** A maybe-*Unique* binding — released on some but not all paths through a conditional construct — is scheduled with a **cleanup token**. The lowering arms a token at the construct's entry (`%c: cleanup = cleanup_arm %v`, in the block that dominates every branch and the join); a path that consumes `%v` (moves, takes, transfers it) also disarms the token (`cleanup_disarm %c`); the scope-end destruction is `cleanup_drop %c` — destroying the payload iff the token is still armed on the path that reached the scope exit. The per-path liveness lives in the token's armed bit (runtime state), not in an SSA value, so the maybe-*Unique* value itself is never referenced after the construct's join and the destruction schedule is SSA-clean on every path.
 
   **Cleanup token invariants.** A cleanup token (type `cleanup`) is a compiler-managed capability, not a user value:
 
-  - it is created only by `cleanup_owner` and used only by `cleanup_disable` / `drop_cleanup`;
+  - it is created only by `cleanup_arm` and used only by `cleanup_disarm` / `cleanup_drop`;
   - it is never `copy`'d, `move`'d, `borrow`'d, stored into an aggregate or a module slot, passed as a `call` / `syscall` argument, `ret`'d, or merged by an ordinary `phi` — no token-phi exists, and the op schema types every ordinary op's operands, so no ordinary op accepts a `cleanup`-typed value;
   - a token carries no *Copy*/*Unique* ownership class: it is a separate, opaque value kind with no user-visible semantics;
-  - its **armed bit** is runtime state: `cleanup_disable` disarms; `drop_cleanup` destroys the payload iff still armed, then disarms;
+  - its **armed bit** is runtime state: `cleanup_disarm` disarms; `cleanup_drop` destroys the payload iff still armed, then disarms;
   - cleanup ops are ordering-sensitive effects: the optimizer never CSEs, duplicates, or reorders them relative to the owner's consumption or to each other.
 
   **Lowering boundary.** The cleanup family lives in the SSA CFG as the three ops; no pass expands them into flag stores and branches before validation and optimization. The frontend **canonicalizes** at emission time, after ownership analysis, so the optimizer never sees a conditional-destruction candidate in any other shape:
@@ -347,11 +347,11 @@ Destruction is deterministic (per the Stilla Runtime Specification) and material
   | --- | --- |
   | definitely owned (never consumed) | an ordinary `drop` at scope end — no token |
   | definitely released (consumed on every path) | no destruction — no cleanup ops at all |
-  | maybe-*Unique* (consumed on some paths) | `cleanup_owner` at construct entry, `cleanup_disable` on consume paths, `drop_cleanup` at scope end |
+  | maybe-*Unique* (consumed on some paths) | `cleanup_arm` at construct entry, `cleanup_disarm` on consume paths, `cleanup_drop` at scope end |
 
   Expansion beyond that is a backend matter: a compiling backend lowers the three ops — after validation and optimization — to a frame cleanup slot / armed bit and a conditional destruction (branch on the bit) at the scope exit. A runtime that interprets the SSA CFG directly executes the ops as-is — the armed bit is the token's runtime state — and never expands them at all.
-- **Drop hooks.** `drop %v` where `v`'s struct defines a `drop` hook is a *single* instruction: the runtime executes the destruction sequence — hook call (fields still valid), then reverse-declaration-order field destruction, then the value is marked destroyed. The IR does not expand this; the ordering is a runtime contract (per the Stilla Runtime Specification).
-- **Opaque destruction.** `drop %v` where `v`'s type is `opaque(OpaqueDecl)` is likewise a single instruction: the runtime dispatches to the host type's destructor named by `host_id` (`host_drop(host_id, value)`, Runtime §6.6) and marks the value destroyed. The IR does not expand this either — there is no `drop_array`-style family; the same `drop` op covers every nominal type (Core §11.8).
+- **Drop hooks.** `drop %v` where `v`'s struct defines a `drop` hook is *not* left to the runtime: the post-optimization drop-lowering pass expands it into a direct `call` of the hidden hook function (the hook runs while all fields remain valid, Runtime §6.2), an `unpack_struct` consuming the value, and the per-field drops in reverse declaration order — recursively expanded. A struct without a hook expands to the unpack and field drops alone. The ordering is thereby made explicit in the CFG; only the drops the CFG cannot express stay as single instructions (opaque, `hostdata`, `list`, `any`).
+- **Opaque destruction.** `drop %v` where `v`'s type is `opaque(OpaqueDecl)` stays a single instruction: the runtime dispatches to the host type's destructor named by `host_id` (`host_drop(host_id, value)`, Runtime §6.6) and marks the value destroyed. The CFG cannot express the host dispatch — there is no `drop_array`-style family; the same `drop` op covers every nominal type (Core §11.8).
 - **Trap paths.** `trap` performs no drops: panic and runtime traps skip all pending destruction. Destruction is therefore always placed on edges that complete normally.
 
 ## 6.5 Borrow provenance
@@ -514,7 +514,7 @@ Op ::= const(ConstValue) | module_ref(Spec) | fn_ref(Name)
      | add(Bin) | sub(Bin) | mul(Bin) | div(Bin) | rem(Bin) | concat(Bin)
      | eq(Bin) | ne(Bin) | lt(Bin) | le(Bin) | gt(Bin) | ge(Bin)
      | copy(Value) | borrow(Value) | move(Value) | drop(Value)    -- drop is an effect
-     | cleanup_owner(Value) | cleanup_disable(Value) | drop_cleanup(Value)
+     | cleanup_arm(Value) | cleanup_disarm(Value) | cleanup_drop(Value)
      | load_member(LoadMember) | store_member(StoreMember)  -- store_member is an effect
      | construct(Construct) | read_field(Proj) | read_tuple(Proj)
      | read_index(Index) | tail(Value)
@@ -597,7 +597,7 @@ IrProgram    ::= { modules: [IrModule], funcs: [IrFunc],
 
 # 10. Textual form
 
-The text form is the canonical printable representation: used for IR dumps, tests, and golden files. It is a debug format, not a persistence format — the in-memory structures are authoritative. The printer may omit types where inferable, omit `br` to the next block in layout (fall-through), and use symbolic names instead of `%N`. Constant literals may appear inline wherever a value operand is expected (they are `const` instructions in memory).
+The text form is the canonical printable representation: used for IR dumps, tests, and golden files. It is a debug format, not a persistence format — the in-memory structures are authoritative. The printer may omit types where inferable, omit `j` to the next block in layout (fall-through), and use symbolic names instead of `%N`. Constant literals may appear inline wherever a value operand is expected (they are `const` instructions in memory).
 
 ```
 ir      ::= module*
@@ -621,7 +621,7 @@ op      ::= "const" literal
           | "module_ref" string
           | "fn_ref" "@" ident
           | ("neg" | "not" | "num_cast" | "any_pack_copy" | "any_pack_move"
-             | "any_unpack_copy" | "any_unpack_move" | "cleanup_owner"
+             | "any_unpack_copy" | "any_unpack_move" | "cleanup_arm"
              | "copy" | "borrow" | "move") value
           | ("add"|"sub"|"mul"|"div"|"rem"|"concat"|"eq"|"ne"|"lt"|"le"|"gt"|"ge") value "," value
           | "type_is" value "," type
@@ -636,8 +636,8 @@ op      ::= "const" literal
           | "syscall" target ("," value)*
           | "phi" "[" value "," label "]" ("," "[" value "," label "]")*
 effect  ::= "drop" value
-          | "cleanup_disable" value
-          | "drop_cleanup" value
+          | "cleanup_disarm" value
+          | "cleanup_drop" value
           | "store_member" number "," value
 ```
 
@@ -658,14 +658,14 @@ The frontend walks the annotated, monomorphic AST with a builder that appends in
 | nominal struct / union / opaque types | one `TypeDecl` in the type environment per type in use (including monomorphic generic specializations), translated from the module's type members into IR-native types; an opaque type becomes `opaque(OpaqueDecl)` with the declared ownership and the host identity of its monomorphic instantiation |
 | binary arithmetic / comparison | one `add`…`ge` |
 | `!` | `not` |
-| `and` / `or` | `br_cond` diamond, join phi |
+| `and` / `or` | `br` diamond, join phi |
 | `a as T` | `num_cast` (the Core §16.3 cast set) or `any_unpack_copy` / `any_unpack_move` |
 | coercion to `any` | `any_pack_copy` (*Copy*) or `any_pack_move` (*Unique*) at the boundary |
 | `let name = expr` | evaluate `expr`, bind result as a fresh value |
 | `let pattern = expr` | destructure: `read_*` views or the atomic `unpack_*` / `split_list` |
-| `if` | `br_cond` then/else, join phi; no `else` → `void` join |
+| `if` | `br` then/else, join phi; no `else` → `void` join |
 | `match` (union) | `read_tag` + `switch`; per-arm payload binds; join phi |
-| `match` (other patterns) | `eq`/`br_cond` chains, projections, `tail` |
+| `match` (other patterns) | `eq`/`br` chains, projections, `tail` |
 | `match (move s)` | `unpack_variant` binds (tag-carrying); scrutinee wholly consumed |
 | `move name` | `move` (or `copy` for *Copy*); old value dead |
 | `drop name;` | `drop` |
@@ -710,10 +710,10 @@ These invariants are the contract every producer of the IR must uphold — the f
 - `copy` / `move` / `drop` / `unpack_*` / `split_list` / `any_pack_move` / `any_unpack_move` / phi / `ret` operands that are *Unique* are `owned` (never `borrowed`, never already consumed in that instruction);
 - a forward analysis over the CFG tracks each *Unique* value as `Available` / `Consumed` / `MaybeConsumed` per program point, merging at joins (`Available ⊔ Consumed = MaybeConsumed`): a consuming op requires its operand *available*; a `MaybeConsumed` value has no uses at all (its destruction is scheduled through its cleanup token); a phi input is checked against its **arriving edge's** exit state, so the loop-carried phis of tail-call optimization validate per edge;
 - a destructure consumes its base atomically (`unpack_*` / `split_list`): one op, base `Available` on arrival and `Consumed` afterwards — there is no partial-consumption state to track;
-- `drop` of a *Copy* value is absent (the frontend never emits it); `cleanup_disable` / `drop_cleanup` operands are cleanup tokens;
-- cleanup tokens are compiler-only capabilities: each is created by exactly one `cleanup_owner` and used by `cleanup_disable` / `drop_cleanup` only — never `copy`'d, `move`'d, `borrow`'d, stored, passed as an argument, `ret`'d, or phi-merged (the schema types every ordinary op's operands, so no ordinary op accepts a `cleanup`-typed value);
-- a token is disarmed at most once per path, its `drop_cleanup` is its last use on the path, and every normal-exit path disposes of every armed token (trap paths skip all destruction);
-- `cleanup_disable` appears only on paths where the token's owner was consumed (moved, taken, transferred) on that path;
+- `drop` of a *Copy* value is absent (the frontend never emits it); `cleanup_disarm` / `cleanup_drop` operands are cleanup tokens;
+- cleanup tokens are compiler-only capabilities: each is created by exactly one `cleanup_arm` and used by `cleanup_disarm` / `cleanup_drop` only — never `copy`'d, `move`'d, `borrow`'d, stored, passed as an argument, `ret`'d, or phi-merged (the schema types every ordinary op's operands, so no ordinary op accepts a `cleanup`-typed value);
+- a token is disarmed at most once per path, its `cleanup_drop` is its last use on the path, and every normal-exit path disposes of every armed token (trap paths skip all destruction);
+- `cleanup_disarm` appears only on paths where the token's owner was consumed (moved, taken, transferred) on that path;
 - a borrow-mode parameter is the only way a value arrives `borrowed`;
 - a `load_member` of a *Unique* constant member arrives `borrowed` — the module owns the constant and source cannot move or drop it;
 - named ownership: a `named`-typed value's ownership resolves through its type declaration; a struct with a user drop hook is always *Unique* — a drop hook and *Copy* ownership contradict; an opaque type is *Unique* by declaration (Core §11.8) — `Array[int32]` is unique even though `int32` is *Copy*;
@@ -741,7 +741,7 @@ These invariants are the contract every producer of the IR must uphold — the f
 Consumers of the CFG:
 
 - **runtime interpreter/compiler** — executes function bodies; blocks, terminators, and explicit `drop`s make evaluation order and destruction unambiguous; module instantiation runs `@init` in topological order; the cleanup ops are executed as-is (their armed bits are token runtime state) — only a compiling backend expands them, at its own lowering, after validation and optimization.
-- **static analysis / mid-level optimizer** (frontend.md, kept at `docs/frontend.md`) — the CFG is the base for a fixed sequence of semantics-preserving rewrites: tail call optimization (which rewrites calls in tail position into frame-reusing branches — *Copy* carriers into a loop-header phi loop, move/*Unique* carriers into the `tailcall` terminator, §14.7), constant folding, common subexpression elimination, partial redundancy elimination, copy propagation, dead-block elimination, drop elision (a `drop` whose effect is provably unobservable may be removed — `drop_cleanup` / `cleanup_disable` act on a token whose payload is a *Unique* owner and are never elided), and phi simplification. Cleanup ops are additionally never CSE'd, duplicated, or reordered relative to each other or to the owner's consumption. Optimization is permitted only when the observable behavior is unchanged; drop elision must not remove a user drop hook that performs output, and no pass may move a destruction earlier than its prescribed point.
+- **static analysis / mid-level optimizer** (frontend.md, kept at `docs/frontend.md`) — the CFG is the base for a fixed sequence of semantics-preserving rewrites: tail call optimization (which rewrites calls in tail position into frame-reusing branches — *Copy* carriers into a loop-header phi loop, move/*Unique* carriers into the `tailcall` terminator, §14.7), constant folding, common subexpression elimination, partial redundancy elimination, copy propagation, dead-block elimination, drop elision (a `drop` whose effect is provably unobservable may be removed — `cleanup_drop` / `cleanup_disarm` act on a token whose payload is a *Unique* owner and are never elided), and phi simplification. Cleanup ops are additionally never CSE'd, duplicated, or reordered relative to each other or to the owner's consumption. Optimization is permitted only when the observable behavior is unchanged; drop elision must not remove a user drop hook that performs output, and no pass may move a destruction earlier than its prescribed point.
 
 Non-goals: no register allocation, no instruction scheduling, no cost-model-driven optimizer in this document. The mid-level optimizer is a fixed, small set of CFG→CFG rewrites that preserve observable behavior; tail call optimization is the first of them, the remainder (folding, propagation, dead-block elimination, drop elision, phi simplification) follows. The `any` runtime representation (tagging) is a runtime concern; the IR only requires that a value coerced to `any` carries its payload.
 
@@ -781,10 +781,10 @@ entry:
     br %a1 ? rhs : false_
 rhs:
     %b1: bool = …                  ; evaluate b, only when a is true
-    br join
+    j join
 false_:
     %f: bool = const false
-    br join
+    j join
 join:
     %r: bool = phi [%b1, rhs], [%f, false_]
     br %r ? then : done
@@ -812,21 +812,21 @@ arm_ok:
     %s: str   = syscall builtin#str, %v
     %pre: str = const "ok: "
     %r1: str  = concat %pre, %s
-    br join
+    j join
 arm_err:
     %e: str   = read_payload %result
     %pre2: str = const "error: "
     %r2: str  = concat %pre2, %e
-    br join
+    j join
 join:
     %message: str = phi [%r1, arm_ok], [%r2, arm_err]
     ret %message
 }
 ```
 
-`_`, literal, tuple, struct, and list patterns lower to the same primitives: `eq` + `br_cond` for literals, `read_*` projections and discriminant tests for shapes, `tail`/`read_index` for `[head, ..tail]`. A `match (move value)` binds payloads with `unpack_variant` (tag-carrying) and the scrutinee is wholly consumed.
+`_`, literal, tuple, struct, and list patterns lower to the same primitives: `eq` + `br` for literals, `read_*` projections and discriminant tests for shapes, `tail`/`read_index` for `[head, ..tail]`. A `match (move value)` binds payloads with `unpack_variant` (tag-carrying) and the scrutinee is wholly consumed.
 
-A `match` over an `any` value with **type-test** patterns does *not* lower to a `switch`: the tag space is open, so each arm becomes a `type_is` test followed by a `br_cond` chain that falls through to the next test, and the selected arm recovers the payload with an `any_unpack_copy` (non-consuming match) or `any_unpack_move` (`match (move a)`). A wildcard `_` arm is required because the tag space is open.
+A `match` over an `any` value with **type-test** patterns does *not* lower to a `switch`: the tag space is open, so each arm becomes a `type_is` test followed by a `br` chain that falls through to the next test, and the selected arm recovers the payload with an `any_unpack_copy` (non-consuming match) or `any_unpack_move` (`match (move a)`). A wildcard `_` arm is required because the tag space is open.
 
 ## 14.4 Ownership: borrow, move, drop
 
@@ -868,7 +868,7 @@ open_file("temporary.txt");
     drop %t                          ; end of full expression
 ```
 
-A `drop` of a struct with a user hook stays one instruction — the runtime runs the hook, then reverse-declaration-order field destruction; the IR never expands it.
+A `drop` whose destruction the CFG can express is expanded after optimization (the **drop-lowering pass**, §6.4): a struct (hook or not) into a hook call + `unpack_struct` + reverse-declaration-order field drops, a tuple into `unpack_tuple` + reverse element drops, a `box[T]` into `builtin#unbox` + a drop of the contained value, and a union into a `read_tag` + `switch` destroying the active variant's payload. The only `drop` instructions that remain are the ones the runtime must dispatch dynamically — opaque host types (`host_drop`), `hostdata`, `list[T]`, and `any` — so a `drop` in the final IR always denotes host-side or dynamically-dispatched destruction. `cleanup_drop` / `cleanup_disarm` are likewise never expanded: a cleanup token's armed bit is runtime state (the token's payload is destroyed by the runtime iff the token is still armed).
 
 ## 14.5 `never` and traps
 
@@ -959,12 +959,12 @@ recur:
 }
 ```
 
-After: the `call` + `ret` in `recur` becomes a `br` to a **loop header**, with one phi per parameter merging the initial entry values with the loop-back arguments, so the frame is reused and the recursion runs as a loop. The entry block must have no predecessors, so a no-pred **trampoline** forwards to the header:
+After: the `call` + `ret` in `recur` becomes a `j` to a **loop header**, with one phi per parameter merging the initial entry values with the loop-back arguments, so the frame is reused and the recursion runs as a loop. The entry block must have no predecessors, so a no-pred **trampoline** forwards to the header:
 
 ```text
 func @countdown(n: int32) -> int32 {
 entry:
-    br header
+    j header
 header:
     %n1: int32 = phi [%n, entry], [%nm1, recur]
     %z: int32 = const 0
@@ -975,7 +975,7 @@ base:
 recur:
     %one: int32 = const 1
     %nm1: int32 = sub %n1, %one
-    br header
+    j header
 }
 ```
 
@@ -999,7 +999,7 @@ Rules (the validator enforces them):
 - `tailcall` appears only in tail position: block `B` ends in `tailcall @self, %a, …`, and every path from `B` to a `ret` passes through a reused frame — there is no result to return, so the enclosing function's `ret` is reached only via the final self-frame's `ret`. The target is always the enclosing `IrFunc`.
 - Argument types match the callee's parameter types; argument modes follow the parameter modes: a plain/borrow parameter takes a view, a move parameter transfers ownership of a *Unique* argument and consumes it. A borrow-mode argument must not name a local the reuse destroys (its root must outlive the frame reuse); the validator checks availability on the tail edge.
 - No *Unique* value is live across the `tailcall` except by being an argument: after the transfer the current frame holds no *Unique* local whose destruction the reuse would reorder.
-- The tail edge carries no armed cleanup token (a scope-end `drop_cleanup` would sit after the reuse point); otherwise the destruction schedule is unchanged.
+- The tail edge carries no armed cleanup token (a scope-end `cleanup_drop` would sit after the reuse point); otherwise the destruction schedule is unchanged.
 
 Backends and the runtime interpreter execute `tailcall` by reusing the current frame's slots; an optimizing backend may lower it to a machine jump. The mid-level optimizer treats `tailcall` as a control-flow edge to the function's entry, not as the phi-loop shape, so *Unique* loop-carried state needs no cyclic ownership fixed point in the IR itself.
 

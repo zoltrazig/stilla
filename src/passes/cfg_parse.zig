@@ -76,7 +76,7 @@ const OpName = enum {
     any_pack_move,
     any_unpack_copy,
     any_unpack_move,
-    cleanup_owner,
+    cleanup_arm,
     add,
     sub,
     mul,
@@ -115,7 +115,7 @@ const OpName = enum {
 /// cfg.opInfo): each `OpName` member whose name matches an `Op` tag gets
 /// the schema's canonical spelling, so the parser and the printer can
 /// never disagree about an op's text. Effects (`drop`, `store_member`,
-/// `cleanup_disable`, `drop_cleanup`) are parsed as bare statements and
+/// `cleanup_disarm`, `cleanup_drop`) are parsed as bare statements and
 /// are not in the map.
 const op_names = blk: {
     @setEvalBranchQuota(100_000);
@@ -594,7 +594,7 @@ pub const Parser = struct {
             return self.fail(op_tok, "expected an instruction name, found '{s}'", .{describe(op_tok)});
         }
         const opname = op_names.get(op_tok.text) orelse {
-            if (std.mem.eql(u8, op_tok.text, "drop") or std.mem.eql(u8, op_tok.text, "store_member") or std.mem.eql(u8, op_tok.text, "cleanup_disable") or std.mem.eql(u8, op_tok.text, "drop_cleanup")) {
+            if (std.mem.eql(u8, op_tok.text, "drop") or std.mem.eql(u8, op_tok.text, "store_member") or std.mem.eql(u8, op_tok.text, "cleanup_disarm") or std.mem.eql(u8, op_tok.text, "cleanup_drop")) {
                 return self.fail(op_tok, "'{s}' produces no value; write it as a bare statement", .{op_tok.text});
             }
             return self.fail(op_tok, "unknown instruction '{s}'", .{op_tok.text});
@@ -637,18 +637,18 @@ pub const Parser = struct {
             _ = try self.emit(t.span, .{ .drop_ = v }, &.{});
             return;
         }
-        if (std.mem.eql(u8, text, "cleanup_disable")) {
+        if (std.mem.eql(u8, text, "cleanup_disarm")) {
             _ = self.advance();
             if (self.f_cur == null) return self.fail(t, "instruction appears after the block's terminator", .{});
             const v = try self.parseOperand();
-            _ = try self.emit(t.span, .{ .cleanup_disable = v }, &.{});
+            _ = try self.emit(t.span, .{ .cleanup_disarm = v }, &.{});
             return;
         }
-        if (std.mem.eql(u8, text, "drop_cleanup")) {
+        if (std.mem.eql(u8, text, "cleanup_drop")) {
             _ = self.advance();
             if (self.f_cur == null) return self.fail(t, "instruction appears after the block's terminator", .{});
             const v = try self.parseOperand();
-            _ = try self.emit(t.span, .{ .drop_cleanup = v }, &.{});
+            _ = try self.emit(t.span, .{ .cleanup_drop = v }, &.{});
             return;
         }
         if (std.mem.eql(u8, text, "store_member")) {
@@ -687,19 +687,20 @@ pub const Parser = struct {
             try self.setTerminator(.{ .ret = v });
             return;
         }
+        if (std.mem.eql(u8, text, "j")) {
+            _ = self.advance();
+            const target = try self.expectLabel();
+            try self.setTerminator(.{ .j = target });
+            return;
+        }
         if (std.mem.eql(u8, text, "br")) {
             _ = self.advance();
-            if (self.at(.value_ref)) {
-                const cond = try self.parseOperand();
-                try self.expect(.question, "'?'");
-                const then_ = try self.expectLabel();
-                try self.expect(.colon, "':'");
-                const else_ = try self.expectLabel();
-                try self.setTerminator(.{ .branch_cond = .{ .cond = cond, .then_ = then_, .else_ = else_ } });
-            } else {
-                const target = try self.expectLabel();
-                try self.setTerminator(.{ .branch = target });
-            }
+            const cond = try self.parseOperand();
+            try self.expect(.question, "'?'");
+            const then_ = try self.expectLabel();
+            try self.expect(.colon, "':'");
+            const else_ = try self.expectLabel();
+            try self.setTerminator(.{ .br = .{ .cond = cond, .then_ = then_, .else_ = else_ } });
             return;
         }
         if (std.mem.eql(u8, text, "switch")) {
@@ -783,7 +784,7 @@ pub const Parser = struct {
             .any_pack_move => return .{ .any_pack_move = try self.parseOperand() },
             .any_unpack_copy => return .{ .any_unpack_copy = try self.parseOperand() },
             .any_unpack_move => return .{ .any_unpack_move = try self.parseOperand() },
-            .cleanup_owner => return .{ .cleanup_owner = try self.parseOperand() },
+            .cleanup_arm => return .{ .cleanup_arm = try self.parseOperand() },
             .type_is => {
                 const v = try self.parseOperand();
                 try self.expectComma();
@@ -1029,6 +1030,10 @@ pub const Parser = struct {
                     _ = self.advance();
                     return self.synthConstBool(t);
                 }
+                if (std.mem.eql(u8, t.text, "inf") or std.mem.eql(u8, t.text, "nan")) {
+                    _ = self.advance();
+                    return self.synthConstNumber(t);
+                }
                 return self.fail(t, "expected an operand, found identifier '{s}'", .{t.text});
             },
             else => return self.fail(t, "expected an operand, found '{s}'", .{describe(t)}),
@@ -1090,14 +1095,32 @@ pub const Parser = struct {
         return instr;
     }
 
+    /// True when an IR literal token denotes a float32 constant: it
+    /// carries a decimal point, or is one of the non-finite spellings
+    /// the printer emits for folded IEEE results (inf / -inf / nan).
+    fn isFloatText(text: []const u8) bool {
+        return std.mem.indexOfScalar(u8, text, '.') != null or
+            std.mem.eql(u8, text, "inf") or
+            std.mem.eql(u8, text, "-inf") or
+            std.mem.eql(u8, text, "nan");
+    }
+
+    /// Parse a float32 literal, including the non-finite spellings.
+    fn floatFromText(self: *Parser, t: Token) ParseError!f32 {
+        if (std.mem.eql(u8, t.text, "inf")) return std.math.inf(f32);
+        if (std.mem.eql(u8, t.text, "-inf")) return -std.math.inf(f32);
+        if (std.mem.eql(u8, t.text, "nan")) return std.math.nan(f32);
+        return std.fmt.parseFloat(f32, t.text) catch
+            return self.fail(t, "invalid float literal '{s}'", .{t.text});
+    }
+
     fn synthConstNumber(self: *Parser, t: Token) ParseError!*Value {
-        const is_float = std.mem.indexOfScalar(u8, t.text, '.') != null;
+        const is_float = isFloatText(t.text);
         var type_: Type = undefined;
         var c: ConstValue = undefined;
         if (is_float) {
             type_ = .{ .primitive = .float32 };
-            c = .{ .float = std.fmt.parseFloat(f32, t.text) catch
-                return self.fail(t, "invalid float literal '{s}'", .{t.text}) };
+            c = .{ .float = try floatFromText(self, t) };
         } else {
             type_ = .{ .primitive = .int32 };
             c = .{ .int = std.fmt.parseInt(i64, t.text, 10) catch
@@ -1132,9 +1155,8 @@ pub const Parser = struct {
         switch (t.kind) {
             .number => {
                 _ = self.advance();
-                if (std.mem.indexOfScalar(u8, t.text, '.') != null) {
-                    return .{ .float = std.fmt.parseFloat(f32, t.text) catch
-                        return self.fail(t, "invalid float literal '{s}'", .{t.text}) };
+                if (isFloatText(t.text)) {
+                    return .{ .float = try floatFromText(self, t) };
                 }
                 return .{ .int = std.fmt.parseInt(i64, t.text, 10) catch
                     return self.fail(t, "invalid integer literal '{s}'", .{t.text}) };
@@ -1147,6 +1169,10 @@ pub const Parser = struct {
                 return .{ .string = s };
             },
             .ident => {
+                if (std.mem.eql(u8, t.text, "inf") or std.mem.eql(u8, t.text, "nan")) {
+                    _ = self.advance();
+                    return .{ .float = try floatFromText(self, t) };
+                }
                 if (std.mem.eql(u8, t.text, "true")) {
                     _ = self.advance();
                     return .{ .bool = true };
@@ -1334,10 +1360,10 @@ test "cfg parses a conditional branch with a phi join" {
         \\    br %c ? pos : neg
         \\pos:
         \\    %one: int32 = const 1
-        \\    br join
+        \\    j join
         \\neg:
         \\    %mone: int32 = const -1
-        \\    br join
+        \\    j join
         \\join:
         \\    %sign: int32 = phi [%one, pos], [%mone, neg]
         \\    ret %sign
@@ -1351,7 +1377,7 @@ test "cfg parses a conditional branch with a phi join" {
 
     // Entry: conditional branch to pos/neg; no predecessors.
     const bc = switch (f.entry.terminator) {
-        .branch_cond => |b| b,
+        .br => |b| b,
         else => unreachable,
     };
     try std.testing.expectEqualStrings("pos", bc.then_.name);
@@ -1384,7 +1410,7 @@ test "cfg parses a loop header phi with a back edge" {
         \\entry:
         \\    %n: int32 = syscall builtin#len, %values
         \\    %z: int32 = const 0
-        \\    br header
+        \\    j header
         \\header:
         \\    %i: int32 = phi [%z, entry], [%i2, body]
         \\    %done: bool = ge %i, %n
@@ -1394,7 +1420,7 @@ test "cfg parses a loop header phi with a back edge" {
         \\    syscall builtin#print, %item
         \\    %one: int32 = const 1
         \\    %i2: int32 = add %i, %one
-        \\    br header
+        \\    j header
         \\exit:
         \\    ret
         \\}
@@ -1423,7 +1449,7 @@ test "cfg parses a loop header phi with a back edge" {
     // The body's back edge targets the header.
     const body = f.blocks[2];
     const be = switch (body.terminator) {
-        .branch => |b| b,
+        .j => |b| b,
         else => unreachable,
     };
     try std.testing.expect(be == header);
@@ -1517,11 +1543,11 @@ test "cfg parses constructs, projections, and a switch" {
         \\    arm_ok:
         \\        %v: str = read_payload %result
         \\        %r1: str = construct %v
-        \\        br join
+        \\        j join
         \\    arm_err:
         \\        %e: str = read_payload %result
         \\        %r2: str = concat %e, %e
-        \\        br join
+        \\        j join
         \\    join:
         \\        %m: str = phi [%r1, arm_ok], [%r2, arm_err]
         \\        ret %m
@@ -1626,10 +1652,10 @@ test "cfg rejects a phi whose incoming order mismatches predecessors" {
         \\    br %a ? l : r
         \\l:
         \\    %b: int32 = const 2
-        \\    br join
+        \\    j join
         \\r:
         \\    %c: int32 = const 3
-        \\    br join
+        \\    j join
         \\join:
         \\    %m: int32 = phi [%b, r], [%c, l]
         \\    ret %m

@@ -345,9 +345,16 @@ pub const Parser = struct {
     }
 
     pub fn floatValue(self: *Parser, tok: lex.Token) !f64 {
-        return std.fmt.parseFloat(f64, tok.text) catch {
+        const f = std.fmt.parseFloat(f64, tok.text) catch {
             return self.fail(tok.span, "invalid float literal: {s}", .{tok.text});
         };
+        // Zig's parseFloat saturates: an out-of-range literal becomes
+        // ±inf instead of an error. Reject it here, mirroring
+        // `intValue`'s out-of-range diagnostic.
+        if (!std.math.isFinite(f)) {
+            return self.fail(tok.span, "float literal out of range: {s}", .{tok.text});
+        }
+        return f;
     }
 
     pub fn mark(self: *Parser) usize {

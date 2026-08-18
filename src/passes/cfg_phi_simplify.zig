@@ -137,8 +137,8 @@ fn rewriteBlock(b: *cfg.BasicBlock, fwd: *const std.AutoHashMap(*cfg.Value, *cfg
         .ret => |v| {
             if (v) |val| b.terminator.ret = resolve(fwd, val);
         },
-        .branch => {},
-        .branch_cond => |*bc| bc.cond = resolve(fwd, bc.cond),
+        .j => {},
+        .br => |*bc| bc.cond = resolve(fwd, bc.cond),
         .@"switch" => |*s| s.disc = resolve(fwd, s.disc),
         .tailcall => |*tc| for (tc.args) |*a| {
             a.* = resolve(fwd, a.*);
@@ -150,7 +150,7 @@ fn rewriteBlock(b: *cfg.BasicBlock, fwd: *const std.AutoHashMap(*cfg.Value, *cfg
 /// Rewrite the value operands of `instr` in place.
 fn rewriteInstr(instr: *cfg.Instr, fwd: *const std.AutoHashMap(*cfg.Value, *cfg.Value)) void {
     switch (instr.op) {
-        .neg, .not_, .num_cast, .any_pack_copy, .any_pack_move, .any_unpack_copy, .any_unpack_move, .cleanup_owner, .cleanup_disable, .drop_cleanup, .copy, .borrow, .move_, .tail, .unpack_struct, .unpack_tuple, .split_list, .read_tag, .read_payload, .drop_ => |*v| {
+        .neg, .not_, .num_cast, .any_pack_copy, .any_pack_move, .any_unpack_copy, .any_unpack_move, .cleanup_arm, .cleanup_disarm, .cleanup_drop, .copy, .borrow, .move_, .tail, .unpack_struct, .unpack_tuple, .split_list, .read_tag, .read_payload, .drop_ => |*v| {
             v.* = resolve(fwd, v.*);
         },
         .unpack_variant => |*uv| uv.base = resolve(fwd, uv.base),

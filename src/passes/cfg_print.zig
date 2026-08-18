@@ -89,7 +89,7 @@ fn printFunc(out: *std.ArrayList(u8), allocator: std.mem.Allocator, types: []con
     // example, defines its `type_is`/`eq` values before the arm bodies,
     // while the arm blocks were created earlier; sorting keeps the text
     // self-consistent. Blocks whose instructions define no values (bare
-    // `br` joins) sort after value-bearing blocks, and the entry block is
+    // `j` joins) sort after value-bearing blocks, and the entry block is
     // pinned first regardless (see `BlockOrder`).
     var order = try allocator.alloc(*const BasicBlock, f.blocks.len);
     defer allocator.free(order);
@@ -191,7 +191,23 @@ fn printOperand(out: *std.ArrayList(u8), allocator: std.mem.Allocator, v: *const
 fn printConst(out: *std.ArrayList(u8), allocator: std.mem.Allocator, c: ConstValue) !void {
     switch (c) {
         .int => |i| try w(out, allocator, "{d}", .{i}),
-        .float => |f| try w(out, allocator, "{d}", .{f}),
+        .float => |f| {
+            // The IR parser distinguishes floats from ints by the '.';
+            // `{d}` drops it for integral values (3.0 → "3"), so append
+            // an explicit fraction. Non-finite values print as
+            // inf/-inf/nan (no '.' either) — the parser accepts those
+            // spellings as float literals.
+            const start = out.items.len;
+            try w(out, allocator, "{d}", .{f});
+            const s = out.items[start..];
+            if (std.mem.indexOfScalar(u8, s, '.') == null and
+                !std.mem.eql(u8, s, "inf") and
+                !std.mem.eql(u8, s, "-inf") and
+                !std.mem.eql(u8, s, "nan"))
+            {
+                try out.appendSlice(allocator, ".0");
+            }
+        },
         .bool => |b| try w(out, allocator, "{s}", .{if (b) "true" else "false"}),
         .string => |s| {
             try w(out, allocator, "\"", .{});
@@ -231,7 +247,7 @@ fn printInstr(out: *std.ArrayList(u8), allocator: std.mem.Allocator, types: []co
         },
         .module_ref => |s| try w(out, allocator, "module_ref \"{s}\"", .{s}),
         .fn_ref => |n| try w(out, allocator, "fn_ref @{s}", .{n}),
-        .neg, .not_, .num_cast, .any_pack_copy, .any_pack_move, .any_unpack_copy, .any_unpack_move, .cleanup_owner, .copy, .borrow, .move_, .tail, .unpack_struct, .unpack_tuple, .split_list, .read_tag, .read_payload => |v| {
+        .neg, .not_, .num_cast, .any_pack_copy, .any_pack_move, .any_unpack_copy, .any_unpack_move, .cleanup_arm, .copy, .borrow, .move_, .tail, .unpack_struct, .unpack_tuple, .split_list, .read_tag, .read_payload => |v| {
             try w(out, allocator, "{s} ", .{opText(instr.op)});
             try printOperand(out, allocator, v);
         },
@@ -342,12 +358,12 @@ fn printInstr(out: *std.ArrayList(u8), allocator: std.mem.Allocator, types: []co
             try w(out, allocator, "drop ", .{});
             try printOperand(out, allocator, v);
         },
-        .cleanup_disable => |v| {
-            try w(out, allocator, "cleanup_disable ", .{});
+        .cleanup_disarm => |v| {
+            try w(out, allocator, "cleanup_disarm ", .{});
             try printOperand(out, allocator, v);
         },
-        .drop_cleanup => |v| {
-            try w(out, allocator, "drop_cleanup ", .{});
+        .cleanup_drop => |v| {
+            try w(out, allocator, "cleanup_drop ", .{});
             try printOperand(out, allocator, v);
         },
     }
@@ -363,8 +379,8 @@ fn printTerminator(out: *std.ArrayList(u8), allocator: std.mem.Allocator, types:
                 try printOperand(out, allocator, val);
             }
         },
-        .branch => |b| try w(out, allocator, "br {s}", .{b.name}),
-        .branch_cond => |bc| {
+        .j => |b| try w(out, allocator, "j {s}", .{b.name}),
+        .br => |bc| {
             try w(out, allocator, "br ", .{});
             try printOperand(out, allocator, bc.cond);
             try w(out, allocator, " ? {s} : {s}", .{ bc.then_.name, bc.else_.name });
@@ -404,10 +420,10 @@ test "cfg round-trips through the printer" {
         \\        br %gt ? big : small
         \\    big:
         \\        %r1: int32 = add %a, %b
-        \\        br join
+        \\        j join
         \\    small:
         \\        %r2: int32 = sub %b, %a
-        \\        br join
+        \\        j join
         \\    join:
         \\        %r: int32 = phi [%r1, big], [%r2, small]
         \\        ret %r
@@ -533,10 +549,10 @@ test "cfg round-trips a phi join with branching" {
         \\        br %2 ? pos : neg
         \\    pos:
         \\        %3: int32 = const 1
-        \\        br join
+        \\        j join
         \\    neg:
         \\        %4: int32 = const -1
-        \\        br join
+        \\        j join
         \\    join:
         \\        %5: int32 = phi [%3, pos], [%4, neg]
         \\        ret %5

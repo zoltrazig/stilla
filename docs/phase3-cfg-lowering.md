@@ -57,13 +57,13 @@ ir.md §10. Key points:
 - parameters are **SSA roots** (no `arg` op), and the op set is the
   ir.md §5 one: `const`, `module_ref`, `fn_ref`; `neg`/`not`/`num_cast`/
   `type_is`, the four `any_pack_*`/`any_unpack_*`; `add`…`ge`, `concat`;
-  `copy`/`borrow`/`move`/`drop` and the `cleanup_owner`/
-  `cleanup_disable`/`drop_cleanup` token ops; `load_member`/
+  `copy`/`borrow`/`move`/`drop` and the `cleanup_arm`/
+  `cleanup_disarm`/`cleanup_drop` token ops; `load_member`/
   `store_member`; `construct` and the `read_*`/`unpack_*`/`split_list`
-  projections; `call`/`syscall`/`phi`; `ret`/`br`/`br_cond`/`switch`/
+  projections; `call`/`syscall`/`phi`; `ret`/`j`/`br`/`switch`/
   `trap` terminators;
 - a `switch` dispatches on a **union discriminant** (`read_tag`) only;
-  a match over an `any` value lowers to a **`type_is` + `br_cond`
+  a match over an `any` value lowers to a **`type_is` + `br`
   chain** (the tag space is open, ir.md §14.3), not a `switch`.
 
 The `BasicBlock` / `IrFunc` / `Value` shapes are defined in ir.md §9
@@ -108,7 +108,7 @@ receives the selected branch's value; no `else` → else block yields
 Evaluate scrutinee once; for a union, a `switch` on the variant
 discriminant dispatches to per-arm blocks (pattern tests compile to
 discriminant comparisons / payload binds / nested tests for list shapes);
-for an `any` scrutinee, a `type_is` + `br_cond` chain tests each
+for an `any` scrutinee, a `type_is` + `br` chain tests each
 type-test arm and the required wildcard `_` arm (Core §11.6.2, §14.7;
 ir.md §14.3 — **not** a `switch`, because the tag space is open): a
 non-consuming match binds only **Copy** payloads (copied out), and a
@@ -189,14 +189,32 @@ construct, Core §13.5).
 
 ### User drop hook
 
-Destroying a struct that defines `drop` emits the hook call followed by
+Destroying a struct that defines `drop` runs the hook call followed by
 reverse-declaration-order field destruction (Core §9, Runtime §6.2).
+Phase 3 emits the destruction as one `drop` instruction; the
+post-optimization **drop-lowering pass** (`src/passes/cfg_lower_drop.zig`)
+expands it in the CFG — a direct `call` of the hidden hook function,
+then `unpack_struct` and per-field drops in reverse declaration order
+(recursively). The hook runs while all fields remain valid: the call is
+emitted before the unpack (ir.md §6.4).
 
 ### hostdata payloads
 
 Destroying a `hostdata` value runs no Stilla `drop` hook; it hands the
 opaque payload to the host for disposal, which phase 3 records as an
 ordinary `drop` of the unique value (Core §11.7, Runtime §3.4, §7.3).
+
+### opaque host types
+
+An opaque host type value (`Array[T]`, `HashMap[K, V]` — Core §11.8,
+StdLib §1) is a unique nominal value with no fields: the checker rejects
+its construction, member access, and destructuring in source, and the
+lowerer reports the same rules for any path that reaches it. `drop` of an
+opaque value is one unexpanded instruction (ir.md §6.4): the runtime
+dispatches `host_drop(host_id, value)` by the type's host identity
+(Runtime §3.4, §6.6), and consuming operations on containers (`set`,
+`insert`, `remove`) lower to `syscall`s taking the value by `move` and
+returning the updated value — the host may mutate in place.
 
 ### Unique temporaries
 
@@ -213,8 +231,8 @@ a `trap` terminator performs no drops.
 ### Conditional destruction
 
 A maybe-unique binding (Core §10.10) is destroyed through its cleanup
-token (ir.md §6.4): `cleanup_owner` at the construct's entry,
-`cleanup_disable` on the paths that consume the binding, `drop_cleanup`
+token (ir.md §6.4): `cleanup_arm` at the construct's entry,
+`cleanup_disarm` on the paths that consume the binding, `cleanup_drop`
 at scope end. The lowering **canonicalizes** the three post-construct
 states — definitely owned → plain `drop`, definitely released → nothing,
 maybe-unique → token — and the three ops stay in the SSA CFG: no
@@ -316,12 +334,15 @@ pub const SysCallTarget = union(enum) {
   generic function (producing a `FuncInstance` with `body = null`), and
   phase 3 lowers the specialized call site to a syscall carrying the
   resolved concrete signature;
-- **`any` and `hostdata` at the host boundary** — an `any` argument to or
-  result from a host binding is transferred as its tagged payload, and a
-  `hostdata` argument or result as its opaque payload (Core §11.6–§11.7,
-  Runtime §3.4); the frontend only passes the value through — recovery
-  requires a Stilla-side `as` or `match` type-test, and the tag / opaque
-  representation is the runtime's concern.
+- **`any`, `hostdata`, and opaque host types at the host boundary** — an
+  `any` argument to or result from a host binding is transferred as its
+  tagged payload, and a `hostdata` argument or result as its opaque
+  payload (Core §11.6–§11.7, Runtime §3.4); an opaque host type value
+  (`Array[int32]`, Core §11.8) is transferred as the context-scoped
+  handle naming its host object, with a concrete nominal type in the
+  signature. The frontend only passes the value through — recovery from
+  `any` requires a Stilla-side `as` or `match` type-test, and the tag /
+  opaque representation is the runtime's concern.
 
 Rationale: host bindings are the *only* surface where the language meets
 implementation-specific behavior. Making them system calls keeps the CFG
@@ -402,6 +423,7 @@ Consumers of the CFG:
 | `src/passes/cfg_lower_path.zig` | Path expression lowering |
 | `src/passes/cfg_lower_emit.zig` | On-the-fly optimizations at construction (§4.3) |
 | `src/passes/cfg_lower_validate.zig` | Post-lowering validation |
+| `src/passes/cfg_lower_drop.zig` | Post-optimization drop lowering: expand statically-expandable `drop`s (struct/tuple/box/union) into explicit CFG operations; only opaque, `hostdata`, `list`, and `any` drops remain single instructions |
 | `src/passes/cfg_lex.zig` | IR text lexing (re-exported by `cfg`) |
 | `src/passes/cfg_parse.zig` | IR text parsing (re-exported by `cfg`) |
 | `src/passes/cfg_print.zig` | IR text printing (re-exported by `cfg`) |

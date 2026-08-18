@@ -191,7 +191,7 @@ released on some paths and not others. After the construct the binding is
 exactly one of definitely owned, maybe-unique (`maybe`), or definitely
 released (`released`). A maybe-unique binding is unusable afterward and
 is destroyed conditionally at scope end: in the IR the implementation
-arms a cleanup token at the construct's entry and emits `drop_cleanup`
+arms a cleanup token at the construct's entry and emits `cleanup_drop`
 at scope end, destroying the value only if it is still alive on the path
 that got there (Core §10.10, Runtime §6.1, ir.md §6.4).
 

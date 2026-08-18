@@ -69,6 +69,19 @@ fn irText(program: *const cfg.IrProgram) ![]u8 {
     return cfg.print(program, testing.allocator);
 }
 
+/// Compile with the mid-level optimizer on (Passes 7–8 plus the
+/// post-optimization drop lowering), as the `stilla` executable does.
+fn compileOpt(entry: []const u8, texts: []const struct { []const u8, []const u8 }) !frontend.Compilation {
+    var sources = moduleinfo.Sources{};
+    var source_map = std.StringHashMapUnmanaged([]const u8).empty;
+    defer source_map.deinit(testing.allocator);
+    for (texts) |pair| {
+        try source_map.put(testing.allocator, pair[0], pair[1]);
+    }
+    sources.source = source_map;
+    return frontend.compile(testing.allocator, .{ .entry = entry, .sources = sources, .entry_fn = "main", .optimize = true });
+}
+
 /// Test-only driver for the construction-time constant folding
 /// (frontend.md §4.3): applies the same `tryFoldOp` that every `emit`
 /// site uses to a parsed program, so the fold math (IEEE float
@@ -210,7 +223,7 @@ test "frontend lowers if/else joins and short-circuit and" {
     const out = try irText(&c.program.?);
     defer testing.allocator.free(out);
     // Conditional branches print in the canonical ternary form
-    // `br %c ? then : else` (ir.md §9), not as a `br_cond` opcode.
+    // `br %c ? then : else` (ir.md §9), reusing the `br` mnemonic.
     try testing.expect(std.mem.indexOf(u8, out, " ? ") != null);
     try testing.expect(std.mem.indexOf(u8, out, "phi") != null);
     try testing.expect(std.mem.indexOf(u8, out, "br %") != null);
@@ -416,10 +429,10 @@ test "frontend does not auto-drop a binding released by every branch" {
 test "frontend lowers a partially released binding to a cleanup token" {
     // Core §10.10: a binding released on some but not all normal paths
     // becomes maybe-unique. The v0.2 IR represents this with a cleanup
-    // token (ir.md §6.4): `cleanup_owner` arms the token at the
-    // construct's entry, the consuming path disarms it (`cleanup_disable`
+    // token (ir.md §6.4): `cleanup_arm` arms the token at the
+    // construct's entry, the consuming path disarms it (`cleanup_disarm`
     // alongside the `move`), and the scope-end destruction is a
-    // `drop_cleanup` of the token — conditional on the per-path armed bit.
+    // `cleanup_drop` of the token — conditional on the per-path armed bit.
     // The maybe-unique value itself is never referenced after the join.
     var c = try compileText("app", &.{
         .{
@@ -441,12 +454,12 @@ test "frontend lowers a partially released binding to a cleanup token" {
     const out = try irText(&program);
     defer testing.allocator.free(out);
     const body = funcBody(out, "func @app.main");
-    try testing.expect(std.mem.indexOf(u8, body, "cleanup_owner") != null);
-    try testing.expect(std.mem.indexOf(u8, body, "cleanup_disable") != null);
-    try testing.expect(std.mem.indexOf(u8, body, "drop_cleanup") != null);
+    try testing.expect(std.mem.indexOf(u8, body, "cleanup_arm") != null);
+    try testing.expect(std.mem.indexOf(u8, body, "cleanup_disarm") != null);
+    try testing.expect(std.mem.indexOf(u8, body, "cleanup_drop") != null);
     try testing.expect(std.mem.indexOf(u8, body, "move %") != null);
     // The release is conditional: the destruction is a token disarm /
-    // drop_cleanup pair, never a plain unconditional `drop` of the file.
+    // cleanup_drop pair, never a plain unconditional `drop` of the file.
     try testing.expect(std.mem.indexOf(u8, body, " drop %") == null);
 }
 
@@ -2058,10 +2071,10 @@ test "frontend join phis own their unique inputs (match, return case)" {
     // The only destruction in pick is the non-moved scrutinee %0 at scope
     // end — as a conditional-release candidate it is destroyed through its
     // cleanup token (ir.md §6.4), never by a plain drop of a phi input.
-    try testing.expect(std.mem.indexOf(u8, body, "drop %2") == null);
-    try testing.expect(std.mem.indexOf(u8, body, "drop %4") == null);
-    try testing.expect(std.mem.indexOf(u8, body, "drop %5") == null);
-    try testing.expect(std.mem.indexOf(u8, body, "drop_cleanup") != null);
+    try testing.expect(std.mem.indexOf(u8, body, " drop %2") == null);
+    try testing.expect(std.mem.indexOf(u8, body, " drop %4") == null);
+    try testing.expect(std.mem.indexOf(u8, body, " drop %5") == null);
+    try testing.expect(std.mem.indexOf(u8, body, "cleanup_drop") != null);
 }
 
 test "frontend join phis own their unique inputs (let case: one drop)" {
@@ -2088,11 +2101,11 @@ test "frontend join phis own their unique inputs (let case: one drop)" {
     var drops: usize = 0;
     var it = std.mem.tokenizeScalar(u8, body, '\n');
     while (it.next()) |line| {
-        if (std.mem.indexOf(u8, line, "drop %") != null) drops += 1;
+        if (std.mem.indexOf(u8, line, " drop %") != null) drops += 1;
     }
     try testing.expectEqual(@as(usize, 1), drops);
-    try testing.expect(std.mem.indexOf(u8, body, "drop %2") == null);
-    try testing.expect(std.mem.indexOf(u8, body, "drop %4") == null);
+    try testing.expect(std.mem.indexOf(u8, body, " drop %2") == null);
+    try testing.expect(std.mem.indexOf(u8, body, " drop %4") == null);
 }
 
 test "frontend lowers a and die() and a or die() without a crash" {
@@ -2314,7 +2327,7 @@ test "frontend IR round-trips nested joins and fib-style control flow" {
     // rejected the re-parse with "phi incoming order does not match
     // predecessors". Covers the nested short-circuit / nested if / nested
     // match shapes plus a fib-style function whose `then` block is
-    // value-less (bare `br join`) and therefore prints last.
+    // value-less (bare `j join`) and therefore prints last.
     var c = try compileText("app", &.{
         .{
             "app",
@@ -2431,13 +2444,13 @@ test "Pass 7 rewrites a self-recursive tail call into a loop" {
     const text = try irText(&program);
     defer testing.allocator.free(text);
     // The trampoline forwards to the loop header...
-    try testing.expect(std.mem.indexOf(u8, text, "    entry:\n        br header") != null);
+    try testing.expect(std.mem.indexOf(u8, text, "    entry:\n        j header") != null);
     // ...which opens with the param phi merging the entry value (%0) and
     // the loop-back argument...
     try testing.expect(std.mem.indexOf(u8, text, "        %1: int32 = phi [%0, entry], [") != null);
     // ...and the recursive call is gone: the tail block branches back.
     try testing.expect(std.mem.indexOf(u8, text, "call @app.countdown") == null);
-    try testing.expect(std.mem.indexOf(u8, text, "br header") != null);
+    try testing.expect(std.mem.indexOf(u8, text, "j header") != null);
 
     // The rewritten text round-trips through the standalone cfg parser
     // (ir.md §13): the header phi has one incoming per predecessor.
@@ -2472,7 +2485,7 @@ test "Pass 7 rewrites a void self-recursive tail call into a loop" {
 
     const text = try irText(&program);
     defer testing.allocator.free(text);
-    try testing.expect(std.mem.indexOf(u8, text, "    entry:\n        br header") != null);
+    try testing.expect(std.mem.indexOf(u8, text, "    entry:\n        j header") != null);
     try testing.expect(std.mem.indexOf(u8, text, "        %1: int32 = phi [%0, entry], [") != null);
     try testing.expect(std.mem.indexOf(u8, text, "call @app.count") == null);
 
@@ -2518,7 +2531,7 @@ test "Pass 7 skips a tail call whose chain merges another arm's value" {
     // middle arm's `1` through a phi.
     try testing.expect(std.mem.indexOf(u8, text, "call @app.f") != null);
     try testing.expect(std.mem.indexOf(u8, text, "phi [%6, then_1], [%9, else_1]") != null);
-    try testing.expect(std.mem.indexOf(u8, text, "br header") == null);
+    try testing.expect(std.mem.indexOf(u8, text, "j header") == null);
 
     // The full pipeline keeps the result correct and validates.
     var full = try compileText("app", &.{
@@ -2573,7 +2586,7 @@ test "Pass 7 skips tail calls whose ret block would be orphaned" {
     defer testing.allocator.free(text);
     try testing.expect(std.mem.indexOf(u8, text, "call @app.f") != null);
     try testing.expect(std.mem.indexOf(u8, text, "ret %7") != null);
-    try testing.expect(std.mem.indexOf(u8, text, "br header") == null);
+    try testing.expect(std.mem.indexOf(u8, text, "j header") == null);
 }
 
 test "Pass 7 skips a void tail call whose chain merges another arm" {
@@ -2605,7 +2618,7 @@ test "Pass 7 skips a void tail call whose chain merges another arm" {
     const text = try irText(&program);
     defer testing.allocator.free(text);
     try testing.expect(std.mem.indexOf(u8, text, "call @app.log") != null);
-    try testing.expect(std.mem.indexOf(u8, text, "br header") == null);
+    try testing.expect(std.mem.indexOf(u8, text, "j header") == null);
 }
 
 test "Pass 7 leaves a non-tail self-recursive call alone" {
@@ -2632,7 +2645,7 @@ test "Pass 7 leaves a non-tail self-recursive call alone" {
     const text = try irText(&program);
     defer testing.allocator.free(text);
     try testing.expect(std.mem.indexOf(u8, text, "call @app.f") != null);
-    try testing.expect(std.mem.indexOf(u8, text, "br header") == null);
+    try testing.expect(std.mem.indexOf(u8, text, "j header") == null);
 }
 
 test "Pass 7 leaves a tail call to another function alone" {
@@ -2661,7 +2674,7 @@ test "Pass 7 leaves a tail call to another function alone" {
     const text = try irText(&program);
     defer testing.allocator.free(text);
     try testing.expect(std.mem.indexOf(u8, text, "call @app.g") != null);
-    try testing.expect(std.mem.indexOf(u8, text, "br header") == null);
+    try testing.expect(std.mem.indexOf(u8, text, "j header") == null);
 }
 
 test "Pass 7 leaves a value call alone" {
@@ -2685,7 +2698,7 @@ test "Pass 7 leaves a value call alone" {
     const text = try irText(&program);
     defer testing.allocator.free(text);
     try testing.expect(std.mem.indexOf(u8, text, "call %0, %1") != null);
-    try testing.expect(std.mem.indexOf(u8, text, "br header") == null);
+    try testing.expect(std.mem.indexOf(u8, text, "j header") == null);
 }
 
 test "Pass 7 leaves a tail call with live unique state alone" {
@@ -2717,7 +2730,7 @@ test "Pass 7 leaves a tail call with live unique state alone" {
     const text = try irText(&program);
     defer testing.allocator.free(text);
     try testing.expect(std.mem.indexOf(u8, text, "call @app.f") != null);
-    try testing.expect(std.mem.indexOf(u8, text, "br header") == null);
+    try testing.expect(std.mem.indexOf(u8, text, "j header") == null);
 }
 
 test "Pass 7 runs before the Pass 8 pipeline" {
@@ -2744,7 +2757,7 @@ test "Pass 7 runs before the Pass 8 pipeline" {
 
     const text = try irText(&program);
     defer testing.allocator.free(text);
-    try testing.expect(std.mem.indexOf(u8, text, "    entry:\n        br header") != null);
+    try testing.expect(std.mem.indexOf(u8, text, "    entry:\n        j header") != null);
     try testing.expect(std.mem.indexOf(u8, text, "call @app.countdown") == null);
 
     var p = cfg.Parser.init(testing.allocator);
@@ -3317,10 +3330,10 @@ test "Pass 8.3 hoists a partially redundant comparison into a join phi" {
         \\entry:
         \\    br %2 ? pos : neg
         \\pos:
-        \\    br join
+        \\    j join
         \\neg:
         \\    %3: bool = lt %0, %1
-        \\    br join
+        \\    j join
         \\join:
         \\    %4: bool = lt %0, %1
         \\    ret %4
@@ -3362,10 +3375,10 @@ test "Pass 8.3 joins a fully redundant computation without inserting" {
         \\    br %2 ? pos : neg
         \\pos:
         \\    %3: bool = lt %0, %1
-        \\    br join
+        \\    j join
         \\neg:
         \\    %4: bool = lt %0, %1
-        \\    br join
+        \\    j join
         \\join:
         \\    %5: bool = lt %0, %1
         \\    ret %5
@@ -3400,9 +3413,9 @@ test "Pass 8.3 leaves a fully unavailable computation alone" {
         \\entry:
         \\    br %2 ? pos : neg
         \\pos:
-        \\    br join
+        \\    j join
         \\neg:
-        \\    br join
+        \\    j join
         \\join:
         \\    %3: bool = lt %0, %1
         \\    ret %3
@@ -3432,9 +3445,9 @@ test "Pass 8.3 skips a candidate with an operand from a predecessor" {
         \\b1:
         \\    %3: int32 = add %0, %1
         \\    %4: bool = lt %3, %0
-        \\    br join
+        \\    j join
         \\b2:
-        \\    br join
+        \\    j join
         \\join:
         \\    %5: bool = lt %3, %0
         \\    ret %5
@@ -3460,9 +3473,9 @@ test "Pass 8.3 leaves trapping arithmetic alone" {
         \\    br %2 ? pos : neg
         \\pos:
         \\    %3: int32 = mul %0, %1
-        \\    br join
+        \\    j join
         \\neg:
-        \\    br join
+        \\    j join
         \\join:
         \\    %4: int32 = mul %0, %1
         \\    ret %4
@@ -3488,9 +3501,9 @@ test "Pass 8.3 leaves side-effecting ops alone" {
         \\    br %1 ? pos : neg
         \\pos:
         \\    %2: int32 = syscall builtin#peek, %0
-        \\    br join
+        \\    j join
         \\neg:
-        \\    br join
+        \\    j join
         \\join:
         \\    %3: int32 = syscall builtin#peek, %0
         \\    ret %3
@@ -3516,17 +3529,17 @@ test "Pass 8.3 hoists unary non-trapping ops" {
         \\    br %0 ? npos : nneg
         \\npos:
         \\    %3: bool = not %1
-        \\    br njoin
+        \\    j njoin
         \\nneg:
-        \\    br njoin
+        \\    j njoin
         \\njoin:
         \\    %4: bool = not %1
         \\    br %4 ? tpos : tneg
         \\tpos:
         \\    %5: bool = type_is %2, int32
-        \\    br tjoin
+        \\    j tjoin
         \\tneg:
-        \\    br tjoin
+        \\    j tjoin
         \\tjoin:
         \\    %6: bool = type_is %2, int32
         \\    ret %6
@@ -3609,10 +3622,10 @@ test "Pass 8.3 optimized IR round-trips through the standalone cfg parser" {
         \\entry:
         \\    br %2 ? pos : neg
         \\pos:
-        \\    br join
+        \\    j join
         \\neg:
         \\    %3: bool = lt %0, %1
-        \\    br join
+        \\    j join
         \\join:
         \\    %4: bool = lt %0, %1
         \\    ret %4
@@ -3747,13 +3760,13 @@ test "Pass 8.5 prunes phi incoming lists and predecessor sets" {
         \\module "app" {
         \\func @f(a: int32, b: int32) -> int32 {
         \\entry:
-        \\    br live
+        \\    j live
         \\live:
         \\    %2: int32 = add %0, %1
-        \\    br join
+        \\    j join
         \\dead:
         \\    %3: int32 = const 42
-        \\    br join
+        \\    j join
         \\join:
         \\    %4: int32 = phi [%2, live], [%3, dead]
         \\    ret %4
@@ -3786,11 +3799,11 @@ test "Pass 8.5 removes a whole unreachable chain" {
         \\module "app" {
         \\func @f(a: int32) -> int32 {
         \\entry:
-        \\    br live
+        \\    j live
         \\live:
         \\    ret %0
         \\dead:
-        \\    br deeper
+        \\    j deeper
         \\deeper:
         \\    %1: int32 = add %0, %0
         \\    ret %1
@@ -3803,7 +3816,7 @@ test "Pass 8.5 removes a whole unreachable chain" {
     const f = t.program.funcs[0];
     try testing.expectEqual(@as(usize, 2), f.blocks.len);
     try testing.expect(f.blocks[0] == f.entry);
-    try testing.expect(f.blocks[1] == f.blocks[0].terminator.branch);
+    try testing.expect(f.blocks[1] == f.blocks[0].terminator.j);
     try testing.expectEqual(@as(usize, 1), f.values.len);
 }
 
@@ -3816,10 +3829,10 @@ test "Pass 8.5 leaves a reachable diamond intact" {
         \\    br %2 ? pos : neg
         \\pos:
         \\    %3: int32 = add %0, %1
-        \\    br join
+        \\    j join
         \\neg:
         \\    %4: int32 = sub %0, %1
-        \\    br join
+        \\    j join
         \\join:
         \\    %5: int32 = phi [%3, pos], [%4, neg]
         \\    ret %5
@@ -3844,13 +3857,13 @@ test "Pass 8.5 optimized IR round-trips through the standalone cfg parser" {
         \\module "app" {
         \\func @f(a: int32, b: int32) -> int32 {
         \\entry:
-        \\    br live
+        \\    j live
         \\live:
         \\    %2: int32 = add %0, %1
-        \\    br join
+        \\    j join
         \\dead:
         \\    %3: int32 = const 42
-        \\    br join
+        \\    j join
         \\join:
         \\    %4: int32 = phi [%2, live], [%3, dead]
         \\    ret %4
@@ -3941,7 +3954,7 @@ fn countBlocks(program: *const cfg.IrProgram) usize {
 }
 
 test "Pass 8.8 jump threading removes an empty forwarding block" {
-    // `then:` is a forwarding block (no instructions, `br join`); its
+    // `then:` is a forwarding block (no instructions, `j join`); its
     // edge is redirected to `join` and the join phi's `then` entry is
     // re-keyed to `entry`.
     var t = try cfg_parse.parseText(
@@ -3951,10 +3964,10 @@ test "Pass 8.8 jump threading removes an empty forwarding block" {
         \\    %3: bool = lt %0, %1
         \\    br %3 ? then : else
         \\then:
-        \\    br join
+        \\    j join
         \\else:
         \\    %4: int32 = const 1
-        \\    br join
+        \\    j join
         \\join:
         \\    %5: int32 = phi [%0, then], [%4, else]
         \\    ret %5
@@ -3991,7 +4004,7 @@ test "Pass 8.8 jump threading skips a candidate with a duplicate-edge risk" {
         \\    %4: int32 = const 1
         \\    br %3 ? then : join
         \\then:
-        \\    br join
+        \\    j join
         \\join:
         \\    %5: int32 = phi [%4, entry], [%0, then]
         \\    ret %5
@@ -4022,7 +4035,7 @@ test "Pass 8.7 phi simplification removes single-incoming phis" {
         \\module "app" {
         \\func @f(a: int32) -> int32 {
         \\entry:
-        \\    br join
+        \\    j join
         \\join:
         \\    %1: int32 = phi [%0, entry]
         \\    %2: int32 = add %1, %1
@@ -4052,11 +4065,11 @@ test "Pass 8.7 phi simplification collapses identical-incoming phis" {
         \\module "app" {
         \\func @f(a: int32, b: int32) -> int32 {
         \\entry:
-        \\    br left
+        \\    j left
         \\left:
-        \\    br join
+        \\    j join
         \\right:
-        \\    br join
+        \\    j join
         \\join:
         \\    %2: int32 = phi [%0, left], [%0, right]
         \\    ret %2
@@ -4088,11 +4101,11 @@ test "Pass 8.7 phi simplification removes self-referential trivial phis" {
         \\module "app" {
         \\func @f(a: int32, b: int32) -> int32 {
         \\entry:
-        \\    br left
+        \\    j left
         \\left:
-        \\    br join
+        \\    j join
         \\right:
-        \\    br join
+        \\    j join
         \\join:
         \\    %2: int32 = phi [%1, left], [%2, right]
         \\    ret %2
@@ -4124,14 +4137,14 @@ test "Pass 8.7 phi simplification resolves chains of trivial phis" {
         \\module "app" {
         \\func @f(a: int32, b: int32) -> int32 {
         \\entry:
-        \\    br left
+        \\    j left
         \\left:
-        \\    br join
+        \\    j join
         \\right:
-        \\    br inner
+        \\    j inner
         \\inner:
         \\    %2: int32 = phi [%3, right]
-        \\    br join
+        \\    j join
         \\join:
         \\    %3: int32 = phi [%1, left], [%2, inner]
         \\    ret %3
@@ -4162,11 +4175,11 @@ test "Pass 8.7 phi simplification keeps all-self phis" {
         \\module "app" {
         \\func @f(a: int32, b: int32) -> int32 {
         \\entry:
-        \\    br left
+        \\    j left
         \\left:
-        \\    br join
+        \\    j join
         \\right:
-        \\    br join
+        \\    j join
         \\join:
         \\    %2: int32 = phi [%2, left], [%2, right]
         \\    ret %2
@@ -4223,6 +4236,294 @@ test "Pass 8.6 drop elision removes Copy drops, keeps unique drops" {
     try testing.expectEqualStrings(text, text2);
 }
 
+test "drop lowering expands a struct drop into hook call + reverse field drops" {
+    // Post-optimization drop lowering (ir.md §6.4, §14): `drop %v` of a
+    // struct becomes the hook call (when declared) followed by
+    // `unpack_struct` and per-field drops in reverse declaration order
+    // (Runtime §6.2). Only the *Unique* fields are dropped; Copy fields
+    // destroy nothing.
+    var c = try compileOpt("app", &.{
+        .{
+            "app",
+            \\const builtin = import("builtin");
+            \\struct File { fd: int32; drop(file) {} }
+            \\struct Other { fd: int32; drop(file) {} }
+            \\struct Pair { a: File; b: Other; }
+            \\fn open_file() -> File { File { fd: 3 } }
+            \\fn open_other() -> Other { Other { fd: 4 } }
+            \\fn main() -> void {
+            \\    let x = open_file();
+            \\    let y = open_other();
+            \\    let p = Pair { a: move x, b: move y };
+            \\}
+        },
+    });
+    defer c.deinit();
+    const text = try irText(&c.program.?);
+    defer testing.allocator.free(text);
+    const body = funcBody(text, "func @app.main");
+    // The struct drop is expanded: one `unpack_struct` of the Pair, then
+    // the two field destructions. The field drops run in reverse
+    // declaration order — `b: Other` before `a: File` — so the Other
+    // hook call precedes the File hook call.
+    try testing.expect(std.mem.indexOf(u8, body, "unpack_struct %") != null);
+    const other = std.mem.indexOf(u8, body, "call @app.Other.drop") orelse {
+        return error.TestUnexpectedResult;
+    };
+    const file = std.mem.indexOf(u8, body, "call @app.File.drop") orelse {
+        return error.TestUnexpectedResult;
+    };
+    try testing.expect(other < file);
+    // No plain `drop` of the struct itself remains in main (its fields
+    // are destroyed structurally).
+    try testing.expect(std.mem.indexOf(u8, body, "drop %") == null);
+}
+
+test "drop lowering runs a struct's hook before its fields are destroyed" {
+    // Runtime §6.2: the user hook runs while all fields remain valid —
+    // the hook call is emitted on the whole value before the unpack.
+    var c = try compileOpt("app", &.{
+        .{
+            "app",
+            \\const builtin = import("builtin");
+            \\const array = import("array");
+            \\struct File {
+            \\    arr: array.Array[int32];
+            \\    drop(file) { builtin.print("closing"); }
+            \\}
+            \\fn main() -> void {
+            \\    let f = File { arr: array.make(10, 0) };
+            \\}
+        },
+    });
+    defer c.deinit();
+    const text = try irText(&c.program.?);
+    defer testing.allocator.free(text);
+    const body = funcBody(text, "func @app.main");
+    const hook = std.mem.indexOf(u8, body, "call @app.File.drop") orelse {
+        return error.TestUnexpectedResult;
+    };
+    const unpack = std.mem.indexOf(u8, body, "unpack_struct %") orelse {
+        return error.TestUnexpectedResult;
+    };
+    try testing.expect(hook < unpack);
+    // The opaque field's destruction reaches the runtime as a plain drop
+    // (host side), after the hook ran.
+    try testing.expect(std.mem.indexOf(u8, body, "drop %") != null);
+}
+
+test "drop lowering expands a tuple drop into reverse element drops" {
+    var c = try compileOpt("app", &.{
+        .{
+            "app",
+            \\struct File { fd: int32; drop(file) {} }
+            \\struct Other { fd: int32; drop(file) {} }
+            \\fn open_file() -> File { File { fd: 3 } }
+            \\fn open_other() -> Other { Other { fd: 4 } }
+            \\fn main() -> void {
+            \\    let x = open_file();
+            \\    let y = open_other();
+            \\    let t = (move x, move y);
+            \\}
+        },
+    });
+    defer c.deinit();
+    const text = try irText(&c.program.?);
+    defer testing.allocator.free(text);
+    const body = funcBody(text, "func @app.main");
+    try testing.expect(std.mem.indexOf(u8, body, "unpack_tuple %") != null);
+    // Reverse element order: the second element (`Other`) is destroyed
+    // before the first (`File`).
+    const other = std.mem.indexOf(u8, body, "call @app.Other.drop") orelse {
+        return error.TestUnexpectedResult;
+    };
+    const file = std.mem.indexOf(u8, body, "call @app.File.drop") orelse {
+        return error.TestUnexpectedResult;
+    };
+    try testing.expect(other < file);
+}
+
+test "drop lowering expands a box drop into unbox + contained drop" {
+    // Runtime §6.3: destroying a `box[T]` destroys the contained value.
+    // The expansion is `builtin#unbox` (which consumes the box and
+    // returns ownership of the payload) followed by the payload's own
+    // destruction.
+    var c = try compileOpt("app", &.{
+        .{
+            "app",
+            \\const builtin = import("builtin");
+            \\struct File { fd: int32; drop(file) {} }
+            \\fn open_file() -> File { File { fd: 3 } }
+            \\fn main() -> void {
+            \\    let f = open_file();
+            \\    let b = builtin.box(move f);
+            \\}
+        },
+    });
+    defer c.deinit();
+    const text = try irText(&c.program.?);
+    defer testing.allocator.free(text);
+    const body = funcBody(text, "func @app.main");
+    try testing.expect(std.mem.indexOf(u8, body, "syscall builtin#unbox") != null);
+    try testing.expect(std.mem.indexOf(u8, body, "call @app.File.drop") != null);
+    try testing.expect(std.mem.indexOf(u8, body, "drop %") == null);
+}
+
+test "drop lowering expands a union drop into a tag switch" {
+    // Runtime §6.3: only the active union variant is destroyed. The
+    // expansion dispatches on the tag: payload-less variants destroy
+    // nothing; payload variants `unpack_variant` and destroy the payload
+    // (which itself recurses into its own expansion).
+    var c = try compileOpt("app", &.{
+        .{
+            "app",
+            \\const builtin = import("builtin");
+            \\struct File { fd: int32; drop(file) {} }
+            \\union Maybe {
+            \\    Nothing,
+            \\    Just(File),
+            \\}
+            \\fn open_file() -> File { File { fd: 3 } }
+            \\fn main() -> void {
+            \\    let f = open_file();
+            \\    let m = Maybe::Just(move f);
+            \\    let n = Maybe::Nothing;
+            \\}
+        },
+    });
+    defer c.deinit();
+    const text = try irText(&c.program.?);
+    defer testing.allocator.free(text);
+    const body = funcBody(text, "func @app.main");
+    try testing.expect(std.mem.indexOf(u8, body, "read_tag %") != null);
+    try testing.expect(std.mem.indexOf(u8, body, "switch %") != null);
+    try testing.expect(std.mem.indexOf(u8, body, "unpack_variant %") != null);
+    try testing.expect(std.mem.indexOf(u8, body, "call @app.File.drop") != null);
+    // The two unions converge on their joins; no plain `drop` of a
+    // union remains.
+    try testing.expect(std.mem.indexOf(u8, body, "drop %") == null);
+}
+
+test "drop lowering keeps opaque and any drops" {
+    // The drops the CFG cannot expand stay single instructions: opaque
+    // host types (`host_drop`) and `any` (dynamic tag). `hostdata` and
+    // `list[T]` ride the same `expandable → false` guard (pass header):
+    // `hostdata` cannot be constructed from Stilla source, and `list`
+    // element count is dynamic (a runtime loop, Runtime §6.3). Here a
+    // struct whose fields are an `any` and an opaque `Array[int32]`
+    // expands to unpack + the two kept drops.
+    var c = try compileOpt("app", &.{
+        .{
+            "app",
+            \\const builtin = import("builtin");
+            \\const array = import("array");
+            \\struct S { a: any; arr: array.Array[int32]; }
+            \\fn main() -> void {
+            \\    let s = S { a: 42, arr: array.make(10, 0) };
+            \\}
+        },
+    });
+    defer c.deinit();
+    const text = try irText(&c.program.?);
+    defer testing.allocator.free(text);
+    const body = funcBody(text, "func @app.main");
+    try testing.expect(std.mem.indexOf(u8, body, "unpack_struct %") != null);
+    try testing.expect(std.mem.indexOf(u8, body, "drop %") != null);
+}
+
+test "drop lowering substitutes generic instantiation args" {
+    // `Option[File]`'s `Some` payload is `File`, not the declaration's
+    // `T` — the payload type substitutes the instantiation's arguments
+    // (Core §12.1), and its drop expands to the File destruction.
+    var c = try compileOpt("app", &.{
+        .{
+            "app",
+            \\const builtin = import("builtin");
+            \\struct File { fd: int32; drop(file) {} }
+            \\union Option[T] {
+            \\    None,
+            \\    Some(T),
+            \\}
+            \\fn open_file() -> File { File { fd: 3 } }
+            \\fn main() -> void {
+            \\    let o: Option[File] = Option::Some(open_file());
+            \\}
+        },
+    });
+    defer c.deinit();
+    const text = try irText(&c.program.?);
+    defer testing.allocator.free(text);
+    const body = funcBody(text, "func @app.main");
+    try testing.expect(std.mem.indexOf(u8, body, "unpack_variant %") != null);
+    try testing.expect(std.mem.indexOf(u8, body, "call @app.File.drop") != null);
+}
+
+test "drop lowering expands nested struct fields recursively" {
+    // A struct field that is itself a struct recurses: the outer unpack
+    // feeds the inner expansion, which eventually terminates in the
+    // kept opaque drop. The whole sequence runs in the join of the outer
+    // destruction's block.
+    var c = try compileOpt("app", &.{
+        .{
+            "app",
+            \\const array = import("array");
+            \\struct Inner { arr: array.Array[int32]; }
+            \\struct Outer { inner: Inner; }
+            \\fn main() -> void {
+            \\    let o = Outer { inner: Inner { arr: array.make(10, 0) } };
+            \\}
+        },
+    });
+    defer c.deinit();
+    const text = try irText(&c.program.?);
+    defer testing.allocator.free(text);
+    const body = funcBody(text, "func @app.main");
+    try testing.expect(std.mem.indexOf(u8, body, "unpack_struct %") != null);
+    try testing.expect(std.mem.indexOf(u8, body, "drop %") != null);
+}
+
+test "drop lowering handles a drop before a match in one block" {
+    // `redirectSuccessors` must redirect the successors of a block split
+    // by a union drop — including a conditional terminator (`match`
+    // lowers to a `switch`; an `if` branch to a `branch_cond`). Here an
+    // explicit `drop` of a union is followed by a `match` over a second
+    // union in the same block: the drop's switch, then the match's
+    // switch, in one block's tail.
+    var c = try compileOpt("app", &.{
+        .{
+            "app",
+            \\const builtin = import("builtin");
+            \\struct File { fd: int32; drop(file) {} }
+            \\union Maybe {
+            \\    Nothing,
+            \\    Just(File),
+            \\}
+            \\fn open_file() -> File { File { fd: 3 } }
+            \\fn main() -> void {
+            \\    let f1 = open_file();
+            \\    let f2 = open_file();
+            \\    let m1 = Maybe::Just(move f1);
+            \\    let m2 = Maybe::Just(move f2);
+            \\    drop m1;
+            \\    match (m2) {
+            \\        Maybe::Nothing => builtin.print("none"),
+            \\        Maybe::Just(f) => builtin.print(builtin.str(f.fd)),
+            \\    }
+            \\}
+        },
+    });
+    defer c.deinit();
+    const text = try irText(&c.program.?);
+    defer testing.allocator.free(text);
+    const body = funcBody(text, "func @app.main");
+    // The explicit drop's switch and the match's switch both survive.
+    try testing.expect(std.mem.indexOf(u8, body, "switch %") != null);
+    try testing.expect(std.mem.indexOf(u8, body, "read_tag %") != null);
+    // The match's payload binding (a borrow view of a non-consuming
+    // match) and the drop's destruction both made it through the split.
+    try testing.expect(std.mem.indexOf(u8, body, "call @app.File.drop") != null);
+}
+
 test "Pass 8.4 module/member CSE reuses identical loads in a block" {
     // `m.pi` lowers to `module_ref "math"` + `load_member`, and the
     // on-the-fly CSE never shared them (module ops are not candidates at
@@ -4258,11 +4559,12 @@ test "Pass 8.4 copy propagation collapses copies of Copy values" {
     // The checker emits an explicit `copy` of the move parameter before
     // the ret; for a Copy type `move` is semantically an ordinary copy
     // (Core §10.2), so the copy is a no-op and the parameter is returned
-    // directly.
+    // directly. (`T` is deliberately a concrete Copy type: an undeclared
+    // type name is now a diagnostic, Core §12.1.)
     var c = try compileText("app", &.{
         .{
             "app",
-            \\fn id(move x: T) -> T { x }
+            \\fn id(move x: int32) -> int32 { x }
             \\fn main() -> void {}
         },
     });
@@ -4366,6 +4668,7 @@ test "Pass 8.9 optimization harness: corpus compile, optimize, and measure" {
         "examples/fold.st",
         "examples/box.st",
         "examples/maps.st",
+        "examples/arrays.st",
         "examples/generics.st",
     };
     const io = std.testing.io;
@@ -4445,4 +4748,25 @@ test "frontend dispatches a two-arm list match on an emptiness test" {
     try testing.expect(std.mem.indexOf(u8, body, "syscall builtin#len") != null);
     try testing.expect(std.mem.indexOf(u8, body, "br %") != null);
     try testing.expect(std.mem.indexOf(u8, body, " ? ") != null);
+}
+
+test "float fold to inf survives the optimizer round-trip" {
+    // The emit-time fold of 4.0/0.0 produces an `inf` const; the
+    // optimizer's print→re-parse round-trip must read it back (the text
+    // form spells it `inf`/`-inf`/`nan`).
+    var sources = moduleinfo.Sources{};
+    var source_map = std.StringHashMapUnmanaged([]const u8).empty;
+    defer source_map.deinit(testing.allocator);
+    try source_map.put(testing.allocator, "app",
+        \\fn f() -> float32 {
+        \\    let x = 4.0 / 0.0;
+        \\    x
+        \\}
+    );
+    sources.source = source_map;
+    var c = try frontend.compile(testing.allocator, .{ .entry = "app", .sources = sources, .entry_fn = "f", .optimize = true });
+    defer c.deinit();
+    const text = try cfg.print(&c.program.?, testing.allocator);
+    defer testing.allocator.free(text);
+    try testing.expect(std.mem.indexOf(u8, text, "inf") != null);
 }

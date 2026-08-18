@@ -144,6 +144,11 @@ pub const Frame = struct {
     /// from this expected type (`Result::Break(r)` inside a function
     /// returning `Result[S,R]`). `null` when there is no goal.
     expect: ?cfg.Type = null,
+    /// The type-parameter names of the function being checked, for
+    /// diagnosing unresolved type names that are not in scope (an empty
+    /// slice at module scope). Module-scope frames share the same
+    /// `Frame`, so callers must save and restore this (like `expect`).
+    func_params: []const ast.Ident = &.{},
 };
 
 /// Whether a value of type `t` is owned (not Copy): unique types are

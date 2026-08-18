@@ -148,9 +148,11 @@ pub fn materialize(self: *Builder, raw: *RawModule) !void {
             const declared = c.type_ orelse {
                 return self.failSpan(c.span, "host constant '{s}' must declare its type", .{c.name.text});
             };
-            member.type_ = type_resolve.resolveType(resolve, info, &declared) orelse cfg.Type{ .primitive = .any };
+            member.type_ = type_resolve.resolveType(resolve, info, &declared) orelse
+                return self.failSpan(c.span, "cannot resolve declared type of constant '{s}'", .{c.name.text});
         } else if (c.type_) |declared| {
-            member.type_ = type_resolve.resolveType(resolve, info, &declared) orelse cfg.Type{ .primitive = .any };
+            member.type_ = type_resolve.resolveType(resolve, info, &declared) orelse
+                return self.failSpan(c.span, "cannot resolve declared type of constant '{s}'", .{c.name.text});
         } else {
             member.type_ = type_infer.inferExprType(resolve, info, c.init.?) orelse {
                 return self.failSpan(c.span, "cannot infer the type of constant '{s}'", .{c.name.text});

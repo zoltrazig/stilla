@@ -1,7 +1,7 @@
 //! Pass: control-flow lowering — `if-expression`, `match-expression`,
 //! and short-circuit `and`/`or` (Core §10, §11, §13; ir.md §10.3–§10.4).
 //! In: Lowerer + FuncState + AST control-flow nodes, module graph. Out:
-//! CFG blocks, `br_cond`/`switch`/`branch` terminators, and join phis.
+//! CFG blocks, `br`/`switch`/`branch` terminators, and join phis.
 
 const std = @import("std");
 const ast = @import("../ast.zig");
@@ -30,13 +30,13 @@ pub const JoinIn = struct {
 };
 
 /// `a and b`: the right operand is evaluated only when `a` is true —
-/// a `br_cond` diamond with a join phi (ir.md §10.3, Runtime §5).
+/// a `br` diamond with a join phi (ir.md §10.3, Runtime §5).
 pub fn lowerAnd(self: *Lowerer, fs: *FuncState, b: *const ast.Binary) LowerError!?*cfg.Value {
     const lhs = (try cfg_lower_expr.lowerExpr(self, fs, b.lhs)) orelse return null;
     const track = try cfg_lower_emit.beginCond(self, fs, b.span);
     const rhs_block = try cfg_lower_emit.newBlock(self, fs, "rhs");
     const false_block = try cfg_lower_emit.newBlock(self, fs, "false_");
-    try cfg_lower_emit.setTerminator(self, fs, .{ .branch_cond = .{ .cond = lhs, .then_ = rhs_block, .else_ = false_block } });
+    try cfg_lower_emit.setTerminator(self, fs, .{ .br = .{ .cond = lhs, .then_ = rhs_block, .else_ = false_block } });
     // Right operand: evaluated only when the left is true.
     fs.cur = rhs_block;
     // A never right operand (`a and die()`) traps inside rhs_block: the
@@ -51,13 +51,13 @@ pub fn lowerAnd(self: *Lowerer, fs: *FuncState, b: *const ast.Binary) LowerError
     // in-edge predecessor (ir.md §4.3).
     const rhs_join_pred = fs.cur;
     const rhs_liv = try cfg_lower_emit.condLiveness(self, fs, track);
-    if (rhs_join_pred != null) try cfg_lower_emit.setTerminator(self, fs, .{ .branch = join });
+    if (rhs_join_pred != null) try cfg_lower_emit.setTerminator(self, fs, .{ .j = join });
     cfg_lower_emit.restoreCond(self, fs, track);
     // False arm: const false (consumes nothing).
     fs.cur = false_block;
     const fval = (try cfg_lower_expr.emitConst(self, fs, b.span, .{ .bool = false }, .{ .primitive = .bool })).?;
     const false_liv = try cfg_lower_emit.condLiveness(self, fs, track);
-    try cfg_lower_emit.setTerminator(self, fs, .{ .branch = join });
+    try cfg_lower_emit.setTerminator(self, fs, .{ .j = join });
     cfg_lower_emit.restoreCond(self, fs, track);
     fs.cur = join;
     try cfg_lower_emit.joinMaybeFlags(self, fs, track, b.span, &.{
@@ -76,7 +76,7 @@ pub fn lowerOr(self: *Lowerer, fs: *FuncState, b: *const ast.Binary) LowerError!
     const track = try cfg_lower_emit.beginCond(self, fs, b.span);
     const rhs_block = try cfg_lower_emit.newBlock(self, fs, "rhs");
     const true_block = try cfg_lower_emit.newBlock(self, fs, "true_");
-    try cfg_lower_emit.setTerminator(self, fs, .{ .branch_cond = .{ .cond = lhs, .then_ = true_block, .else_ = rhs_block } });
+    try cfg_lower_emit.setTerminator(self, fs, .{ .br = .{ .cond = lhs, .then_ = true_block, .else_ = rhs_block } });
     fs.cur = rhs_block;
     // A never right operand (`a or die()`) traps inside rhs_block: the
     // rhs side then contributes no phi input and no edge to the join
@@ -88,13 +88,13 @@ pub fn lowerOr(self: *Lowerer, fs: *FuncState, b: *const ast.Binary) LowerError!
     // actually branches to the join (the inner join for a nested rhs).
     const rhs_join_pred = fs.cur;
     const rhs_liv = try cfg_lower_emit.condLiveness(self, fs, track);
-    if (rhs_join_pred != null) try cfg_lower_emit.setTerminator(self, fs, .{ .branch = join });
+    if (rhs_join_pred != null) try cfg_lower_emit.setTerminator(self, fs, .{ .j = join });
     cfg_lower_emit.restoreCond(self, fs, track);
     // True arm: const true (consumes nothing).
     fs.cur = true_block;
     const tval = (try cfg_lower_expr.emitConst(self, fs, b.span, .{ .bool = true }, .{ .primitive = .bool })).?;
     const true_liv = try cfg_lower_emit.condLiveness(self, fs, track);
-    try cfg_lower_emit.setTerminator(self, fs, .{ .branch = join });
+    try cfg_lower_emit.setTerminator(self, fs, .{ .j = join });
     cfg_lower_emit.restoreCond(self, fs, track);
     fs.cur = join;
     try cfg_lower_emit.joinMaybeFlags(self, fs, track, b.span, &.{
@@ -234,7 +234,7 @@ pub fn lowerIf(self: *Lowerer, fs: *FuncState, e: *const ast.IfExpr) LowerError!
     const track = try cfg_lower_emit.beginCond(self, fs, e.span);
     const then_block = try cfg_lower_emit.newBlock(self, fs, "then");
     const else_block = try cfg_lower_emit.newBlock(self, fs, "else");
-    try cfg_lower_emit.setTerminator(self, fs, .{ .branch_cond = .{ .cond = cond, .then_ = then_block, .else_ = else_block } });
+    try cfg_lower_emit.setTerminator(self, fs, .{ .br = .{ .cond = cond, .then_ = then_block, .else_ = else_block } });
     const join = try cfg_lower_emit.newBlock(self, fs, "join");
 
     // Then branch.
@@ -245,7 +245,7 @@ pub fn lowerIf(self: *Lowerer, fs: *FuncState, e: *const ast.IfExpr) LowerError!
     // is the inner join, not then_block.
     const then_pred = fs.cur;
     const then_liv = try cfg_lower_emit.condLiveness(self, fs, track);
-    if (then_pred != null) try cfg_lower_emit.setTerminator(self, fs, .{ .branch = join });
+    if (then_pred != null) try cfg_lower_emit.setTerminator(self, fs, .{ .j = join });
     cfg_lower_emit.restoreCond(self, fs, track);
 
     // Else branch: a block / nested if, or void when absent (Core
@@ -257,7 +257,7 @@ pub fn lowerIf(self: *Lowerer, fs: *FuncState, e: *const ast.IfExpr) LowerError!
         try cfg_lower_expr.emitVoid(self, fs, e.span);
     const else_pred = fs.cur;
     const else_liv = try cfg_lower_emit.condLiveness(self, fs, track);
-    if (else_pred != null) try cfg_lower_emit.setTerminator(self, fs, .{ .branch = join });
+    if (else_pred != null) try cfg_lower_emit.setTerminator(self, fs, .{ .j = join });
     cfg_lower_emit.restoreCond(self, fs, track);
 
     // @intFromBool yields u1; widen before summing so two completing
@@ -312,21 +312,53 @@ pub fn lowerUnionMatch(
     // not tracked as a maybe-unique candidate.
     if (moving) cfg_lower_emit.markConsumed(self, fs, scrut);
     const track = try cfg_lower_emit.beginCond(self, fs, e.span);
-    // Arm blocks keyed by variant tag (Core §11.1: declaration order);
-    // uncovered tags trap (match exhaustiveness is phase-2).
-    var arm_blocks = std.ArrayListUnmanaged(*cfg.BasicBlock).empty;
-    var arms = std.ArrayListUnmanaged(cfg.SwitchArm).empty;
+
+    // First-match-wins coverage (Core §13.3): a variant arm covers its
+    // tag; a wildcard/identifier arm is a catch-all covering every tag
+    // not yet covered; any arm after the first catch-all is dead.
+    const cover_arm = try self.arena.alloc(?usize, ud.variants.len);
+    @memset(cover_arm, null);
+    var catchall: ?usize = null; // the first catch-all arm's index, if any
+    const live = try self.arena.alloc(bool, e.arms.len);
+    @memset(live, false);
     for (e.arms, 0..) |*arm, i| {
+        if (catchall != null) continue; // already fully covered: dead
+        if (armIsCatchAll(&arm.pattern)) {
+            live[i] = true;
+            catchall = i;
+            continue;
+        }
         const vtag = try armVariantTag(self, fs, ud, &arm.pattern, arm.span);
+        if (cover_arm[vtag] != null) continue; // duplicate variant: dead
+        cover_arm[vtag] = i;
+        live[i] = true;
+    }
+
+    // One arm block per live arm; every tag dispatches to the first
+    // arm that covers it. Uncovered tags trap (match exhaustiveness is
+    // checked in phase 2; the trap is the backstop).
+    var arm_blocks = std.ArrayListUnmanaged(*cfg.BasicBlock).empty;
+    const block_of = try self.arena.alloc(?*cfg.BasicBlock, e.arms.len);
+    @memset(block_of, null);
+    for (e.arms, 0..) |*arm, i| {
+        _ = arm;
+        if (!live[i]) continue;
         const ab = try cfg_lower_emit.newBlock(self, fs, try cfg_lower_emit.fmtBlockName(self, "arm", i));
         try arm_blocks.append(self.arena, ab);
-        try arms.append(self.arena, .{ .tag = vtag, .block = ab });
+        block_of[i] = ab;
+    }
+    var arms = std.ArrayListUnmanaged(cfg.SwitchArm).empty;
+    for (ud.variants, 0..) |_, ti| {
+        const b = if (cover_arm[ti]) |i| block_of[i].? else if (catchall) |i| block_of[i].? else continue;
+        try arms.append(self.arena, .{ .tag = @intCast(ti), .block = b });
     }
     try cfg_lower_emit.setTerminator(self, fs, .{ .@"switch" = .{ .disc = tag, .arms = arms.items } });
     const join = try cfg_lower_emit.newBlock(self, fs, "join");
     var incoming = std.ArrayListUnmanaged(JoinIn).empty;
     var branches = std.ArrayListUnmanaged(cfg_lower_emit.CondBranch).empty;
-    for (e.arms, arm_blocks.items) |*arm, ab| {
+    for (e.arms, 0..) |*arm, i| {
+        if (!live[i]) continue;
+        const ab = block_of[i].?;
         fs.cur = ab;
         try fs.scopes.append(self.arena, .{});
         try bindUnionPattern(self, fs, &arm.pattern, scrut, moving);
@@ -338,7 +370,7 @@ pub fn lowerUnionMatch(
         try incoming.append(self.arena, .{ .v = v, .b = pred });
         const arm_liv = try cfg_lower_emit.condLiveness(self, fs, track);
         try branches.append(self.arena, .{ .pred = fs.cur, .released = arm_liv });
-        if (fs.cur != null) try cfg_lower_emit.setTerminator(self, fs, .{ .branch = join });
+        if (fs.cur != null) try cfg_lower_emit.setTerminator(self, fs, .{ .j = join });
         cfg_lower_emit.restoreCond(self, fs, track);
     }
     var completing: usize = 0;
@@ -356,6 +388,98 @@ pub fn lowerUnionMatch(
     return try makeJoinPhi(self, fs, join, e.span, incoming.items);
 }
 
+/// True when a union-match arm pattern is a catch-all: `_` or a plain
+/// identifier (no variant tail).
+/// The number of test conditions an arm's pattern needs: literal and
+/// type-test arms test once; list patterns test length plus one equality
+/// per literal item; everything else is irrefutable and tested nowhere.
+fn armTestCount(p: *const ast.Pattern) usize {
+    return switch (p.*) {
+        .literal, .type_test => 1,
+        .list => |lp| blk: {
+            var n: usize = 1; // the length test
+            for (lp.items) |*it| {
+                if (it.* == .literal) n += 1;
+            }
+            break :blk n;
+        },
+        else => 0,
+    };
+}
+
+/// Whether the arm's pattern has a test condition at index `k`.
+fn hasArmTest(self: *Lowerer, fs: *FuncState, arm: *const ast.MatchArm, k: usize) LowerError!bool {
+    _ = self;
+    _ = fs;
+    return k < armTestCount(&arm.pattern);
+}
+
+/// Emit the k-th test condition for a match arm; null when the pattern
+/// has no test at that index. List patterns test length first (k == 0),
+/// then each literal item's equality (k == 1 + literal index).
+fn emitArmTest(self: *Lowerer, fs: *FuncState, scrut: *cfg.Value, arm: *const ast.MatchArm, k: usize) LowerError!?*cfg.Value {
+    const span = arm.span;
+    switch (arm.pattern) {
+        .literal => |lp| {
+            if (k != 0) return null;
+            const lit = try cfg_lower_pattern.lowerLiteralConst(self, fs, &lp);
+            return try cfg_lower_emit.emit(self, fs, span, .{ .eq = .{ .a = scrut, .b = lit } }, .{ .primitive = .bool });
+        },
+        .type_test => |tp| {
+            if (k != 0) return null;
+            const test_type = try self.resolveType(fs, &tp.type_);
+            return try cfg_lower_emit.emit(self, fs, tp.span, .{ .type_is = .{ .value = scrut, .type_ = test_type } }, .{ .primitive = .bool });
+        },
+        .list => |lp| {
+            if (k == 0) {
+                // Length test: `[a, b]` matches only length-2 lists;
+                // `[a, ..t]` matches lists of length >= 1 (Core §14.5).
+                const target: i64 = @intCast(lp.items.len);
+                const n_const = (try cfg_lower_expr.emitConst(self, fs, span, .{ .int = target }, .{ .primitive = .int32 })).?;
+                const len_args = try self.arena.alloc(*cfg.Value, 1);
+                len_args[0] = scrut;
+                const len = (try cfg_lower_emit.emit(self, fs, span, .{ .syscall = .{ .span = span, .target = .{ .builtin = .len }, .args = len_args, .ret = .{ .primitive = .int32 } } }, .{ .primitive = .int32 })).?;
+                if (lp.rest != null) {
+                    return try cfg_lower_emit.emit(self, fs, span, .{ .ge = .{ .a = len, .b = n_const } }, .{ .primitive = .bool });
+                }
+                return try cfg_lower_emit.emit(self, fs, span, .{ .eq = .{ .a = len, .b = n_const } }, .{ .primitive = .bool });
+            }
+            // Item test: the (k-1)-th literal item's equality with the
+            // scrutinee element at its index.
+            const elem_type = switch (scrut.type_) {
+                .list => |inner| inner.*,
+                else => return self.fail(span, "list pattern requires a list value", .{}),
+            };
+            var item_idx: usize = 0;
+            var lit_idx: usize = 1;
+            for (lp.items) |*it| {
+                if (it.* != .literal) {
+                    item_idx += 1;
+                    continue;
+                }
+                if (lit_idx == k) {
+                    const lit = try cfg_lower_pattern.lowerLiteralConst(self, fs, &it.*.literal);
+                    const idx = (try cfg_lower_expr.emitConst(self, fs, span, .{ .int = @intCast(item_idx) }, .{ .primitive = .int32 })).?;
+                    const elem = (try cfg_lower_emit.emit(self, fs, span, .{ .read_index = .{ .base = scrut, .index = idx } }, elem_type)).?;
+                    return try cfg_lower_emit.emit(self, fs, span, .{ .eq = .{ .a = elem, .b = lit } }, .{ .primitive = .bool });
+                }
+                item_idx += 1;
+                lit_idx += 1;
+            }
+            return null;
+        },
+        else => return null,
+    }
+}
+
+fn armIsCatchAll(p: *const ast.Pattern) bool {
+    return switch (p.*) {
+        .wildcard => true,
+        .path => |pp| pp.tail == .none,
+        else => false,
+    };
+}
+
 /// The union variant tag an arm's pattern selects (a variant
 /// pattern, Core §11.1). Refutable arms are the only supported form
 /// in a union match for now.
@@ -371,7 +495,7 @@ pub fn armVariantTag(self: *Lowerer, fs: *FuncState, ud: *const ast.UnionDef, pa
         },
         else => {},
     }
-    return self.fail(span, "only variant patterns are supported in a union match by this frontend", .{});
+    return self.fail(span, "unsupported pattern in a union match (expected a variant pattern or a catch-all)", .{});
 }
 
 /// Bind the patterns of a union-match arm: a variant pattern binds
@@ -478,65 +602,62 @@ pub fn lowerPatternMatch(self: *Lowerer, fs: *FuncState, e: *const ast.MatchExpr
         _ = arm;
         try arm_blocks.append(self.arena, try cfg_lower_emit.newBlock(self, fs, try cfg_lower_emit.fmtBlockName(self, "arm", i)));
     }
-    // Fallthrough: the first arm that is neither a literal, a type-test
-    // pattern, nor an empty-list pattern — a `[]` arm is refutable (it
-    // matches only the empty list, so it needs an emptiness test), while
-    // other list/struct/tuple patterns are treated as irrefutable by this
-    // frontend. Else the last arm.
+    // Fallthrough: the first arm that is not refutable — a literal, a
+    // type-test pattern, or a list pattern that constrains the value
+    // (`[]` needs an emptiness test, `[a, b]` a length + element test,
+    // `[h, ..t]` a length >= 1 test so the bindings never read out of
+    // bounds). Only a `[..rest]` list pattern (no items) and the other
+    // irrefutable shapes (struct/tuple/identifier/wildcard) fall
+    // through. Else the last arm.
     var fallthrough: usize = n - 1;
     for (e.arms, 0..) |*arm, i| switch (arm.pattern) {
         .literal, .type_test => {},
-        .list => |lp| if (lp.items.len == 0 and lp.rest == null) {} else {
-            fallthrough = i;
-            break;
+        .list => |lp| {
+            // `[]` and item-bearing patterns are refutable (length and
+            // element tests); only `[..rest]` matches any list.
+            if (lp.items.len == 0 and lp.rest != null) {
+                fallthrough = i;
+                break;
+            }
         },
         else => {
             fallthrough = i;
             break;
         },
     };
-    // Tests: literal arms become `eq` + br_cond, type-test arms become
-    // `type_is` + br_cond, empty-list arms become a length test
-    // (`syscall builtin#len` == 0 + br_cond), chained in the scrutinee's
-    // block.
+    // Tests: literal arms become `eq` + br, type-test arms become
+    // `type_is` + br, list patterns become a length test followed
+    // by per-literal-item `eq` tests (`[1, 2]` matches only length-2
+    // lists whose elements equal 1 and 2; `[h, ..t]` requires len >= 1
+    // so the bindings never read out of bounds), chained in the
+    // scrutinee's block: every condition of an arm must hold for the arm
+    // to match, and any failure falls through to the next arm's test.
     var cur_test = fs.cur orelse return null;
     var i: usize = 0;
     while (i < n and i != fallthrough) : (i += 1) {
-        fs.cur = cur_test;
-        var cond: *cfg.Value = undefined;
-        switch (e.arms[i].pattern) {
-            .literal => |lp| {
-                const lit = try cfg_lower_pattern.lowerLiteralConst(self, fs, &lp);
-                cond = (try cfg_lower_emit.emit(self, fs, e.arms[i].span, .{ .eq = .{ .a = scrut, .b = lit } }, .{ .primitive = .bool })).?;
-            },
-            .type_test => |tp| {
-                const test_type = try self.resolveType(fs, &tp.type_);
-                cond = (try cfg_lower_emit.emit(self, fs, tp.span, .{ .type_is = .{ .value = scrut, .type_ = test_type } }, .{ .primitive = .bool })).?;
-            },
-            .list => |lp| {
-                // `[]` matches only the empty list: len == 0 (Core §14.5).
-                std.debug.assert(lp.items.len == 0 and lp.rest == null);
-                const zero = (try cfg_lower_expr.emitConst(self, fs, e.arms[i].span, .{ .int = 0 }, .{ .primitive = .int32 })).?;
-                const len_args = try self.arena.alloc(*cfg.Value, 1);
-                len_args[0] = scrut;
-                const len = (try cfg_lower_emit.emit(self, fs, e.arms[i].span, .{ .syscall = .{ .span = e.arms[i].span, .target = .{ .builtin = .len }, .args = len_args, .ret = .{ .primitive = .int32 } } }, .{ .primitive = .int32 })).?;
-                cond = (try cfg_lower_emit.emit(self, fs, e.arms[i].span, .{ .eq = .{ .a = len, .b = zero } }, .{ .primitive = .bool })).?;
-            },
-            else => unreachable, // fallthrough is the first irrefutable arm
+        const next_test: *cfg.BasicBlock = if (i + 1 == fallthrough) arm_blocks.items[fallthrough] else blk: {
+            const nb = try cfg_lower_emit.newBlock(self, fs, "test");
+            break :blk nb;
+        };
+        var cond_block = cur_test;
+        var k: usize = 0;
+        while (true) : (k += 1) {
+            fs.cur = cond_block;
+            const cond = (try emitArmTest(self, fs, scrut, &e.arms[i], k)) orelse break;
+            const has_next = try hasArmTest(self, fs, &e.arms[i], k + 1);
+            const then_b = if (has_next) blk: {
+                const nb = try cfg_lower_emit.newBlock(self, fs, "test");
+                cond_block = nb;
+                break :blk nb;
+            } else arm_blocks.items[i];
+            try cfg_lower_emit.setTerminator(self, fs, .{ .br = .{ .cond = cond, .then_ = then_b, .else_ = next_test } });
         }
-        var else_block: *cfg.BasicBlock = undefined;
-        if (i + 1 == fallthrough) {
-            else_block = arm_blocks.items[fallthrough];
-        } else {
-            else_block = try cfg_lower_emit.newBlock(self, fs, "test");
-            cur_test = else_block;
-        }
-        try cfg_lower_emit.setTerminator(self, fs, .{ .branch_cond = .{ .cond = cond, .then_ = arm_blocks.items[i], .else_ = else_block } });
+        cur_test = next_test;
     }
     if (i == 0) {
         // No tests: straight to the fallthrough arm.
         fs.cur = cur_test;
-        try cfg_lower_emit.setTerminator(self, fs, .{ .branch = arm_blocks.items[fallthrough] });
+        try cfg_lower_emit.setTerminator(self, fs, .{ .j = arm_blocks.items[fallthrough] });
     }
     const join = try cfg_lower_emit.newBlock(self, fs, "join");
     var incoming = std.ArrayListUnmanaged(JoinIn).empty;
@@ -553,7 +674,7 @@ pub fn lowerPatternMatch(self: *Lowerer, fs: *FuncState, e: *const ast.MatchExpr
         try incoming.append(self.arena, .{ .v = v, .b = pred });
         const arm_liv = try cfg_lower_emit.condLiveness(self, fs, track);
         try branches.append(self.arena, .{ .pred = fs.cur, .released = arm_liv });
-        if (fs.cur != null) try cfg_lower_emit.setTerminator(self, fs, .{ .branch = join });
+        if (fs.cur != null) try cfg_lower_emit.setTerminator(self, fs, .{ .j = join });
         cfg_lower_emit.restoreCond(self, fs, track);
     }
     var completing: usize = 0;

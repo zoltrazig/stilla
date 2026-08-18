@@ -107,7 +107,11 @@ pub fn emit(
         const v = try newValue(self, fs, span, rt, createdState(op2, fs, rt));
         if (v.state == .borrowed) v.origin = cfg.originOf(op2);
         result = v;
-        if (v.ownership == .unique) try fs.created.append(self.arena, v);
+        // Scope-end destruction tracks owned unique values only: a
+        // borrowed view of a unique value (read_field of an unique base,
+        // `builtin.peek`, borrow_variant) aliases the owner and must not
+        // be dropped through.
+        if (v.state == .owned and v.ownership == .unique) try fs.created.append(self.arena, v);
     }
     const instr = try self.arena.create(cfg.Instr);
     if (result) |v| {
@@ -160,7 +164,9 @@ pub fn emitBorrowVariant(self: *lower.Lowerer, fs: *lower.FuncState, span: ast.S
         const v = try newValue(self, fs, span, rt, state);
         if (v.state == .borrowed) v.origin = cfg.originOf(op);
         results[i] = v;
-        if (v.ownership == .unique) try fs.created.append(self.arena, v);
+        // Only owned unique values are destroyed at scope end; the
+        // borrowed views of unique payloads alias the base.
+        if (v.state == .owned and v.ownership == .unique) try fs.created.append(self.arena, v);
     }
     const instr = try self.arena.create(cfg.Instr);
     instr.* = .{ .span = span, .results = results, .op = op };
@@ -170,8 +176,21 @@ pub fn emitBorrowVariant(self: *lower.Lowerer, fs: *lower.FuncState, span: ast.S
 }
 /// an unique member read is a borrowed view). Parameters are SSA roots
 /// (ir.md §5.1): their state is set when they are seeded, never by an op.
+/// The SSA-state of an op result (ir.md §6.1–§6.5). Parameters are SSA
+/// roots (ir.md §5.1): their state is set when they are seeded, never by
+/// an op.
 pub fn createdState(op: cfg.Op, fs: *lower.FuncState, result_type: cfg.Type) cfg.ValueState {
     _ = fs;
+    // `syscall builtin#peek` of a unique payload is a borrowed view of
+    // the boxed value (ir.md §6.5); of a Copy payload it is an owned
+    // copy. The generic syscall schema row says .owned, which would
+    // make the unique-payload view look owned and get destroyed through
+    // the box — a double destruction.
+    if (std.meta.activeTag(op) == .syscall and
+        op.syscall.target == .builtin and op.syscall.target.builtin == .peek)
+    {
+        return readState(result_type);
+    }
     return switch (cfg.opInfo(std.meta.activeTag(op)).created) {
         .owned => .owned,
         .borrowed => .borrowed,
@@ -204,7 +223,7 @@ pub fn isConsumed(fs: *lower.FuncState, v: *cfg.Value) bool {
 /// Emit an instruction into a specific block — used to materialize the
 /// `T → any` coercion of a phi input on its predecessor edge (ir.md
 /// §4.4), where the branch block is already terminated, and the
-/// `cleanup_disable` of a token whose owner was consumed on that edge.
+/// `cleanup_disarm` of a token whose owner was consumed on that edge.
 /// The instruction is appended after the block's existing instructions
 /// (immediately before its terminator), which is the correct evaluation
 /// point. No on-the-fly folding/CSE applies (these ops are not foldable
@@ -245,14 +264,14 @@ pub fn cleanupDisable(self: *lower.Lowerer, fs: *lower.FuncState, span: ast.Span
 /// `cleanupDisable` into a specific block (a branch edge or the join).
 pub fn cleanupDisableInto(self: *lower.Lowerer, fs: *lower.FuncState, b: *cfg.BasicBlock, span: ast.Span, v: *cfg.Value) lower.LowerError!void {
     if (fs.cleanup_tokens.get(v)) |tok| {
-        _ = try emitInto(self, fs, b, span, .{ .cleanup_disable = tok }, null);
+        _ = try emitInto(self, fs, b, span, .{ .cleanup_disarm = tok }, null);
     }
 }
 
 /// Drop a value (a `drop` effect); the value is dead afterwards.
 /// Dropping a Copy value does nothing (Core §10.1). A value with a
 /// cleanup token — a conditional-release candidate (Core §10.10) — is
-/// destroyed through its token: `drop_cleanup` destroys the payload iff
+/// destroyed through its token: `cleanup_drop` destroys the payload iff
 /// the token is still armed (the value was not consumed on this path),
 /// then disarms it. The maybe-unique *value* itself is never referenced
 /// after the construct's join (ir.md §6.4).
@@ -264,7 +283,7 @@ pub fn emitDrop(self: *lower.Lowerer, fs: *lower.FuncState, span: ast.Span, v: *
     if (v.state == .borrowed) return;
     if (isConsumed(fs, v)) return;
     if (fs.cleanup_tokens.get(v)) |tok| {
-        _ = try emit(self, fs, span, .{ .drop_cleanup = tok }, null);
+        _ = try emit(self, fs, span, .{ .cleanup_drop = tok }, null);
         markConsumed(self, fs, v);
         return;
     }
@@ -325,8 +344,8 @@ pub fn exitScope(self: *lower.Lowerer, fs: *lower.FuncState, except: ?*cfg.Value
 /// The tracked bindings of a conditional construct: the live unique
 /// owners that might be consumed on some but not all paths through it.
 /// Each candidate is given a cleanup token at the construct's entry; a
-/// consuming path disarms it (`cleanup_disable`), and the scope-end
-/// destruction is a `drop_cleanup` of the token — destroying the payload
+/// consuming path disarms it (`cleanup_disarm`), and the scope-end
+/// destruction is a `cleanup_drop` of the token — destroying the payload
 /// iff it was never transferred on the path that reached the scope exit.
 pub const CondTrack = struct {
     candidates: []*cfg.Value,
@@ -343,7 +362,7 @@ pub const CondBranch = struct {
 /// Snapshot the unique bindings visible at a conditional construct's
 /// entry (Core §10.10): every live, owned, unique value bound to a local
 /// at the current point, in value-id order. Each candidate that does not
-/// already have a token gets one now — a `cleanup_owner` in the current
+/// already have a token gets one now — a `cleanup_arm` in the current
 /// block, which dominates every branch and the join, so the token is
 /// armed on every path until a consuming path disarms it. Call after the
 /// condition/scrutinee has been lowered — a binding consumed there is
@@ -361,7 +380,7 @@ pub fn beginCond(self: *lower.Lowerer, fs: *lower.FuncState, span: ast.Span) low
     }
     for (cands.items) |v| {
         if (!fs.cleanup_tokens.contains(v)) {
-            const tok = (try emit(self, fs, span, .{ .cleanup_owner = v }, .cleanup)).?;
+            const tok = (try emit(self, fs, span, .{ .cleanup_arm = v }, .cleanup)).?;
             try fs.cleanup_tokens.put(self.arena, v, tok);
         }
     }
@@ -395,7 +414,7 @@ pub fn restoreCond(_: *lower.Lowerer, fs: *lower.FuncState, track: CondTrack) vo
 /// disarmed on every path). Consumed on some but not all branches, the
 /// binding is *maybe-unique*: no join-time state exists — the token's
 /// per-path armed bit *is* the conditional destruction, and the scope-end
-/// `drop_cleanup` destroys the payload only on the paths that kept it.
+/// `cleanup_drop` destroys the payload only on the paths that kept it.
 /// The maybe-unique value itself has no uses after the join (ir.md §6.4).
 pub fn joinMaybeFlags(
     self: *lower.Lowerer,
@@ -417,7 +436,7 @@ pub fn joinMaybeFlags(
         if (!all_released) {
             // Maybe-unique: the token handles the conditional destruction.
             // The local's consumed flag must stay clear so the scope-end
-            // `drop_cleanup` is emitted (ir.md §6.4).
+            // `cleanup_drop` is emitted (ir.md §6.4).
             if (fs.value_locals.get(v)) |l| l.consumed = false;
             continue;
         }
@@ -630,6 +649,9 @@ fn intArith(comptime T: type, a: cfg.ConstValue, b: cfg.ConstValue, op: Arith) ?
 
 /// Float arithmetic is IEEE binary32 (Runtime §7.2): it never traps, so
 /// division by zero folds to ±inf and NaN propagates like the runtime.
+/// Non-finite results DO fold — the IR text form represents them as
+/// inf/-inf/nan (cfg_parse accepts them), so the round-trip stays
+/// faithful.
 fn floatArith(a: cfg.ConstValue, b: cfg.ConstValue, op: Arith) ?cfg.ConstValue {
     const x = floatConst(a) orelse return null;
     const y = floatConst(b) orelse return null;

@@ -29,7 +29,7 @@ pub fn dropElide(program: *cfg.IrProgram, allocator: std.mem.Allocator) !void {
             for (b.instrs) |instr| {
                 const v = switch (instr.op) {
                     .drop_ => |v| v,
-                    // `drop_cleanup` / `cleanup_disable` act on a
+                    // `cleanup_drop` / `cleanup_disarm` act on a
                     // cleanup token (type `.cleanup`, classified
                     // Copy) and must never be elided: the token's
                     // payload is an unique owner.

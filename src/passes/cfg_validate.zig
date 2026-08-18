@@ -96,8 +96,8 @@ fn validateFunc(f: *const cfg.IrFunc, allocator: std.mem.Allocator) !?[]const u8
     // analysis, not by this check: their `trap` terminator has no edge.
     for (f.blocks) |b| {
         const targets: []const *const cfg.BasicBlock = switch (b.terminator) {
-            .branch => |t| &.{t},
-            .branch_cond => |bc| &.{ bc.then_, bc.else_ },
+            .j => |t| &.{t},
+            .br => |bc| &.{ bc.then_, bc.else_ },
             .@"switch" => |s| blk: {
                 var ts = std.ArrayList(*const cfg.BasicBlock).empty;
                 for (s.arms) |arm| try ts.append(allocator, arm.block);
@@ -274,8 +274,8 @@ fn successors(b: *const cfg.BasicBlock, allocator: std.mem.Allocator) ![]const *
     var out = std.ArrayList(*const cfg.BasicBlock).empty;
     switch (b.terminator) {
         .ret, .tailcall, .trap => {},
-        .branch => |t| try out.append(allocator, t),
-        .branch_cond => |bc| {
+        .j => |t| try out.append(allocator, t),
+        .br => |bc| {
             try out.append(allocator, bc.then_);
             try out.append(allocator, bc.else_);
         },
@@ -334,7 +334,7 @@ fn consume(st: *StateMap, v: ?*const cfg.Value) !void {
 
 fn operand0(op: cfg.Op) ?*const cfg.Value {
     return switch (op) {
-        .neg, .not_, .num_cast, .any_pack_copy, .any_pack_move, .any_unpack_copy, .any_unpack_move, .cleanup_owner, .cleanup_disable, .drop_cleanup, .copy, .borrow, .move_, .tail, .unpack_struct, .unpack_tuple, .split_list, .read_tag, .read_payload, .drop_ => |v| v,
+        .neg, .not_, .num_cast, .any_pack_copy, .any_pack_move, .any_unpack_copy, .any_unpack_move, .cleanup_arm, .cleanup_disarm, .cleanup_drop, .copy, .borrow, .move_, .tail, .unpack_struct, .unpack_tuple, .split_list, .read_tag, .read_payload, .drop_ => |v| v,
         .unpack_variant => |uv| uv.base,
         .borrow_variant => |bv| bv.base,
         .type_is => |x| x.value,
@@ -573,10 +573,10 @@ fn checkInstr(
                 return msg(allocator, "function @{s}: drop of borrowed value %{d} in block '{s}' (Core §10.7)", .{ f.name.text, v.id, b.name });
             }
         },
-        .cleanup_owner => |v| {
-            if (instr.results[0].type_ != .cleanup) return typeErr(allocator, f, b, "cleanup_owner", v.type_);
+        .cleanup_arm => |v| {
+            if (instr.results[0].type_ != .cleanup) return typeErr(allocator, f, b, "cleanup_arm", v.type_);
         },
-        .cleanup_disable, .drop_cleanup => |v| {
+        .cleanup_disarm, .cleanup_drop => |v| {
             if (v.type_ != .cleanup) {
                 return msg(allocator, "function @{s}: {s} operand %{d} is not a cleanup token in block '{s}'", .{ f.name.text, info.text, v.id, b.name });
             }
@@ -659,7 +659,17 @@ fn checkInstr(
             // args already moved, so an arriving borrowed value is a
             // plain/borrow argument — a legal view. Nothing to check
             // here beyond the schema's arity (done above).
-            _ = s;
+            //
+            // `builtin#peek` of a non-Copy payload must produce a
+            // borrowed view (ir.md §6.5): an owned result would be
+            // destroyed through the box at scope end AND by the box's
+            // own destruction — a double free.
+            if (s.target == .builtin and s.target.builtin == .peek and instr.results.len == 1) {
+                const r = instr.results[0];
+                if (r.ownership != .copy and r.state == .owned) {
+                    return msg(allocator, "function @{s}: syscall builtin#peek result %{d} of non-Copy type must be a borrowed view (ir.md §6.5)", .{ f.name.text, r.id });
+                }
+            }
         },
         .phi => unreachable, // handled at the block head
     }
@@ -697,7 +707,7 @@ fn checkTerminator(f: *const cfg.IrFunc, b: *const cfg.BasicBlock, dom: [][]bool
                 }
             }
         },
-        .branch, .trap => {},
+        .j, .trap => {},
         .tailcall => |tc| {
             // A `tailcall` is a direct self-call: the target must be the
             // enclosing function, the argument list must match the
@@ -742,7 +752,7 @@ fn checkTerminator(f: *const cfg.IrFunc, b: *const cfg.BasicBlock, dom: [][]bool
                 }
             }
         },
-        .branch_cond => |bc| {
+        .br => |bc| {
             if (try checkUse(f, b, null, bc.cond, dom, allocator)) |m| return m;
             if (bc.cond.state == .borrowed) {
                 if (try checkBorrowRoot(f, b, bc.cond, st.*, allocator)) |m| return m;
@@ -762,7 +772,7 @@ fn checkTerminator(f: *const cfg.IrFunc, b: *const cfg.BasicBlock, dom: [][]bool
 fn valueOperandCount(op: cfg.Op) usize {
     return switch (op) {
         .const_, .module_ref, .fn_ref => 0,
-        .neg, .not_, .num_cast, .any_pack_copy, .any_pack_move, .any_unpack_copy, .any_unpack_move, .cleanup_owner, .cleanup_disable, .drop_cleanup, .copy, .borrow, .move_, .tail, .unpack_struct, .unpack_tuple, .unpack_variant, .borrow_variant, .split_list, .read_tag, .read_payload, .drop_ => 1,
+        .neg, .not_, .num_cast, .any_pack_copy, .any_pack_move, .any_unpack_copy, .any_unpack_move, .cleanup_arm, .cleanup_disarm, .cleanup_drop, .copy, .borrow, .move_, .tail, .unpack_struct, .unpack_tuple, .unpack_variant, .borrow_variant, .split_list, .read_tag, .read_payload, .drop_ => 1,
         .type_is => 1,
         .load_member => 1,
         .store_member => 1,
@@ -781,7 +791,7 @@ fn collectOperands(instr: *const cfg.Instr, allocator: std.mem.Allocator) ![]*co
     var out = std.ArrayList(*const cfg.Value).empty;
     errdefer out.deinit(allocator);
     switch (instr.op) {
-        .neg, .not_, .num_cast, .any_pack_copy, .any_pack_move, .any_unpack_copy, .any_unpack_move, .cleanup_owner, .cleanup_disable, .drop_cleanup, .copy, .borrow, .move_, .tail, .unpack_struct, .unpack_tuple, .split_list, .read_tag, .read_payload, .drop_ => |v| try out.append(allocator, v),
+        .neg, .not_, .num_cast, .any_pack_copy, .any_pack_move, .any_unpack_copy, .any_unpack_move, .cleanup_arm, .cleanup_disarm, .cleanup_drop, .copy, .borrow, .move_, .tail, .unpack_struct, .unpack_tuple, .split_list, .read_tag, .read_payload, .drop_ => |v| try out.append(allocator, v),
         .unpack_variant => |uv| try out.append(allocator, uv.base),
         .borrow_variant => |bv| try out.append(allocator, bv.base),
         .type_is => |x| try out.append(allocator, x.value),
@@ -986,16 +996,16 @@ test "validator accepts a lowered-style program with cleanup tokens" {
         \\    entry:
         \\        %0: int32 = const 1
         \\        %1: File = construct %0
-        \\        %2: cleanup = cleanup_owner %1
+        \\        %2: cleanup = cleanup_arm %1
         \\        %3: bool = const true
         \\        br %3 ? then : join
         \\    then:
         \\        %4: File = move %1
-        \\        cleanup_disable %2
+        \\        cleanup_disarm %2
         \\        call @consume, %4
-        \\        br join
+        \\        j join
         \\    join:
-        \\        drop_cleanup %2
+        \\        cleanup_drop %2
         \\        ret
         \\    }
         \\    func @consume(move f: File) -> void {
@@ -1064,7 +1074,7 @@ test "validator rejects a non-dominated use" {
         \\        br %0 ? b : c
         \\    b:
         \\        %1: int32 = const 1
-        \\        br join
+        \\        j join
         \\    c:
         \\        ret %1
         \\    join:
@@ -1086,9 +1096,9 @@ test "validator rejects a phi with mixed incoming types" {
         \\        %2: str = const "x"
         \\        br %0 ? a : b
         \\    a:
-        \\        br join
+        \\        j join
         \\    b:
-        \\        br join
+        \\        j join
         \\    join:
         \\        %3: int32 = phi [%1, a], [%2, b]
         \\        ret %3

@@ -61,7 +61,12 @@ pub fn annotateModule(ck: *checker.Checker, info: *ModuleInfo) CheckError!void {
     for (program.items) |*item| switch (item.*) {
         .const_def => |*c| {
             if (c.type_ != null) {
-                _ = try ck.resolveTypeOf(ma, info, &c.type_.?);
+                const resolved = try ck.resolveTypeOf(ma, info, &c.type_.?);
+                // Module scope has no type parameters: any `.param` in a
+                // declared type is an unresolved name.
+                if (findStrayParam(resolved, &.{})) |name| {
+                    return frame.ck.fail(c.type_.?.span(), "cannot resolve type '{s}'", .{name});
+                }
                 try ma.names.put(ck.alloc(), c.name.text, &c.name);
             }
             if (c.init) |init| {
@@ -81,10 +86,16 @@ pub fn annotateModule(ck: *checker.Checker, info: *ModuleInfo) CheckError!void {
         .struct_def => |*s| {
             // The user `drop` hook's destruction-view restrictions (Core
             // §9.2, §18 *User drop hook*). Generic templates are never
-            // checked unspecialized (Core §12.4); their hooks are lowered
-            // per specialization, matching `cfg_lower_module`.
-            if (s.type_params.len == 0) {
-                if (s.drop) |d| try checkDropHook(frame, s, d);
+            // checked unspecialized (Core §12.4), and there is no
+            // per-specialization hook expansion (monomorphize clones
+            // function templates only), so a hook on a generic struct
+            // would silently never run. Reject it instead.
+            if (s.type_params.len > 0) {
+                if (s.drop != null) {
+                    return frame.ck.fail(s.name.span, "a drop hook on a generic struct is not supported (it would never run); use a concrete wrapper struct", .{});
+                }
+            } else if (s.drop) |d| {
+                try checkDropHook(frame, s, d);
             }
         },
         else => {},
@@ -114,12 +125,48 @@ fn checkDropHook(frame: *Frame, s: *const ast.StructDef, d: *const ast.DropDecl)
 // Functions and blocks
 // ---------------------------------------------------------------------------
 
+/// The name of the first `.param` (an unresolved type name) in `t` that
+/// is not one of the declared type parameters; null when every mention is
+/// in scope. Phase 1 degrades unknown names to `.param`, so this is how
+/// the checker turns a typo like `fn f(x: Piont)` into a diagnostic
+/// (Core §12.1).
+fn findStrayParam(t: cfg.Type, declared: []const ast.Ident) ?[]const u8 {
+    return switch (t) {
+        .param => |name| blk: {
+            for (declared) |d| if (std.mem.eql(u8, d.text, name)) break :blk null;
+            break :blk name;
+        },
+        .list => |inner| findStrayParam(inner.*, declared),
+        .box => |inner| findStrayParam(inner.*, declared),
+        .tuple => |elems| blk: {
+            for (elems) |e| if (findStrayParam(e, declared)) |n| break :blk n;
+            break :blk null;
+        },
+        .named => |n| blk: {
+            for (n.args) |a| if (findStrayParam(a, declared)) |x| break :blk x;
+            break :blk null;
+        },
+        else => null,
+    };
+}
+
 fn checkFuncBody(frame: *Frame, f: *const ast.FuncDef, body: *const ast.Block) CheckError!void {
     _ = try pushScope(frame, true);
     defer popScope(frame);
 
+    // Phase 1 degrades an unresolvable type name to the generic-variable
+    // marker (`.param`), so the checker must verify every type in the
+    // signature mentions only declared parameters (Core §12.1): a typo
+    // like `fn f(x: Piont)` would otherwise compile as a phantom generic.
+    const old_params = frame.func_params;
+    frame.func_params = f.type_params;
+    defer frame.func_params = old_params;
+
     for (f.params) |*p| {
         const t = try frame.ck.resolveTypeOf(frame.ma, frame.info, &p.type_);
+        if (findStrayParam(t, f.type_params)) |name| {
+            return frame.ck.fail(p.type_.span(), "cannot resolve type '{s}': not a declared type parameter of this function", .{name});
+        }
         _ = try bindLocal(frame, p.name.text, t, p.mode == .borrow);
     }
     // Resolve the declared return type so the validate pass can check the
@@ -130,6 +177,9 @@ fn checkFuncBody(frame: *Frame, f: *const ast.FuncDef, body: *const ast.Block) C
     const old_expect = frame.expect;
     if (f.ret != null) {
         frame.expect = try frame.ck.resolveTypeOf(frame.ma, frame.info, &f.ret.?);
+        if (findStrayParam(frame.expect.?, f.type_params)) |name| {
+            return frame.ck.fail(f.ret.?.span(), "cannot resolve type '{s}': not a declared type parameter of this function", .{name});
+        }
     }
     defer frame.expect = old_expect;
 
@@ -173,7 +223,13 @@ fn checkLet(frame: *Frame, l: *const ast.LetStmt) CheckError!void {
     // initializer's goal type (Core §11), so an under-determined
     // construction fills its type arguments from it.
     var declared: ?cfg.Type = null;
-    if (l.type_ != null) declared = try frame.ck.resolveTypeOf(frame.ma, frame.info, &l.type_.?);
+    if (l.type_ != null) {
+        declared = try frame.ck.resolveTypeOf(frame.ma, frame.info, &l.type_.?);
+        // A declared type may not name an undeclared type variable.
+        if (findStrayParam(declared.?, frame.func_params)) |name| {
+            return frame.ck.fail(l.type_.?.span(), "cannot resolve type '{s}': not a declared type parameter of this function", .{name});
+        }
+    }
     const t: ?cfg.Type = blk: {
         // The declared type types the binding when one is written (Core
         // §4): a declared `any` makes the binding `any` (the top-type
@@ -187,19 +243,21 @@ fn checkLet(frame: *Frame, l: *const ast.LetStmt) CheckError!void {
         break :blk it;
     };
     // A `let` binding owns its initializer, so the initializer may not be
-    // a borrowed unique value (Core §10.7, §18). An irrefutable
-    // identifier pattern bound to an existing unique local owner requires
-    // an explicit `move` (Core §10.4); a fresh unique expression binds
-    // directly (Core §10.5).
+    // a borrowed unique value (Core §10.7, §18). An irrefutable pattern
+    // that creates bindings (an identifier, or a destructure) bound to an
+    // existing unique local owner requires an explicit `move` (Core
+    // §10.4, §14.6): the bindings take the value or its parts, and
+    // otherwise two owners would exist. A wildcard discards (no new
+    // owner — no move needed) and refutable patterns are rejected by
+    // `inferPattern` below, so neither needs the ownership check first.
     if (try isBorrowedExpr(frame, l.init)) {
         return frame.ck.fail(l.init.span(), "cannot store a borrowed value into an owning binding (Core §10.7)", .{});
     }
-    switch (l.pattern) {
-        .path => |*pp| if (pp.tail == .none and pp.path.len == 1) {
-            try requireMoveIfOwned(frame, l.init, "binding");
-        },
-        else => {},
-    }
+    const binds = switch (l.pattern) {
+        .wildcard, .literal, .type_test => false,
+        else => true,
+    };
+    if (binds) try requireMoveIfOwned(frame, l.init, "binding");
     if (t) |tt| try inferPattern(frame, &l.pattern, tt, false);
 }
 
@@ -1089,6 +1147,17 @@ fn specializeInstance(
         if (inst.decl != decl) continue;
         if (!typeArgsEqual(inst.type_args, type_args)) continue;
         return inst;
+    }
+
+    // Recursive generics that grow the instantiation per depth
+    // (`grow[T]` calling `grow[list[T]]`) would expand forever, one
+    // distinct instance per level; the dedup above cannot stop them.
+    // Cap the total count so diverging programs terminate with a
+    // diagnostic instead of a compile-time hang.
+    // ponytail: fixed total-instance cap; revisit if real code needs more.
+    const kMaxInstances = 512;
+    if (ck.annotation.instances.items.len >= kMaxInstances) {
+        return ck.fail(target.vm.name.span, "generic instantiation limit exceeded ({d} instances); the program's generic recursion does not terminate", .{ck.annotation.instances.items.len});
     }
 
     const inst = try ck.alloc().create(checker.FuncInstance);

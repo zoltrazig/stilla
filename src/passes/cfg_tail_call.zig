@@ -24,7 +24,7 @@
 //! orphan the function's only `ret`. Both are conservative: the call
 //! stays ordinary when either fails.
 //!
-//! The rewrite (§7.2) replaces the `call`+`ret` pair with a `br` back to
+//! The rewrite (§7.2) replaces the `call`+`ret` pair with a `j` back to
 //! the function's own entry block, re-binding the callee parameters from
 //! the call's arguments: the entry block becomes a loop header holding
 //! one phi per parameter (the entry values merged with the loop-back
@@ -133,16 +133,16 @@ fn resultChain(f: *cfg.IrFunc, block: *cfg.BasicBlock, result: *cfg.Value, alloc
             .ret => |t| {
                 if (t == cur_block) return finishChain(&chain, allocator);
                 // The block branches to a phi-only block that rets it.
-                if (cur_block.terminator != .branch) return null;
-                if (cur_block.terminator.branch != t) return null;
+                if (cur_block.terminator != .j) return null;
+                if (cur_block.terminator.j != t) return null;
                 if (!isPhiOnly(t)) return null;
                 try chain.append(allocator, t);
                 return finishChain(&chain, allocator);
             },
             .phi => |p| {
                 if (p.pred != cur_block) return null;
-                if (cur_block.terminator != .branch) return null;
-                if (cur_block.terminator.branch != p.block) return null;
+                if (cur_block.terminator != .j) return null;
+                if (cur_block.terminator.j != p.block) return null;
                 if (!isPhiOnly(p.block)) return null;
                 const next = phiResult(p.block, cur_block, cur_val) orelse return null;
                 cur_block = p.block;
@@ -195,7 +195,7 @@ fn voidChain(block: *cfg.BasicBlock, call_instr: *cfg.Instr, allocator: std.mem.
                 if (r != null) return null;
                 return try chain.toOwnedSlice(allocator);
             },
-            .branch => |next| {
+            .j => |next| {
                 if (!isNoiseOnly(next)) return null;
                 // An intermediate (branching) chain block must forward
                 // only the call: with extra predecessors it merges other
@@ -203,7 +203,7 @@ fn voidChain(block: *cfg.BasicBlock, call_instr: *cfg.Instr, allocator: std.mem.
                 // (multi-arm guarded recursion, §7.2). The ret block may
                 // keep other predecessors — its non-chain values are
                 // preserved.
-                if (next.terminator == .branch and next.preds.len != 1) return null;
+                if (next.terminator == .j and next.preds.len != 1) return null;
                 try chain.append(allocator, next);
                 cur = next;
             },
@@ -270,8 +270,8 @@ fn collectUses(f: *cfg.IrFunc, v: *cfg.Value, allocator: std.mem.Allocator) !std
                     if (uses.items.len > 1) break :outer;
                 };
             },
-            .branch => {},
-            .branch_cond => |bc| {
+            .j => {},
+            .br => |bc| {
                 if (bc.cond == v) {
                     try uses.append(allocator, .other);
                     if (uses.items.len > 1) break :outer;
@@ -301,7 +301,7 @@ fn collectUses(f: *cfg.IrFunc, v: *cfg.Value, allocator: std.mem.Allocator) !std
 /// caller).
 fn instrUses(instr: *const cfg.Instr, v: *const cfg.Value) bool {
     return switch (instr.op) {
-        .neg, .not_, .num_cast, .any_pack_copy, .any_pack_move, .any_unpack_copy, .any_unpack_move, .cleanup_owner, .cleanup_disable, .drop_cleanup, .copy, .borrow, .move_, .tail, .unpack_struct, .unpack_tuple, .split_list, .read_tag, .read_payload, .drop_ => |x| x == v,
+        .neg, .not_, .num_cast, .any_pack_copy, .any_pack_move, .any_unpack_copy, .any_unpack_move, .cleanup_arm, .cleanup_disarm, .cleanup_drop, .copy, .borrow, .move_, .tail, .unpack_struct, .unpack_tuple, .split_list, .read_tag, .read_payload, .drop_ => |x| x == v,
         .unpack_variant => |uv| uv.base == v,
         .borrow_variant => |bv| bv.base == v,
         .type_is => |x| x.value == v,
@@ -360,7 +360,7 @@ fn rewriteFunc(f: *cfg.IrFunc, allocator: std.mem.Allocator) !void {
         .span = header.span,
         .name = tramp_name,
         .instrs = &.{},
-        .terminator = .{ .branch = header },
+        .terminator = .{ .j = header },
         .preds = &.{},
     };
 
@@ -381,7 +381,7 @@ fn rewriteFunc(f: *cfg.IrFunc, allocator: std.mem.Allocator) !void {
         for (0..t.chain.len - 1) |i| {
             try dropPred(t.chain[i + 1], t.chain[i], allocator);
         }
-        t.block.terminator = .{ .branch = header };
+        t.block.terminator = .{ .j = header };
     }
 
     // The header's predecessors, in the same order as the phi incomings:
@@ -538,8 +538,8 @@ fn rewriteBlock(b: *cfg.BasicBlock, renames: *const std.AutoHashMap(*cfg.Value, 
         .ret => |v| {
             if (v) |val| b.terminator.ret = renames.get(val) orelse val;
         },
-        .branch => {},
-        .branch_cond => |*bc| bc.cond = renames.get(bc.cond) orelse bc.cond,
+        .j => {},
+        .br => |*bc| bc.cond = renames.get(bc.cond) orelse bc.cond,
         .@"switch" => |*s| s.disc = renames.get(s.disc) orelse s.disc,
         .tailcall => |*tc| for (tc.args) |*a| {
             a.* = renames.get(a.*) orelse a.*;
@@ -551,7 +551,7 @@ fn rewriteBlock(b: *cfg.BasicBlock, renames: *const std.AutoHashMap(*cfg.Value, 
 /// Rewrite the value operands of `instr` in place.
 fn rewriteInstr(instr: *cfg.Instr, renames: *const std.AutoHashMap(*cfg.Value, *cfg.Value)) void {
     switch (instr.op) {
-        .neg, .not_, .num_cast, .any_pack_copy, .any_pack_move, .any_unpack_copy, .any_unpack_move, .cleanup_owner, .cleanup_disable, .drop_cleanup, .copy, .borrow, .move_, .tail, .unpack_struct, .unpack_tuple, .split_list, .read_tag, .read_payload, .drop_ => |*v| {
+        .neg, .not_, .num_cast, .any_pack_copy, .any_pack_move, .any_unpack_copy, .any_unpack_move, .cleanup_arm, .cleanup_disarm, .cleanup_drop, .copy, .borrow, .move_, .tail, .unpack_struct, .unpack_tuple, .split_list, .read_tag, .read_payload, .drop_ => |*v| {
             v.* = renames.get(v.*) orelse v.*;
         },
         .unpack_variant => |*uv| uv.base = renames.get(uv.base) orelse uv.base,
@@ -596,7 +596,7 @@ fn rewriteInstr(instr: *cfg.Instr, renames: *const std.AutoHashMap(*cfg.Value, *
 /// severed, the join loses the block as a predecessor and drops the call
 /// result's phi incoming, and the reuse disposes of the remaining owned
 /// locals (an armed cleanup token guarding such a local is satisfied by the
-/// reuse, so no `drop_cleanup` is emitted on the tail path).
+/// reuse, so no `cleanup_drop` is emitted on the tail path).
 ///
 /// Supported shape (the fold pattern): block `b` ends in
 /// `call @f, args` and branches to a single target `t`, whose phi consumes
@@ -621,11 +621,11 @@ fn emitTailCalls(f: *cfg.IrFunc, allocator: std.mem.Allocator) !void {
         const result = ci.results[0];
 
         // Tail position: the result is re-turned through a join phi
-        // (`br t` + phi in t whose result `t` rets), or ret'd directly.
+        // (`j t` + phi in t whose result `t` rets), or ret'd directly.
         switch (b.terminator) {
-            .branch => |t| {
+            .j => |t| {
                 const phi_res = phiIncoming(t, b, result) orelse continue;
-                if (b.terminator.branch != t) continue;
+                if (b.terminator.j != t) continue;
                 // The result must be used *only* as that join phi input — a
                 // self-call whose result is consumed elsewhere is not a tail
                 // call and must not be frame-reused.

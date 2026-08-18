@@ -3,7 +3,7 @@
 //! with empty forwarding blocks removed.
 //!
 //! A forwarding block is one with no instructions whose terminator is an
-//! unconditional `br` to a single successor — the lowerer's trivial
+//! unconditional `j` to a single successor — the lowerer's trivial
 //! `then:`/`else:` branches of an `if`, and the noise-only joins of void
 //! control flow. Threading removes it: every predecessor's edge to the
 //! block is redirected to its ultimate successor, and the successor's phi
@@ -16,7 +16,7 @@
 //! The rewrite is semantics-preserving: an empty block performs no work,
 //! so redirecting edges and re-keying phis changes nothing observable.
 //! Chains of forwarding blocks collapse to their ultimate successor (the
-//! walk follows `br` edges while the target is itself a forwarding
+//! walk follows `j` edges while the target is itself a forwarding
 //! candidate); a chain cycle makes every member non-threadable. A
 //! candidate whose predecessor already branches directly to the ultimate
 //! target is skipped, so threading never creates a duplicate predecessor
@@ -104,14 +104,14 @@ fn threadFunc(f: *cfg.IrFunc, allocator: std.mem.Allocator) !void {
 }
 
 /// The forwarding candidates of `f`: blocks with no instructions, an
-/// unconditional `br` to a block other than themselves, and not the entry.
+/// unconditional `j` to a block other than themselves, and not the entry.
 fn collectCandidates(f: *const cfg.IrFunc, allocator: std.mem.Allocator) ![]*cfg.BasicBlock {
     var out = std.ArrayList(*cfg.BasicBlock).empty;
     for (f.blocks) |b| {
         if (b == f.entry) continue;
         if (b.instrs.len != 0) continue;
         const t = switch (b.terminator) {
-            .branch => |t| t,
+            .j => |t| t,
             else => continue,
         };
         if (t == b) continue;
@@ -120,7 +120,7 @@ fn collectCandidates(f: *const cfg.IrFunc, allocator: std.mem.Allocator) ![]*cfg
     return out.toOwnedSlice(allocator);
 }
 
-/// The ultimate successor of candidate `x`: follow its `br` chain while
+/// The ultimate successor of candidate `x`: follow its `j` chain while
 /// the target is itself a forwarding candidate. Null when the chain cycles
 /// (the candidate is not threadable).
 fn ultimateOf(f: *const cfg.IrFunc, x: *cfg.BasicBlock, allocator: std.mem.Allocator) !?*cfg.BasicBlock {
@@ -131,7 +131,7 @@ fn ultimateOf(f: *const cfg.IrFunc, x: *cfg.BasicBlock, allocator: std.mem.Alloc
         if (visited.contains(cur)) return null; // cycle
         try visited.put(cur, {});
         const t = switch (cur.terminator) {
-            .branch => |t| t,
+            .j => |t| t,
             else => return cur,
         };
         if (t == cur) return null; // self-loop, not a candidate anyway
@@ -146,7 +146,7 @@ fn isCandidate(f: *const cfg.IrFunc, b: *const cfg.BasicBlock) bool {
     if (b == f.entry) return false;
     if (b.instrs.len != 0) return false;
     const t = switch (b.terminator) {
-        .branch => |t| t,
+        .j => |t| t,
         else => return false,
     };
     return t != b;
@@ -155,8 +155,8 @@ fn isCandidate(f: *const cfg.IrFunc, b: *const cfg.BasicBlock) bool {
 /// True when `p`'s terminator currently has an edge to `t`.
 fn referencesTarget(p: *const cfg.BasicBlock, t: *const cfg.BasicBlock) bool {
     return switch (p.terminator) {
-        .branch => |b| b == t,
-        .branch_cond => |bc| bc.then_ == t or bc.else_ == t,
+        .j => |b| b == t,
+        .br => |bc| bc.then_ == t or bc.else_ == t,
         .@"switch" => |s| blk: {
             for (s.arms) |a| if (a.block == t) break :blk true;
             break :blk false;
@@ -170,12 +170,12 @@ fn referencesTarget(p: *const cfg.BasicBlock, t: *const cfg.BasicBlock) bool {
 /// a payload capture of a loaded value).
 fn retarget(p: *cfg.BasicBlock, x: *const cfg.BasicBlock, t: *cfg.BasicBlock, allocator: std.mem.Allocator) !void {
     switch (p.terminator) {
-        .branch => |b| {
-            if (b == x) p.terminator = .{ .branch = t };
+        .j => |b| {
+            if (b == x) p.terminator = .{ .j = t };
         },
-        .branch_cond => |bc| {
+        .br => |bc| {
             if (bc.then_ == x or bc.else_ == x) {
-                p.terminator = .{ .branch_cond = .{
+                p.terminator = .{ .br = .{
                     .cond = bc.cond,
                     .then_ = if (bc.then_ == x) t else bc.then_,
                     .else_ = if (bc.else_ == x) t else bc.else_,
@@ -237,17 +237,32 @@ fn rebuildBlock(
             const v = if (old.get(p)) |v|
                 v
             else blk: {
-                // `p` inherits the entry of the threaded candidate it
-                // used to feed (at most one — duplicate edges are
-                // prevented by the pass's skip rule).
+                // `p` inherits the entry of the threaded candidate chain
+                // it used to feed (at most one chain — duplicate edges are
+                // prevented by the pass's skip rule). In a multi-hop chain
+                // (p → x → y → b) the entry is keyed by the chain's
+                // bottom, b's original predecessor (empty forwarding blocks
+                // pass the value through unchanged, so every hop shares
+                // one value), so walk the chain to it instead of stopping
+                // at the first hop: `old.get(x)` would be null for an
+                // interior hop, and the old code fell into `unreachable`.
                 var found: ?*cfg.Value = null;
                 outer: for (orig_blocks) |x| {
                     if (!removed[x.id]) continue;
                     if (ult[x.id].? != b) continue;
                     for (x.preds) |xp| {
                         if (xp == p) {
-                            found = old.get(x) orelse continue :outer;
-                            break :outer;
+                            var hop: *cfg.BasicBlock = x;
+                            while (true) {
+                                if (old.get(hop)) |v| {
+                                    found = v;
+                                    break :outer;
+                                }
+                                hop = switch (hop.terminator) {
+                                    .j => |t| t,
+                                    else => unreachable, // candidates are empty j blocks
+                                };
+                            }
                         }
                     }
                 }

@@ -66,13 +66,13 @@ fn marks(f: *cfg.IrFunc, allocator: std.mem.Allocator) ![]bool {
     while (work.pop()) |b| {
         switch (b.terminator) {
             .ret, .tailcall, .trap => {},
-            .branch => |succ| {
+            .j => |succ| {
                 if (!seen[succ.id]) {
                     seen[succ.id] = true;
                     try work.append(allocator, succ);
                 }
             },
-            .branch_cond => |bc| {
+            .br => |bc| {
                 for ([_]*cfg.BasicBlock{ bc.then_, bc.else_ }) |succ| {
                     if (!seen[succ.id]) {
                         seen[succ.id] = true;

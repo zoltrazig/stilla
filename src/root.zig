@@ -48,7 +48,8 @@
 //!               `cfg_lower_validate`), the CFG-optimization passes
 //!               (`cfg_optimize`, `cfg_pre`; constant folding, arithmetic
 //!               simplification, CSE, and copy propagation run on-the-fly
-//!               inside `cfg_lower_emit`), and
+//!               inside `cfg_lower_emit`), the post-optimization drop-lowering
+//!               pass (`cfg_lower_drop`), and
 //!               the IR text form's lexer,
 //!               parser, and printer (`cfg_lex`, `cfg_parse`, `cfg_print` —
 //!               re-exported by `cfg`)

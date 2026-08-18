@@ -177,7 +177,7 @@ fn validateExpr(frame: *Frame, e: *const ast.Expr) CheckError!void {
         },
         .match => |*m| try validateMatch(frame, m),
         .block => |*b| try validateBlock(frame, b.block),
-        .unary => |*u| try validateExpr(frame, u.operand),
+        .unary => |*u| try validateUnary(frame, u),
         .binary => |*b| try validateBinary(frame, b),
         .move => {},
         .cast => |*c| try validateCast(frame, c),
@@ -191,23 +191,57 @@ fn validateExpr(frame: *Frame, e: *const ast.Expr) CheckError!void {
     }
 }
 
+fn validateUnary(frame: *Frame, u: *const ast.Unary) CheckError!void {
+    try validateExpr(frame, u.operand);
+    const t = frame.ma.expr_of.get(u.operand) orelse return;
+    // `never` coerces to every type (Core §13.2).
+    if (isNever(t)) return;
+    switch (u.op) {
+        .neg => {
+            if (!isNumeric(t)) return frame.ck.fail(u.span, "unary '-' accepts int32, uint32, or float32 (Core §16.3)", .{});
+        },
+        .not => {
+            if (!isBool(t)) return frame.ck.fail(u.span, "unary '!' requires a bool operand (Core §16.3)", .{});
+        },
+    }
+}
+
 fn validateBinary(frame: *Frame, b: *const ast.Binary) CheckError!void {
     try validateExpr(frame, b.lhs);
     try validateExpr(frame, b.rhs);
     const l = frame.ma.expr_of.get(b.lhs) orelse return;
     const r = frame.ma.expr_of.get(b.rhs) orelse return;
-    if (isNeverOrAny(l) or isNeverOrAny(r)) return;
+    // `never` coerces to every type (Core §13.2): a never operand
+    // satisfies the operator's requirement when the other side does.
+    // `any` deliberately does NOT: Core §16.3 defines no operator on
+    // `any` (only `as` and `match` type-testing).
+    const never = isNever(l) or isNever(r);
     switch (b.op) {
         .and_, .or_ => {
-            if (!isBool(l) or !isBool(r)) return frame.ck.fail(b.span, "logical operator requires bool operands", .{});
+            if (!((isBool(l) and isBool(r)) or (never and (isBool(l) or isBool(r))))) {
+                return frame.ck.fail(b.span, "logical operator requires bool operands (Core §16.3)", .{});
+            }
         },
-        .eq, .ne, .lt, .le, .gt, .ge => {
-            if (!cfg.Type.eql(l, r)) return frame.ck.fail(b.span, "comparison operands must have matching types", .{});
+        // Equality is defined only for byte, int32, uint32, float32,
+        // bool, and str — never for `any`, structs, unions, tuples,
+        // lists, boxes, functions, or modules (Core §16.3).
+        .eq, .ne => {
+            if (!(never or (isEqScalar(l) and isEqScalar(r) and cfg.Type.eql(l, r)))) {
+                return frame.ck.fail(b.span, "equality is defined for byte, int32, uint32, float32, bool, and str only (Core §16.3)", .{});
+            }
+        },
+        // Ordering accepts operands of the same numeric type (Core §16.3).
+        .lt, .le, .gt, .ge => {
+            if (!(never or (isOrderNumeric(l) and isOrderNumeric(r) and cfg.Type.eql(l, r)))) {
+                return frame.ck.fail(b.span, "ordering comparison requires matching numeric operands (Core §16.3)", .{});
+            }
         },
         .add, .sub, .mul, .div, .rem => {
-            const numeric = isNumeric(l) and isNumeric(r) and cfg.Type.eql(l, r);
+            const numeric = never or (isNumeric(l) and isNumeric(r) and cfg.Type.eql(l, r));
             const str_concat = b.op == .add and isStr(l) and isStr(r);
-            if (!numeric and !str_concat) return frame.ck.fail(b.span, "type mismatch in operator", .{});
+            if (!numeric and !str_concat) {
+                return frame.ck.fail(b.span, "type mismatch in operator (Core §16.3)", .{});
+            }
         },
     }
 }
@@ -215,6 +249,16 @@ fn validateBinary(frame: *Frame, b: *const ast.Binary) CheckError!void {
 /// Operator typing per Core §16.3 and §18 *Conversion*: `int32 ↔ float32`
 /// casts, and `any as T` (an invalid recovery traps at runtime, Runtime
 /// §7.2 — not a compile-time error).
+/// True when a match arm pattern is irrefutable: a wildcard or a
+/// plain identifier binding the whole scrutinee (Core §13.3).
+fn armIsIrrefutable(p: *const ast.Pattern) bool {
+    return switch (p.*) {
+        .wildcard => true,
+        .path => |pp| pp.tail == .none,
+        else => false,
+    };
+}
+
 fn validateCast(frame: *Frame, c: *const ast.Cast) CheckError!void {
     try validateExpr(frame, c.operand);
     const src = frame.ma.expr_of.get(c.operand) orelse return;
@@ -225,9 +269,16 @@ fn validateCast(frame: *Frame, c: *const ast.Cast) CheckError!void {
     if (dst == .primitive and dst.primitive == .hostdata) {
         return frame.ck.fail(c.span, "invalid cast: 'hostdata' has no cast (Core §11.7)", .{});
     }
-    // An `any` source recovers by tag (Core §11.6.1); `never` coerces to
-    // every type (Core §13.2).
-    if (isNeverOrAny(src)) return;
+    // An `any` source recovers by tag (Core §11.6.1) into a concrete
+    // target: `any`, `never`, and `hostdata` are not valid recovery
+    // targets (Core §16.3). `never` coerces to every type (Core §13.2).
+    if (src == .primitive and src.primitive == .never) return;
+    if (src == .primitive and src.primitive == .any) {
+        if (dst == .primitive and (dst.primitive == .never or dst.primitive == .any)) {
+            return frame.ck.fail(c.span, "invalid cast: an 'any' can only be recovered as a concrete type (Core §16.3)", .{});
+        }
+        return;
+    }
     if (validNumCast(src, dst)) return;
     return frame.ck.fail(c.span, "invalid cast", .{});
 }
@@ -315,7 +366,9 @@ fn validateMatch(frame: *Frame, m: *const ast.MatchExpr) CheckError!void {
         const covered = try frame.ck.alloc().alloc(bool, ud.variants.len);
         @memset(covered, false);
         for (m.arms) |*arm| {
-            if (arm.pattern == .wildcard) {
+            // A wildcard or plain-identifier arm is irrefutable (Core
+            // §13.3): it covers every not-yet-covered variant.
+            if (arm.pattern == .wildcard or armIsIrrefutable(&arm.pattern)) {
                 has_wildcard = true;
                 break;
             }
@@ -1158,8 +1211,25 @@ fn compatibleRecur(expected: cfg.Type, actual: cfg.Type) bool {
     }
 }
 
-fn isNeverOrAny(t: cfg.Type) bool {
-    return t == .primitive and (t.primitive == .never or t.primitive == .any);
+fn isNever(t: cfg.Type) bool {
+    return t == .primitive and t.primitive == .never;
+}
+
+/// The equality domain of Core §16.3: byte, int32, uint32, float32,
+/// bool, and str. Everything else (any, never, hostdata, structs,
+/// unions, tuples, lists, boxes, functions, modules) has no `==`/`!=`.
+fn isEqScalar(t: cfg.Type) bool {
+    if (t != .primitive) return false;
+    return switch (t.primitive) {
+        .byte, .int32, .uint32, .float32, .bool, .str => true,
+        else => false,
+    };
+}
+
+/// The ordering domain of Core §16.3 (`< <= > >=`): the numeric types.
+/// `byte` is numeric for ordering but has no arithmetic.
+fn isOrderNumeric(t: cfg.Type) bool {
+    return t == .primitive and (t.primitive == .byte or t.primitive == .int32 or t.primitive == .uint32 or t.primitive == .float32);
 }
 
 fn isBool(t: cfg.Type) bool {

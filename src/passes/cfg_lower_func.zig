@@ -15,6 +15,8 @@ const cfg_lower_expr = @import("cfg_lower_expr.zig");
 const cfg_lower_pattern = @import("cfg_lower_pattern.zig");
 const cfg_lower_validate = @import("cfg_lower_validate.zig");
 const cfg_lower_emit = @import("cfg_lower_emit.zig");
+const cfg_lower_path = @import("cfg_lower_path.zig");
+const type_resolve = @import("type_resolve.zig");
 
 const Lowerer = lower.Lowerer;
 const FuncState = lower.FuncState;
@@ -155,7 +157,7 @@ pub fn lowerBlock(self: *Lowerer, fs: *FuncState, b: *const ast.Block) LowerErro
                 try cfg_lower_expr.discardValue(self, fs, v);
             },
             .empty => {},
-            .using => |*u| return self.fail(u.span, "block-level using is not yet supported by the frontend", .{}),
+            .using => |*u| try lowerUsing(self, fs, u),
         }
     }
     if (fs.cur != null) {
@@ -197,6 +199,30 @@ pub fn lowerLet(self: *Lowerer, fs: *FuncState, ls: *const ast.LetStmt) LowerErr
         }
     }
     try cfg_lower_pattern.bindPattern(self, fs, &ls.pattern, bound, moving);
+}
+
+/// Lower a block-level `using` alias (Core §2.8, §13.1): a scoped
+/// compile-time binding of a module value or a value member (a type
+/// alias binds nothing at runtime). The alias names the bound value for
+/// the rest of the block; no storage is allocated. Unresolvable aliases
+/// are silently skipped, matching the checker (`bindUsing`) and phase 1.
+pub fn lowerUsing(self: *Lowerer, fs: *FuncState, u: *const ast.UsingDecl) LowerError!void {
+    const alias = u.alias orelse return;
+    const target = type_resolve.resolveAliasTarget(self.resolve, fs.module, u) orelse return;
+    switch (target) {
+        .module => |spec| {
+            const v = (try cfg_lower_path.emitModuleRef(self, fs, u.span, spec)) orelse return;
+            try cfg_lower_emit.bindLocal(self, fs, alias.text, v, false);
+        },
+        .value => |mr| {
+            const m = self.graph.module(mr.module) orelse return;
+            const vm = m.valueMember(mr.name) orelse return;
+            const mod_ref = (try cfg_lower_path.emitModuleRef(self, fs, u.span, mr.module)) orelse return;
+            const v = (try cfg_lower_path.lowerMemberLoad(self, fs, u.span, mod_ref, vm)) orelse return;
+            try cfg_lower_emit.bindLocal(self, fs, alias.text, v, false);
+        },
+        .type => {},
+    }
 }
 
 /// Lower a `drop` statement: look up the binding, reject borrowed values,

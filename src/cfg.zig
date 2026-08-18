@@ -44,7 +44,7 @@
 //!   definition order);
 //! - instructions are `%name: type = op operands`;
 //! - pure effects are `drop %v` and `store_member #slot, %v`;
-//! - terminators are `ret`, `br`, `br_cond` (`br %c ? a : b`), `switch`,
+//! - terminators are `ret`, `j`, `br` (`br %c ? a : b`), `switch`,
 //!   and `trap`;
 //! - constant literals may appear inline where a value operand is expected
 //!   (they are materialized as `const` instructions in memory);
@@ -94,8 +94,8 @@ pub const Type = union(enum) {
     /// The type of a cleanup token (ir.md §6.4): a compiler-only value
     /// that schedules the conditional destruction of a maybe-unique
     /// owner. Not a Core type — no source expression, parameter, or
-    /// binding ever has this type; only `cleanup_owner` produces it and
-    /// only `cleanup_disable` / `drop_cleanup` consume it. Classified
+    /// binding ever has this type; only `cleanup_arm` produces it and
+    /// only `cleanup_disarm` / `cleanup_drop` consume it. Classified
     /// Copy so ordinary scope-end machinery never drops it.
     cleanup,
 
@@ -275,7 +275,7 @@ pub const Value = struct {
 /// several for the atomic destructure ops `unpack_struct` / `unpack_tuple` /
 /// `unpack_variant` / `split_list` and the non-consuming `borrow_variant`,
 /// ir.md §5.3) unless it is a pure effect
-/// (`drop`, `store_member`, `cleanup_disable`, `drop_cleanup`, or a
+/// (`drop`, `store_member`, `cleanup_disarm`, `cleanup_drop`, or a
 /// `void`/effect `call` / `syscall`).
 ///
 /// `synth` marks constants materialized from inline literals in operand
@@ -342,14 +342,14 @@ pub const Op = union(enum) {
     drop_: *Value, // effect; no result
     /// Creates a cleanup token scheduling `v`'s conditional destruction
     /// (ir.md §6.4). Produces a `Type.cleanup` value usable only by
-    /// `cleanup_disable` and `drop_cleanup`.
-    cleanup_owner: *Value,
+    /// `cleanup_disarm` and `cleanup_drop`.
+    cleanup_arm: *Value,
     /// Disarms a cleanup token without destroying the payload: emitted on
     /// the paths where the owner was consumed (moved, taken, transferred).
-    cleanup_disable: *Value, // effect; no result
+    cleanup_disarm: *Value, // effect; no result
     /// The scope-end conditional destruction: destroys the owner iff its
     /// token is still armed, then disarms it. Effect; no result.
-    drop_cleanup: *Value,
+    cleanup_drop: *Value,
 
     // memory (§5.6)
     load_member: LoadMember,
@@ -434,7 +434,7 @@ pub const OpInfo = struct {
     /// trap must never be hoisted onto a path that could skip it (PRE).
     may_trap: bool,
     /// Has observable side effects beyond producing its result (calls,
-    /// syscalls, drops, store_member, cleanup_disable): such ops are
+    /// syscalls, drops, store_member, cleanup_disarm): such ops are
     /// never CSE'd, moved, or elided.
     effects: bool,
     /// True when the op defines more than one result value (the atomic
@@ -495,9 +495,9 @@ pub fn opInfo(tag: OpTag) OpInfo {
         .borrow => .{ .text = "borrow", .arity = .one, .consumes = .none, .created = .borrowed, .may_trap = false, .effects = false },
         .move_ => .{ .text = "move", .arity = .one, .consumes = .op0, .created = .owned, .may_trap = false, .effects = false },
         .drop_ => .{ .text = "drop", .arity = .one, .consumes = .op0, .created = .none, .may_trap = false, .effects = true },
-        .cleanup_owner => .{ .text = "cleanup_owner", .arity = .one, .consumes = .none, .created = .owned, .may_trap = false, .effects = false },
-        .cleanup_disable => .{ .text = "cleanup_disable", .arity = .one, .consumes = .none, .created = .none, .may_trap = false, .effects = true },
-        .drop_cleanup => .{ .text = "drop_cleanup", .arity = .one, .consumes = .none, .created = .none, .may_trap = false, .effects = true },
+        .cleanup_arm => .{ .text = "cleanup_arm", .arity = .one, .consumes = .none, .created = .owned, .may_trap = false, .effects = false },
+        .cleanup_disarm => .{ .text = "cleanup_disarm", .arity = .one, .consumes = .none, .created = .none, .may_trap = false, .effects = true },
+        .cleanup_drop => .{ .text = "cleanup_drop", .arity = .one, .consumes = .none, .created = .none, .may_trap = false, .effects = true },
 
         // memory (§5.6)
         .load_member => .{ .text = "load_member", .arity = .one, .consumes = .none, .created = .owned, .may_trap = false, .effects = false },
@@ -699,8 +699,8 @@ pub const PhiIn = struct { value: *Value, pred: *BasicBlock };
 
 pub const Terminator = union(enum) {
     ret: ?*Value,
-    branch: *BasicBlock,
-    branch_cond: struct { cond: *Value, then_: *BasicBlock, else_: *BasicBlock },
+    j: *BasicBlock,
+    br: struct { cond: *Value, then_: *BasicBlock, else_: *BasicBlock },
     @"switch": Switch,
     /// Frame-reusing direct self-call (ir.md §14.7.1): the move/unique
     /// form of a direct self-recursive tail call. Arguments are
@@ -783,8 +783,8 @@ pub fn finalizeBlocks(
     for (blocks) |b| {
         switch (b.terminator) {
             .ret, .tailcall, .trap => {},
-            .branch => |tgt| try preds.items[tgt.id].append(allocator, b),
-            .branch_cond => |bc| {
+            .j => |tgt| try preds.items[tgt.id].append(allocator, b),
+            .br => |bc| {
                 try preds.items[bc.then_.id].append(allocator, b);
                 try preds.items[bc.else_.id].append(allocator, b);
             },
@@ -846,7 +846,7 @@ pub const BlockOrder = struct {
         const am = minValueId(a) orelse std.math.maxInt(u32);
         const bm = minValueId(b) orelse std.math.maxInt(u32);
         if (am != bm) return am < bm;
-        // Value-less blocks (bare `br` joins) keep creation order.
+        // Value-less blocks (bare `j` joins) keep creation order.
         return a.id < b.id;
     }
 };
@@ -901,7 +901,7 @@ pub fn renumberValues(f: *IrFunc, allocator: std.mem.Allocator) !void {
 pub fn rewriteUses(f: *IrFunc, from: *Value, to: *Value) void {
     for (f.blocks) |b| {
         for (b.instrs) |instr| switch (instr.op) {
-            .neg, .not_, .num_cast, .any_pack_copy, .any_pack_move, .any_unpack_copy, .any_unpack_move, .cleanup_owner, .cleanup_disable, .drop_cleanup, .copy, .borrow, .move_, .tail, .unpack_struct, .unpack_tuple, .split_list, .read_tag, .read_payload, .drop_ => |*v| {
+            .neg, .not_, .num_cast, .any_pack_copy, .any_pack_move, .any_unpack_copy, .any_unpack_move, .cleanup_arm, .cleanup_disarm, .cleanup_drop, .copy, .borrow, .move_, .tail, .unpack_struct, .unpack_tuple, .split_list, .read_tag, .read_payload, .drop_ => |*v| {
                 if (v.* == from) v.* = to;
             },
             .unpack_variant => |*uv| {
@@ -959,8 +959,8 @@ pub fn rewriteUses(f: *IrFunc, from: *Value, to: *Value) void {
                     if (val == from) b.terminator.ret = to;
                 }
             },
-            .branch => {},
-            .branch_cond => |*bc| {
+            .j => {},
+            .br => |*bc| {
                 if (bc.cond == from) bc.cond = to;
             },
             .@"switch" => |*s| {
