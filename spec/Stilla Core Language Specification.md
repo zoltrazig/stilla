@@ -132,7 +132,7 @@ These terms are used throughout the specification.
 - **borrow** — a non-owning, read-only view of a value; it never transfers ownership (Parameter modes).
 - **move** — explicit ownership transfer of a complete local owner (Ownership transfer with `move`).
 - **drop** — deterministic destruction: a user `drop` hook (`drop` lifecycle declaration), an explicit `drop` statement (Explicit destruction), or automatic destruction when a scope ends (Automatic destruction).
-- **nominal type** — a type defined by a `struct` or `union` declaration; it is distinct from every other type even if shape-identical (Structs, Algebraic Data Types).
+- **nominal type** — a type defined by a `struct`, `union`, or `opaque` declaration; it is distinct from every other type even if shape-identical (Structs, Algebraic Data Types, Host-backed opaque nominal types).
 - **monomorphic function** — a function value whose parameter and return types are fully concrete; there are no runtime generic function values (Generics).
 - **specialization** — compile-time expansion of generic code to concrete types (Generics).
 - **top type** — `any`, the type every value type coerces to; its counterpart is the bottom type `never`, which has no values and coerces to every type (The top type `any`, `if`).
@@ -142,6 +142,11 @@ These terms are used throughout the specification.
   initializer, an argument, a field initializer, a match-arm body, or a
   block's final expression. *Unique* temporaries are destroyed at the end
   of the innermost enclosing full expression (the Runtime specification).
+- **host-backed opaque nominal type** — a nominal type declared by a
+  standard-library or host-provided module interface as `opaque type
+  Name[params];`; its representation, storage, and construction are
+  entirely host-side, and it is *Unique* by declaration (Host-backed
+  opaque nominal types).
 
 Runtime-side terms (execution context, module storage, teardown, host) are defined in the Runtime specification.
 
@@ -312,6 +317,12 @@ runtime system call, its body is never lowered, and a host constant is
 read as a runtime value the host provides at instantiation (the Runtime specification).
 Standard-library modules use the same forms for their host-implemented
 members (the Standard Library).
+
+A standard-library or host-provided module may additionally declare a
+**host-backed opaque nominal type** — `opaque type Name[params];`
+(Grammar `opaque-def`) — a nominal type whose representation, storage,
+and construction are entirely host-side (Host-backed opaque nominal types).
+A Stilla source module may not declare one.
 
 Conceptually:
 
@@ -864,7 +875,10 @@ Raw struct construction remains available even if a type defines `drop`.
 
 Therefore Stilla v1.3 does not provide language-enforced private constructor invariants.
 
-Libraries that require stronger abstraction must rely on module conventions or host-provided opaque interfaces.
+Libraries that require stronger abstraction must rely on module conventions or
+**host-backed opaque nominal types** (Host-backed opaque nominal types) —
+declared by a standard-library or host-provided module interface, never by a
+source module.
 
 Visibility control and opaque source-defined structs are outside the scope of Stilla v1.3.
 
@@ -1037,14 +1051,15 @@ Immutable strings may use reference-counted sharing.
 
 All first-class function values are monomorphic (Generics).
 
-The top type `any` is **not** *Copy*: because it may hold a value of any type — including a *Unique* value — `any` is always *Unique* (The top type `any`). The type `hostdata` is **not** *Copy*: it wraps a host-owned opaque payload and is always *Unique* (The `hostdata` type).
+The top type `any` is **not** *Copy*: because it may hold a value of any type — including a *Unique* value — `any` is always *Unique* (The top type `any`). The type `hostdata` is **not** *Copy*: it wraps a host-owned opaque payload and is always *Unique* (The `hostdata` type). A host-backed opaque nominal type is **not** *Copy* either: it is *Unique* by declaration, regardless of its type arguments (Host-backed opaque nominal types) — `Array[int32]` is *Unique* even though `int32` is *Copy*.
 
 ## 10.2 *Unique* values
 
 A value is *Unique* if:
 
 - its named struct type defines `drop`; or
-- one of its owned components is *Unique*.
+- one of its owned components is *Unique*; or
+- its nominal type is a host-backed opaque type (Host-backed opaque nominal types), whose declaration fixes *Unique* ownership.
 
 *Unique* values cannot be implicitly copied.
 
@@ -1579,6 +1594,46 @@ The primary uses are:
 - **host bindings** — host-provided functions and module members may accept and return `hostdata` for opaque payloads;
 - **opaque handles** — a host may hand a Stilla program a `hostdata` value wrapping a host-owned resource; Stilla tracks it with *Unique* ownership and hands it back without inspecting it;
 - **host-bound buffering** — *Unique* containers such as `box[hostdata]` and `list[hostdata]` can carry opaque payloads that a Stilla program collects and forwards to the host as a whole.
+
+## 11.8 Host-backed opaque nominal types
+
+A standard-library or host-provided module may declare a **host-backed opaque nominal type** (Grammar `opaque-def`):
+
+```stilla
+opaque type Array[T];
+```
+
+Such a declaration creates a nominal type with **no fields, no variants, and no Stilla-visible representation**: the host defines the storage, the operations, and the destruction of every value. Stilla knows only the type's identity, its type arguments, and its ownership; it can never inspect or construct a value itself. Only the host constructs values of the type, through the declaring module's host bindings (Host-provided modules; the Runtime specification).
+
+The declaration form is restricted to module interfaces: **a Stilla source module may not declare an opaque type**. The feature exists so that libraries that need strong abstraction can depend on host-provided opaque interfaces rather than on source-defined structs; it is not general-purpose visibility control (Deliberate omissions). The type itself, however, is a first-class nominal type usable from any module that imports the declaring one.
+
+Ownership is **declared, not structural**: every opaque type is *Unique* (*Unique* values), irrespective of its type arguments — `Array[int32]` is *Unique* even though `int32` is *Copy* (Copy capability). The value may be moved, borrowed, stored, passed along, and handed to the host, and is never implicitly copyable.
+
+Stilla defines no construction or inspection operation on an opaque value:
+
+- **raw construction** (Raw struct construction) does not apply — an opaque type is not a struct, so `Array{ … }` is a compile-time error;
+- **member access** does not apply — an opaque type has no fields, so `a.length` is a compile-time error;
+- **destructuring** does not apply — an opaque value is not matchable by struct pattern and has no payload to unpack.
+
+In every other value position an opaque value behaves like any other nominal value: it may be a plain, `borrow`, or `move` parameter; a return value; an element of `list`, `box`, or `tuple`; and a payload of the top type `any` (The top type `any`) — an opaque value coerces to `any` like any other tagged value type, carrying its nominal type identity in the tag, and is recovered with the ordinary `as` / `match` recovery operations. `move`, `borrow`, and `drop` of an opaque value are ordinary.
+
+Destruction of an opaque value — automatic, explicit `drop`, or container destruction — dispatches to the **host type's destructor** (the Runtime specification): the runtime calls the host-side destruction routine named by the type's host identity, which releases the backing resources. This is host cleanup, not execution of a Stilla `drop` hook (the Runtime specification).
+
+The distinction from `hostdata` (The `hostdata` type) is one of type identity:
+
+| | `hostdata` | opaque host type |
+| --- | --- | --- |
+| type identity | one untyped payload type | a distinct nominal type per declaration (`Array[int32]`, …) |
+| type arguments | none | generic (`Array[T]`) |
+| ownership | always *Unique* | *Unique* by declaration |
+| Stilla-visible representation | none | none |
+| raw construction | never | compile-time error |
+| fields / destructuring | none | none |
+| coercion to `any` | **not allowed** (The top type `any`) | allowed, like any nominal type |
+| destruction | host payload disposal | host type destructor by host identity |
+| intended use | opaque handle pass-through | stdlib / native abstractions (`array`, `hashmap` — the Standard Library) |
+
+`hostdata` is the type-erased form — "the host knows what this is, Stilla does not". An opaque host type is the nominal form — "the compiler knows this is an `Array[int32]`, but not how it is stored".
 
 ---
 

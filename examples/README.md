@@ -17,7 +17,7 @@ zig build run -- examples/<name>.st
 | [`floats.st`](floats.st) | the `math` module: float32 constants, IEEE 754 functions, rounding, min/max/abs, trigonometry, explicit `as` conversions (Core §16.3) |
 | [`fold.st`](fold.st) | lists and the `iter` module: `builtin.range`, indexing, `fold` with int and tuple accumulators, `each` with a lambda, recursive `[head, ..tail]` patterns |
 | [`box.st`](box.st) | ownership extraction with `builtin.box`/`peek`/`unbox`, explicit `move` at the unbox site |
-| [`maps.st`](maps.st) | persistent-style `hashmap` operations, explicit generic specialization `::[K, V]`, tuple destructuring from `remove`, `Option` matching |
+| [`maps.st`](maps.st) | unique opaque `hashmap` container: move-consuming `insert`/`remove`, borrowed `get`/`contains`/`len`, `clone`, explicit generic specialization `::[K, V]`, tuple destructuring from `remove`, `Option` matching |
 | [`generics.st`](generics.st) | polymorphic functions, explicit specialization `::[T]` and inference, one generic fn specialized to several types |
 
 All examples are also compiled, optimized, and round-tripped by the

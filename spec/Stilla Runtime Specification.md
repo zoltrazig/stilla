@@ -177,6 +177,8 @@ This structural illustration does not make module values ordinary first-class st
 
 Source modules, standard-library modules, and host modules use the same `.` member-access syntax (the Core specification).
 
+A standard-library or host-provided module may additionally declare **host-backed opaque nominal types** (the Core specification) — `opaque type Name[params];` — whose values the host constructs, stores, and destroys. For each opaque declaration and monomorphic instantiation the host registers a **host type implementation**: a stable host identity (`host_id`) naming the type's construction and destruction routines (Host integration contract, Opaque type destruction).
+
 ## 3.2 The `builtin` module
 
 `builtin` is an ordinary importable standard-library module (the Core specification): a
@@ -230,6 +232,8 @@ The host may register host-provided modules (Host-provided modules) and may dire
 An `any` value (the Core specification) is a type-erased payload with a runtime type tag: the tag is deterministic and comparable and identifies the concrete payload type. Stilla inspects the tag only through the two typed-recovery operations, `as` and `match` type-test patterns. Destruction of an `any` destroys the payload by the payload type's own destruction rules. An `any` argument to or result from a host binding is transferred as that opaque tagged payload.
 
 A `hostdata` value (the Core specification) is an opaque, type-erased payload with no runtime type tag: its runtime representation is implementation- and host-defined, and Stilla performs no inspection or recovery on it. A `hostdata` value never appears as an `any` payload: the top type's tag space covers the tagged value types only. A payload leaves `hostdata` only when the complete value is passed to a host binding or destroyed. When Stilla destroys a `hostdata` value on normal control flow, the host is responsible for disposing of the opaque payload; such disposal is host cleanup and must not be described as execution of a Stilla `drop` hook. A `hostdata` argument to or result from a host binding is transferred as that opaque payload.
+
+An **opaque host type** value (the Core specification, Host-backed opaque nominal types) is a nominal value whose runtime representation the host defines. A conforming runtime represents it as a **context-scoped opaque handle**: a small index naming a row of the execution context's **opaque object table**, which maps the handle to the host object (for example, an array or hash-map buffer). The handle is runtime representation, not a Stilla integer: Stilla cannot observe, compare, or construct it — only the declaring module's host bindings and the context's destruction machinery touch it, so user source can never forge or alias one. Destroying an opaque value on normal control flow invokes the host type's destructor (`host_drop(host_id, value)`, Opaque type destruction). Because every live opaque value is a table row, context disposal — normal teardown or panic — disposes of every remaining row by walking the table (Host cleanup responsibility); no unwinding is required and no host resource leaks. An opaque value carries its nominal type identity, so it may be an `any` payload (the Core specification) and is recovered with the ordinary `as` / `match` operations.
 
 ---
 
@@ -555,6 +559,20 @@ performs the same destruction sequence as automatic destruction (Automatic destr
 
 After the statement, the binding is no longer usable; this is enforced at compile time (the Core specification).
 
+## 6.6 Opaque type destruction
+
+Destroying a value of a host-backed opaque nominal type (the Core specification) dispatches to the **host type's destructor**:
+
+```text
+drop opaque value
+    ↓
+host_drop(type.host_id, value)
+```
+
+The runtime resolves the opaque type declaration's host identity (`host_id`), invokes the host-side destruction routine with the value, and marks the value destroyed. For a handle-based representation (Host integration contract) the routine removes the handle's row from the context's opaque object table and releases the host object. This is host cleanup, not execution of a Stilla `drop` hook: an opaque type has no user-defined hook.
+
+Opaque values participate in structural destruction like any other nominal value (Structural destruction order): an opaque element of a `list`, `box`, or `tuple`, or an opaque payload of an `any`, is destroyed by this dispatch when the container is destroyed.
+
 ---
 
 # 7. Termination and Traps
@@ -603,6 +621,8 @@ All of these traps are deterministic.
 On normal termination, the host performs context teardown (Teardown).
 
 On panic or runtime trap, Stilla performs no unwinding and no pending destruction (Panic); the host is responsible for disposing of the terminated execution context and any host-owned resources.
+
+Opaque host-type resources are context-scoped (Host integration contract): the runtime's opaque object table is context-owned, and context disposal walks the table and releases every remaining host object — on normal teardown and on panic alike (Panic). This is host cleanup, not execution of Stilla `drop` hooks.
 
 Host cleanup must not be described as execution of Stilla `drop` hooks (Host integration contract).
 
@@ -716,7 +736,7 @@ canonical struct instance
 exception unwinding
 ```
 
-An `any` value (the Core specification) carries a deterministic runtime type tag identifying its concrete payload type; Stilla inspects the tag only through the `as` cast and `match` type-test patterns. A `hostdata` value is a type-erased opaque payload with no runtime type tag and no runtime inspection; it leaves Stilla only via host handoff or via host disposal on destruction, and never appears as an `any` payload (Host integration contract).
+An `any` value (the Core specification) carries a deterministic runtime type tag identifying its concrete payload type; Stilla inspects the tag only through the `as` cast and `match` type-test patterns. A `hostdata` value is a type-erased opaque payload with no runtime type tag and no runtime inspection; it leaves Stilla only via host handoff or via host disposal on destruction, and never appears as an `any` payload (Host integration contract). An opaque host type value (the Core specification) is a nominal value whose representation and destruction are host-side: the runtime stores it as a context-scoped opaque handle and dispatches destruction to the host type's destructor (Host integration contract, Opaque type destruction). Unlike `hostdata`, an opaque value carries its nominal type identity and may be an `any` payload.
 
 The central rules of the language (stated fully in the Core specification) are:
 

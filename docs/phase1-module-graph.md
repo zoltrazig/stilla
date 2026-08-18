@@ -52,9 +52,12 @@ the frontend-side form of "instantiated at most once per context".
 For each module, phase 1 computes and annotates everything that is
 statically knowable **without analyzing function bodies**:
 
-- **type members** — `struct_def`, `union_def`, `type_def` items with
-  their generic parameter lists (Core §2.5: types are compile-time members;
-  Core §12.1). Each module gets a member table keyed by declared name.
+- **type members** — `struct_def`, `union_def`, `opaque_def`, `type_def`
+  items with their generic parameter lists (Core §2.5: types are
+  compile-time members; Core §12.1). Each module gets a member table
+  keyed by declared name. `opaque_def` is the host-backed opaque nominal
+  type of Core §11.8: no fields, no variants, unique by declaration,
+  legal only in standard-library / host-provided module interfaces.
 - **value members** — `const_def` names with their *declared* types (when
   annotated) and `func_def` names with their *signatures* (Core §2.5).
   Function signatures are resolved monomorphically (Core §6, §12.5);

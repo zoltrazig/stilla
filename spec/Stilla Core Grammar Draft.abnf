@@ -128,14 +128,16 @@ void-literal    = "(" ")"
 ; ----------------------------------------------------------------------------
 ;   The following identifiers are reserved:
 ;   and any as bool borrow box byte const drop else false float32 fn
-;   hostdata if import int32 let list match move never or str struct true
-;   tuple type uint32 union using void
+;   hostdata if import int32 let list match move never opaque or str struct
+;   true tuple type uint32 union using void
 ; The removed historical words "def", "gen", "delete", "for", and "in"
 ; have no special syntactic meaning: the v1.3 core language has no loop
 ; construct, and repetition is expressed with ordinary recursive function
 ; calls (the Core specification).
 ; The collection type names "array" and "hashmap" are not reserved words. The module name "builtin" is not a reserved word
 ; either: it is an ordinary importable standard-library module (the Core specification).
+; The keyword "opaque" (the Core specification, "Host-backed opaque nominal types")
+; is reserved and recognized lexically.
 ; Reserved words are recognized lexically, before syntactic parsing.
 ; The primitive type "hostdata" (the Core specification) is reserved and appears in
 ; both the reserved list above and "primitive-type".
@@ -154,6 +156,7 @@ module-item =
     / type-def
     / struct-def
     / union-def
+    / opaque-def
     / using-decl
 
 
@@ -386,6 +389,27 @@ union-def =
 variant-decl =
     identifier
     [ "(" type *( "," type ) ")" ]
+
+
+; ----------------------------------------------------------------------------
+; Host-backed opaque nominal types
+; ----------------------------------------------------------------------------
+; An opaque declaration creates a nominal type with no fields, no variants,
+; and no user-visible representation (the Core specification, "Host-backed
+; opaque nominal types"). Only the host constructs values of the type and
+; only the host's drop dispatch destroys them; Stilla source cannot
+; construct, destructure, or inspect an opaque value.
+; Static semantics: an opaque declaration is legal only in a
+; standard-library or host-provided module interface; a Stilla source module
+; may not declare one. All opaque types are unique (the Core specification):
+; the declaration carries no ownership annotation.
+
+opaque-def =
+    %s"opaque"
+    %s"type"
+    identifier
+    [ type-params ]
+    ";"
 
 
 ; ----------------------------------------------------------------------------

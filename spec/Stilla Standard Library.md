@@ -34,47 +34,71 @@ replace them. An implementation or host may substitute alternative
 representations, or add specialized collection modules, without touching the
 language core.
 
-A container value is an ordinary nominal struct (the Core specification) whose runtime
-value is an immutable **token** naming a host-owned opaque buffer: the
-host owns the buffer's memory and lifetime, Stilla never inspects it, and
-the `array` and `hashmap` module functions are the only access path. The token is
-*Copy* when its element types are *Copy* (the Core specification), and the element
-types must be *Copy* (The `array` module, The `hashmap` module) — a container is never a `hostdata` payload and
-does not depend on the Core specification.
+`Array[T]` and `HashMap[K, V]` are **host-backed opaque nominal types**
+(the Core specification, *Host-backed opaque nominal types*): nominal types
+declared by the module interface with `opaque type` and no Stilla-visible
+representation. The host owns the buffer's memory and lifetime, Stilla never
+inspects it, and the `array` and `hashmap` module functions are the only
+access path. Every container value is *Unique* by declaration (the Core
+specification) — never *Copy*, even when the element types are *Copy* — and
+only the module's host bindings construct and destroy values.
 
-**Abstract-buffer contract (v1.3 chosen semantics).** The Stilla *value* is
-the *Copy* token; the opaque buffer it names is not a Stilla value and cannot
-be created or inspected in source. A conforming implementation must ensure
-that:
+**Opaque-container contract (v1.3 chosen semantics).** The Stilla *value* is
+the *Unique* opaque container; the opaque buffer it names is not a Stilla
+value and cannot be created or inspected in source. A conforming
+implementation must ensure that:
 
 - a valid buffer exists only behind the container module's host bindings —
-  the token is produced by `array.make` / `hashmap.empty` (and the
-  persistent `hashmap.insert`/`remove` clones) and consumed by the read /
-  destroy host bindings; a token raw-constructed in source (for example an
-  `array.make`-shaped struct literal) names no buffer and is a programming
-  error, not a valid container (the v1.3 documents keep the container as an
-  ordinary nominal struct rather than an `opaque` nominal type — adding an
-  `opaque`/`extern` nominal type to the IR is the follow-up that would make
-  this unreachable in the type system);
-- the buffer's lifetime is **bound to the execution context**: buffers are
-  allocated in the context-arena and reclaimed by the execution-context-
-  level host cleanup at context end (the Runtime specification, §1.3
-  Execution context, §7.3 Host cleanup responsibility). A *Copy* token may be
-  freely duplicated and stored; there is no per-token destruction event in
-  the language (the IR schedules no `drop` for *Copy* values), so the host
-  must not rely on a last-token-gone signal — memory is context-scoped, not
-  reference-counted-to-zero. `ponytail:` ceiling — a persistent `HashMap`
-  that keeps allocating per context grows until context end; if long-lived
-  contexts matter, add an explicit rehash/GC or a per-entry reference count
-  as a future refinement.
+  the value is produced by `array.make` / `hashmap.empty` and consumed by
+  the read / transform / destroy host bindings. Because the type is opaque
+  (the Core specification), a token raw-constructed in source (`Array{ … }`)
+  is a **compile-time error**, not a runtime hazard — the type system makes
+  it unreachable;
+- every **consuming** operation — `array.set`, `hashmap.insert`,
+  `hashmap.remove` — takes the value by `move` and returns the updated
+  value. Source semantics are purely functional — the input value is dead
+  after the call, the result owns the continuation — so the host is free to
+  **mutate the buffer in place** and return the same underlying object:
+  without an alias, no persistent data structure, copy-on-write, or
+  reference counting is required for the common path;
+- `array.clone` / `hashmap.clone` duplicate the buffer into a fresh opaque
+  object, giving the result independent storage;
+- the buffer's lifetime is **bound to the execution context**: the runtime
+  stores each live opaque value as a row of the context's opaque object
+  table, and context cleanup — normal teardown or panic — disposes of every
+  remaining row via the host type's destructor (the Runtime specification,
+  *Host integration contract*, *Opaque type destruction*). Destruction on
+  normal control flow is the ordinary `drop` of a *Unique* value: it
+  dispatches to the host type's destructor, never to a Stilla `drop` hook.
+
+**Host interface descriptor (informative).** The `opaque type` declaration in
+the module interface is the source-level form of the host interface
+registration. A host registering the module exposes, per opaque declaration:
+
+```text
+HostTypeDecl {
+    module:        "array",
+    name:          "Array",
+    params:        [T],
+    ownership:     unique,
+    representation: opaque
+}
+```
+
+The host maps each monomorphic instantiation (`Array[int32]`,
+`Array[float32]`, …) to a stable **host identity** (`host_id`) naming its
+construction and destruction routines; the runtime dispatches destruction
+through it (the Runtime specification, *Opaque type destruction*). Because
+generics are compile-time specialization, the IR carries no runtime generic:
+each instantiation is a distinct concrete nominal type.
 
 The standard library provides:
 
 ```text
 builtin       required core interface: print, str, len, range, box, peek,
               unbox, panic, assert, hash (the Runtime specification)
-array[T]      host-owned contiguous-memory sequence
-hashmap[K, V] host-owned contiguous-bucket hash table
+array[T]      host-owned contiguous-memory sequence, Unique opaque nominal
+hashmap[K, V] host-owned contiguous-bucket hash table, Unique opaque nominal
 math          common mathematical constants and functions
 string        Unicode text operations and conversions
 iter          list combinators: each, each_with, fold, fold_with, consume_each,
@@ -98,36 +122,73 @@ Conceptual interface (a conforming standard library must provide at least this):
 array.make[T]:
     fn(int32, T) -> Array[T]
 
-array.get[T]:
-    fn(Array[T], int32) -> T
-
 array.len[T]:
-    fn(Array[T]) -> int32
+    fn(borrow Array[T]) -> int32
+
+array.get[T]:
+    fn(borrow Array[T], int32) -> T
+
+array.set[T]:
+    fn(move Array[T], int32, T) -> Array[T]
+
+array.clone[T]:
+    fn(borrow Array[T]) -> Array[T]
 ```
 
-- `Array[T]` is an ordinary nominal struct (Scope): the module functions are
-  host bindings that construct, read, and destroy a host-owned opaque
-  contiguous buffer; the Stilla value is the immutable token naming it.
+- `Array[T]` is a **host-backed opaque nominal type** (Scope, the Core
+  specification): the module functions are host bindings that construct,
+  read, and destroy a host-owned opaque contiguous buffer; the Stilla value
+  is the opaque handle naming it. `Array[T]` cannot be raw-constructed,
+  field-accessed, or destructured (the Core specification), and only the
+  module's host bindings produce and consume values.
+- `Array[T]` is **Unique by declaration** (the Core specification): it is
+  never *Copy*, even when `T` is *Copy*. It may be moved, borrowed, stored,
+  and dropped like any other *Unique* value.
+- The element type `T` must be *Copy*. The restriction is enforced by the
+  type system at the producing operations: `make`'s `init` and `set`'s
+  `value` are plain (*Copy*) parameters (the Core specification), so a
+  *Unique* `init` or `value` is rejected at compile time. Consequently no
+  `Array[Unique]` value is ever produced — the type is uninhabited — and
+  `get` / `clone` / `len` never observe a non-*Copy* element. *Unique*
+  element storage is provided by `list[T]` (the Core specification) with the
+  `iter` combinators.
 - `array.make(length, init)` constructs a fresh `Array[T]` of the given
   length; every element is initialized to a copy of `init`.
-- The element type `T` must be *Copy*. Parameters are plain (*Copy*)
-  parameters (the Core specification): a *Unique* `init` is rejected at compile time, so
-  the *Copy* restriction is enforced by the type system. The token is *Copy*
-  when `T` is *Copy* (the Core specification) and may be reused freely.
-- `array.get(a, i)` reads element `i` and returns a copy of it. Invalid
-  indexing produces a deterministic runtime trap (the Runtime specification).
-- `array.len(a)` returns the length.
-- `get` returns an element by value; a borrowed *Unique* return is not
-  expressible (the Core specification), which is why `T` is restricted to *Copy*. *Unique*
-  element storage is provided by `list[T]` (the Core specification) with the `iter`
-  combinators.
+- `array.len(a)` returns the length; `a` is borrowed, so the owner keeps
+  ownership.
+- `array.get(a, i)` reads element `i` and returns a copy of it; `a` is
+  borrowed. Invalid indexing produces a deterministic runtime trap (the
+  Runtime specification). `get` returns an element by value; a borrowed
+  *Unique* return is not expressible (the Core specification), which is why
+  `T` is restricted to *Copy*.
+- `array.set(move a, i, v)` consumes `a` and returns the updated array with
+  element `i` replaced by `v`. The input value is dead after the call and
+  the result owns the continuation, so the host may **mutate the buffer in
+  place** and return the same underlying object — no persistent structure
+  or copy-on-write is required. The value is updated atomically from the
+  source's point of view: no observation can see a partially updated array
+  (invalid indexing still traps).
+- `array.clone(a)` copies the buffer into a fresh `Array[T]` with
+  independent storage; `a` is borrowed. `clone` is the only way to obtain a
+  second live array naming distinct storage.
+- Consuming updates compose by rebinding:
+
+```stilla
+let a = array.make(1000, 0);
+let a = array.set(move a, 20, 123);
+let a = array.set(move a, 30, 456);
+let a = array.set(move a, 40, 789);
+```
+
+  each step can operate on the same contiguous allocation (Scope).
 - Wholesale iteration over `Array[T]` is host-provided: `for` is not a
   core-language construct (the Core specification), and the `iter` combinators
   operate on `list[T]`, not on `Array[T]`.
-- `array.make`'s `T` is inferred from `init` (the Core specification); `get` and `len`
-  carry `T` only in the token type, so their type argument must be written
-  explicitly: `array.get::[int32](a, 2)`, `array.len::[int32](a)`
-  (the Core specification).
+- `array.make`'s `T` is inferred from `init` (the Core specification);
+  `array.set`'s `T` is inferred from the moved array and `value`;
+  `len`, `get`, and `clone` carry `T` only in the token type, so their type
+  argument must be written explicitly: `array.get::[int32](a, 2)`,
+  `array.len::[int32](a)`, `array.clone::[int32](a)` (the Core specification).
 
 Usage:
 
@@ -137,6 +198,8 @@ const array = import("array");
 let a = array.make(4, 0);
 let x = array.get::[int32](a, 2);
 let n = array.len::[int32](a);
+let a = array.set(move a, 2, 42);
+let b = array.clone::[int32](a);
 ```
 
 # 3. The `hashmap` module
@@ -148,37 +211,56 @@ hashmap.empty[K, V]:
     fn() -> HashMap[K, V]
 
 hashmap.insert[K, V]:
-    fn(HashMap[K, V], K, V) -> HashMap[K, V]
+    fn(move HashMap[K, V], K, V) -> HashMap[K, V]
 
 hashmap.get[K, V]:
-    fn(HashMap[K, V], K) -> Option[V]
+    fn(borrow HashMap[K, V], K) -> Option[V]
 
 hashmap.contains[K, V]:
-    fn(HashMap[K, V], K) -> bool
+    fn(borrow HashMap[K, V], K) -> bool
 
 hashmap.remove[K, V]:
-    fn(HashMap[K, V], K) -> tuple[HashMap[K, V], Option[V]]
+    fn(move HashMap[K, V], K) -> tuple[HashMap[K, V], Option[V]]
 
 hashmap.len[K, V]:
-    fn(HashMap[K, V]) -> int32
+    fn(borrow HashMap[K, V]) -> int32
+
+hashmap.clone[K, V]:
+    fn(borrow HashMap[K, V]) -> HashMap[K, V]
 ```
 
-- `HashMap[K, V]` is an ordinary nominal struct (Scope): the module functions
-  are host bindings that construct, read, and transform a host-owned
-  opaque contiguous-bucket table; the Stilla value is the immutable token
-  naming it.
-- A key type `K` must be *Copy* and hashable; a value type `V` must be *Copy*.
-  Parameters are plain (*Copy*) parameters (the Core specification), so the *Copy*
-  restrictions are enforced by the type system.
+- `HashMap[K, V]` is a **host-backed opaque nominal type** (Scope, the Core
+  specification): the module functions are host bindings that construct,
+  read, and transform a host-owned opaque contiguous-bucket table; the
+  Stilla value is the opaque handle naming it. It cannot be raw-constructed,
+  field-accessed, or destructured (the Core specification), and only the
+  module's host bindings produce and consume values.
+- `HashMap[K, V]` is **Unique by declaration** (the Core specification): it
+  is never *Copy*, even when `K` and `V` are *Copy*. It may be moved,
+  borrowed, stored, and dropped like any other *Unique* value.
+- A key type `K` must be *Copy* and hashable; a value type `V` must be
+  *Copy*. The restrictions are enforced by the type system at the producing
+  operations: `insert`'s `key` and `value` are plain (*Copy*) parameters (the
+  Core specification), as are `get`/`contains`/`remove`'s `key`, so a
+  *Unique* key or value is rejected at compile time and no
+  `HashMap[Unique, V]` / `HashMap[K, Unique]` value is ever produced.
 - `builtin.hash` provides hashing for the primitive key types (the Runtime specification).
-- Insertion and removal are persistent-style: they take the token by plain
-  (*Copy*) parameter and return a *new* map token. The input token remains
-  usable and references the previous immutable table, so the map is never
-  partially mutated.
-- `hashmap.get` returns a copy of the value as `Option[V]` — `Some(v)` when
-  `key` is present, `None` otherwise. `get` returns a value by copy; a
-  borrowed *Unique* return is not expressible (the Core specification), which is why `V`
-  is restricted to *Copy*.
+- `hashmap.insert(move m, key, value)` consumes `m` and returns the updated
+  map. The input value is dead after the call and the result owns the
+  continuation, so the host may **mutate the table in place** and return the
+  same underlying object. Inserting a key that is already present replaces
+  its value; the map is updated atomically from the source's point of view.
+- `hashmap.remove(move m, key)` consumes `m` and returns the updated map
+  together with the removed entry as `Option[V]` — `Some(v)` when `key` was
+  present, `None` otherwise. As with `insert`, the host may remove in place.
+- `hashmap.get(m, key)` returns a copy of the value as `Option[V]`; `m` and
+  `key` are borrowed. `get` returns a value by copy; a borrowed *Unique*
+  return is not expressible (the Core specification), which is why `V` is
+  restricted to *Copy*.
+- `hashmap.contains(m, key)` and `hashmap.len(m)` borrow `m`; `contains`
+  tests presence, `len` returns the entry count.
+- `hashmap.clone(m)` copies the table into a fresh `HashMap[K, V]` with
+  independent storage; `m` is borrowed.
 - Iteration order is unspecified but stable within a single execution
   context. Wholesale iteration over `HashMap[K, V]` is host-provided:
   `for` is not a core-language construct (the Core specification), and the `iter`
@@ -193,18 +275,22 @@ const builtin = import("builtin");
 using builtin.Option;
 
 let m = hashmap.empty::[str, int32]();
-let m = hashmap.insert(m, "a", 1);
-let m = hashmap.insert(m, "b", 2);
+let m = hashmap.insert(move m, "a", 1);
+let m = hashmap.insert(move m, "b", 2);
 
 match (hashmap.get::[str, int32](m, "a")) {
     Option::Some(value) => builtin.print(builtin.str(value)),
     Option::None => builtin.print("missing")
 };
+
+let (m, removed) = hashmap.remove::[str, int32](move m, "a");
+let b = hashmap.clone::[str, int32](m);
 ```
 
-`insert`'s `K` and `V` are inferred from the key and value arguments
-(the Core specification); the other functions carry `K`/`V` only in the token or result
-type, so their type arguments must be written explicitly (the Core specification).
+`insert`'s `K` and `V` are inferred from the key and value arguments,
+and `remove`'s from the moved map and key (the Core specification); the
+other functions carry `K`/`V` only in the token or result type, so their
+type arguments must be written explicitly (the Core specification).
 `Option` is `builtin`'s type member, brought into scope with `using`
 (the Core specification).
 
@@ -498,9 +584,7 @@ let upper = string.upper(s);                          // "HELLO"
   host for disposal (the Runtime specification); this is host cleanup, not execution
   of a Stilla `drop` hook.
 
-`hostdata` is not involved in the `array` and `hashmap` containers (The `array` module, The `hashmap` module): a container value is an ordinary nominal struct token (Scope),
-not a `hostdata` payload. Container buffers are host-owned opaque memory
-managed by the `array` and `hashmap` host bindings, not by the Core specification.
+`hostdata` is not involved in the `array` and `hashmap` containers (The `array` module, The `hashmap` module): a container value is a host-backed opaque nominal type (the Core specification, *Host-backed opaque nominal types*) with a distinct nominal identity, not a `hostdata` payload. The two are different abstractions — `hostdata` is the type-erased form ("the host knows what this is, Stilla does not"), while an opaque container is the nominal form ("the compiler knows this is an `Array[int32]`, but not how it is stored"); see the Core specification for the full division.
 
 Usage:
 

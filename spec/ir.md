@@ -351,6 +351,7 @@ Destruction is deterministic (per the Stilla Runtime Specification) and material
 
   Expansion beyond that is a backend matter: a compiling backend lowers the three ops — after validation and optimization — to a frame cleanup slot / armed bit and a conditional destruction (branch on the bit) at the scope exit. A runtime that interprets the SSA CFG directly executes the ops as-is — the armed bit is the token's runtime state — and never expands them at all.
 - **Drop hooks.** `drop %v` where `v`'s struct defines a `drop` hook is a *single* instruction: the runtime executes the destruction sequence — hook call (fields still valid), then reverse-declaration-order field destruction, then the value is marked destroyed. The IR does not expand this; the ordering is a runtime contract (per the Stilla Runtime Specification).
+- **Opaque destruction.** `drop %v` where `v`'s type is `opaque(OpaqueDecl)` is likewise a single instruction: the runtime dispatches to the host type's destructor named by `host_id` (`host_drop(host_id, value)`, Runtime §6.6) and marks the value destroyed. The IR does not expand this either — there is no `drop_array`-style family; the same `drop` op covers every nominal type (Core §11.8).
 - **Trap paths.** `trap` performs no drops: panic and runtime traps skip all pending destruction. Destruction is therefore always placed on edges that complete normally.
 
 ## 6.5 Borrow provenance
@@ -466,19 +467,25 @@ Type           ::= primitive(PrimitiveKind)           -- int32 | uint32 | float3
                  | box(Type)
                  | tuple([Type])
                  | function(FunctionType)
-TypeDecl       ::= struct(StructDecl) | union(UnionDecl)
+TypeDecl       ::= struct(StructDecl) | union(UnionDecl) | opaque(OpaqueDecl)
 StructDecl     ::= { module, name, ownership: Ownership, drop: Name?, fields: [FieldDecl] }
 FieldDecl      ::= { name, type: Type }
 UnionDecl      ::= { module, name, ownership: Ownership, variants: [VariantDecl] }
 VariantDecl    ::= { name, payloads: [Type] }
+OpaqueDecl     ::= { module, name, ownership: Ownership, host_id: HostTypeId }
+HostTypeId     ::= { host_module: Spec, type_name: Name }   -- names the host type
+                                              -- implementation of the
+                                              -- declaring module (Runtime
+                                              -- §3.1, Opaque type destruction)
 FunctionType   ::= { params: [Param], ret: Type }
 ```
 
 **Semantics.**
 
-- **Type environment.** Every nominal struct or union used by the program has one entry in the program's type environment, indexed by a stable `TypeId`. Canonical type identity is the `TypeId`; the name strings in `StructDecl` / `UnionDecl` are for printing and diagnostics only — the validator never compares names.
+- **Type environment.** Every nominal struct, union, or opaque type used by the program has one entry in the program's type environment, indexed by a stable `TypeId`. Canonical type identity is the `TypeId`; the name strings in `StructDecl` / `UnionDecl` / `OpaqueDecl` are for printing and diagnostics only — the validator never compares names.
+- **Opaque types.** An `opaque(OpaqueDecl)` entry is a host-backed opaque nominal type (Core §11.8): it declares **no fields and no variants**, its `ownership` is the declared class — *Unique* for every v1.3 opaque type — and its `host_id` names the host type implementation behind it. The type is a normal nominal value type: it may be borrowed, moved, dropped, stored in containers, and `any`-packed; only the *inspection* operations are excluded (construct, field/tuple projection, unpack, read_tag/read_payload, read_index over it). The source-level checker rejects those before lowering (Core §11.8), so the IR never carries a construction or projection over an opaque type; the validator's schema checks are the same guard for text-form programs.
 - **Transparent aliases** expand during type resolution and leave no entry; structural types (`list`, `box`, `tuple`, function types) stay inline in `Type`.
-- **Ownership resolution.** A named type's ownership resolves through its declaration: *Copy* iff every owned component is *Copy*. A struct with a user drop hook is always *Unique* — *Copy* destruction does nothing, so a drop hook implies *Unique*; the two never contradict.
+- **Ownership resolution.** A named type's ownership resolves through its declaration: a struct or union is *Copy* iff every owned component is *Copy*; an opaque type is *Unique* by declaration, regardless of its type arguments. A struct with a user drop hook is always *Unique* — *Copy* destruction does nothing, so a drop hook implies *Unique*; the two never contradict.
 - **Type members are compile-time** (per the Stilla Core Language Specification): they exist here as declarations and never occupy module storage. The division is exact — type members go in the type environment (names), value members go in the member table.
 
 ## 9.2 Values and instructions
@@ -584,7 +591,7 @@ IrProgram    ::= { modules: [IrModule], funcs: [IrFunc],
 
 - `init` is the module's `@init` function; it is absent for host modules.
 - `members` is the member table in declaration order; `slots` is the module storage layout — constant members only.
-- The type environment is the program's `types`: one entry per nominal struct or union in use, including monomorphic generic specializations.
+- The type environment is the program's `types`: one entry per nominal struct, union, or opaque type in use, including monomorphic generic specializations.
 
 ---
 
@@ -648,7 +655,7 @@ The frontend walks the annotated, monomorphic AST with a builder that appends in
 | parameter | the parameter SSA root |
 | module-valued const / import | `module_ref` |
 | module member reference | `load_member` (member lookup: constant members read their slot, function members yield a `fn_ref`, module-valued members yield the module value — chained for library paths) |
-| nominal struct / union types | one `TypeDecl` in the type environment per type in use (including monomorphic generic specializations), translated from the module's type members into IR-native types |
+| nominal struct / union / opaque types | one `TypeDecl` in the type environment per type in use (including monomorphic generic specializations), translated from the module's type members into IR-native types; an opaque type becomes `opaque(OpaqueDecl)` with the declared ownership and the host identity of its monomorphic instantiation |
 | binary arithmetic / comparison | one `add`…`ge` |
 | `!` | `not` |
 | `and` / `or` | `br_cond` diamond, join phi |
@@ -688,7 +695,8 @@ These invariants are the contract every producer of the IR must uphold — the f
 - `phi` only at block heads; one incoming per predecessor, in `preds` order; a `trap`-terminated block has no out-edge and is therefore never a `phi` predecessor — its producing path contributes no `phi` input;
 - arity: every op has its declared operand count (≤2 except the four n-ary forms); `read_tuple` index < element count per the static type; `store_member` only in `@init`;
 - members: `load_member`'s member index names a member of the module's member table and the member's kind matches the load (a constant member is read from its slot, a function member yields a function value, a module-valued member yields a module value); `store_member`'s slot index names a constant member's slot;
-- types: `read_field` bases are structs and the field index names a field of the `StructDecl` (result typed as that field); `unpack_struct` consumes a struct and defines exactly its fields; `construct` with a `#tag` and `unpack_variant #k` keep the tag within the `UnionDecl`'s variants and match the payload arity; `read_tag` / `read_payload` / `borrow_variant` bases are unions; `switch` arm tags are exactly the union's variants — exhaustive, with the implicit `trap` default unreachable and no bogus tags.
+- types: `read_field` bases are structs and the field index names a field of the `StructDecl` (result typed as that field); `unpack_struct` consumes a struct and defines exactly its fields; `construct` with a `#tag` and `unpack_variant #k` keep the tag within the `UnionDecl`'s variants and match the payload arity; `read_tag` / `read_payload` / `borrow_variant` bases are unions; `switch` arm tags are exactly the union's variants — exhaustive, with the implicit `trap` default unreachable and no bogus tags;
+- opaque bases: no `construct`, `read_field` / `read_tuple`, `unpack_struct` / `unpack_tuple` / `unpack_variant`, `read_tag` / `read_payload`, or `read_index` may target an `opaque(OpaqueDecl)` type — an opaque value is only borrowed, moved, dropped, stored, passed, `ret`'d, phi-merged, or `any`-packed (Core §11.8; the checker rejects the excluded operations in source, and the schema applies the same rule to text-form programs);
 
 **SSA**
 
@@ -708,7 +716,7 @@ These invariants are the contract every producer of the IR must uphold — the f
 - `cleanup_disable` appears only on paths where the token's owner was consumed (moved, taken, transferred) on that path;
 - a borrow-mode parameter is the only way a value arrives `borrowed`;
 - a `load_member` of a *Unique* constant member arrives `borrowed` — the module owns the constant and source cannot move or drop it;
-- named ownership: a `named`-typed value's ownership resolves through its type declaration; a struct with a user drop hook is always *Unique* — a drop hook and *Copy* ownership contradict;
+- named ownership: a `named`-typed value's ownership resolves through its type declaration; a struct with a user drop hook is always *Unique* — a drop hook and *Copy* ownership contradict; an opaque type is *Unique* by declaration (Core §11.8) — `Array[int32]` is unique even though `int32` is *Copy*;
 - borrow provenance: every use of a `borrowed` value is checked against its ultimate root — `root` origins resolve transitively through the view chain, `call` origins need no check inside the callee, and `peek` origins are bound to the producing syscall's boxed argument. An owned root must be `Available` at the use point; a consumed or maybe-*Unique* root is a violation (an owner dropped or moved while a view of it is still used);
 - a value's origin is non-null iff its state is `borrowed`;
 - a phi over borrowed views joins views of one root, which the result inherits; the root's availability on each arriving edge is checked by the edge-sensitive phi-input machinery.

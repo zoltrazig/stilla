@@ -231,20 +231,21 @@ let y = identity(7);             // 参数可推断 T 时省略
 
 ### 4.11 嵌入边界：`any` 与 `hostdata`
 
-宿主集成是设计目标，语言为此准备了两个「边界类型」（Core §11.6、§11.7）：
+宿主集成是设计目标，语言为此准备了两个「边界类型」（Core §11.6、§11.7）和一类宿主声明的类型（Core §11.8）：
 
 - **`any`**——顶部类型（top type），任何类型的值都可以放进 `any`。它携带**运行时类型标签**，恢复必须显式命名类型：`a as int32`（标签不匹配则 trap），或 `match` 的类型测试模式（`int32 n => ...`，对 `any` 的 match 必须有 `_` 通配臂，因为标签空间是开放的）。`any` 本身是 unique（它可能装着唯一值）。
-- **`hostdata`**——**不透明的宿主负载**。只有宿主能构造，Stilla 无法检查、无法转换、无法比较它，只能移动、借用、存储、原样递给宿主。`array[T]` 和 `hashmap[K, V]` 就构建在它之上。
+- **`hostdata`**——**不透明的、类型擦除的宿主负载**。只有宿主能构造，Stilla 无法检查、无法转换、无法比较它，只能移动、借用、存储、原样递给宿主。它没有类型身份，也**不能进入 `any`**。
+- **opaque host type（宿主不透明名义类型）**——`opaque type Array[T];`，只允许出现在标准库/宿主模块接口里（Core §11.8）。它和 `hostdata` 的关键区别是**有正常的名义类型身份**：编译器知道这是 `Array[int32]`，只是不知道它内部怎么存；它可以进 `any`、可以泛型、可以 `as`/`match` 恢复。
 
-标准库的集合因此很特别（StdLib §2、§3）：`array` 是宿主实现的连续内存缓冲；`hashmap` 的 `insert` / `remove` 是**持久式（persistent）**的——消费旧 map、返回新 map，从不原地部分修改：
+标准库的集合就是 opaque host type（StdLib §2、§3）：`array` 是宿主实现的连续内存缓冲，`hashmap` 是连续桶哈希表。它们**天生 unique**（声明即 unique，即使元素类型是 Copy），因此 `set`/`insert`/`remove` 都是**消费式更新**——`move` 进、更新后的值出——宿主可以在底层**原地修改同一块 buffer**，而源码语义仍完全函数式：
 
 ```stilla
-let m0 = hm.empty::[int32, str]();
-let m1 = hm.insert::[int32, str](m0, 1, "one");
-let m2 = hm.insert::[int32, str](m1, 2, "two");
+let m = hm.empty::[int32, str]();
+let m = hm.insert(move m, 1, "one");
+let m = hm.insert(move m, 2, "two");
 ```
 
-（示例片段。）因为是 `hostdata` 负载，容器**永远是 unique**，即使元素类型是 Copy——所有权整体转移，绝无部分突变。
+（示例片段。）没有别名，就没有部分突变的可能：旧值已死、新值拥有延续，源语言不需要 mutable 变量也能得到接近传统可变容器的运行时性能。`get`/`len`/`contains` 借用，`clone` 复制出新 buffer；容器元素要求 Copy（`make`/`set`/`insert` 的 plain 参数在编译期强制）。
 
 ### 4.12 标准库
 
@@ -314,7 +315,7 @@ let m2 = hm.insert::[int32, str](m1, 2, "two");
 
 **共同点**（这组对照最有趣）：
 
-- **不可变数据**：Elixir 的一切都不可变、持久化数据结构；Stilla 绑定不可变、`hashmap` 持久式更新。
+- **不可变数据**：Elixir 的一切都不可变、持久化数据结构；Stilla 绑定不可变、`hashmap` 用唯一容器上的消费式更新（move 进、新值出）表达同样的不可变性，宿主可原地实现。
 - **函数式风格**：表达导向、模式匹配、**递归优于显式循环**。Stilla 的 `iter.fold` 与 Elixir 的 `Enum.fold` 是同一个思想；`[head, ..tail]` 列表模式与 Elixir 的 `[head | tail]` 同源。
 - **容错哲学**：Elixir 的「let it crash」——进程崩溃不清理、交给 supervisor 重启；Stilla 的「panic 终止上下文、不展开、宿主接管清理」。两者都拒绝「展开栈并尽力清理」的模型，把崩溃后的处置权交给外层。
 

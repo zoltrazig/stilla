@@ -57,6 +57,11 @@ Every syntactic `ast.Type` is resolved to a `cfg.Type`
   the top type — always unique, carries a runtime type tag, and is
   recovered only by `as` or `match` type-test patterns (§4.6);
   `hostdata` is an opaque unique payload constructible only by the host;
+- host-backed opaque nominal types (Core §11.8) — declared by
+  standard-library / host-provided module interfaces (`opaque type
+  Array[T];`): no fields or variants, unique by declaration regardless of
+  type arguments, no raw construction / member access / destructuring in
+  source; valid in every value position including `any`;
 - ownership classification computed structurally (Copy vs unique,
   Core §10.1–§10.3) to the **greatest fixpoint** (Core §10.3): a
   recursive type whose graph cycles through an owned component is unique,
