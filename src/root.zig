@@ -156,6 +156,7 @@ test {
     _ = @import("interpreter_scalar_tests.zig");
     _ = @import("interpreter_lifecycle_tests.zig");
     _ = @import("interpreter_host_tests.zig");
+    _ = @import("host_bind_tests.zig");
     _ = @import("interpreter_image_tests.zig");
     _ = @import("interpreter_load_tests.zig");
     _ = @import("interpreter_vm_tests.zig");

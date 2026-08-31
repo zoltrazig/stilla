@@ -107,31 +107,9 @@ const MathFn1 = *const fn (userdata: ?*const anyopaque, x: f32) f32;
 /// One binary `f32 × f32 -> f32` handler.
 const MathFn2 = *const fn (userdata: ?*const anyopaque, x: f32, y: f32) f32;
 
-/// The `math` member names, in the StdLib §4 order (the adapter resolves
-/// the syscall's member name through this enum).
-pub const MathMember = enum {
-    sqrt,
-    pow,
-    exp,
-    ln,
-    log2,
-    log10,
-    sin,
-    cos,
-    tan,
-    asin,
-    acos,
-    atan,
-    atan2,
-    floor,
-    ceil,
-    round,
-    trunc,
-    abs,
-    min,
-    max,
-};
-
+/// The `math` member names are the `math_module` struct's fns in
+/// interpreter_host.zig (StdLib §4 order); the handlers are the
+/// `MathHostCall` fields below.
 /// Default implementations of the `math` module members (StdLib §4) as
 /// standalone function pointers, one per member, beside `DefaultHostCall`.
 /// Results follow IEEE 754, including NaN and infinity, and are
@@ -267,29 +245,9 @@ pub const StringErr = error{
     OutOfMemory,
 };
 
-/// The `string` member names (StdLib §5, std/string.st).
-pub const StringMember = enum {
-    len,
-    is_empty,
-    concat,
-    contains,
-    starts_with,
-    ends_with,
-    index_of,
-    substring,
-    split,
-    join,
-    trim,
-    lower,
-    upper,
-    replace,
-    repeat,
-    to_utf8,
-    from_utf8,
-    to_codepoints,
-    from_codepoints,
-};
-
+/// The `string` member names are the `string_module` struct's fns in
+/// interpreter_host.zig (StdLib §5, std/string.st); the handlers are the
+/// `StringHostCall` fields below.
 /// Default implementations of the `string` module members (StdLib §5) as
 /// standalone function pointers, one per member, beside `DefaultHostCall`.
 /// String-producing handlers append into a caller-provided scratch
@@ -607,10 +565,8 @@ fn listRange(userdata: ?*const anyopaque, start: i32, end: i32, out: *std.array_
 // import working.
 pub const array_storage = @import("host_array.zig");
 pub const hashmap_storage = @import("host_hashmap.zig");
-pub const ArrayMember = array_storage.ArrayMember;
 pub const ArrayErr = array_storage.ArrayErr;
 pub const ArrayObject = array_storage.ArrayObject;
-pub const HashMapMember = hashmap_storage.HashMapMember;
 pub const HashMapEntry = hashmap_storage.HashMapEntry;
 pub const HashMapHashFn = hashmap_storage.HashMapHashFn;
 pub const HashMapEqFn = hashmap_storage.HashMapEqFn;

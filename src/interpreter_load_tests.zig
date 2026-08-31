@@ -340,23 +340,10 @@ fn expectMemberCoverage(spec: []const u8) !void {
     }
 }
 
-/// Mirror `interpreter.defaultHostCall`'s recognition tables: builtin →
-/// the `DefaultHostCall` member set, math/string/array/hashmap → their
-/// member enums, list → the `len`/`range` pair (everything else in
-/// `list.st` has a real body).
+/// Recognition is the registry: a member is handled when
+/// `defaultHostRegistry` resolves its (specifier, member) pair.
 fn memberRecognized(spec: []const u8, member: []const u8) bool {
-    if (std.mem.eql(u8, spec, "builtin")) {
-        inline for (std.meta.fields(host_module.DefaultHostCall)) |f| {
-            if (std.mem.eql(u8, member, f.name)) return true;
-        }
-        return false;
-    }
-    if (std.mem.eql(u8, spec, "math")) return std.meta.stringToEnum(host_module.MathMember, member) != null;
-    if (std.mem.eql(u8, spec, "string")) return std.meta.stringToEnum(host_module.StringMember, member) != null;
-    if (std.mem.eql(u8, spec, "list")) return std.mem.eql(u8, member, "len") or std.mem.eql(u8, member, "range");
-    if (std.mem.eql(u8, spec, "array")) return std.meta.stringToEnum(host_module.ArrayMember, member) != null;
-    if (std.mem.eql(u8, spec, "hashmap")) return std.meta.stringToEnum(host_module.HashMapMember, member) != null;
-    return false;
+    return interpreter_host.defaultHostRegistry.lookup(spec, member) != null;
 }
 
 test "M6: every declaration-only stdlib member has a default-host handler" {

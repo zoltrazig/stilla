@@ -87,11 +87,18 @@ pub const Termination = interp_types.Termination;
 pub const RunError = interp_types.RunError;
 pub const HostResult = interp_types.HostResult;
 pub const Continuation = interp_types.Continuation;
+pub const HostSignature = interp_types.HostSignature;
+pub const HostType = interp_types.HostType;
+pub const HostScratch = interp_types.HostScratch;
 pub const HostResource = interp_types.HostResource;
 pub const HostDisposer = interp_types.HostDisposer;
 pub const DestroyWork = interp_types.DestroyWork;
 pub const HostCall = interp_host.HostCall;
 pub const defaultHostCall = interp_host.defaultHostCall;
+pub const defaultHostRegistry = interp_host.defaultHostRegistry;
+/// Typed host-binding layer (docs/host-bindings.md): `bind`/`bindC`/
+/// `raw`/`hostModule`/`HostRegistry`.
+pub const host_bind = @import("host_bind.zig");
 pub const run = interp_host.run;
 pub const runWithHost = interp_host.runWithHost;
 pub const runWithEntry = interp_host.runWithEntry;
@@ -324,11 +331,11 @@ pub const VmCtx = struct {
         const f = self.loaded.funcs.items[entry_fn].desc;
         if (self.loaded.funcs.items[entry_fn].arity.params != 0) return error.InvalidImage;
         self.runtime.running = true;
-        // The host argument buffer grows with demand (syscall dispatch).
+        // The host scratch grows with demand (syscall dispatch).
         var max_args: usize = 0;
         for (self.curImage().syscall_descs) |d| max_args = @max(max_args, d.args_len);
-        if (max_args > self.runtime.host_args.items.len) {
-            try self.runtime.host_args.resize(self.allocator, max_args);
+        if (max_args > self.runtime.host_scratch.values.items.len) {
+            try self.runtime.host_scratch.values.resize(self.allocator, max_args);
         }
         const fp: u32 = 3;
         const end: usize = llir.frameEnd(fp, f);

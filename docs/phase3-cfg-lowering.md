@@ -444,4 +444,4 @@ Consumers of the CFG:
 | `src/passes/cfg_lex.zig` | AIR text lexing (re-exported by `cfg`) |
 | `src/passes/cfg_parse.zig` | AIR text parsing (re-exported by `cfg`) |
 | `src/passes/cfg_print.zig` | AIR text printing (re-exported by `cfg`) |
-| `src/host.zig` | Host-call handlers (`DefaultHostCall`, per-module handlers); dispatch is `src/interpreter_host.zig` |
+| `src/host.zig` | Host-call handlers (`DefaultHostCall`, per-module handlers); dispatch is the registry in `src/interpreter_host.zig` (host-bindings.md §4), with typed bindings in `src/host_bind.zig` |

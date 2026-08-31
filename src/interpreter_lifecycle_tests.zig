@@ -154,7 +154,7 @@ test "module teardown runs a slot drop hook exactly once with no trap" {
     const Count = struct { hooks: usize = 0, main_ran: bool = false, saw_id: bool = false };
     var state = Count{};
     const Adapter = struct {
-        fn invoke(vm: *interpreter.VmCtx, userdata: ?*const anyopaque, module_symbol: []const u8, member: []const u8, sig: u32, args: []const vm_types.Value) interpreter.HostResult {
+        fn invoke(vm: *interpreter.VmCtx, userdata: ?*const anyopaque, module_symbol: []const u8, member: []const u8, sig: interpreter.HostSignature, args: []const vm_types.Value) interpreter.HostResult {
             if (std.mem.eql(u8, member, "print")) {
                 const c: *Count = @ptrCast(@alignCast(@constCast(userdata.?)));
                 const bytes = vm.runtime.heap.strSliceOf(args[0]) orelse return .{ .panic = "print: not a str" };
@@ -206,7 +206,7 @@ test "mid-frame drop hook runs once through the hook continuation" {
     const Count = struct { hooks: usize = 0 };
     var state = Count{};
     const Adapter = struct {
-        fn invoke(vm: *interpreter.VmCtx, userdata: ?*const anyopaque, module_symbol: []const u8, member: []const u8, sig: u32, args: []const vm_types.Value) interpreter.HostResult {
+        fn invoke(vm: *interpreter.VmCtx, userdata: ?*const anyopaque, module_symbol: []const u8, member: []const u8, sig: interpreter.HostSignature, args: []const vm_types.Value) interpreter.HostResult {
             if (std.mem.eql(u8, member, "print")) {
                 const c: *Count = @ptrCast(@alignCast(@constCast(userdata.?)));
                 const bytes = vm.runtime.heap.strSliceOf(args[0]) orelse return .{ .panic = "print: not a str" };
@@ -336,7 +336,7 @@ test "stage 7.2: counted value released on one outgoing edge stays live on its s
     // paths: else exercises the edge block; then the in-block trailing
     // release.
     const Sink = struct {
-        fn invoke(vm: *interpreter.VmCtx, userdata: ?*const anyopaque, module_symbol: []const u8, member: []const u8, sig: u32, args: []const vm_types.Value) interpreter.HostResult {
+        fn invoke(vm: *interpreter.VmCtx, userdata: ?*const anyopaque, module_symbol: []const u8, member: []const u8, sig: interpreter.HostSignature, args: []const vm_types.Value) interpreter.HostResult {
             if (std.mem.eql(u8, member, "print")) return .{ .value = 0 };
             return interpreter.defaultHostCall(vm, userdata, module_symbol, member, sig, args);
         }

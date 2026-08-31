@@ -95,7 +95,7 @@ test "host adapter: full-width 64-bit scalars reach the callback; owners transfe
     };
     var state = State{};
     const Adapter = struct {
-        fn invoke(vm: *interpreter.VmCtx, userdata: ?*const anyopaque, module_symbol: []const u8, member: []const u8, sig: u32, args: []const vm_types.Value) interpreter.HostResult {
+        fn invoke(vm: *interpreter.VmCtx, userdata: ?*const anyopaque, module_symbol: []const u8, member: []const u8, sig: interpreter.HostSignature, args: []const vm_types.Value) interpreter.HostResult {
             _ = module_symbol;
             _ = sig;
             const st: *State = @ptrCast(@alignCast(@constCast(userdata.?)));

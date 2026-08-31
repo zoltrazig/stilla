@@ -48,7 +48,7 @@ test "host: builtin.print and str format every supported scalar" {
     var state = Capture{};
 
     const Adapter = struct {
-        fn invoke(vm: *interpreter.VmCtx, userdata: ?*const anyopaque, module_symbol: []const u8, member: []const u8, sig: u32, args: []const vm_types.Value) interpreter.HostResult {
+        fn invoke(vm: *interpreter.VmCtx, userdata: ?*const anyopaque, module_symbol: []const u8, member: []const u8, sig: interpreter.HostSignature, args: []const vm_types.Value) interpreter.HostResult {
             if (std.mem.eql(u8, member, "print") and args.len > 0) {
                 const c: *Capture = @ptrCast(@alignCast(@constCast(userdata.?)));
                 const bytes = vm.runtime.heap.strSliceOf(args[0]) orelse return .{ .panic = "print: not a str" };
@@ -107,7 +107,7 @@ test "host: custom adapter captures print and delegates the rest" {
     var state = Capture{};
 
     const Adapter = struct {
-        fn invoke(vm: *interpreter.VmCtx, userdata: ?*const anyopaque, module_symbol: []const u8, member: []const u8, sig: u32, args: []const vm_types.Value) interpreter.HostResult {
+        fn invoke(vm: *interpreter.VmCtx, userdata: ?*const anyopaque, module_symbol: []const u8, member: []const u8, sig: interpreter.HostSignature, args: []const vm_types.Value) interpreter.HostResult {
             if (std.mem.eql(u8, member, "print") and args.len > 0) {
                 const c: *Capture = @ptrCast(@alignCast(@constCast(userdata.?)));
                 const bytes = vm.runtime.heap.strSliceOf(args[0]) orelse return .{ .panic = "print: not a str" };

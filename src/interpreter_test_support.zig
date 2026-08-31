@@ -111,7 +111,7 @@ pub const CaptureAdapter = struct {
     buffer: [2048]u8 = undefined,
     len: usize = 0,
 
-    pub fn invoke(vm: *interpreter.VmCtx, userdata: ?*const anyopaque, module_symbol: []const u8, member: []const u8, sig: u32, args: []const vm_types.Value) interpreter.HostResult {
+    pub fn invoke(vm: *interpreter.VmCtx, userdata: ?*const anyopaque, module_symbol: []const u8, member: []const u8, sig: interpreter.HostSignature, args: []const vm_types.Value) interpreter.HostResult {
         if (std.mem.eql(u8, member, "print") and args.len > 0) {
             const c: *CaptureAdapter = @ptrCast(@alignCast(@constCast(userdata.?)));
             const bytes = vm.runtime.heap.strSliceOf(args[0]) orelse return .{ .panic = "print: not a str" };

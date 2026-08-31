@@ -682,6 +682,13 @@ fn hSyscall(self: *VmCtx, n: u32) void {
     if (dd.args_start > image.call_args.len or dd.args_len > image.call_args.len - dd.args_start) {
         return trap(self, "syscall desc {d}: argument range out of bounds", .{did});
     }
+    if (dd.signature_id >= image.signatures.len) {
+        return trap(self, "syscall desc {d}: signature {d} out of range", .{ did, dd.signature_id });
+    }
+    // The signature interface (docs/host-bindings.md §3.0): the host
+    // receives a zero-allocation view of the binding's signature row,
+    // never a raw index into the artifact.
+    const sig = interp_types.HostSignature{ .image = image, .desc = image.signatures[dd.signature_id] };
     // The host dispatch pair is symbolic: the import's
     // (module_symbol, member_symbol) bytes.
     const imp = image.imports[dd.host_binding_id];
@@ -689,17 +696,28 @@ fn hSyscall(self: *VmCtx, n: u32) void {
         return trap(self, "syscall desc {d}: module symbol out of range", .{did});
     const member = self.curMod().symbolBytes(imp.member_sym) orelse
         return trap(self, "syscall desc {d}: member symbol out of range", .{did});
-    if (dd.args_len > self.runtime.host_args.items.len) {
-        self.runtime.host_args.resize(self.allocator, dd.args_len) catch |e| return fail(self, e);
+    if (dd.args_len > self.runtime.host_scratch.values.items.len) {
+        self.runtime.host_scratch.values.resize(self.allocator, dd.args_len) catch |e| return fail(self, e);
     }
+    // Per-call scratch: C-string bytes reset so bindC thunks start fresh
+    // (capacity retained — no per-call allocation).
+    self.runtime.host_scratch.bytes.clearRetainingCapacity();
     // Gather one canonical cell per argument, in order; the moves/
     // borrows were already materialized by the lowering into the arg
     // registers (spec §5.3).
-    const args = self.runtime.host_args.items[0..dd.args_len];
+    const args = self.runtime.host_scratch.values.items[0..dd.args_len];
     for (image.call_args[dd.args_start..][0..dd.args_len], 0..) |reg, i| {
         args[i] = read(self, reg);
     }
-    switch (self.host.invoke(self, self.host.userdata, mod_bytes, member, dd.signature_id, args)) {
+    // Dispatch: the registry (default), or the opt-out adapter. A miss
+    // with no fallback is a deterministic not_implemented trap.
+    const result: interp_types.HostResult = if (self.host.invoke) |inv|
+        inv(self, self.host.userdata, mod_bytes, member, sig, args)
+    else if (self.host.registry.lookup(mod_bytes, member)) |hit|
+        hit.thunk(self, hit.userdata orelse self.host.userdata, sig, args)
+    else
+        return trap(self, "host binding '@{s}#{s}' is not implemented by this host", .{ mod_bytes, member });
+    switch (result) {
         .value => |res| {
             if (v.a != llir.zero_reg) write(self, v.a, res);
         },

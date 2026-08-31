@@ -1499,4 +1499,5 @@ pub fn moduleByName(self: *const IrProgram, spec: []const u8) ?*const IrModule {
 
 pub const Diag = @import("passes/cfg_parse.zig").Diag;
 pub const Parser = @import("passes/cfg_parse.zig").Parser;
+// pi-lens-ignore: zls:unknown
 pub const print = @import("passes/cfg_print.zig").print;

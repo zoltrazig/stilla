@@ -9,10 +9,6 @@
 const std = @import("std");
 const vm_types = @import("vm_types.zig");
 
-/// The `array` member names (StdLib §2, std/array.st); the adapter
-/// resolves the syscall's member name through this enum.
-pub const ArrayMember = enum { make, len, get, set, clone };
-
 /// Errors an array handler reports; the adapter maps `OutOfRange` to an
 /// owned deterministic trap message (Runtime §7.2).
 pub const ArrayErr = error{ OutOfRange, OutOfMemory };

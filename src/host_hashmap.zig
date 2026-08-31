@@ -8,10 +8,6 @@
 const std = @import("std");
 const vm_types = @import("vm_types.zig");
 
-/// The `hashmap` member names (StdLib §3, std/hashmap.st); the adapter
-/// resolves the syscall's member name through this enum.
-pub const HashMapMember = enum { empty, insert, get, contains, remove, len, clone };
-
 /// A stored or displaced entry: the raw key and value cells. Whether a
 /// displaced cell must be released is the adapter's decision.
 pub const HashMapEntry = struct { key: vm_types.Value = 0, val: vm_types.Value = 0 };

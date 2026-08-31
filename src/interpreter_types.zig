@@ -215,6 +215,15 @@ pub const HostResource = struct {
 
 pub const HostDisposer = *const fn (user: ?*anyopaque, payload: u64) void;
 
+/// Reusable per-call host scratch (docs/host-bindings.md §6): `values`
+/// stages syscall arguments (one canonical cell per parameter), `bytes`
+/// NUL-terminates C-string arguments for `bindC` thunks. Grows on
+/// demand; nothing is allocated per executed instruction.
+pub const HostScratch = struct {
+    values: std.ArrayList(Value) = .empty,
+    bytes: std.ArrayList(u8) = .empty,
+};
+
 /// Iterative destruction work items (docs/interpreter-vm.md §6.2) — no
 /// host-stack recursion for deeply nested values.
 pub const DestroyWork = union(enum) {
@@ -225,6 +234,219 @@ pub const DestroyWork = union(enum) {
     /// Resume a struct's destruction after its user drop hook returns.
     resume_struct: struct { type_id: u32, h: *ObjectHeader },
 };
+
+// ---------------------------------------------------------------------------
+// Host signature interface (docs/host-bindings.md §3.0): the host-facing
+// projection of a binding's Stilla signature. The syscall path resolves a
+// `SignatureId` once into a zero-allocation `HostSignature` view and passes
+// it across the host boundary; hosts never touch `TypeId` tables.
+// ---------------------------------------------------------------------------
+
+/// Host-facing projection of a Stilla type, resolved from a `TypeId`
+/// through the artifact's `types`/`type_decls` tables. The typed binding
+/// layer handles the primitive/str/opaque/hostdata/any subset; every other
+/// type resolves to `.composite` (bindable only by a raw handler).
+pub const HostType = enum {
+    void,
+    bool,
+    byte,
+    int32,
+    uint32,
+    i64,
+    u64,
+    float32,
+    float64,
+    str,
+    any,
+    hostdata,
+    opaque_,
+    composite,
+    /// Expected-signature marker only (never resolved): matches any
+    /// runtime type.
+    wildcard,
+};
+
+/// One parameter's host-facing shape: declared mode plus resolved type.
+pub const HostParam = struct {
+    mode: llir.ParamMode,
+    ty: HostType,
+};
+
+/// A comptime-declared expected signature (the contract a typed binding
+/// promises) — plain data, no artifact. Built from the bound function's
+/// Zig parameter types (docs/host-bindings.md §3.0, §5).
+pub const ExpectedSignature = struct {
+    params: []const HostParam,
+    ret: HostType,
+};
+
+/// The signature interface: a zero-allocation view over the executing
+/// artifact's signature row. The syscall path resolves `dd.signature_id`
+/// once and passes this to every host thunk; raw handlers reach the raw
+/// `desc`/`image` directly, typed bindings compare against an
+/// `ExpectedSignature` via `matches` before decoding.
+pub const HostSignature = struct {
+    /// The artifact the signature row came from (the executing module's
+    /// image; its types/params/signatures tables are seeded identically
+    /// into every artifact of one compilation).
+    image: *const llir.LlirProgram,
+    /// The resolved signature row.
+    desc: llir.SignatureDesc,
+
+    pub inline fn paramCount(self: HostSignature) usize {
+        return self.desc.params_len;
+    }
+
+    /// Parameter `i` (mode + resolved type). Out of range reads
+    /// `.composite`/`.plain` rather than trapping — raw handlers may
+    /// still reach the raw desc.
+    pub inline fn param(self: HostSignature, i: usize) HostParam {
+        if (i >= self.desc.params_len) return .{ .mode = .plain, .ty = .composite };
+        const p = self.image.params[self.desc.params_start + i];
+        return .{ .mode = p.mode, .ty = resolveHostType(self.image, p.type_) };
+    }
+
+    pub inline fn ret(self: HostSignature) HostType {
+        // `void`/`never` results have no TypeDesc row — the artifact
+        // writes the `no_index` sentinel (cfg_lower_llir_intern.zig).
+        if (self.desc.ret == llir.no_index) return .void;
+        return resolveHostType(self.image, self.desc.ret);
+    }
+
+    /// Element-wise compare against a comptime expected signature: param
+    /// count, each param's mode and type, and the return type.
+    /// `.wildcard` in `expected` matches any runtime type; `.composite`
+    /// matches only `.composite`. A `move`-mode runtime parameter always
+    /// fails (expected modes are plain/borrow — typed glue cannot honor
+    /// ownership transfer).
+    pub fn matches(self: HostSignature, expected: ExpectedSignature) bool {
+        if (self.desc.params_len != expected.params.len) return false;
+        for (expected.params, 0..) |e, i| {
+            const a = self.param(i);
+            if (a.mode != e.mode or a.mode == .move) return false;
+            if (e.ty != .wildcard and a.ty != e.ty) return false;
+        }
+        const r = self.ret();
+        if (expected.ret != .wildcard and r != expected.ret) return false;
+        return true;
+    }
+};
+
+/// Resolve a `TypeId` to its host-facing type (docs/host-bindings.md §3.0).
+/// Unresolvable ids read `.composite`, never trap.
+pub fn resolveHostType(image: *const llir.LlirProgram, type_id: u32) HostType {
+    if (type_id >= image.types.len) return .composite;
+    const t = image.types[type_id];
+    return switch (t.kind) {
+        .primitive => switch (@as(llir.PrimitiveId, @enumFromInt(t.a))) {
+            .byte => .byte,
+            .bool => .bool,
+            .int32 => .int32,
+            .uint32 => .uint32,
+            .float32 => .float32,
+            .str => .str,
+            .any => .any,
+            .hostdata => .hostdata,
+            .i64 => .i64,
+            .u64 => .u64,
+            .f64 => .float64,
+        },
+        .named => blk: {
+            if (t.a >= image.type_decls.len) break :blk .composite;
+            break :blk switch (image.type_decls[t.a].kind) {
+                .opaque_ => .opaque_,
+                else => .composite,
+            };
+        },
+        else => .composite,
+    };
+}
+
+test "HostSignature: type resolution and matches" {
+    const testing = std.testing;
+    // Hand-built image: t0=int32, t1=str, t2=opaque(named→decl 0),
+    // t3=list, t4=any. Same seeded-identically shape as real artifacts.
+    var types = [_]llir.TypeDesc{
+        .{ .kind = .primitive, .a = @intFromEnum(llir.PrimitiveId.int32), .b = 0, .c = 0 },
+        .{ .kind = .primitive, .a = @intFromEnum(llir.PrimitiveId.str), .b = 0, .c = 0 },
+        .{ .kind = .named, .a = 0, .b = 0, .c = 0 },
+        .{ .kind = .list, .a = 0, .b = 0, .c = 0 },
+        .{ .kind = .primitive, .a = @intFromEnum(llir.PrimitiveId.any), .b = 0, .c = 0 },
+    };
+    var decls = [_]llir.TypeDeclDesc{.{
+        .kind = .opaque_,
+        .a = 0,
+        .b = 0,
+        .c = 0,
+        .d = 0,
+        .e = 0,
+    }};
+    var params = [_]llir.ParamDesc{
+        .{ .mode = .plain, .type_ = 0 }, // int32
+        .{ .mode = .borrow, .type_ = 1 }, // str
+        .{ .mode = .plain, .type_ = 2 }, // opaque
+    };
+    var signatures = [_]llir.SignatureDesc{
+        .{ .params_start = 0, .params_len = 2, .ret = 0 },
+        .{ .params_start = 2, .params_len = 1, .ret = 4 }, // opaque -> any
+    };
+    var image: llir.LlirProgram = undefined;
+    image.types = &types;
+    image.type_decls = &decls;
+    image.params = &params;
+    image.signatures = &signatures;
+
+    try testing.expectEqual(HostType.int32, resolveHostType(&image, 0));
+    try testing.expectEqual(HostType.str, resolveHostType(&image, 1));
+    try testing.expectEqual(HostType.opaque_, resolveHostType(&image, 2));
+    try testing.expectEqual(HostType.composite, resolveHostType(&image, 3)); // list
+    try testing.expectEqual(HostType.composite, resolveHostType(&image, 99)); // out of range
+
+    const sig = HostSignature{ .image = &image, .desc = signatures[0] };
+    try testing.expectEqual(@as(usize, 2), sig.paramCount());
+    try testing.expectEqual(HostType.int32, sig.param(0).ty);
+    try testing.expectEqual(llir.ParamMode.plain, sig.param(0).mode);
+    try testing.expectEqual(HostType.str, sig.param(1).ty);
+    try testing.expectEqual(llir.ParamMode.borrow, sig.param(1).mode);
+    try testing.expectEqual(HostType.int32, sig.ret());
+    // Out-of-range accessor reads .composite/.plain, never traps.
+    try testing.expectEqual(HostType.composite, sig.param(3).ty);
+
+    // Exact match: plain int32 + borrow str -> int32.
+    try testing.expect(sig.matches(.{ .params = &.{
+        .{ .mode = .plain, .ty = .int32 },
+        .{ .mode = .borrow, .ty = .str },
+    }, .ret = .int32 }));
+    // Mode mismatch rejected.
+    try testing.expect(!sig.matches(.{ .params = &.{
+        .{ .mode = .plain, .ty = .int32 },
+        .{ .mode = .plain, .ty = .str },
+    }, .ret = .int32 }));
+    // Type mismatch rejected.
+    try testing.expect(!sig.matches(.{ .params = &.{
+        .{ .mode = .plain, .ty = .int32 },
+        .{ .mode = .borrow, .ty = .any },
+    }, .ret = .int32 }));
+    // Count mismatch rejected.
+    try testing.expect(!sig.matches(.{ .params = &.{
+        .{ .mode = .plain, .ty = .int32 },
+    }, .ret = .int32 }));
+    // wildcard expected param matches any actual type.
+    try testing.expect(sig.matches(.{ .params = &.{
+        .{ .mode = .plain, .ty = .wildcard },
+        .{ .mode = .borrow, .ty = .wildcard },
+    }, .ret = .wildcard }));
+
+    const sig2 = HostSignature{ .image = &image, .desc = signatures[1] };
+    try testing.expect(sig2.matches(.{ .params = &.{
+        .{ .mode = .plain, .ty = .opaque_ },
+    }, .ret = .any }));
+    // A runtime move param fails even when the expected type matches.
+    params[2].mode = .move;
+    try testing.expect(!sig2.matches(.{ .params = &.{
+        .{ .mode = .plain, .ty = .opaque_ },
+    }, .ret = .any }));
+}
 
 // ---------------------------------------------------------------------------
 // Runtime state (docs/interpreter-vm.md §4, §8): where execution is. The
@@ -284,7 +506,8 @@ pub const VmRuntimeState = struct {
     /// Iterative destruction work stack.
     destroy_work: std.ArrayList(DestroyWork) = .empty,
     continuations: std.ArrayList(Continuation) = .empty,
-    host_args: std.ArrayList(Value) = .empty,
+    /// Per-call host scratch (values + C-string bytes).
+    host_scratch: HostScratch = .{},
     /// Scratch buffer for `panicFmt` messages (borrowed; `sitePrefixed`
     /// copies into the owned Termination message and this is reused).
     panic_buf: [1024]u8 = undefined,
@@ -295,7 +518,8 @@ pub const VmRuntimeState = struct {
         self.string_consts.deinit(allocator);
         self.destroy_work.deinit(allocator);
         self.continuations.deinit(allocator);
-        self.host_args.deinit(allocator);
+        self.host_scratch.values.deinit(allocator);
+        self.host_scratch.bytes.deinit(allocator);
         self.stack.deinit(allocator);
     }
 };

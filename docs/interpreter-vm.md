@@ -149,8 +149,9 @@ const VmCtx = struct {
     /// `result`/`pending_err`/`popped_hook_cont`, and the execution
     /// resources below (the heap, the host-resource and
     /// string-constant registries, the destruction-work and
-    /// continuation stacks, the host argument
-    /// buffer, and the panic scratch buffer) — where execution is. No
+    /// continuation stacks, the host scratch
+    /// (argument cells + C-string bytes, docs/host-bindings.md §6),
+    /// and the panic scratch buffer) — where execution is. No
     /// default: the heap requires the allocator at construction.
     runtime: VmRuntimeState,
     stack_limit: u32 = 1 << 20,
@@ -181,7 +182,8 @@ const VmRuntimeState = struct {
     string_consts: std.AutoHashMapUnmanaged(u64, Value) = .empty,
     destroy_work: std.ArrayList(DestroyWork) = .empty,
     continuations: std.ArrayList(Continuation) = .empty,
-    host_args: std.ArrayList(Value) = .empty,
+    /// Per-call host scratch (argument cells + C-string bytes).
+    host_scratch: HostScratch = .{},
     /// Scratch buffer for `panicFmt` messages.
     panic_buf: [1024]u8 = undefined,
 };
@@ -196,8 +198,9 @@ registrations — `VmLoadedData`, §8) plus the runtime state
 `running`/`terminated`, the threaded-dispatch out-of-band state
 (`result`/`pending_err`/`popped_hook_cont`, §7), and every per-run
 resource: the heap, the host-resource and string-constant registries,
-the destruction-work and continuation stacks, the host argument
-buffer, and the panic scratch buffer). The split is by
+the destruction-work and continuation stacks, the host scratch
+(argument cells + C-string bytes), and the panic scratch buffer). The
+split is by
 kind, not by mutability: lazy loading
 and hot-reload mutate the loaded data during a run (appending modules,
 repointing `module_by_symbol`, flipping initialization state, filling
@@ -763,20 +766,34 @@ host resources and raw-frees remaining live-object allocations.
 
 ## 9. Host boundary
 
-Resolve a syscall through its descriptor to a `HostBinding`, then dispatch by
+Resolve a syscall through its descriptor to a host binding, then dispatch by
 the binding's module and member identity. Host bindings lower only to
-`syscall`; indirect calls (`jalr`) accept executable entry PCs only.
+`syscall`; indirect calls (`jalr`) accept executable entry PCs only. The
+host boundary and the typed binding layer are specified in
+host-bindings.md; this section covers the interpreter-side contract.
 
-The default host (`defaultHostCall`) resolves the syscall's import
+`hSyscall` (interpreter_dispatch.zig) resolves the syscall's import
 descriptor — the `(module_symbol, member_symbol)` byte pair in the
-executing artifact's `imports` table — and dispatches the pair to one
-adapter per stdlib module — `builtin`,
-`math`, `string`, `list` (M2), `array`, `hashmap` (M3). Same-named members in
-different modules (`string.len` vs `list.len`) therefore reach different
-handlers; a module or member with no handler reports `not_implemented`, which
-the syscall dispatch turns into a deterministic trap.
+executing artifact's `imports` table — into a `HostSignature` view (the
+artifact's signature row, resolved once; hosts never touch `TypeId`
+tables, host-bindings.md §3.0), then dispatches through `HostCall`: the
+member-table registry (`defaultHostRegistry`, the stdlib modules) by
+default, or the opt-out `invoke` adapter when set. Same-named members in
+different modules (`string.len` vs `list.len`) reach different handlers
+via the member tables; a module or member with no handler reports
+`not_implemented`, which the syscall dispatch turns into a deterministic
+trap.
 
-Each adapter is responsible for:
+The six stdlib modules are module structs registered through
+`host_bind.register` (host-bindings.md §7): members with a plain
+scalar/str signature bind typed (all 20 `math` functions, `builtin.print`,
+and the four pure `string` predicates), and every other member is a
+raw-shaped fn carrying the adapter logic directly — the per-module
+member dispatch switches are deleted. `defaultHostCall` survives as the
+opt-out adapter: a registry dispatch that dynamic-host `invoke`
+overriders delegate non-intercepted members to.
+
+Each member (typed or raw) is responsible for:
 
 - checking the descriptor/signature before crossing the boundary;
 - translating `str` to a borrowed byte slice;
@@ -792,7 +809,10 @@ Each adapter is responsible for:
 The adapters keep the VM heap mechanics (decode cells, walk lists, allocate
 objects); the handler structs in `host.zig` (`DefaultHostCall`,
 `MathHostCall`, `StringHostCall`, `ListHostCall`) receive only verified
-plain data and never touch the VM (M2). The string handlers operate on code
+plain data and never touch the VM (M2). The typed member machinery
+generates the same decode/encode glue from a Zig/C function
+signature, with signature verification against the artifact before
+decoding (host-bindings.md §3, §5). The string handlers operate on code
 points, never byte offsets; their errors map to owned deterministic trap
 messages (StdLib §5, Runtime §7.2).
 
@@ -879,8 +899,11 @@ pub fn run(allocator: std.mem.Allocator, image: *LlirProgram) RunError!Terminati
 ```
 
 `run` enters the artifact's recorded entry export (`entry_member`) through
-the symbolic resolver. `runWithHost` takes an explicit `HostCall` adapter
-instead of the default `builtin` one; `runWithEntry` runs from an explicit
+the symbolic resolver. `runWithHost` takes an explicit `HostCall` — a
+member-table registry plus an opt-out adapter (`host_bind.register`
+derives a module from a struct: `pub const symbol` + `pub fn` members,
+host-bindings.md §3) — instead
+of the default stdlib registry; `runWithEntry` runs from an explicit
 module-local `FunctionId`; the `*AndLoader` forms (`runWithEntryAndLoader`,
 `runWithHostAndLoader`) resolve cross-module references through a
 `ModuleLoader` — a whole-program artifact bundle or an embedding's provider
@@ -1016,6 +1039,22 @@ Implemented milestones:
   A coverage guard walks every bundle module's declaration-only `fn`
   members and asserts the default host dispatches each — a declared
   stdlib binding never falls through to `.not_implemented`.
+- **M7 — Typed host-binding registry (host-bindings.md):** `HostCall`
+  dispatches through a member-table registry (`defaultHostRegistry`);
+  `hSyscall` passes a `HostSignature` view (the artifact's signature
+  row, resolved once — hosts never touch `TypeId` tables) instead of a
+  bare signature index; `host_bind.zig` adds the typed member layer
+  (`host_bind.register` over a module struct — `pub const symbol` +
+  `pub fn` members; comptime decode/encode glue, module userdata
+  injection, reusable `HostScratch` for NUL-terminated C strings). The
+  six stdlib modules migrated onto it: members with a plain
+  scalar/str signature bind typed (the 20 `math` functions,
+  `builtin.print`, the four pure `string` predicates), the rest are
+  raw-shaped fns carrying the adapter logic — the per-module member
+  dispatch switches and `moduleFromFields` are deleted. The
+  pre-registry adapter contract remains as the `invoke` opt-out for
+  dynamic hosts (`defaultHostCall` now dispatches through the
+  registry).
 
 Do not implement all opcode handlers before the execution skeleton has a real
 end-to-end test. Conversely, do not declare completion until mechanical
