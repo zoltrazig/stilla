@@ -40,7 +40,7 @@ const functionAtPc = interp_types.functionAtPc;
 // ---------------------------------------------------------------------------
 
 /// One per-opcode handler; `n` is the remaining step budget. The
-/// handler's instruction is fetched from `code[self.core.pc]` at entry
+/// handler's instruction is fetched from `code[self.runtime.pc]` at entry
 /// (`pc` always points at the executing instruction — transfer
 /// handlers move it only for the *next* token). The 8-byte `VmInstr`
 /// deliberately does NOT cross the tail jump: Debug-mode codegen
@@ -62,7 +62,7 @@ fn maxOpcodeValue() comptime_int {
 // --- loads ----------------------------------------------------------------
 
 fn hConst(self: *VmCtx, n: u32) void {
-    const v = self.core.code.items[self.core.pc];
+    const v = self.loaded.code.items[self.runtime.pc];
     const image = self.curImage();
     const imm: u32 = @truncate(v.operand);
     const cr = image.constants[imm];
@@ -81,10 +81,10 @@ fn hConst(self: *VmCtx, n: u32) void {
             // destination retains its own reference. The cache key is
             // module-qualified — const ids are per-artifact.
             const key: u64 = (@as(u64, self.curModIdx()) << 32) | imm;
-            const gop = self.string_consts.getOrPut(self.allocator, key) catch |e| return fail(self, e);
+            const gop = self.runtime.string_consts.getOrPut(self.allocator, key) catch |e| return fail(self, e);
             if (!gop.found_existing) {
                 const bytes = image.strings[cr.a .. cr.a + cr.b];
-                const h = self.heap.allocObjectIn(.str_, self.curModIdx(), cr.type_, 0, @intCast(bytes.len)) catch |e| return fail(self, e);
+                const h = self.runtime.heap.allocObjectIn(.str_, self.curModIdx(), cr.type_, 0, @intCast(bytes.len)) catch |e| return fail(self, e);
                 const dst_bytes: [*]u8 = @ptrCast(h.cells);
                 @memcpy(dst_bytes[0..bytes.len], bytes);
                 gop.value_ptr.* = @intFromPtr(h);
@@ -98,12 +98,12 @@ fn hConst(self: *VmCtx, n: u32) void {
 }
 
 fn hFnRef(self: *VmCtx, n: u32) void {
-    const v = self.core.code.items[self.core.pc];
+    const v = self.loaded.code.items[self.runtime.pc];
     const imm: u32 = @truncate(v.operand);
     // The runtime materializes the executable entry PC from the
     // module-local FunctionId (Instruction Set §5.2) — the relocated
     // entry of the executing module's own function.
-    write(self, v.a, self.core.funcs.items[self.curMod().func_base + imm].desc.entry_pc);
+    write(self, v.a, self.loaded.funcs.items[self.curMod().func_base + imm].desc.entry_pc);
     return fallthrough(self, n);
 }
 
@@ -118,7 +118,7 @@ fn hFnRef(self: *VmCtx, n: u32) void {
 fn arithHandler(comptime op: llir.Opcode) Handler {
     return struct {
         fn run(self: *VmCtx, n: u32) void {
-            const v = self.core.code.items[self.core.pc];
+            const v = self.loaded.code.items[self.runtime.pc];
             const r = binOp(self, op, read(self, v.b), read(self, v.c)) catch |e| return stop(self, intTrap(self, e));
             write(self, v.a, r);
             return fallthrough(self, n);
@@ -134,7 +134,7 @@ fn arithHandler(comptime op: llir.Opcode) Handler {
 fn arithImmSignedHandler(comptime op: llir.Opcode) Handler {
     return struct {
         fn run(self: *VmCtx, n: u32) void {
-            const v = self.core.code.items[self.core.pc];
+            const v = self.loaded.code.items[self.runtime.pc];
             const im7: u64 = @bitCast(vm_instr.imm7Signed(v.c));
             const b = read(self, v.b);
             const r = switch (op) {
@@ -152,7 +152,7 @@ fn arithImmSignedHandler(comptime op: llir.Opcode) Handler {
 fn arithImmUnsignedHandler(comptime op: llir.Opcode) Handler {
     return struct {
         fn run(self: *VmCtx, n: u32) void {
-            const v = self.core.code.items[self.core.pc];
+            const v = self.loaded.code.items[self.runtime.pc];
             const b = read(self, v.b);
             const r = switch (op) {
                 .addiu => b +% v.c,
@@ -169,7 +169,7 @@ fn arithImmUnsignedHandler(comptime op: llir.Opcode) Handler {
 fn divImmSignedHandler(comptime op: llir.Opcode) Handler {
     return struct {
         fn run(self: *VmCtx, n: u32) void {
-            const v = self.core.code.items[self.core.pc];
+            const v = self.loaded.code.items[self.runtime.pc];
             const b = read(self, v.b);
             const im7 = @as(u64, @bitCast(vm_instr.imm7Signed(v.c)));
             if (im7 == 0) return stop(self, intTrap(self, error.DivByZero));
@@ -195,7 +195,7 @@ fn divImmSignedHandler(comptime op: llir.Opcode) Handler {
 fn divImmUnsignedHandler(comptime op: llir.Opcode) Handler {
     return struct {
         fn run(self: *VmCtx, n: u32) void {
-            const v = self.core.code.items[self.core.pc];
+            const v = self.loaded.code.items[self.runtime.pc];
             const b = read(self, v.b);
             const im7: u64 = v.c;
             if (im7 == 0) return stop(self, intTrap(self, error.DivByZero));
@@ -212,7 +212,7 @@ fn divImmUnsignedHandler(comptime op: llir.Opcode) Handler {
 fn shiftImmHandler(comptime op: llir.Opcode) Handler {
     return struct {
         fn run(self: *VmCtx, n: u32) void {
-            const v = self.core.code.items[self.core.pc];
+            const v = self.loaded.code.items[self.runtime.pc];
             const sh: u6 = @intCast(v.c & 63);
             const b = read(self, v.b);
             const r = switch (op) {
@@ -230,7 +230,7 @@ fn shiftImmHandler(comptime op: llir.Opcode) Handler {
 fn bitImmHandler(comptime op: llir.Opcode) Handler {
     return struct {
         fn run(self: *VmCtx, n: u32) void {
-            const v = self.core.code.items[self.core.pc];
+            const v = self.loaded.code.items[self.runtime.pc];
             const b = read(self, v.b);
             const r = switch (op) {
                 .andi => b & v.c,
@@ -249,7 +249,7 @@ fn bitImmHandler(comptime op: llir.Opcode) Handler {
 fn fmacHandler(comptime op: llir.Opcode) Handler {
     return struct {
         fn run(self: *VmCtx, n: u32) void {
-            const v = self.core.code.items[self.core.pc];
+            const v = self.loaded.code.items[self.runtime.pc];
             const acc = read(self, v.a);
             const b = read(self, v.b);
             const c = read(self, v.c);
@@ -264,7 +264,7 @@ fn fmacHandler(comptime op: llir.Opcode) Handler {
 fn fmacImmHandler(comptime op: llir.Opcode) Handler {
     return struct {
         fn run(self: *VmCtx, n: u32) void {
-            const v = self.core.code.items[self.core.pc];
+            const v = self.loaded.code.items[self.runtime.pc];
             const acc = read(self, v.a);
             const b = read(self, v.b);
             const im7 = if (op == .maddi) @as(u64, @bitCast(vm_instr.imm7Signed(v.c))) else v.c;
@@ -277,7 +277,7 @@ fn fmacImmHandler(comptime op: llir.Opcode) Handler {
 // --- widthless unary / 32-bit canonicalization ----------------------------
 
 fn hNeg(self: *VmCtx, n: u32) void {
-    const v = self.core.code.items[self.core.pc];
+    const v = self.loaded.code.items[self.runtime.pc];
     // Two's complement `0 - b` on the full canonical cell; a 32-bit
     // operand type's `neg; sext32` sequence wraps the result.
     write(self, v.a, 0 -% read(self, v.b));
@@ -285,13 +285,13 @@ fn hNeg(self: *VmCtx, n: u32) void {
 }
 
 fn hSext32(self: *VmCtx, n: u32) void {
-    const v = self.core.code.items[self.core.pc];
+    const v = self.loaded.code.items[self.runtime.pc];
     write(self, v.a, ValueCodec.extendInt32Bits(@truncate(read(self, v.b))));
     return fallthrough(self, n);
 }
 
 fn hZext32(self: *VmCtx, n: u32) void {
-    const v = self.core.code.items[self.core.pc];
+    const v = self.loaded.code.items[self.runtime.pc];
     write(self, v.a, @as(u64, @truncate(read(self, v.b))));
     return fallthrough(self, n);
 }
@@ -301,7 +301,7 @@ fn hZext32(self: *VmCtx, n: u32) void {
 fn unaryHandler(comptime op: llir.Opcode) Handler {
     return struct {
         fn run(self: *VmCtx, n: u32) void {
-            const v = self.core.code.items[self.core.pc];
+            const v = self.loaded.code.items[self.runtime.pc];
             write(self, v.a, canonicalIntResult(op, unOp(self, op, read(self, v.b))));
             return fallthrough(self, n);
         }
@@ -313,8 +313,8 @@ fn unaryHandler(comptime op: llir.Opcode) Handler {
 fn cmpHandler(comptime op: llir.Opcode) Handler {
     return struct {
         fn run(self: *VmCtx, n: u32) void {
-            const v = self.core.code.items[self.core.pc];
-            self.core.fast_regs[llir.cond_reg] = ValueCodec.encodeBool(cmpC(self, op, read(self, v.a), read(self, v.b)));
+            const v = self.loaded.code.items[self.runtime.pc];
+            self.runtime.fast_regs[llir.cond_reg] = ValueCodec.encodeBool(cmpC(self, op, read(self, v.a), read(self, v.b)));
             return fallthrough(self, n);
         }
     }.run;
@@ -323,7 +323,7 @@ fn cmpHandler(comptime op: llir.Opcode) Handler {
 fn cmpImmHandler(comptime op: llir.Opcode) Handler {
     return struct {
         fn run(self: *VmCtx, n: u32) void {
-            const v = self.core.code.items[self.core.pc];
+            const v = self.loaded.code.items[self.runtime.pc];
             const a = read(self, v.a);
             const im7: u64 = @bitCast(vm_instr.imm7Signed(v.b));
             const r = switch (op) {
@@ -335,30 +335,30 @@ fn cmpImmHandler(comptime op: llir.Opcode) Handler {
                 .sgtiu => intOrdCmp(false, true, a, v.b),
                 else => unreachable,
             };
-            self.core.fast_regs[llir.cond_reg] = ValueCodec.encodeBool(r);
+            self.runtime.fast_regs[llir.cond_reg] = ValueCodec.encodeBool(r);
             return fallthrough(self, n);
         }
     }.run;
 }
 
 fn hBoolEq(self: *VmCtx, n: u32) void {
-    const v = self.core.code.items[self.core.pc];
-    self.core.fast_regs[llir.cond_reg] = ValueCodec.encodeBool(read(self, v.a) == read(self, v.b));
+    const v = self.loaded.code.items[self.runtime.pc];
+    self.runtime.fast_regs[llir.cond_reg] = ValueCodec.encodeBool(read(self, v.a) == read(self, v.b));
     return fallthrough(self, n);
 }
 
 fn hBoolNe(self: *VmCtx, n: u32) void {
-    const v = self.core.code.items[self.core.pc];
-    self.core.fast_regs[llir.cond_reg] = ValueCodec.encodeBool(read(self, v.a) != read(self, v.b));
+    const v = self.loaded.code.items[self.runtime.pc];
+    self.runtime.fast_regs[llir.cond_reg] = ValueCodec.encodeBool(read(self, v.a) != read(self, v.b));
     return fallthrough(self, n);
 }
 
 fn strCmpHandler(comptime op: llir.Opcode) Handler {
     return struct {
         fn run(self: *VmCtx, n: u32) void {
-            const v = self.core.code.items[self.core.pc];
+            const v = self.loaded.code.items[self.runtime.pc];
             const equal = strEqual(self, read(self, v.a), read(self, v.b)) catch |e| return stop(self, heapTrap(self, e));
-            self.core.fast_regs[llir.cond_reg] = ValueCodec.encodeBool(if (op == .str_eq) equal else !equal);
+            self.runtime.fast_regs[llir.cond_reg] = ValueCodec.encodeBool(if (op == .str_eq) equal else !equal);
             return fallthrough(self, n);
         }
     }.run;
@@ -367,15 +367,15 @@ fn strCmpHandler(comptime op: llir.Opcode) Handler {
 // --- boolean complement / select ------------------------------------------
 
 fn hNot(self: *VmCtx, n: u32) void {
-    const v = self.core.code.items[self.core.pc];
+    const v = self.loaded.code.items[self.runtime.pc];
     write(self, v.a, ValueCodec.encodeBool(read(self, v.b) == 0));
     return fallthrough(self, n);
 }
 
 fn hCmov(self: *VmCtx, n: u32) void {
-    const v = self.core.code.items[self.core.pc];
+    const v = self.loaded.code.items[self.runtime.pc];
     // dst = cond ? b : c — a raw pattern move.
-    const pick = self.core.fast_regs[llir.cond_reg] != 0;
+    const pick = self.runtime.fast_regs[llir.cond_reg] != 0;
     write(self, v.a, if (pick) read(self, v.b) else read(self, v.c));
     return fallthrough(self, n);
 }
@@ -385,7 +385,7 @@ fn hCmov(self: *VmCtx, n: u32) void {
 fn castHandler(comptime op: llir.Opcode) Handler {
     return struct {
         fn run(self: *VmCtx, n: u32) void {
-            const v = self.core.code.items[self.core.pc];
+            const v = self.loaded.code.items[self.runtime.pc];
             write(self, v.a, doCast(self, op, read(self, v.b)));
             return fallthrough(self, n);
         }
@@ -395,7 +395,7 @@ fn castHandler(comptime op: llir.Opcode) Handler {
 // --- transfers / move-wide -------------------------------------------------
 
 fn hTransfer(self: *VmCtx, n: u32) void {
-    const v = self.core.code.items[self.core.pc];
+    const v = self.loaded.code.items[self.runtime.pc];
     // copy / move / borrow — all complete raw-cell transfers.
     write(self, v.a, read(self, v.b));
     return fallthrough(self, n);
@@ -414,7 +414,7 @@ fn movwLane(comptime op: llir.Opcode) u2 {
 fn movwHandler(comptime op: llir.Opcode) Handler {
     return struct {
         fn run(self: *VmCtx, n: u32) void {
-            const v = self.core.code.items[self.core.pc];
+            const v = self.loaded.code.items[self.runtime.pc];
             const lane_imm: u16 = @truncate(v.operand);
             const wide: Value = switch (op) {
                 .movwz0, .movwz1, .movwz2, .movwz3 => llir.movwzValue(movwLane(op), lane_imm),
@@ -431,22 +431,22 @@ fn movwHandler(comptime op: llir.Opcode) Handler {
 // --- spills / argument window ----------------------------------------------
 
 fn hSpillTake(self: *VmCtx, n: u32) void {
-    const v = self.core.code.items[self.core.pc];
+    const v = self.loaded.code.items[self.runtime.pc];
     const f = curFn(
         self,
     );
-    const xi = self.core.fp + f.f_count + @as(u32, @truncate(v.operand));
-    write(self, v.a, self.core.stack.items[xi]);
+    const xi = self.runtime.fp + f.f_count + @as(u32, @truncate(v.operand));
+    write(self, v.a, self.runtime.stack.items[xi]);
     return fallthrough(self, n);
 }
 
 fn hSpillPut(self: *VmCtx, n: u32) void {
-    const v = self.core.code.items[self.core.pc];
+    const v = self.loaded.code.items[self.runtime.pc];
     const f = curFn(
         self,
     );
-    const xi = self.core.fp + f.f_count + @as(u32, @truncate(v.operand));
-    self.core.stack.items[xi] = read(self, v.a);
+    const xi = self.runtime.fp + f.f_count + @as(u32, @truncate(v.operand));
+    self.runtime.stack.items[xi] = read(self, v.a);
     return fallthrough(self, n);
 }
 
@@ -460,18 +460,18 @@ fn hSpillPut(self: *VmCtx, n: u32) void {
 fn slotHandler(comptime op: llir.Opcode) Handler {
     return struct {
         fn run(self: *VmCtx, n: u32) void {
-            const v = self.core.code.items[self.core.pc];
+            const v = self.loaded.code.items[self.runtime.pc];
             const f = curFn(
                 self,
             );
-            const addr = llir.callBase(self.core.fp, f) + @as(u32, @truncate(v.operand));
+            const addr = llir.callBase(self.runtime.fp, f) + @as(u32, @truncate(v.operand));
             const src = read(self, v.a);
             switch (op) {
                 .slot_retain => retainCounted(self, src) catch |e| return stop(self, heapTrap(self, e)),
                 .slot_move => write(self, v.a, ValueCodec.zero), // transfer: the source becomes uninitialized
                 else => {},
             }
-            self.core.stack.items[addr] = src;
+            self.runtime.stack.items[addr] = src;
             return fallthrough(self, n);
         }
     }.run;
@@ -480,13 +480,13 @@ fn slotHandler(comptime op: llir.Opcode) Handler {
 // --- control ----------------------------------------------------------------
 
 fn hJ(self: *VmCtx, n: u32) void {
-    const v = self.core.code.items[self.core.pc];
-    self.core.pc = vm_instr.jumpTarget(self.core.pc, v);
+    const v = self.loaded.code.items[self.runtime.pc];
+    self.runtime.pc = vm_instr.jumpTarget(self.runtime.pc, v);
     return next(self, n);
 }
 
 fn hJal(self: *VmCtx, n: u32) void {
-    const v = self.core.code.items[self.core.pc];
+    const v = self.loaded.code.items[self.runtime.pc];
     // `jal ra, addr` is the direct call. Its operand carries the
     // callee's function registry index, resolved at load time
     // (publishArtifact) — no pc→function search and no entry check on
@@ -498,7 +498,7 @@ fn hJal(self: *VmCtx, n: u32) void {
 }
 
 fn hJalr(self: *VmCtx, n: u32) void {
-    const v = self.core.code.items[self.core.pc];
+    const v = self.loaded.code.items[self.runtime.pc];
     // `jalr ra, base, offs16`: the function value in `base + offs16` is
     // an executable entry PC; `enterJalr` resolves it and checks the
     // dynamic take contract before modifying any state. The offset is a
@@ -517,7 +517,7 @@ fn hJalr(self: *VmCtx, n: u32) void {
 }
 
 fn hTake(self: *VmCtx, n: u32) void {
-    const v = self.core.code.items[self.core.pc];
+    const v = self.loaded.code.items[self.runtime.pc];
     // The generic take: transfer b's ownership to a and clear the
     // source cell. The post-call contract form is `take dst, F(L+3+O-A)`.
     const taken_val = read(self, v.b);
@@ -529,10 +529,10 @@ fn hTake(self: *VmCtx, n: u32) void {
 fn branchHandler(comptime op: llir.Opcode) Handler {
     return struct {
         fn run(self: *VmCtx, n: u32) void {
-            const v = self.core.code.items[self.core.pc];
+            const v = self.loaded.code.items[self.runtime.pc];
             const taken = branchCmp(self, op, read(self, v.a), read(self, v.b));
             if (taken) {
-                self.core.pc = vm_instr.branchTarget(self.core.pc, v);
+                self.runtime.pc = vm_instr.branchTarget(self.runtime.pc, v);
                 return next(self, n);
             }
             return fallthrough(self, n);
@@ -543,7 +543,7 @@ fn branchHandler(comptime op: llir.Opcode) Handler {
 fn branchImmHandler(comptime op: llir.Opcode) Handler {
     return struct {
         fn run(self: *VmCtx, n: u32) void {
-            const v = self.core.code.items[self.core.pc];
+            const v = self.loaded.code.items[self.runtime.pc];
             const a = read(self, v.a);
             const im7: u64 = @bitCast(vm_instr.imm7Signed(v.b));
             const taken = switch (op) {
@@ -554,7 +554,7 @@ fn branchImmHandler(comptime op: llir.Opcode) Handler {
                 else => unreachable,
             };
             if (taken) {
-                self.core.pc = vm_instr.branchTarget(self.core.pc, v);
+                self.runtime.pc = vm_instr.branchTarget(self.runtime.pc, v);
                 return next(self, n);
             }
             return fallthrough(self, n);
@@ -563,29 +563,29 @@ fn branchImmHandler(comptime op: llir.Opcode) Handler {
 }
 
 fn hTbz(self: *VmCtx, n: u32) void {
-    const v = self.core.code.items[self.core.pc];
+    const v = self.loaded.code.items[self.runtime.pc];
     const bit: u6 = @intCast(v.b & 63);
     const set = (read(self, v.a) >> bit) & 1 == 1;
     if (!set) {
-        self.core.pc = vm_instr.branchTarget(self.core.pc, v);
+        self.runtime.pc = vm_instr.branchTarget(self.runtime.pc, v);
         return next(self, n);
     }
     return fallthrough(self, n);
 }
 
 fn hTbnz(self: *VmCtx, n: u32) void {
-    const v = self.core.code.items[self.core.pc];
+    const v = self.loaded.code.items[self.runtime.pc];
     const bit: u6 = @intCast(v.b & 63);
     const set = (read(self, v.a) >> bit) & 1 == 1;
     if (set) {
-        self.core.pc = vm_instr.branchTarget(self.core.pc, v);
+        self.runtime.pc = vm_instr.branchTarget(self.runtime.pc, v);
         return next(self, n);
     }
     return fallthrough(self, n);
 }
 
 fn hSwitch(self: *VmCtx, n: u32) void {
-    const v = self.core.code.items[self.core.pc];
+    const v = self.loaded.code.items[self.runtime.pc];
     const image = self.curImage();
     const imm: u32 = @truncate(v.operand);
     const sd = image.switch_descs[imm];
@@ -599,14 +599,14 @@ fn hSwitch(self: *VmCtx, n: u32) void {
     }
     if (offset) |o| {
         // Arm targets are signed offsets from the switch's own pc.
-        self.core.pc = llir.switchArmTarget(self.core.pc, o);
+        self.runtime.pc = llir.switchArmTarget(self.runtime.pc, o);
         return next(self, n);
     }
     return trap(self, "switch: unmatched tag {d}", .{tag});
 }
 
 fn hJr(self: *VmCtx, n: u32) void {
-    const v = self.core.code.items[self.core.pc];
+    const v = self.loaded.code.items[self.runtime.pc];
     const t = llir.jrTarget(read(self, v.a), vm_instr.offs16Signed(v));
     const f = curFn(
         self,
@@ -614,38 +614,38 @@ fn hJr(self: *VmCtx, n: u32) void {
     if (t < f.code_start or t >= f.code_end) {
         return trap(self, "jr target {d} outside the code range", .{t});
     }
-    self.core.pc = @intCast(t);
+    self.runtime.pc = @intCast(t);
     return next(self, n);
 }
 
 // --- calls / returns ---------------------------------------------------------
 
 fn hRet(self: *VmCtx, n: u32) void {
-    const v = self.core.code.items[self.core.pc];
+    const v = self.loaded.code.items[self.runtime.pc];
     const t = returnFrom(self, v) catch |e| return fail(self, e);
     if (t) |term| return stop(self, term); // root return or trap
-    if (self.core.result != null) return;
-    if (self.core.popped_hook_cont) {
+    if (self.runtime.result != null) return;
+    if (self.runtime.popped_hook_cont) {
         // A drop-hook continuation resumed: the drain inside `returnFrom`
         // may have armed a new hook (pc moved to its entry). Stop the
         // chain — the run loop re-drives from the restored pc, preserving
         // the between-step drain and the teardown hook loop.
-        self.core.popped_hook_cont = false;
+        self.runtime.popped_hook_cont = false;
         return;
     }
     return next(self, n);
 }
 
 fn hReleaseRet(self: *VmCtx, n: u32) void {
-    const v = self.core.code.items[self.core.pc];
+    const v = self.loaded.code.items[self.runtime.pc];
     // `release_ret result, x` = `release(x); return result` (Instruction
     // Set §8) — the fused form's cleanup source dies with the frame.
     releaseCounted(self, read(self, v.b)) catch |e| return stop(self, heapTrap(self, e));
     const t = returnFrom(self, v) catch |e| return fail(self, e);
     if (t) |term| return stop(self, term);
-    if (self.core.result != null) return;
-    if (self.core.popped_hook_cont) {
-        self.core.popped_hook_cont = false;
+    if (self.runtime.result != null) return;
+    if (self.runtime.popped_hook_cont) {
+        self.runtime.popped_hook_cont = false;
         return;
     }
     return next(self, n);
@@ -659,7 +659,7 @@ fn hTailcallSelf(self: *VmCtx, n: u32) void {
 }
 
 fn hTrap(self: *VmCtx, n: u32) void {
-    const v = self.core.code.items[self.core.pc];
+    const v = self.loaded.code.items[self.runtime.pc];
     _ = n;
     _ = v;
     return trap(self, "explicit trap", .{});
@@ -668,7 +668,7 @@ fn hTrap(self: *VmCtx, n: u32) void {
 // --- syscall -------------------------------------------------------------------
 
 fn hSyscall(self: *VmCtx, n: u32) void {
-    const v = self.core.code.items[self.core.pc];
+    const v = self.loaded.code.items[self.runtime.pc];
     const image = self.curImage();
     const imm: u32 = @truncate(v.operand);
     const did = imm;
@@ -689,13 +689,13 @@ fn hSyscall(self: *VmCtx, n: u32) void {
         return trap(self, "syscall desc {d}: module symbol out of range", .{did});
     const member = self.curMod().symbolBytes(imp.member_sym) orelse
         return trap(self, "syscall desc {d}: member symbol out of range", .{did});
-    if (dd.args_len > self.host_args.items.len) {
-        self.host_args.resize(self.allocator, dd.args_len) catch |e| return fail(self, e);
+    if (dd.args_len > self.runtime.host_args.items.len) {
+        self.runtime.host_args.resize(self.allocator, dd.args_len) catch |e| return fail(self, e);
     }
     // Gather one canonical cell per argument, in order; the moves/
     // borrows were already materialized by the lowering into the arg
     // registers (spec §5.3).
-    const args = self.host_args.items[0..dd.args_len];
+    const args = self.runtime.host_args.items[0..dd.args_len];
     for (image.call_args[dd.args_start..][0..dd.args_len], 0..) |reg, i| {
         args[i] = read(self, reg);
     }
@@ -712,7 +712,7 @@ fn hSyscall(self: *VmCtx, n: u32) void {
 // --- module storage --------------------------------------------------------------
 
 fn hModuleRef(self: *VmCtx, n: u32) void {
-    const v = self.core.code.items[self.core.pc];
+    const v = self.loaded.code.items[self.runtime.pc];
     const imm: u32 = @truncate(v.operand);
     const mi = self.resolveModuleRef(imm) catch |e| return fail(self, e);
     // A module's own symbol resolves to itself; only a *different*
@@ -727,7 +727,7 @@ fn hModuleRef(self: *VmCtx, n: u32) void {
 }
 
 fn hLoadMember(self: *VmCtx, n: u32) void {
-    const v = self.core.code.items[self.core.pc];
+    const v = self.loaded.code.items[self.runtime.pc];
     const image = self.curImage();
     const md = image.member_descs[v.c];
     const ri = self.resolveImport(self.curModIdx(), md.ref, true) catch |e| return fail(self, e);
@@ -738,37 +738,37 @@ fn hLoadMember(self: *VmCtx, n: u32) void {
 }
 
 fn hStoreMember(self: *VmCtx, n: u32) void {
-    const v = self.core.code.items[self.core.pc];
+    const v = self.loaded.code.items[self.runtime.pc];
     const image = self.curImage();
     const imm: u32 = @truncate(v.operand);
     const md = image.member_descs[imm];
-    const m = self.curMod();
+    const m = self.loaded.modules.items[self.curModIdx()];
     if (md.ref >= m.slots.len) return trap(self, "module slot out of range", .{});
     m.slots[md.ref] = read(self, v.a);
-    self.initialized_slots.append(self.allocator, .{ .mod = self.curModIdx(), .slot = md.ref }) catch |e| return fail(self, e);
+    m.slot_log.append(self.allocator, md.ref) catch |e| return fail(self, e);
     return fallthrough(self, n);
 }
 
 // --- construction / consuming destructures -------------------------------------
 
 fn hConstruct(self: *VmCtx, n: u32) void {
-    const v = self.core.code.items[self.core.pc];
+    const v = self.loaded.code.items[self.runtime.pc];
     opConstruct(self, v) catch |e| return fail(self, e);
     return fallthrough(self, n);
 }
 
 fn hUnpackAggregate(self: *VmCtx, n: u32) void {
-    const v = self.core.code.items[self.core.pc];
+    const v = self.loaded.code.items[self.runtime.pc];
     // unpack_struct / unpack_tuple: payload cells transfer to their
     // destinations; only the shell dies.
     const image = self.curImage();
     const imm: u32 = @truncate(v.operand);
     const dd = image.destructure_descs[imm];
-    const h = self.heap.deref(read(self, v.a)) catch |e| return stop(self, heapTrap(self, e));
+    const h = self.runtime.heap.deref(read(self, v.a)) catch |e| return stop(self, heapTrap(self, e));
     switch (h.kind) {
         .struct_, .tuple_ => {
             for (0..dd.dsts_len) |k| writeDst(self, dd.dsts_start + k, h.cell(k));
-            self.heap.freeShell(h);
+            self.runtime.heap.freeShell(h);
         },
         else => return trap(self, "destructure of a non-aggregate object", .{}),
     }
@@ -776,11 +776,11 @@ fn hUnpackAggregate(self: *VmCtx, n: u32) void {
 }
 
 fn hSplitList(self: *VmCtx, n: u32) void {
-    const v = self.core.code.items[self.core.pc];
+    const v = self.loaded.code.items[self.runtime.pc];
     const image = self.curImage();
     const imm: u32 = @truncate(v.operand);
     const dd = image.destructure_descs[imm];
-    const h = self.heap.deref(read(self, v.a)) catch |e| return stop(self, heapTrap(self, e));
+    const h = self.runtime.heap.deref(read(self, v.a)) catch |e| return stop(self, heapTrap(self, e));
     switch (h.kind) {
         .list_cons => {
             // A `[a, b, ..rest]` pattern consumes one node per bound
@@ -791,10 +791,10 @@ fn hSplitList(self: *VmCtx, n: u32) void {
             var cur = read(self, v.a);
             var k: usize = 0;
             while (k + 1 < dd.dsts_len) : (k += 1) {
-                const node = self.heap.deref(cur) catch |e| return stop(self, heapTrap(self, e));
+                const node = self.runtime.heap.deref(cur) catch |e| return stop(self, heapTrap(self, e));
                 writeDst(self, dd.dsts_start + k, node.cell(0)); // head transfers
                 cur = node.cell(1);
-                self.heap.freeShell(node);
+                self.runtime.heap.freeShell(node);
             }
             writeDst(self, dd.dsts_start + k, cur); // the rest
         },
@@ -806,15 +806,15 @@ fn hSplitList(self: *VmCtx, n: u32) void {
 fn variantUnpackHandler(comptime op: llir.Opcode) Handler {
     return struct {
         fn run(self: *VmCtx, n: u32) void {
-            const v = self.core.code.items[self.core.pc];
+            const v = self.loaded.code.items[self.runtime.pc];
             const dd = self.curImage().destructure_descs[v.a];
-            const h = self.heap.deref(read(self, v.b)) catch |e| return stop(self, heapTrap(self, e));
+            const h = self.runtime.heap.deref(read(self, v.b)) catch |e| return stop(self, heapTrap(self, e));
             if (h.kind != .union_) return trap(self, "variant unpack of a non-union object", .{});
             for (0..dd.dsts_len) |k| {
                 const pv = h.cell(1 + k);
                 writeDst(self, dd.dsts_start + k, pv);
             }
-            if (op == .unpack_variant) self.heap.freeShell(h);
+            if (op == .unpack_variant) self.runtime.heap.freeShell(h);
             return fallthrough(self, n);
         }
     }.run;
@@ -825,9 +825,9 @@ fn variantUnpackHandler(comptime op: llir.Opcode) Handler {
 fn readProjHandler(comptime op: llir.Opcode) Handler {
     return struct {
         fn run(self: *VmCtx, n: u32) void {
-            const v = self.core.code.items[self.core.pc];
+            const v = self.loaded.code.items[self.runtime.pc];
             const md = self.curImage().member_descs[v.c];
-            const h = self.heap.deref(read(self, v.b)) catch |e| return stop(self, heapTrap(self, e));
+            const h = self.runtime.heap.deref(read(self, v.b)) catch |e| return stop(self, heapTrap(self, e));
             // read_payload's MemberDesc ref indexes the active variant's
             // payload cells, which sit after the tag cell; the spec fixes
             // the ref at 0, so the payload cell is 1 + ref.
@@ -841,17 +841,17 @@ fn readProjHandler(comptime op: llir.Opcode) Handler {
 }
 
 fn hReadIndex(self: *VmCtx, n: u32) void {
-    const v = self.core.code.items[self.core.pc];
+    const v = self.loaded.code.items[self.runtime.pc];
     const base = read(self, v.b);
     const idx: u32 = @truncate(read(self, v.c));
     if (base == 0) return trap(self, "list index {d} out of bounds (empty list)", .{idx});
-    const h = self.heap.deref(base) catch |e| return stop(self, heapTrap(self, e));
+    const h = self.runtime.heap.deref(base) catch |e| return stop(self, heapTrap(self, e));
     if (idx >= h.len) return trap(self, "list index {d} out of bounds ({d})", .{ idx, h.len });
     var node = h;
     var k = idx;
     while (k > 0) {
         k -= 1;
-        node = self.heap.deref(node.cell(1)) catch |e| return stop(self, heapTrap(self, e));
+        node = self.runtime.heap.deref(node.cell(1)) catch |e| return stop(self, heapTrap(self, e));
     }
     const ev = node.cell(0);
     retainCell(self, ev) catch |e| return fail(self, e); // element type from the header
@@ -860,17 +860,17 @@ fn hReadIndex(self: *VmCtx, n: u32) void {
 }
 
 fn hReadIndexI(self: *VmCtx, n: u32) void {
-    const v = self.core.code.items[self.core.pc];
+    const v = self.loaded.code.items[self.runtime.pc];
     const base = read(self, v.b);
     const idx: u32 = v.c;
     if (base == 0) return trap(self, "list index {d} out of bounds (empty list)", .{idx});
-    const h = self.heap.deref(base) catch |e| return stop(self, heapTrap(self, e));
+    const h = self.runtime.heap.deref(base) catch |e| return stop(self, heapTrap(self, e));
     if (idx >= h.len) return trap(self, "list index {d} out of bounds ({d})", .{ idx, h.len });
     var node = h;
     var k = idx;
     while (k > 0) {
         k -= 1;
-        node = self.heap.deref(node.cell(1)) catch |e| return stop(self, heapTrap(self, e));
+        node = self.runtime.heap.deref(node.cell(1)) catch |e| return stop(self, heapTrap(self, e));
     }
     const ev = node.cell(0);
     retainCell(self, ev) catch |e| return fail(self, e);
@@ -879,12 +879,12 @@ fn hReadIndexI(self: *VmCtx, n: u32) void {
 }
 
 fn hTail(self: *VmCtx, n: u32) void {
-    const v = self.core.code.items[self.core.pc];
+    const v = self.loaded.code.items[self.runtime.pc];
     const base = read(self, v.b);
     if (base == 0) {
         write(self, v.a, 0); // tail of empty is empty
     } else {
-        const h = self.heap.deref(base) catch |e| return stop(self, heapTrap(self, e));
+        const h = self.runtime.heap.deref(base) catch |e| return stop(self, heapTrap(self, e));
         const nxt = h.cell(1);
         retainCell(self, nxt) catch |e| return fail(self, e); // the result owns its reference
         write(self, v.a, nxt);
@@ -893,12 +893,12 @@ fn hTail(self: *VmCtx, n: u32) void {
 }
 
 fn hConcat(self: *VmCtx, n: u32) void {
-    const v = self.core.code.items[self.core.pc];
-    const ha = self.heap.deref(read(self, v.b)) catch |e| return stop(self, heapTrap(self, e));
-    const hb2 = self.heap.deref(read(self, v.c)) catch |e| return stop(self, heapTrap(self, e));
+    const v = self.loaded.code.items[self.runtime.pc];
+    const ha = self.runtime.heap.deref(read(self, v.b)) catch |e| return stop(self, heapTrap(self, e));
+    const hb2 = self.runtime.heap.deref(read(self, v.c)) catch |e| return stop(self, heapTrap(self, e));
     const la = ha.len;
     const lb = hb2.len;
-    const h = self.heap.allocObject(.str_, primTy(self, .str), 0, @intCast(la + lb)) catch |e| return fail(self, e);
+    const h = self.runtime.heap.allocObject(.str_, primTy(self, .str), 0, @intCast(la + lb)) catch |e| return fail(self, e);
     const dstb: [*]u8 = @ptrCast(h.cells);
     @memcpy(dstb[0..la], @as([*]const u8, @ptrCast(ha.cells))[0..la]);
     @memcpy(dstb[la .. la + lb], @as([*]const u8, @ptrCast(hb2.cells))[0..lb]);
@@ -907,8 +907,8 @@ fn hConcat(self: *VmCtx, n: u32) void {
 }
 
 fn hReadTag(self: *VmCtx, n: u32) void {
-    const v = self.core.code.items[self.core.pc];
-    const h = self.heap.deref(read(self, v.b)) catch |e| return stop(self, heapTrap(self, e));
+    const v = self.loaded.code.items[self.runtime.pc];
+    const h = self.runtime.heap.deref(read(self, v.b)) catch |e| return stop(self, heapTrap(self, e));
     if (h.kind != .union_) return trap(self, "read_tag on a non-union object", .{});
     write(self, v.a, h.cell(0));
     return fallthrough(self, n);
@@ -917,8 +917,8 @@ fn hReadTag(self: *VmCtx, n: u32) void {
 // --- 'any' -------------------------------------------------------------------------
 
 fn hTypeIs(self: *VmCtx, n: u32) void {
-    const v = self.core.code.items[self.core.pc];
-    const h = self.heap.deref(read(self, v.b)) catch |e| return stop(self, heapTrap(self, e));
+    const v = self.loaded.code.items[self.runtime.pc];
+    const h = self.runtime.heap.deref(read(self, v.b)) catch |e| return stop(self, heapTrap(self, e));
     if (h.kind != .any_) return trap(self, "type_is on a non-'any' object", .{});
     const pt: u32 = @truncate(h.cell(0));
     write(self, v.a, ValueCodec.encodeBool(pt == v.c));
@@ -928,11 +928,11 @@ fn hTypeIs(self: *VmCtx, n: u32) void {
 fn anyPackHandler(comptime op: llir.Opcode) Handler {
     return struct {
         fn run(self: *VmCtx, n: u32) void {
-            const v = self.core.code.items[self.core.pc];
+            const v = self.loaded.code.items[self.runtime.pc];
             const payload_ty = v.c;
             const pv = read(self, v.b);
             if (op == .any_pack_copy) retainCell(self, pv) catch |e| return fail(self, e); // payload type
-            const h = self.heap.allocObject(.any_, primAnyTy(
+            const h = self.runtime.heap.allocObject(.any_, primAnyTy(
                 self,
             ), 2, 0) catch |e| return fail(self, e);
             h.setCell(0, payload_ty);
@@ -946,9 +946,9 @@ fn anyPackHandler(comptime op: llir.Opcode) Handler {
 fn anyUnpackHandler(comptime op: llir.Opcode) Handler {
     return struct {
         fn run(self: *VmCtx, n: u32) void {
-            const v = self.core.code.items[self.core.pc];
+            const v = self.loaded.code.items[self.runtime.pc];
             const expected = v.c;
-            const h = self.heap.deref(read(self, v.b)) catch |e| return stop(self, heapTrap(self, e));
+            const h = self.runtime.heap.deref(read(self, v.b)) catch |e| return stop(self, heapTrap(self, e));
             if (h.kind != .any_) return trap(self, "unpack of a non-'any' object", .{});
             const pt: u32 = @truncate(h.cell(0));
             if (pt != expected) {
@@ -960,7 +960,7 @@ fn anyUnpackHandler(comptime op: llir.Opcode) Handler {
             } else {
                 // The payload moves out; only the 'any' shell dies.
                 h.setCell(1, 0);
-                self.heap.freeShell(h);
+                self.runtime.heap.freeShell(h);
             }
             write(self, v.a, pv);
             return fallthrough(self, n);
@@ -971,13 +971,13 @@ fn anyUnpackHandler(comptime op: llir.Opcode) Handler {
 // --- counted lifecycle ---------------------------------------------------------------
 
 fn hRelease(self: *VmCtx, n: u32) void {
-    const v = self.core.code.items[self.core.pc];
+    const v = self.loaded.code.items[self.runtime.pc];
     releaseCounted(self, read(self, v.a)) catch |e| return stop(self, heapTrap(self, e));
     return fallthrough(self, n);
 }
 
 fn hCopyRetain(self: *VmCtx, n: u32) void {
-    const v = self.core.code.items[self.core.pc];
+    const v = self.loaded.code.items[self.runtime.pc];
     const src = read(self, v.b);
     retainCounted(self, src) catch |e| return stop(self, heapTrap(self, e));
     write(self, v.a, src);
@@ -985,7 +985,7 @@ fn hCopyRetain(self: *VmCtx, n: u32) void {
 }
 
 fn hReplaceCopy(self: *VmCtx, n: u32) void {
-    const v = self.core.code.items[self.core.pc];
+    const v = self.loaded.code.items[self.runtime.pc];
     // Retain the source first, then release the old destination owner
     // (Instruction Set §8 ordering).
     const old = read(self, v.a);
@@ -997,7 +997,7 @@ fn hReplaceCopy(self: *VmCtx, n: u32) void {
 }
 
 fn hReplaceMove(self: *VmCtx, n: u32) void {
-    const v = self.core.code.items[self.core.pc];
+    const v = self.loaded.code.items[self.runtime.pc];
     const old = read(self, v.a);
     const src = read(self, v.b);
     releaseCounted(self, old) catch |e| return stop(self, heapTrap(self, e));
@@ -1006,13 +1006,13 @@ fn hReplaceMove(self: *VmCtx, n: u32) void {
 }
 
 fn hDrop(self: *VmCtx, n: u32) void {
-    const v = self.core.code.items[self.core.pc];
+    const v = self.loaded.code.items[self.runtime.pc];
     const image = self.curImage();
     const imm: u32 = @truncate(v.operand);
     const dd = image.drop_descs[imm];
     const src = read(self, v.a);
     if (src != 0) {
-        const h = self.heap.registry.get(src) orelse return trap(self, "drop of a non-registry value", .{});
+        const h = self.runtime.heap.registry.get(src) orelse return trap(self, "drop of a non-registry value", .{});
         const ty: u32 = if (dd.type_ != llir.no_index) dd.type_ else h.type_id;
         destroyValue(self, ty, src) catch |e| return stop(self, heapTrap(self, e));
     }
@@ -1029,7 +1029,7 @@ fn hDrop(self: *VmCtx, n: u32) void {
 /// enum holes never reach the image (load-time decode rejects reserved
 /// words), so this traps defensively. It is also the table's default.
 fn hTrapGeneric(self: *VmCtx, n: u32) void {
-    const v = self.core.code.items[self.core.pc];
+    const v = self.loaded.code.items[self.runtime.pc];
     _ = n;
     return trap(self, "opcode {s} is not dispatchable", .{llir.opInfo(v.op).name});
 }
@@ -1187,9 +1187,9 @@ fn saturateF64ToByte(d: f64) Value {
 /// `frameIndex(reg) >= f_count`. The zero/cond/ra/T block is one
 /// bounds check into the fast bank.
 pub inline fn read(self: *VmCtx, reg: llir.ValueReg) Value {
-    if (reg < llir.fast_reg_count) return self.core.fast_regs[reg]; // zero (0), cond (1), ra (2), T0–T15 (3..18)
-    return self.core.stack.items[
-        llir.frameCell(self.core.fp, curFn(
+    if (reg < llir.fast_reg_count) return self.runtime.fast_regs[reg]; // zero (0), cond (1), ra (2), T0–T15 (3..18)
+    return self.runtime.stack.items[
+        llir.frameCell(self.runtime.fp, curFn(
             self,
         ), reg)
     ];
@@ -1202,18 +1202,18 @@ pub inline fn write(self: *VmCtx, reg: llir.ValueReg, v: Value) void {
     if (reg < llir.fast_reg_count) {
         // zero (index 0) and ra (index 2, the reserved hole) are
         // discard-only: zero writes drop, ra is call-convention-only.
-        if (reg != llir.zero_reg and reg != llir.ra_reg) self.core.fast_regs[reg] = v;
+        if (reg != llir.zero_reg and reg != llir.ra_reg) self.runtime.fast_regs[reg] = v;
         return;
     }
-    self.core.stack.items[
-        llir.frameCell(self.core.fp, curFn(
+    self.runtime.stack.items[
+        llir.frameCell(self.runtime.fp, curFn(
             self,
         ), reg)
     ] = v;
 }
 
 pub inline fn curFn(self: *VmCtx) llir.FunctionDesc {
-    return self.core.funcs.items[self.core.current_fn].desc;
+    return self.loaded.funcs.items[self.runtime.current_fn].desc;
 }
 
 fn trapMsg(self: *VmCtx, comptime fmt: []const u8, args: anytype) Termination {
@@ -1223,10 +1223,10 @@ fn trapMsg(self: *VmCtx, comptime fmt: []const u8, args: anytype) Termination {
     const site = siteDescription(self);
     defer if (site) |s| self.allocator.free(s);
     const m = if (site) |s|
-        std.fmt.allocPrint(self.allocator, "trap at pc {d} in {s}: " ++ fmt, .{self.core.pc} ++ .{s} ++ args) catch
+        std.fmt.allocPrint(self.allocator, "trap at pc {d} in {s}: " ++ fmt, .{self.runtime.pc} ++ .{s} ++ args) catch
             return .{ .panic = "out of memory while formatting a trap" }
     else
-        std.fmt.allocPrint(self.allocator, "trap at pc {d}: " ++ fmt, .{self.core.pc} ++ args) catch
+        std.fmt.allocPrint(self.allocator, "trap at pc {d}: " ++ fmt, .{self.runtime.pc} ++ args) catch
             return .{ .panic = "out of memory while formatting a trap" };
     return .{ .panic = m };
 }
@@ -1235,7 +1235,7 @@ fn trapMsg(self: *VmCtx, comptime fmt: []const u8, args: anytype) Termination {
 /// at `pc`. Best-effort: never traps itself.
 fn siteDescription(self: *VmCtx) ?[]const u8 {
     const m = self.curMod();
-    return std.fmt.allocPrint(self.allocator, "{s}#{d}", .{ m.symbol, self.core.current_fn - m.func_base }) catch null;
+    return std.fmt.allocPrint(self.allocator, "{s}#{d}", .{ m.symbol, self.runtime.current_fn - m.func_base }) catch null;
 }
 
 /// Prefix a host-supplied panic message with the trap site, so CLI
@@ -1248,7 +1248,7 @@ pub fn sitePrefixed(self: *VmCtx, m: []const u8) []const u8 {
     const site = siteDescription(self) orelse
         return self.allocator.dupe(u8, m) catch m;
     defer self.allocator.free(site);
-    return std.fmt.allocPrint(self.allocator, "panic in {s} at pc {d}: {s}", .{ site, self.core.pc, m }) catch
+    return std.fmt.allocPrint(self.allocator, "panic in {s} at pc {d}: {s}", .{ site, self.runtime.pc, m }) catch
         self.allocator.dupe(u8, m) catch m;
 }
 
@@ -1259,13 +1259,13 @@ pub fn sitePrefixed(self: *VmCtx, m: []const u8) []const u8 {
 /// route through here — its callee registry index is resolved at
 /// load (publishArtifact) and read straight from the instruction.
 pub fn enterJalr(self: *VmCtx, target: u32) !?Termination {
-    const callee_id = functionAtPc(self.core.funcs.items, target) orelse
+    const callee_id = functionAtPc(self.loaded.funcs.items, target) orelse
         return trapMsg(self, "call target {d} is not a function entry", .{target});
     // Only a function entry is a legal call target — `functionAtPc`
     // returns the containing function for any interior pc, so a
     // dynamic `jalr` into the middle of a function must be rejected,
     // never silently redirected to the entry (spec §5.2).
-    const callee = self.core.funcs.items[callee_id].desc;
+    const callee = self.loaded.funcs.items[callee_id].desc;
     if (target != callee.entry_pc) {
         return trapMsg(self, "call target {d} is not a function entry", .{target});
     }
@@ -1282,8 +1282,8 @@ pub fn enterJalr(self: *VmCtx, target: u32) !?Termination {
 /// target and forwards the registry index; static `jal` forwards
 /// the index already stored in its operand by the load.
 pub fn enterCalleeId(self: *VmCtx, callee_id: u32, allow_coalesced: bool) !?Termination {
-    const callee = self.core.funcs.items[callee_id].desc;
-    const a: u32 = self.core.funcs.items[callee_id].a();
+    const callee = self.loaded.funcs.items[callee_id].desc;
+    const a: u32 = self.loaded.funcs.items[callee_id].a();
     if (callee.f_count < a) {
         return trapMsg(self, "callee frame too small for the value area", .{});
     }
@@ -1296,25 +1296,25 @@ pub fn enterCalleeId(self: *VmCtx, callee_id: u32, allow_coalesced: bool) !?Term
     if (a > llir.outCount(caller)) {
         return trapMsg(self, "callee value area exceeds the caller output window", .{});
     }
-    if (self.core.sp < a) return trapMsg(self, "call underflows the stack", .{});
-    const new_fp = self.core.sp - a;
+    if (self.runtime.sp < a) return trapMsg(self, "call underflows the stack", .{});
+    const new_fp = self.runtime.sp - a;
     const end: usize = llir.frameEnd(new_fp, callee);
     try self.ensure(end); // reserve before any write (failure atomicity)
-    if (!takeContract(self, callee_id, caller, a, self.core.pc + 1, allow_coalesced)) {
+    if (!takeContract(self, callee_id, caller, a, self.runtime.pc + 1, allow_coalesced)) {
         return trapMsg(self, "take contract mismatch at the call return pc", .{});
     }
     // Commit: ra = pc + 1; the header records the caller's frame
     // base and function index, and this callee's return pc (nested
     // calls may overwrite `ra` without losing the outer link).
-    const ra = self.core.pc + 1;
+    const ra = self.runtime.pc + 1;
     const hb = new_fp - 3;
-    self.core.stack.items[hb + 0] = self.core.fp; // saved_fp: the caller's frame base
-    self.core.stack.items[hb + 1] = self.core.current_fn; // saved_fn: the caller's function registry index
-    self.core.stack.items[hb + 2] = ra; // saved_ra: this callee's return pc
-    self.core.fp = new_fp;
-    self.core.sp = @intCast(end);
-    self.core.pc = callee.entry_pc;
-    self.core.current_fn = callee_id;
+    self.runtime.stack.items[hb + 0] = self.runtime.fp; // saved_fp: the caller's frame base
+    self.runtime.stack.items[hb + 1] = self.runtime.current_fn; // saved_fn: the caller's function registry index
+    self.runtime.stack.items[hb + 2] = ra; // saved_ra: this callee's return pc
+    self.runtime.fp = new_fp;
+    self.runtime.sp = @intCast(end);
+    self.runtime.pc = callee.entry_pc;
+    self.runtime.current_fn = callee_id;
     return null;
 }
 
@@ -1329,9 +1329,9 @@ pub fn enterCalleeId(self: *VmCtx, callee_id: u32, allow_coalesced: bool) !?Term
 /// performs the same check for `jalr` after resolving the actual
 /// callee.
 fn takeContract(self: *VmCtx, callee_id: u32, caller: llir.FunctionDesc, a: u32, ret_pc: u32, allow_coalesced: bool) bool {
-    if (ret_pc >= self.core.code.items.len) return false;
-    const nd = self.core.code.items[ret_pc];
-    if (self.core.funcs.items[callee_id].hasRet()) {
+    if (ret_pc >= self.loaded.code.items.len) return false;
+    const nd = self.loaded.code.items[ret_pc];
+    if (self.loaded.funcs.items[callee_id].hasRet()) {
         // A coalesced call (static jal) may have no take — the
         // fallthrough consumes the result alias directly.
         if (nd.op != .take) return allow_coalesced;
@@ -1344,11 +1344,11 @@ fn takeContract(self: *VmCtx, callee_id: u32, caller: llir.FunctionDesc, a: u32,
 /// the result to slot 0, restore the caller's `sp/fp/pc`. The root
 /// header (`invalid_pc`) terminates normally.
 pub fn returnFrom(self: *VmCtx, v: VmInstr) !?Termination {
-    const fe = self.core.funcs.items[self.core.current_fn];
+    const fe = self.loaded.funcs.items[self.runtime.current_fn];
     const a: u32 = fe.a();
     const result: Value = read(self, v.a);
-    const hdr = readHeader(self.core.stack.items, self.core.fp);
-    if (!hdr.check(self.core.funcs.items, self.core.fp)) {
+    const hdr = readHeader(self.runtime.stack.items, self.runtime.fp);
+    if (!hdr.check(self.loaded.funcs.items, self.runtime.fp)) {
         return trapMsg(self, "corrupt frame header", .{});
     }
     if (hdr.saved_ra == invalid_pc) {
@@ -1359,16 +1359,21 @@ pub fn returnFrom(self: *VmCtx, v: VmInstr) !?Termination {
     // a void return writes nothing. The caller's take
     // consumes the slot.
     if (fe.hasRet()) {
-        self.core.stack.items[self.core.fp] = result;
+        self.runtime.stack.items[self.runtime.fp] = result;
     }
     // Restore the caller: sp = fp_callee + A; fp = saved_fp;
     // current_fn = saved_fn; pc = saved_ra.
-    self.core.sp = self.core.fp + a;
-    self.core.fp = hdr.saved_fp;
+    self.runtime.sp = self.runtime.fp + a;
+    self.runtime.fp = hdr.saved_fp;
     if (hdr.saved_ra == vm_internal_pc) {
-        const cont = self.continuations.pop() orelse return trapMsg(self, "missing VM continuation", .{});
-        self.core.sp = cont.caller_sp;
-        self.core.current_fn = cont.caller_fn;
+        const cont = self.runtime.continuations.pop() orelse return trapMsg(self, "missing VM continuation", .{});
+        // The interrupted frame's identity is already in the header
+        // (`saved_fp`, restored above; `saved_fn`); its `sp` is its
+        // frame end — `sp` equals `frameEnd(current frame)` at every
+        // instruction boundary, and the runtime call was pushed from
+        // one.
+        self.runtime.current_fn = hdr.saved_fn;
+        self.runtime.sp = llir.frameEnd(hdr.saved_fp, self.loaded.funcs.items[hdr.saved_fn].desc);
         switch (cont.kind) {
             .hook => {
                 // Resume the interrupted instruction: `resume_pc` is
@@ -1379,19 +1384,19 @@ pub fn returnFrom(self: *VmCtx, v: VmInstr) !?Termination {
                 // which takes over pc. The flag tells the `ret`
                 // handler to stop the chain so the run loop re-drives
                 // from the (possibly new) hook state.
-                self.core.pc = cont.resume_pc;
-                self.core.popped_hook_cont = true;
+                self.runtime.pc = cont.resume_pc;
+                self.runtime.popped_hook_cont = true;
                 try self.drainDestroyWork();
             },
             .module => |m| {
-                self.core.modules.items[m].state = .initialized;
-                self.core.pc = cont.resume_pc;
+                self.loaded.modules.items[m].state = .initialized;
+                self.runtime.pc = cont.resume_pc;
             },
         }
         return null;
     }
-    self.core.pc = hdr.saved_ra;
-    self.core.current_fn = hdr.saved_fn; // the caller, recorded at the call — O(1), no scan
+    self.runtime.pc = hdr.saved_ra;
+    self.runtime.current_fn = hdr.saved_fn; // the caller, recorded at the call — O(1), no scan
     return null; // keep running
 }
 
@@ -1406,19 +1411,19 @@ pub fn tailcallSelf(self: *VmCtx) !void {
     const f = curFn(
         self,
     );
-    const fe = self.core.funcs.items[self.core.current_fn];
+    const fe = self.loaded.funcs.items[self.runtime.current_fn];
     const p: u32 = fe.arity.params;
     const base = f.window_count - p;
     for (0..p) |k| {
-        const wslot = llir.callBase(self.core.fp, f) + base + @as(u32, @intCast(k));
-        const v = self.core.stack.items[wslot];
-        self.core.stack.items[wslot] = ValueCodec.zero;
+        const wslot = llir.callBase(self.runtime.fp, f) + base + @as(u32, @intCast(k));
+        const v = self.runtime.stack.items[wslot];
+        self.runtime.stack.items[wslot] = ValueCodec.zero;
         // Parameter cell Fk aliases `fp + k` (parameters always live
         // in the F area: `p <= f_count`).
-        self.core.stack.items[self.core.fp + @as(u32, @intCast(k))] = v;
+        self.runtime.stack.items[self.runtime.fp + @as(u32, @intCast(k))] = v;
     }
-    self.core.sp = llir.frameEnd(self.core.fp, f);
-    self.core.pc = f.entry_pc;
+    self.runtime.sp = llir.frameEnd(self.runtime.fp, f);
+    self.runtime.pc = f.entry_pc;
 }
 
 /// Execute one decoded instruction; returns a termination when the
@@ -1434,14 +1439,14 @@ pub fn tailcallSelf(self: *VmCtx) !void {
 /// Threaded functions return `void` — termination and errors travel
 /// out-of-band in `result` / `pending_err` / `popped_hook_cont`.
 pub fn step(self: *VmCtx) !?Termination {
-    if (self.core.terminated) return Termination{ .normal = 0 };
-    self.core.result = null;
-    self.core.pending_err = null;
-    self.core.popped_hook_cont = false;
+    if (self.runtime.terminated) return Termination{ .normal = 0 };
+    self.runtime.result = null;
+    self.runtime.pending_err = null;
+    self.runtime.popped_hook_cont = false;
     dispatch(self, 1);
-    if (self.core.pending_err) |e| return e;
-    if (self.core.result) |t| {
-        self.core.terminated = true;
+    if (self.runtime.pending_err) |e| return e;
+    if (self.runtime.result) |t| {
+        self.runtime.terminated = true;
         return t;
     }
     return null;
@@ -1457,19 +1462,19 @@ pub fn intTrap(self: *VmCtx, e: IntErr) Termination {
 /// Stop the chain with a termination (normal root return, panic, or
 /// trap message): the dispatch loop observes `result` and returns.
 pub inline fn stop(self: *VmCtx, t: Termination) void {
-    self.core.result = t;
+    self.runtime.result = t;
 }
 
 /// Stop the chain with a trap message.
 pub inline fn trap(self: *VmCtx, comptime fmt: []const u8, args: anytype) void {
-    self.core.result = trapMsg(self, fmt, args);
+    self.runtime.result = trapMsg(self, fmt, args);
 }
 
 /// Stop the chain with a Zig error to propagate from `step` (the
 /// RunError surface is unchanged — every failing helper's error set
 /// is a subset of `RunError`).
 pub inline fn fail(self: *VmCtx, e: RunError) void {
-    self.core.pending_err = e;
+    self.runtime.pending_err = e;
 }
 
 /// Entry: dispatch the instruction `v` — one indirect jump to its
@@ -1478,7 +1483,7 @@ pub inline fn fail(self: *VmCtx, e: RunError) void {
 /// signature: `@call(.always_tail, ...)` requires the caller's
 /// signature to match the callee's.
 pub fn dispatch(self: *VmCtx, n: u32) void {
-    const v = self.core.code.items[self.core.pc];
+    const v = self.loaded.code.items[self.runtime.pc];
     return @call(.always_tail, handlers[@intFromEnum(v.op)], .{ self, n });
 }
 
@@ -1487,24 +1492,24 @@ pub fn dispatch(self: *VmCtx, n: u32) void {
 /// token, and tail-jump to its handler. `v` is the just-executed
 /// instruction (carried only to keep the chain signature uniform).
 pub inline fn next(self: *VmCtx, n: u32) void {
-    if (self.destroy_work.items.len != 0) {
+    if (self.runtime.destroy_work.items.len != 0) {
         self.drainDestroyWork() catch |e| return fail(self, e);
     }
     if (n == 1) return; // step mode: exactly one instruction
-    const nv = self.core.code.items[self.core.pc];
+    const nv = self.loaded.code.items[self.runtime.pc];
     return @call(.always_tail, handlers[@intFromEnum(nv.op)], .{ self, n - 1 });
 }
 
 /// Fallthrough ops: advance pc, then the common tail.
 pub inline fn fallthrough(self: *VmCtx, n: u32) void {
-    self.core.pc += 1;
+    self.runtime.pc += 1;
     return next(self, n);
 }
 
 pub fn strEqual(self: *VmCtx, a: Value, b: Value) HeapErr!bool {
     if (a == b) return true;
-    const ah = try self.heap.deref(a);
-    const bh = try self.heap.deref(b);
+    const ah = try self.runtime.heap.deref(a);
+    const bh = try self.runtime.heap.deref(b);
     if (ah.kind != .str_ or bh.kind != .str_) return error.TypeMismatch;
     const ab = @as([*]const u8, @ptrCast(ah.cells))[0..ah.len];
     const bb = @as([*]const u8, @ptrCast(bh.cells))[0..bh.len];
@@ -1535,7 +1540,7 @@ pub fn retainCell(self: *VmCtx, addr: Value) HeapErr!void {
     // silently skipped. The explicit membership traps for the
     // counted lifecycle opcodes stay in their dispatch arms.
     if (addr == 0) return;
-    const h = self.heap.registry.get(addr) orelse return;
+    const h = self.runtime.heap.registry.get(addr) orelse return;
     if (!isRefType(self, h.type_id)) return;
     if (!h.isCounted()) return; // unique shells are not shared
     h.track.CopyValue += 1;
@@ -1545,7 +1550,7 @@ pub fn retainCell(self: *VmCtx, addr: Value) HeapErr!void {
 /// by `drainDestroyWork` (children before shells, no recursion).
 pub fn destroyValue(self: *VmCtx, type_id: u32, addr: Value) !void {
     if (addr == 0) return;
-    try self.destroy_work.append(self.allocator, .{ .value = .{ .type_id = type_id, .addr = addr } });
+    try self.runtime.destroy_work.append(self.allocator, .{ .value = .{ .type_id = type_id, .addr = addr } });
 }
 
 /// Release one counted reference: decrement; destruction enqueues
@@ -1553,7 +1558,7 @@ pub fn destroyValue(self: *VmCtx, type_id: u32, addr: Value) !void {
 /// lifecycle op on a unique shell is a contract violation.
 pub fn releaseCounted(self: *VmCtx, addr: Value) HeapErr!void {
     if (addr == 0) return;
-    const h = self.heap.registry.get(addr) orelse return error.ForgedPointer;
+    const h = self.runtime.heap.registry.get(addr) orelse return error.ForgedPointer;
     if (!h.isCounted()) return error.TypeMismatch;
     if (h.track.CopyValue > 0) h.track.CopyValue -= 1;
     if (h.track.CopyValue == 0) try destroyValue(self, h.type_id, addr);
@@ -1561,7 +1566,7 @@ pub fn releaseCounted(self: *VmCtx, addr: Value) HeapErr!void {
 
 pub fn retainCounted(self: *VmCtx, addr: Value) HeapErr!void {
     if (addr == 0) return;
-    const h = self.heap.registry.get(addr) orelse return error.ForgedPointer;
+    const h = self.runtime.heap.registry.get(addr) orelse return error.ForgedPointer;
     if (!h.isCounted()) return error.TypeMismatch;
     h.track.CopyValue += 1;
 }
@@ -1587,7 +1592,7 @@ pub fn opConstruct(self: *VmCtx, d: VmInstr) HeapErr!void {
             var k = dd.args_len;
             while (k > 0) {
                 k -= 1;
-                const h = try self.heap.allocObjectIn(.list_cons, self.curModIdx(), ty, 2, 0);
+                const h = try self.runtime.heap.allocObjectIn(.list_cons, self.curModIdx(), ty, 2, 0);
                 const ev = read(self, image.call_args[dd.args_start + k]);
                 h.setCell(0, ev);
                 try retainCell(self, ev);
@@ -1599,7 +1604,7 @@ pub fn opConstruct(self: *VmCtx, d: VmInstr) HeapErr!void {
             out = nxt;
         },
         .box => {
-            const h = try self.heap.allocObjectIn(.box_, self.curModIdx(), ty, 0, 1);
+            const h = try self.runtime.heap.allocObjectIn(.box_, self.curModIdx(), ty, 0, 1);
             const v = read(self, image.call_args[dd.args_start]);
             h.setCell(0, v);
             try retainCell(self, v); // boxed element type
@@ -1610,7 +1615,7 @@ pub fn opConstruct(self: *VmCtx, d: VmInstr) HeapErr!void {
             // into `types` — the element count is `b`, not
             // `b - a` (the range start is a table offset).
             const n: usize = row.b;
-            const h = try self.heap.allocObjectIn(.tuple_, self.curModIdx(), ty, n, 0);
+            const h = try self.runtime.heap.allocObjectIn(.tuple_, self.curModIdx(), ty, n, 0);
             for (0..n) |k| {
                 const v = read(self, image.call_args[dd.args_start + @as(u32, @intCast(k))]);
                 h.setCell(k, v);
@@ -1623,7 +1628,7 @@ pub fn opConstruct(self: *VmCtx, d: VmInstr) HeapErr!void {
             switch (decl.kind) {
                 .struct_ => {
                     const n: usize = decl.d -| decl.c;
-                    const h = try self.heap.allocObjectIn(.struct_, self.curModIdx(), ty, n, 0);
+                    const h = try self.runtime.heap.allocObjectIn(.struct_, self.curModIdx(), ty, n, 0);
                     for (0..n) |k| {
                         const v = read(self, image.call_args[dd.args_start + @as(u32, @intCast(k))]);
                         h.setCell(k, v);
@@ -1633,7 +1638,7 @@ pub fn opConstruct(self: *VmCtx, d: VmInstr) HeapErr!void {
                     out = @intFromPtr(h);
                 },
                 .union_ => {
-                    const h = try self.heap.allocObjectIn(.union_, self.curModIdx(), ty, 1 + dd.args_len, 0);
+                    const h = try self.runtime.heap.allocObjectIn(.union_, self.curModIdx(), ty, 1 + dd.args_len, 0);
                     h.setCell(0, dd.tag);
                     const variant = image.union_variants[decl.b + dd.tag];
                     for (0..dd.args_len) |k| {
@@ -1714,9 +1719,9 @@ pub fn writeDst(self: *VmCtx, dst_idx: usize, v: Value) void {
     if (dst < llir.fast_reg_count) {
         // Destructure destinations are F cells or T registers — never
         // zero or ra — so both guards are defensive.
-        if (dst != llir.zero_reg and dst != llir.ra_reg) self.core.fast_regs[dst] = v;
+        if (dst != llir.zero_reg and dst != llir.ra_reg) self.runtime.fast_regs[dst] = v;
     } else {
-        self.core.stack.items[self.core.fp + llir.frameIndex(dst)] = v;
+        self.runtime.stack.items[self.runtime.fp + llir.frameIndex(dst)] = v;
     }
 }
 

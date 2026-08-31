@@ -51,7 +51,7 @@ test "host: builtin.print and str format every supported scalar" {
         fn invoke(vm: *interpreter.VmCtx, userdata: ?*const anyopaque, module_symbol: []const u8, member: []const u8, sig: u32, args: []const vm_types.Value) interpreter.HostResult {
             if (std.mem.eql(u8, member, "print") and args.len > 0) {
                 const c: *Capture = @ptrCast(@alignCast(@constCast(userdata.?)));
-                const bytes = vm.heap.strSliceOf(args[0]) orelse return .{ .panic = "print: not a str" };
+                const bytes = vm.runtime.heap.strSliceOf(args[0]) orelse return .{ .panic = "print: not a str" };
                 @memcpy(c.buffer[c.len..][0..bytes.len], bytes);
                 c.len += bytes.len;
                 c.buffer[c.len] = '\n';
@@ -110,7 +110,7 @@ test "host: custom adapter captures print and delegates the rest" {
         fn invoke(vm: *interpreter.VmCtx, userdata: ?*const anyopaque, module_symbol: []const u8, member: []const u8, sig: u32, args: []const vm_types.Value) interpreter.HostResult {
             if (std.mem.eql(u8, member, "print") and args.len > 0) {
                 const c: *Capture = @ptrCast(@alignCast(@constCast(userdata.?)));
-                const bytes = vm.heap.strSliceOf(args[0]) orelse return .{ .panic = "print: not a str" };
+                const bytes = vm.runtime.heap.strSliceOf(args[0]) orelse return .{ .panic = "print: not a str" };
                 @memcpy(c.buffer[0..bytes.len], bytes);
                 c.len = bytes.len;
                 return .{ .value = 0 };
@@ -745,7 +745,7 @@ test "host: array with str elements survives clone and overwrite with zero leaks
     defer vm.deinit();
     try vm.setupRootArtifact(l.image, try l.fid("main"));
     var result: Value = 0;
-    while (!vm.core.terminated) {
+    while (!vm.runtime.terminated) {
         if (try vm_dispatch.step(&vm)) |t| {
             switch (t) {
                 .normal => |v| result = v,
@@ -761,8 +761,8 @@ test "host: array with str elements survives clone and overwrite with zero leaks
     }
     vm.finishCleanup();
     try testing.expectEqual(@as(Value, 0), result);
-    try testing.expectEqual(@as(usize, 0), vm.heap.registry.count());
-    try testing.expectEqual(@as(usize, 0), vm.host_resources.count());
+    try testing.expectEqual(@as(usize, 0), vm.runtime.heap.registry.count());
+    try testing.expectEqual(@as(usize, 0), vm.runtime.host_resources.count());
 }
 
 test "host: hashmap module empty/insert/get/contains/remove/len/clone with str keys" {
@@ -914,7 +914,7 @@ test "host: opaque array/map disposal runs exactly once on drop" {
     defer vm.deinit();
     try vm.setupRootArtifact(l.image, try l.fid("main"));
     var result: Value = 0;
-    while (!vm.core.terminated) {
+    while (!vm.runtime.terminated) {
         if (try vm_dispatch.step(&vm)) |t| {
             switch (t) {
                 .normal => |v| result = v,
@@ -930,8 +930,8 @@ test "host: opaque array/map disposal runs exactly once on drop" {
     }
     vm.finishCleanup();
     try testing.expectEqual(@as(Value, 3), result);
-    try testing.expectEqual(@as(usize, 0), vm.heap.registry.count());
-    try testing.expectEqual(@as(usize, 0), vm.host_resources.count());
+    try testing.expectEqual(@as(usize, 0), vm.runtime.heap.registry.count());
+    try testing.expectEqual(@as(usize, 0), vm.runtime.host_resources.count());
 }
 
 test "host: opaque array/map disposal runs exactly once on panic teardown" {
@@ -953,7 +953,7 @@ test "host: opaque array/map disposal runs exactly once on panic teardown" {
     defer vm.deinit();
     try vm.setupRootArtifact(l.image, try l.fid("main"));
     var panicked = false;
-    while (!vm.core.terminated) {
+    while (!vm.runtime.terminated) {
         if (try vm_dispatch.step(&vm)) |t| {
             switch (t) {
                 .normal => {},
@@ -968,6 +968,6 @@ test "host: opaque array/map disposal runs exactly once on panic teardown" {
     }
     vm.finishCleanup();
     try testing.expect(panicked);
-    try testing.expectEqual(@as(usize, 0), vm.heap.registry.count());
-    try testing.expectEqual(@as(usize, 0), vm.host_resources.count());
+    try testing.expectEqual(@as(usize, 0), vm.runtime.heap.registry.count());
+    try testing.expectEqual(@as(usize, 0), vm.runtime.host_resources.count());
 }

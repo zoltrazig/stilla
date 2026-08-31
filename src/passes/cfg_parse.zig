@@ -353,7 +353,6 @@ pub const Parser = struct {
                     .store_member => |sm| {
                         try slots.append(self.arena.allocator(), .{
                             .type_ = sm.value.type_,
-                            .init_order = @intCast(slots.items.len),
                         });
                     },
                     else => {},
@@ -1571,8 +1570,6 @@ test "cfg derives module storage slots from @init" {
     try std.testing.expectEqual(@as(usize, 2), m.slots.len);
     try std.testing.expect(Type.eql(.{ .primitive = .str }, m.slots[0].type_));
     try std.testing.expect(Type.eql(.module, m.slots[1].type_));
-    try std.testing.expectEqual(@as(u32, 0), m.slots[0].init_order);
-    try std.testing.expectEqual(@as(u32, 1), m.slots[1].init_order);
 }
 test "cfg parses constructs, projections, and a switch" {
     var t = try parseText(

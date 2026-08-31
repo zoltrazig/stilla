@@ -49,7 +49,7 @@ fn runSetup(
     host: HostCall,
     loader: ModuleLoader,
 ) RunError!Termination {
-    var vm = VmCtx{ .allocator = allocator, .host = host, .provider = loader, .heap = .{ .allocator = allocator } };
+    var vm = VmCtx{ .allocator = allocator, .host = host, .provider = loader, .runtime = .{ .heap = .{ .allocator = allocator } } };
     defer vm.deinit();
     if (entry) |e| try vm.setupRootArtifact(image, e) else try vm.setupRootSymbolic(image);
     return runLoop(&vm);
@@ -117,19 +117,19 @@ pub fn runWithHostAndLoader(
 /// normal root return — tear the module tree down in reverse
 /// initialization order before finishing cleanup.
 pub fn runLoop(self: *VmCtx) RunError!Termination {
-    while (!self.core.terminated) {
+    while (!self.runtime.terminated) {
         // Run mode dispatches a whole instruction segment per iteration
         // (the tail chain runs until a termination, an error, or a
         // drop-hook continuation resumes — no per-instruction
         // call/return back into this loop).
-        self.core.result = null;
-        self.core.pending_err = null;
-        self.core.popped_hook_cont = false;
+        self.runtime.result = null;
+        self.runtime.pending_err = null;
+        self.runtime.popped_hook_cont = false;
         vm_dispatch.dispatch(self, std.math.maxInt(u32));
-        if (self.core.pending_err) |e| return e;
-        if (self.core.result) |t| {
+        if (self.runtime.pending_err) |e| return e;
+        if (self.runtime.result) |t| {
             if (t == .normal) {
-                self.core.terminated = false;
+                self.runtime.terminated = false;
                 try self.teardownModules();
                 while (self.hookActive()) {
                     if (try vm_dispatch.step(self)) |tt| {
@@ -138,7 +138,7 @@ pub fn runLoop(self: *VmCtx) RunError!Termination {
                     }
                     try self.drainDestroyWork();
                 }
-                self.core.terminated = true;
+                self.runtime.terminated = true;
             }
             self.finishCleanup();
             return t;
@@ -215,7 +215,7 @@ fn hostBuiltin(self: *VmCtx, userdata: ?*const anyopaque, member: []const u8, si
     const host = host_module.defaultHostCall;
     if (std.mem.eql(u8, member, "print")) {
         if (args.len < 1) return .{ .panic = "builtin.print: expected 1 argument" };
-        host.print(userdata, self.heap.strSliceOf(args[0]) orelse return .{ .panic = "builtin.print: not a str" });
+        host.print(userdata, self.runtime.heap.strSliceOf(args[0]) orelse return .{ .panic = "builtin.print: not a str" });
         return .{ .value = 0 };
     }
     if (std.mem.eql(u8, member, "str")) {
@@ -224,21 +224,21 @@ fn hostBuiltin(self: *VmCtx, userdata: ?*const anyopaque, member: []const u8, si
         const pt = image.types[params[0].type_];
         const pid: llir.PrimitiveId = if (pt.kind == .primitive) @enumFromInt(pt.a) else .hostdata;
         if (pid == .hostdata) return .{ .panic = "builtin.str: unsupported value" };
-        const view = vm_types.decodeScalar(&self.heap, pid, args[0]) catch return .{ .panic = "builtin.str: unsupported value" };
+        const view = vm_types.decodeScalar(&self.runtime.heap, pid, args[0]) catch return .{ .panic = "builtin.str: unsupported value" };
         var buf: [64]u8 = undefined;
         const text = host.str(userdata, view, &buf) catch return .{ .panic = "builtin.str: unsupported value" };
-        const cell = self.heap.newStr(s.ret, text) catch return .{ .panic = "builtin.str: out of memory" };
+        const cell = self.runtime.heap.newStr(s.ret, text) catch return .{ .panic = "builtin.str: out of memory" };
         return .{ .value = cell };
     }
     if (std.mem.eql(u8, member, "box")) {
         if (args.len < 1) return .{ .panic = "builtin.box: expected 1 argument" };
-        const h = self.heap.allocObject(.box_, s.ret, 1, 0) catch return .{ .panic = "builtin.box: out of memory" };
+        const h = self.runtime.heap.allocObject(.box_, s.ret, 1, 0) catch return .{ .panic = "builtin.box: out of memory" };
         h.setCell(0, host.box(userdata, args[0]));
         return .{ .value = @intFromPtr(h) };
     }
     if (std.mem.eql(u8, member, "unbox")) {
         if (args.len < 1) return .{ .panic = "builtin.unbox: expected 1 argument" };
-        const h = self.heap.deref(args[0]) catch return .{ .panic = "builtin.unbox: not a box" };
+        const h = self.runtime.heap.deref(args[0]) catch return .{ .panic = "builtin.unbox: not a box" };
         if (h.kind != .box_) return .{ .panic = "builtin.unbox: not a box" };
         const payload = h.cell(0);
         // The shell dies only on a consuming `unbox(move b)` (Runtime
@@ -249,19 +249,19 @@ fn hostBuiltin(self: *VmCtx, userdata: ?*const anyopaque, member: []const u8, si
         // the specialized signature's first parameter.
         if (image.params[s.params_start].mode == .move) {
             h.setCell(0, 0);
-            self.heap.freeShell(h);
+            self.runtime.heap.freeShell(h);
         }
         return .{ .value = host.unbox(userdata, payload) };
     }
     if (std.mem.eql(u8, member, "panic")) {
         if (args.len < 1) return .{ .panic = "builtin.panic: expected 1 argument" };
-        const msg = self.heap.strSliceOf(args[0]) orelse return .{ .panic = "builtin.panic: not a str" };
+        const msg = self.runtime.heap.strSliceOf(args[0]) orelse return .{ .panic = "builtin.panic: not a str" };
         return .{ .panic = host.panic(userdata, msg) };
     }
     if (std.mem.eql(u8, member, "assert")) {
         if (args.len < 2) return .{ .panic = "builtin.assert: expected 2 arguments" };
         if (args[0] == 0) {
-            const msg = self.heap.strSliceOf(args[1]) orelse return .{ .panic = "builtin.assert: message not a str" };
+            const msg = self.runtime.heap.strSliceOf(args[1]) orelse return .{ .panic = "builtin.assert: message not a str" };
             return .{ .panic = host.assert(userdata, msg) };
         }
         return .{ .value = 0 };
@@ -269,7 +269,7 @@ fn hostBuiltin(self: *VmCtx, userdata: ?*const anyopaque, member: []const u8, si
     if (std.mem.eql(u8, member, "hash")) {
         if (args.len < 1) return .{ .panic = "builtin.hash: expected 1 argument" };
         const params = image.params[s.params_start..][0..s.params_len];
-        const str_bytes = if (params.len != 0 and image.types[params[0].type_].kind == .primitive and image.types[params[0].type_].a == @intFromEnum(llir.PrimitiveId.str)) self.heap.strSliceOf(args[0]) orelse return .{ .panic = "builtin.hash: not a str" } else null;
+        const str_bytes = if (params.len != 0 and image.types[params[0].type_].kind == .primitive and image.types[params[0].type_].a == @intFromEnum(llir.PrimitiveId.str)) self.runtime.heap.strSliceOf(args[0]) orelse return .{ .panic = "builtin.hash: not a str" } else null;
         var scalar = args[0];
         return .{ .value = host.hash(userdata, str_bytes orelse std.mem.asBytes(&scalar)) };
     }
@@ -387,7 +387,7 @@ fn hostString(self: *VmCtx, userdata: ?*const anyopaque, member: []const u8, sig
             var cells = std.ArrayList(Value).empty;
             defer cells.deinit(self.allocator);
             for (pieces.items) |p| {
-                const c = self.heap.newStr(elem_ty, p) catch return oomPanic(
+                const c = self.runtime.heap.newStr(elem_ty, p) catch return oomPanic(
                     self,
                 );
                 cells.append(self.allocator, c) catch return oomPanic(
@@ -408,7 +408,7 @@ fn hostString(self: *VmCtx, userdata: ?*const anyopaque, member: []const u8, sig
             var parts = std.ArrayList([]const u8).empty;
             defer parts.deinit(self.allocator);
             for (elems.items) |c| {
-                parts.append(self.allocator, self.heap.strSliceOf(c) orelse return .{ .panic = "string.join: element not a str" }) catch return oomPanic(
+                parts.append(self.allocator, self.runtime.heap.strSliceOf(c) orelse return .{ .panic = "string.join: element not a str" }) catch return oomPanic(
                     self,
                 );
             }
@@ -529,7 +529,7 @@ fn hostList(self: *VmCtx, userdata: ?*const anyopaque, member: []const u8, sig: 
 
         var count: i32 = 0;
         if (args[0] != 0) {
-            const head = self.heap.deref(args[0]) catch {
+            const head = self.runtime.heap.deref(args[0]) catch {
                 return .{ .panic = "list.len: not a list" };
             };
             if (head.kind != .list_cons) {
@@ -567,7 +567,7 @@ fn hostList(self: *VmCtx, userdata: ?*const anyopaque, member: []const u8, sig: 
 /// or not a live str object.
 fn strArg(self: *VmCtx, args: []const Value, i: usize) ?[]const u8 {
     if (i >= args.len) return null;
-    return self.heap.strSliceOf(args[i]);
+    return self.runtime.heap.strSliceOf(args[i]);
 }
 
 /// One canonical int32 argument; null when absent or non-canonical.
@@ -595,7 +595,7 @@ fn stringErr(self: *VmCtx, e: host_module.StringErr, member: []const u8) HostRes
             self,
         ),
     };
-    const slice = std.fmt.bufPrint(&self.panic_buf, "string.{s}: {s}", .{ member, msg }) catch return oomPanic(
+    const slice = std.fmt.bufPrint(&self.runtime.panic_buf, "string.{s}: {s}", .{ member, msg }) catch return oomPanic(
         self,
     );
     return .{ .panic = slice };
@@ -603,7 +603,7 @@ fn stringErr(self: *VmCtx, e: host_module.StringErr, member: []const u8) HostRes
 
 /// Allocate a str object holding `bytes`; OOM is a panic.
 fn newStrCell(self: *VmCtx, ty: u32, bytes: []const u8) HostResult {
-    const cell = self.heap.newStr(ty, bytes) catch return oomPanic(
+    const cell = self.runtime.heap.newStr(ty, bytes) catch return oomPanic(
         self,
     );
     return .{ .value = cell };
@@ -620,7 +620,7 @@ fn newListCells(self: *VmCtx, ty: u32, elems: []const Value) HeapErr!Value {
     var k = elems.len;
     while (k > 0) {
         k -= 1;
-        const h = try self.heap.allocObjectIn(.list_cons, self.curModIdx(), ty, 2, 0);
+        const h = try self.runtime.heap.allocObjectIn(.list_cons, self.curModIdx(), ty, 2, 0);
         h.setCell(0, elems[k]);
         h.setCell(1, next);
         h.len = suffix_len + 1;
@@ -635,7 +635,7 @@ fn newListCells(self: *VmCtx, ty: u32, elems: []const Value) HeapErr!Value {
 /// (std/builtin.st declaration order; `read_tag`/`read_payload` and the
 /// destruction walker read the same cells).
 fn optionCell(self: *VmCtx, ty: u32, some: bool, payload: Value) HeapErr!Value {
-    const h = try self.heap.allocObject(.union_, ty, 1 + @as(usize, @intFromBool(some)), 0);
+    const h = try self.runtime.heap.allocObject(.union_, ty, 1 + @as(usize, @intFromBool(some)), 0);
     h.setCell(0, if (some) 0 else 1);
     if (some) h.setCell(1, payload);
     return @intFromPtr(h);
@@ -647,7 +647,7 @@ fn optionCell(self: *VmCtx, ty: u32, some: bool, payload: Value) HeapErr!Value {
 fn walkList(self: *VmCtx, cell: Value, out: *std.ArrayList(Value)) HeapErr!void {
     var cur = cell;
     while (cur != 0) {
-        const node = try self.heap.deref(cur);
+        const node = try self.runtime.heap.deref(cur);
         if (node.kind != .list_cons) return error.TypeMismatch;
         try out.append(self.allocator, node.cell(0));
         cur = node.cell(1);
@@ -798,7 +798,7 @@ fn hostHashMap(self: *VmCtx, userdata: ?*const anyopaque, member: []const u8, si
                 releaseCellIfCounted(self, e.key) catch {};
                 break :blk optionCell(self, opt_ty, true, e.val) catch return oomPanic(self);
             } else optionCell(self, opt_ty, false, 0) catch return oomPanic(self);
-            const tuple = self.heap.allocObject(.tuple_, s.ret, 2, 0) catch return oomPanic(self);
+            const tuple = self.runtime.heap.allocObject(.tuple_, s.ret, 2, 0) catch return oomPanic(self);
             // No retains: the moved map shell and the fresh union shell
             // are unique (matching the non-retaining tuple convention).
             tuple.setCell(0, args[0]);
@@ -840,10 +840,10 @@ fn wrapOpaque(self: *VmCtx, ty: u32, obj: *anyopaque, disposer: HostDisposer) Ho
     if (row.kind != .named) return .{ .panic = "host object: unexpected result type" };
     const host_type_id = self.metaImage().type_decls[row.a].a;
     _ = &host_type_id;
-    const h = self.heap.allocObject(.opaque_, ty, 1, 0) catch return oomPanic(self);
+    const h = self.runtime.heap.allocObject(.opaque_, ty, 1, 0) catch return oomPanic(self);
     h.setCell(0, @intFromPtr(obj));
     self.registerHostResource(host_type_id, @intFromPtr(h), disposer, self) catch {
-        self.heap.freeShell(h);
+        self.runtime.heap.freeShell(h);
         return oomPanic(self);
     };
     return .{ .value = @intFromPtr(h) };
@@ -853,7 +853,7 @@ fn wrapOpaque(self: *VmCtx, ty: u32, obj: *anyopaque, disposer: HostDisposer) Ho
 /// into the VM's scratch buffer, which `sitePrefixed` copies into the
 /// owned Termination message before the buffer is reused.
 fn panicFmt(self: *VmCtx, comptime fmt: []const u8, args: anytype) HostResult {
-    const slice = std.fmt.bufPrint(&self.panic_buf, fmt, args) catch return oomPanic(self);
+    const slice = std.fmt.bufPrint(&self.runtime.panic_buf, fmt, args) catch return oomPanic(self);
     return .{ .panic = slice };
 }
 
@@ -861,13 +861,13 @@ fn panicFmt(self: *VmCtx, comptime fmt: []const u8, args: anytype) HostResult {
 /// their deterministic "not an <what>" trap. Unreachable in validated
 /// programs.
 fn arrayPayload(self: *VmCtx, v: Value) ?*host_module.ArrayObject {
-    const h = self.heap.deref(v) catch return null;
+    const h = self.runtime.heap.deref(v) catch return null;
     if (h.kind != .opaque_) return null;
     return @ptrFromInt(@as(usize, @intCast(h.cell(0))));
 }
 
 fn mapPayload(self: *VmCtx, v: Value) ?*host_module.HashMapObject {
-    const h = self.heap.deref(v) catch return null;
+    const h = self.runtime.heap.deref(v) catch return null;
     if (h.kind != .opaque_) return null;
     return @ptrFromInt(@as(usize, @intCast(h.cell(0))));
 }
@@ -891,7 +891,7 @@ fn checkHashableKey(self: *VmCtx, map_ty: u32) bool {
 /// bit-identical to `builtin.hash` (Runtime §4.9).
 fn hashmapKeyHash(ctx: ?*anyopaque, key: Value) u64 {
     const self: *VmCtx = @ptrCast(@alignCast(ctx.?));
-    if (self.heap.strSliceOf(key)) |bytes| return std.hash.Wyhash.hash(0, bytes);
+    if (self.runtime.heap.strSliceOf(key)) |bytes| return std.hash.Wyhash.hash(0, bytes);
     var v = key;
     return std.hash.Wyhash.hash(0, std.mem.asBytes(&v));
 }
@@ -900,7 +900,7 @@ fn hashmapKeyHash(ctx: ?*anyopaque, key: Value) u64 {
 /// cell equality for scalars.
 fn hashmapKeyEq(ctx: ?*anyopaque, a: Value, b: Value) bool {
     const self: *VmCtx = @ptrCast(@alignCast(ctx.?));
-    if (self.heap.strSliceOf(a) != null) return vm_dispatch.strEqual(self, a, b) catch false;
+    if (self.runtime.heap.strSliceOf(a) != null) return vm_dispatch.strEqual(self, a, b) catch false;
     return a == b;
 }
 
@@ -908,7 +908,7 @@ fn hashmapKeyEq(ctx: ?*anyopaque, a: Value, b: Value) bool {
 /// and unique (non-counted) Copy shells have no reference to drop.
 fn releaseCellIfCounted(self: *VmCtx, addr: Value) HeapErr!void {
     if (addr == 0) return;
-    const h = self.heap.registry.get(addr) orelse return; // scalar cell
+    const h = self.runtime.heap.registry.get(addr) orelse return; // scalar cell
     if (!h.isCounted()) return;
     try vm_dispatch.releaseCounted(self, addr);
 }
@@ -918,7 +918,7 @@ fn releaseCellIfCounted(self: *VmCtx, addr: Value) HeapErr!void {
 /// machinery (the disposer must not free it).
 fn arrayDisposer(user: ?*anyopaque, payload: u64) void {
     const self: *VmCtx = @ptrCast(@alignCast(user orelse return));
-    const h = self.heap.registry.get(payload) orelse return;
+    const h = self.runtime.heap.registry.get(payload) orelse return;
     const obj: *host_module.ArrayObject = @ptrFromInt(@as(usize, @intCast(h.cell(0))));
     for (obj.cells) |c| releaseCellIfCounted(self, c) catch {};
     obj.deinit();
@@ -928,7 +928,7 @@ fn arrayDisposer(user: ?*anyopaque, payload: u64) void {
 /// then free the host object.
 fn hashmapDisposer(user: ?*anyopaque, payload: u64) void {
     const self: *VmCtx = @ptrCast(@alignCast(user orelse return));
-    const h = self.heap.registry.get(payload) orelse return;
+    const h = self.runtime.heap.registry.get(payload) orelse return;
     const obj: *host_module.HashMapObject = @ptrFromInt(@as(usize, @intCast(h.cell(0))));
     for (obj.entries) |slot| {
         if (slot.state != .used) continue;

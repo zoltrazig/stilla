@@ -88,8 +88,8 @@ pub fn lowerModule(self: *Lowerer, info: *moduleinfo.ModuleInfo) LowerError!*cfg
     // are empty.
     var slots = std.ArrayList(cfg.SlotMeta).empty;
     for (info.values) |*vm| {
-        if (constSlot(info, vm)) |slot| {
-            try slots.append(self.arena, .{ .type_ = vm.*.type_, .init_order = slot });
+        if (constSlot(info, vm) != null) {
+            try slots.append(self.arena, .{ .type_ = vm.*.type_ });
         }
     }
     // The member table (air.md §7, §9.6): one row per runtime value

@@ -269,11 +269,11 @@ const Fused = struct {
     }
 
     fn runExpectCleanHost(self: *Fused, host: interpreter.HostCall) !Value {
-        var vm = interpreter.VmCtx{ .allocator = testing.allocator, .host = host, .heap = .{ .allocator = testing.allocator } };
+        var vm = interpreter.VmCtx{ .allocator = testing.allocator, .host = host, .runtime = .{ .heap = .{ .allocator = testing.allocator } } };
         defer vm.deinit();
         try vm.setupRootArtifact(&self.image, try self.fid("main"));
         var result: ?Value = null;
-        while (!vm.core.terminated) {
+        while (!vm.runtime.terminated) {
             if (try interpreter_dispatch_step(&vm)) |t| {
                 switch (t) {
                     .normal => |v| result = v,
@@ -284,7 +284,7 @@ const Fused = struct {
             try vm.drainDestroyWork();
         }
         vm.finishCleanup();
-        try testing.expectEqual(@as(usize, 0), vm.heap.registry.count());
+        try testing.expectEqual(@as(usize, 0), vm.runtime.heap.registry.count());
         return result orelse error.TestUnexpectedResult;
     }
 };
@@ -308,7 +308,7 @@ const PrintRecorder = struct {
     fn invoke(vm: *interpreter.VmCtx, userdata: ?*const anyopaque, module_symbol: []const u8, member: []const u8, sig: u32, args: []const vm_types.Value) interpreter.HostResult {
         if (std.mem.eql(u8, member, "print") and args.len > 0) {
             const r: *PrintRecorder = @ptrCast(@alignCast(@constCast(userdata.?)));
-            const bytes = vm.heap.strSliceOf(args[0]) orelse return .{ .panic = "print: not a str" };
+            const bytes = vm.runtime.heap.strSliceOf(args[0]) orelse return .{ .panic = "print: not a str" };
             if (r.len + bytes.len > r.buffer.len) return .{ .panic = "capture overflow" };
             @memcpy(r.buffer[r.len..][0..bytes.len], bytes);
             r.len += bytes.len;

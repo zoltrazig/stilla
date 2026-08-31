@@ -114,7 +114,7 @@ pub const CaptureAdapter = struct {
     pub fn invoke(vm: *interpreter.VmCtx, userdata: ?*const anyopaque, module_symbol: []const u8, member: []const u8, sig: u32, args: []const vm_types.Value) interpreter.HostResult {
         if (std.mem.eql(u8, member, "print") and args.len > 0) {
             const c: *CaptureAdapter = @ptrCast(@alignCast(@constCast(userdata.?)));
-            const bytes = vm.heap.strSliceOf(args[0]) orelse return .{ .panic = "print: not a str" };
+            const bytes = vm.runtime.heap.strSliceOf(args[0]) orelse return .{ .panic = "print: not a str" };
             if (c.len + bytes.len + 1 > c.buffer.len) return .{ .panic = "capture buffer overflow" };
             @memcpy(c.buffer[c.len..][0..bytes.len], bytes);
             c.len += bytes.len;
@@ -216,7 +216,7 @@ pub fn primType(id: llir.PrimitiveId) llir.TypeDesc {
 /// leave the VM inside the initializer's frame.
 pub fn drainRootInit(vm: *interpreter.VmCtx, entry: llir.FunctionId) !void {
     var steps: usize = 0;
-    while (vm.core.current_fn != entry and !vm.core.terminated) {
+    while (vm.runtime.current_fn != entry and !vm.runtime.terminated) {
         if (try vm_dispatch.step(vm)) |t| {
             switch (t) {
                 .normal => return error.TestUnexpectedResult,
@@ -230,5 +230,5 @@ pub fn drainRootInit(vm: *interpreter.VmCtx, entry: llir.FunctionId) !void {
         steps += 1;
         if (steps > 100_000) return error.TestUnexpectedResult;
     }
-    if (vm.core.terminated) return error.TestUnexpectedResult;
+    if (vm.runtime.terminated) return error.TestUnexpectedResult;
 }

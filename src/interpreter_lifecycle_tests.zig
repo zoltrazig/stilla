@@ -118,12 +118,12 @@ test "normal termination cleans every object and string constant" {
     var vm = interpreter.VmCtx.init(testing.allocator);
     defer vm.deinit();
     try vm.setupRootArtifact(l.image, try l.fid("main"));
-    while (!vm.core.terminated) {
+    while (!vm.runtime.terminated) {
         if (try vm_dispatch.step(&vm)) |_| break;
         try vm.drainDestroyWork();
     }
     vm.finishCleanup();
-    try testing.expectEqual(@as(usize, 0), vm.heap.registry.count());
+    try testing.expectEqual(@as(usize, 0), vm.runtime.heap.registry.count());
 }
 
 test "trap path also cleans every object" {
@@ -157,7 +157,7 @@ test "module teardown runs a slot drop hook exactly once with no trap" {
         fn invoke(vm: *interpreter.VmCtx, userdata: ?*const anyopaque, module_symbol: []const u8, member: []const u8, sig: u32, args: []const vm_types.Value) interpreter.HostResult {
             if (std.mem.eql(u8, member, "print")) {
                 const c: *Count = @ptrCast(@alignCast(@constCast(userdata.?)));
-                const bytes = vm.heap.strSliceOf(args[0]) orelse return .{ .panic = "print: not a str" };
+                const bytes = vm.runtime.heap.strSliceOf(args[0]) orelse return .{ .panic = "print: not a str" };
                 if (std.mem.eql(u8, bytes, "42")) {
                     c.hooks += 1;
                     c.saw_id = true;
@@ -209,7 +209,7 @@ test "mid-frame drop hook runs once through the hook continuation" {
         fn invoke(vm: *interpreter.VmCtx, userdata: ?*const anyopaque, module_symbol: []const u8, member: []const u8, sig: u32, args: []const vm_types.Value) interpreter.HostResult {
             if (std.mem.eql(u8, member, "print")) {
                 const c: *Count = @ptrCast(@alignCast(@constCast(userdata.?)));
-                const bytes = vm.heap.strSliceOf(args[0]) orelse return .{ .panic = "print: not a str" };
+                const bytes = vm.runtime.heap.strSliceOf(args[0]) orelse return .{ .panic = "print: not a str" };
                 if (std.mem.eql(u8, bytes, "7")) c.hooks += 1;
                 return .{ .value = 0 };
             }
@@ -304,7 +304,7 @@ test "release_ret fuses release+ret: the cleanup source dies with the frame" {
     defer vm.deinit();
     try vm.setupRootArtifact(&image, 0);
     var result: ?Value = null;
-    while (!vm.core.terminated) {
+    while (!vm.runtime.terminated) {
         if (try vm_dispatch.step(&vm)) |t| {
             switch (t) {
                 .normal => |v| result = v,
@@ -320,7 +320,7 @@ test "release_ret fuses release+ret: the cleanup source dies with the frame" {
     }
     try vm.drainDestroyWork(); // drain whatever release_ret enqueued
     try testing.expectEqual(@as(Value, 42), result orelse return error.TestUnexpectedResult);
-    try testing.expectEqual(@as(usize, 0), vm.heap.registry.count());
+    try testing.expectEqual(@as(usize, 0), vm.runtime.heap.registry.count());
 }
 
 // ---------------------------------------------------------------------------
@@ -350,7 +350,7 @@ test "stage 7.2: counted value released on one outgoing edge stays live on its s
             vm.host = .{ .invoke = Sink.invoke };
             try vm.setupRootArtifact(l.image, try l.fid("main"));
             var result: ?Value = null;
-            while (!vm.core.terminated) {
+            while (!vm.runtime.terminated) {
                 if (try vm_dispatch.step(&vm)) |t| {
                     switch (t) {
                         .normal => |v| result = v,
@@ -365,7 +365,7 @@ test "stage 7.2: counted value released on one outgoing edge stays live on its s
                 try vm.drainDestroyWork();
             }
             vm.finishCleanup();
-            try testing.expectEqual(@as(usize, 0), vm.heap.registry.count()); // no leak on either path
+            try testing.expectEqual(@as(usize, 0), vm.runtime.heap.registry.count()); // no leak on either path
             return @intCast(result orelse return error.TestUnexpectedResult);
         }
     };
@@ -415,7 +415,7 @@ test "stage 7.1: a switch executes only the selected arm's effects" {
     defer vm.deinit();
     try vm.setupRootArtifact(l.image, try l.fid("main"));
     var result: ?Value = null;
-    while (!vm.core.terminated) {
+    while (!vm.runtime.terminated) {
         if (try vm_dispatch.step(&vm)) |t| {
             switch (t) {
                 .normal => |v| result = v,
@@ -431,7 +431,7 @@ test "stage 7.1: a switch executes only the selected arm's effects" {
     }
     vm.finishCleanup();
     try testing.expectEqual(@as(Value, 1), result.?);
-    try testing.expectEqual(@as(usize, 0), vm.heap.registry.count());
+    try testing.expectEqual(@as(usize, 0), vm.runtime.heap.registry.count());
 }
 
 test "host resource registry: duplicates reject; disposal runs exactly once" {
@@ -460,7 +460,7 @@ test "host resource registry: duplicates reject; disposal runs exactly once" {
     try vm.registerHostResource(3, payload, H.dispose, null);
     vm.finishCleanup();
     try testing.expectEqual(@as(usize, 1), H.disposed);
-    try testing.expectEqual(@as(usize, 0), vm.host_resources.count());
+    try testing.expectEqual(@as(usize, 0), vm.runtime.host_resources.count());
 }
 
 test "illegal null under a reference type traps before dereference" {

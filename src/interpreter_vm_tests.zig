@@ -17,21 +17,21 @@ const ObjectHeader = vm_types.ObjectHeader;
 test "deref rejects forged scalars without dereferencing them" {
     var vm = VmCtx{
         .allocator = std.testing.allocator,
-        .heap = .{ .allocator = std.testing.allocator },
+        .runtime = .{ .heap = .{ .allocator = std.testing.allocator } },
     };
-    defer vm.heap.deinit();
+    defer vm.runtime.heap.deinit();
     // A scalar bit pattern that happens to look like an address: the
     // registry has no such key, so membership fails BEFORE memory is
     // touched (no segfault even though the address is unmapped).
-    try testing.expectError(error.ForgedPointer, vm.heap.deref(0xdead_beef_cafe_f00d));
+    try testing.expectError(error.ForgedPointer, vm.runtime.heap.deref(0xdead_beef_cafe_f00d));
 }
 
 test "registry keeps full-width synthetic keys and never dereferences them" {
     var vm = VmCtx{
         .allocator = std.testing.allocator,
-        .heap = .{ .allocator = std.testing.allocator },
+        .runtime = .{ .heap = .{ .allocator = std.testing.allocator } },
     };
-    defer vm.heap.deinit();
+    defer vm.runtime.heap.deinit();
     // A test-owned header backing a synthetic key above the real host
     // address range: proves every address bit survives and the VM reads
     // the header through the registry mapping instead of the pointer.
@@ -45,7 +45,7 @@ test "registry keeps full-width synthetic keys and never dereferences them" {
         .cells = &cells,
     };
     const synthetic: u64 = 0x0001_0000_0000_f1f1; // > 0x0000_ffff_ffff_ffff
-    try vm.heap.registry.put(std.testing.allocator, synthetic, &h);
+    try vm.runtime.heap.registry.put(std.testing.allocator, synthetic, &h);
     // A minimal type table so the header cross-check has real rows:
     // t0 = byte(PrimitiveId 0), t1 = bool(1).
     var types = [_]llir.TypeDesc{
@@ -54,8 +54,8 @@ test "registry keeps full-width synthetic keys and never dereferences them" {
     };
     var image: llir.LlirProgram = undefined;
     image.types = &types;
-    vm.core.meta_image = &image;
-    const got = try vm.heap.deref(synthetic);
+    vm.loaded.meta_image = &image;
+    const got = try vm.runtime.heap.deref(synthetic);
     try testing.expectEqual(@as(Value, 42), got.cell(0));
 }
 
@@ -64,16 +64,16 @@ test "use-after-free: freed addresses leave the registry before their memory die
     defer arena.deinit();
     var vm = VmCtx{
         .allocator = arena.allocator(),
-        .heap = .{ .allocator = arena.allocator() },
+        .runtime = .{ .heap = .{ .allocator = arena.allocator() } },
     };
-    const h = try vm.heap.allocObject(.box_, 3, 0, 1);
+    const h = try vm.runtime.heap.allocObject(.box_, 3, 0, 1);
     h.setCell(0, 9);
     const addr = @intFromPtr(h);
-    _ = try vm.heap.deref(addr); // membership + type checks pass while live
-    vm.heap.freeShell(h);
+    _ = try vm.runtime.heap.deref(addr); // membership + type checks pass while live
+    vm.runtime.heap.freeShell(h);
     // Freed ⇒ deregistered ⇒ any later dereference traps safely instead
     // of reading the dead object.
-    try testing.expectError(error.ForgedPointer, vm.heap.deref(addr));
+    try testing.expectError(error.ForgedPointer, vm.runtime.heap.deref(addr));
 }
 
 test "release decrements and destroys at zero; retain shares" {
@@ -81,23 +81,23 @@ test "release decrements and destroys at zero; retain shares" {
     defer arena.deinit();
     var vm = VmCtx{
         .allocator = arena.allocator(),
-        .heap = .{ .allocator = arena.allocator() },
+        .runtime = .{ .heap = .{ .allocator = arena.allocator() } },
     };
     // A str type row so typed retains recognize the cell as a pointer.
     var types = [_]llir.TypeDesc{.{ .kind = .primitive, .a = @intFromEnum(llir.PrimitiveId.str), .b = 0, .c = 0 }};
     var image: llir.LlirProgram = undefined;
     image.types = &types;
-    vm.core.meta_image = &image;
-    const h = try vm.heap.allocObject(.str_, 0, 0, 4);
+    vm.loaded.meta_image = &image;
+    const h = try vm.runtime.heap.allocObject(.str_, 0, 0, 4);
     @memcpy(@as([*]u8, @ptrCast(h.cells))[0..4], "abcd");
     const addr = @intFromPtr(h);
     try vm_dispatch.retainCell(&vm, addr);
     try testing.expectEqual(@as(u32, 2), h.track.CopyValue);
     try vm_dispatch.releaseCounted(&vm, addr); // rc 1: still alive
-    try testing.expect(vm.heap.registry.contains(addr));
+    try testing.expect(vm.runtime.heap.registry.contains(addr));
     try vm_dispatch.releaseCounted(&vm, addr); // rc 0: destruction enqueued
     try vm.drainDestroyWork();
-    try testing.expect(!vm.heap.registry.contains(addr));
+    try testing.expect(!vm.runtime.heap.registry.contains(addr));
 }
 
 test "f64_min/f64_max: IEEE fmin/fmax — NaN propagates, -0 beats +0" {
@@ -167,7 +167,7 @@ test "f64_min/f64_max: IEEE fmin/fmax — NaN propagates, -0 beats +0" {
     image.drop_descs = &.{};
 
     // The v9 interpreter runs the image directly — no derived stream.
-    var vm = VmCtx{ .allocator = a, .core = .{ .meta_image = &image }, .heap = .{ .allocator = a } };
+    var vm = VmCtx{ .allocator = a, .loaded = .{ .meta_image = &image }, .runtime = .{ .heap = .{ .allocator = a } } };
     defer vm.deinit();
     try vm.setupRootArtifact(&image, 0);
     // T0 = -0.0, T1 = +0.0, T4 = NaN, T5 = 1.0

@@ -29,9 +29,10 @@
 //! - `interpreter` — the raw-`u64`-cell LLIR interpreter VM
 //!               (docs/interpreter-vm.md): the structurally validated
 //!               image, interpreted in place → `Termination`. Split
-//!               into `interpreter_types` (shared records),
+//!               into `interpreter_types` (shared records and the
+//!               runtime state `VmRuntimeState`),
 //!               `interpreter_loader` (runtime module loading and the
-//!               run image — `VmCore` and the loader functions),
+//!               loaded data — `VmLoadedData` and the loader functions),
 //!               `interpreter_dispatch`
 //!               (per-opcode handlers), and `interpreter_host` (run API
 //!               + host adapters).

@@ -39,30 +39,30 @@
 //! `(specifier, member)` dispatch to the `math`/`string`/`list`
 //! stdlib modules).
 //!
-//! Split into: `interpreter_types.zig` (shared records),
-//! `interpreter_loader.zig` (runtime module loading and the run context
-//! — the loader functions and `VmCore`, including the runtime state:
-//! pc/sp/fp, the register file, run status, dispatch-chain out-of-band
-//! state), `interpreter_dispatch.zig` (per-opcode
+//! Split into: `interpreter_types.zig` (shared records and the runtime
+//! state `VmRuntimeState` — the value stack, the register file, the
+//! execution position pc/sp/fp/current_fn, run status, and the
+//! dispatch-chain out-of-band state),
+//! `interpreter_loader.zig` (runtime module loading and the loaded data
+//! — the loader functions and `VmLoadedData`: the decoded instruction
+//! arena, the function registry, the loaded modules, and the root
+//! identity), `interpreter_dispatch.zig` (per-opcode
 //! handlers + comptime table **and the execution-layer helpers they
 //! drive** — register access, trap plumbing, the call/return path, the
 //! dispatch loop, and the numeric/compare/cast semantics all live
 //! there), `interpreter_host.zig` (run API + host adapters); this file
-//! keeps the `VmCtx` execution context: allocator, the `VmCore` run
-//! image, heap, host adapters, teardown logs, and module orchestration.
+//! keeps the `VmCtx` execution context: allocator, the loaded data
+//! (`VmLoadedData`), the runtime state (`VmRuntimeState`), heap, host
+//! adapters, teardown logs, and module orchestration.
 //! White-box tests live in `interpreter_vm_tests.zig`.
 
 const std = @import("std");
 const testing = std.testing;
 const llir = @import("llir.zig");
-const vm_instr = @import("vm_instr.zig");
 const vm_types = @import("vm_types.zig");
 const Value = vm_types.Value;
-const ValueCodec = vm_types.ValueCodec;
 const ObjectHeader = vm_types.ObjectHeader;
 const HeapErr = vm_types.HeapErr;
-const VmHeap = vm_types.VmHeap;
-const VmInstr = vm_instr.VmInstr;
 
 const interp_types = @import("interpreter_types.zig");
 const interp_loader = @import("interpreter_loader.zig");
@@ -87,7 +87,6 @@ pub const Termination = interp_types.Termination;
 pub const RunError = interp_types.RunError;
 pub const HostResult = interp_types.HostResult;
 pub const Continuation = interp_types.Continuation;
-pub const SlotRef = interp_types.SlotRef;
 pub const HostResource = interp_types.HostResource;
 pub const HostDisposer = interp_types.HostDisposer;
 pub const DestroyWork = interp_types.DestroyWork;
@@ -101,12 +100,19 @@ pub const runWithHostAndLoader = interp_host.runWithHostAndLoader;
 pub const runValidated = interp_host.runValidated;
 pub const runValidatedWithEntry = interp_host.runValidatedWithEntry;
 
-/// The execution context (docs/interpreter-vm.md §4): the run image
-/// (`VmCore`) plus every resource execution touches — the allocator, the
-/// heap, the host adapter, the module-loading provider callback, the
-/// teardown/destruction machinery, and the runtime state inside `core`
-/// (pc/sp/fp, the register file, run status, dispatch-chain out-of-band
-/// state). The dispatch and host-execution layers take `*VmCtx`; loading
+/// The execution context (docs/interpreter-vm.md §4): the fixed
+/// configuration plus the loaded data plus the runtime state. The
+/// configuration is the allocator, the module-loading provider, the
+/// host adapter, and the stack limit; the loaded data (`VmLoadedData` —
+/// the decoded image, loaded modules, root identity) is what the loader
+/// produces; the runtime state (`VmRuntimeState` — the value stack,
+/// register file, pc/sp/fp, run status, dispatch-chain out-of-band
+/// state, and every per-run execution resource: the heap, the
+/// host-resource and string-constant registries, the destruction-work
+/// and continuation stacks, the slot-teardown log, the host argument
+/// buffer, the panic scratch buffer) is everything that changes with the
+/// run. The dispatch
+/// and host-execution layers take `*VmCtx`; loading
 /// and publication stay in `interpreter_loader.zig`, which `VmCtx` never
 /// performs itself.
 pub const VmCtx = struct {
@@ -117,31 +123,27 @@ pub const VmCtx = struct {
     /// the provider is an execution dependency; the publication
     /// algorithms themselves stay in `interpreter_loader.zig`.
     provider: ModuleLoader = .{},
-    /// The run context (`VmCore`): the decoded image, loaded modules,
-    /// root identity, and the runtime state (pc/sp/fp, the register
-    /// file, run status, dispatch-chain out-of-band state)
-    /// (`docs/interpreter-vm.md` §4, §8). Execution reads and mutates
-    /// `core` and never loads or publishes itself.
-    core: interp_loader.VmCore = .{},
+    /// The loaded data (`VmLoadedData`): the decoded instruction arena,
+    /// the function registry, the loaded modules (including registered
+    /// host modules), and the root identity — what the loader produces
+    /// and execution reads (docs/interpreter-vm.md §8). Lazy loading
+    /// and hot-reload mutate it during a run; the loader functions in
+    /// `interpreter_loader.zig` own the publication side.
+    loaded: interp_loader.VmLoadedData = .{},
+    /// The runtime state (`VmRuntimeState`): the value stack, the fast
+    /// register bank, the execution position pc/sp/fp/current_fn, run
+    /// status, the dispatch-chain out-of-band state, and every per-run
+    /// execution resource (the heap, the host-resource and
+    /// string-constant registries, the destruction-work and
+    /// continuation stacks, the slot-teardown log, the host argument
+    /// buffer, the panic scratch buffer) — where execution is
+    /// (docs/interpreter-vm.md §4, §8). Execution reads and mutates it;
+    /// the loader only reads `running`/`terminated` for the
+    /// `reloadModule` quiesce check.
+    runtime: interp_types.VmRuntimeState,
     /// Hard cell limit; exceeding it is a deterministic trap.
     stack_limit: u32 = 1 << 20,
 
-    /// The interpreter's heap: allocation plus provenance dereference.
-    heap: VmHeap,
-    /// Registered host-owned resources, keyed by full payload value.
-    host_resources: std.AutoHashMapUnmanaged(u64, HostResource) = .empty,
-    /// Context-owned string constants (one reference for the whole run).
-    string_consts: std.AutoHashMapUnmanaged(u64, Value) = .empty,
-    /// Iterative destruction work stack.
-    destroy_work: std.ArrayList(DestroyWork) = .empty,
-    continuations: std.ArrayList(Continuation) = .empty,
-    /// Initialized modules' slot teardown log, appended in
-    /// initialization order.
-    initialized_slots: std.ArrayList(SlotRef) = .empty,
-    host_args: std.ArrayList(Value) = .empty,
-    /// Scratch buffer for `panicFmt` messages (borrowed; `sitePrefixed`
-    /// copies into the owned Termination message and this is reused).
-    panic_buf: [1024]u8 = undefined,
     /// Host-binding dispatch (phase 6): the default adapter implements
     /// the required `builtin` interface; an embedding replaces it to
     /// provide its own host modules.
@@ -149,39 +151,35 @@ pub const VmCtx = struct {
 
     /// The default constructor: an empty context (no provider installed).
     pub fn init(allocator: std.mem.Allocator) VmCtx {
-        return .{ .allocator = allocator, .heap = .{ .allocator = allocator } };
+        return .{ .allocator = allocator, .runtime = .{ .heap = .{ .allocator = allocator } } };
     }
 
     pub fn deinit(self: *VmCtx) void {
-        self.heap.deinit();
-        self.host_resources.deinit(self.allocator);
-        self.string_consts.deinit(self.allocator);
-        self.destroy_work.deinit(self.allocator);
-        self.continuations.deinit(self.allocator);
-        self.initialized_slots.deinit(self.allocator);
-        self.host_args.deinit(self.allocator);
-        // The context owns the run image: the decoded image, the loaded
-        // modules, the registry, and the runtime state (stack, register
-        // file, execution position) are freed here.
-        self.core.deinit(self.allocator);
+        // The runtime state owns every per-run resource (heap, the
+        // registries, the work/continuation stacks, the teardown log,
+        // the host argument buffer, the value stack); the loaded data
+        // owns the decoded image, the loaded modules, and the registry.
+        // Both are freed here.
+        self.runtime.deinit(self.allocator);
+        self.loaded.deinit(self.allocator);
     }
 
     // --- module accessors --------------------------------------------------
 
     /// The current runtime module's registry index.
     pub inline fn curModIdx(self: *const VmCtx) u32 {
-        return self.core.funcs.items[self.core.current_fn].mod;
+        return self.loaded.funcs.items[self.runtime.current_fn].mod;
     }
 
     /// The current module.
     pub inline fn curMod(self: *const VmCtx) *const RuntimeModule {
-        return self.core.curMod(self.curModIdx());
+        return self.loaded.curMod(self.curModIdx());
     }
 
     /// The current module's artifact — the metadata authority for the
     /// executing code's signatures, types, and descriptors.
     pub inline fn curImage(self: *const VmCtx) *const llir.LlirProgram {
-        return self.core.curImage(self.curModIdx());
+        return self.loaded.curImage(self.curModIdx());
     }
 
     /// The type table of the module that declared `type_id`.
@@ -189,10 +187,10 @@ pub const VmCtx = struct {
     /// interpretation (types/params/signatures are seeded identically
     /// into every artifact of one compilation). The root module's
     /// artifact works even outside any frame (teardown); tests that
-    /// hand-build a VM set `loader.core.meta_image` directly.
+    /// hand-build a VM set `loader.loaded.meta_image` directly.
     pub fn metaImage(self: *const VmCtx) *const llir.LlirProgram {
-        if (self.core.root_module < self.core.modules.items.len) return self.core.curImage(self.core.root_module);
-        if (self.core.meta_image) |img| return img;
+        if (self.loaded.root_module < self.loaded.modules.items.len) return self.loaded.curImage(self.loaded.root_module);
+        if (self.loaded.meta_image) |img| return img;
         return self.curImage();
     }
 
@@ -202,8 +200,8 @@ pub const VmCtx = struct {
     /// Register a host-owned payload entering VM ownership. A duplicate
     /// registration of the same un-released payload traps before commit.
     pub fn registerHostResource(self: *VmCtx, host_type_id: u32, payload: u64, disposer: HostDisposer, user: ?*anyopaque) !void {
-        if (self.host_resources.contains(payload)) return error.DuplicateHostResource;
-        try self.host_resources.put(self.allocator, payload, .{
+        if (self.runtime.host_resources.contains(payload)) return error.DuplicateHostResource;
+        try self.runtime.host_resources.put(self.allocator, payload, .{
             .host_type_id = host_type_id,
             .disposer = disposer,
             .user = user,
@@ -212,21 +210,21 @@ pub const VmCtx = struct {
 
     /// Transfer a registered payload back out of VM ownership.
     pub fn takeHostResource(self: *VmCtx, payload: u64) ?HostResource {
-        if (self.host_resources.fetchRemove(payload)) |kv| return kv.value;
+        if (self.runtime.host_resources.fetchRemove(payload)) |kv| return kv.value;
         return null;
     }
 
     /// True when the payload is currently registered.
     pub fn isHostResourceRegistered(self: *VmCtx, payload: u64) bool {
-        return self.host_resources.contains(payload);
+        return self.runtime.host_resources.contains(payload);
     }
 
     // ------------------------------------------------------------------
     // Module loading (Runtime §2): atomic publication, load-once
     // identity, cycle detection. The publication machinery, the
-    // registry, and the run image live in `interpreter_loader.zig`
-    // (`VmCore` + the loader functions); execution code drives them
-    // through `self.core` and never loads or publishes itself.
+    // registry, and the loaded data live in `interpreter_loader.zig`
+    // (`VmLoadedData` + the loader functions); execution code drives them
+    // through `self.loaded` and never loads or publishes itself.
     // ------------------------------------------------------------------
 
     /// The registry index of the module named by symbol id `sym_id`
@@ -235,8 +233,8 @@ pub const VmCtx = struct {
     /// resolves to itself.
     pub fn resolveModuleRef(self: *VmCtx, sym_id: u32) !u32 {
         const bytes = self.curMod().symbolBytes(sym_id) orelse return error.InvalidImage;
-        if (self.core.module_by_symbol.get(bytes)) |mi| return mi;
-        return interp_loader.loadModule(&self.core, self.allocator, &self.provider, bytes) catch |e| switch (e) {
+        if (self.loaded.module_by_symbol.get(bytes)) |mi| return mi;
+        return interp_loader.loadModule(&self.loaded, self.allocator, &self.provider, bytes) catch |e| switch (e) {
             error.ModuleNotFound, error.InvalidArtifact, error.LoaderCycle, error.ContextRunning => return error.InvalidImage,
             error.OutOfMemory => return error.OutOfMemory,
         };
@@ -249,20 +247,20 @@ pub const VmCtx = struct {
     /// reference (every function symbol, including lowered private
     /// specializations, resolves).
     pub fn resolveImport(self: *VmCtx, mi: u32, imp_i: u32, require_public: bool) !ResolvedImport {
-        const m = self.core.modules.items[mi];
+        const m = self.loaded.modules.items[mi];
         if (imp_i >= m.import_cache.len) return error.InvalidImage;
         if (m.import_cache[imp_i]) |v| return .{ .val = v, .started_init = false };
         const imp = m.image.imports[imp_i];
         const mod_bytes = m.symbolBytes(imp.module_sym) orelse return error.InvalidImage;
         const member_bytes = m.symbolBytes(imp.member_sym) orelse return error.InvalidImage;
         const tmi = blk: {
-            if (self.core.module_by_symbol.get(mod_bytes)) |x| break :blk x;
-            break :blk interp_loader.loadModule(&self.core, self.allocator, &self.provider, mod_bytes) catch |e| switch (e) {
+            if (self.loaded.module_by_symbol.get(mod_bytes)) |x| break :blk x;
+            break :blk interp_loader.loadModule(&self.loaded, self.allocator, &self.provider, mod_bytes) catch |e| switch (e) {
                 error.ModuleNotFound, error.InvalidArtifact, error.LoaderCycle, error.ContextRunning => return error.InvalidImage,
                 error.OutOfMemory => return error.OutOfMemory,
             };
         };
-        const t = self.core.modules.items[tmi];
+        const t = self.loaded.modules.items[tmi];
         if (t.is_host) {
             // Host modules have no Stilla members to resolve as values.
             return error.InvalidImage;
@@ -283,13 +281,13 @@ pub const VmCtx = struct {
         // *non-function* export is barred from a public member load.
         if (require_public and row.public == 0 and row.kind != .function) return error.InvalidImage;
         const v: u64 = switch (row.kind) {
-            .function => self.core.funcs.items[t.func_base + row.ref].desc.entry_pc,
+            .function => self.loaded.funcs.items[t.func_base + row.ref].desc.entry_pc,
             .const_slot => if (row.ref == llir.no_index) 0 else t.slots[row.ref],
             .nested_module => blk2: {
                 const nested_bytes = t.symbolBytes(row.ref) orelse return error.InvalidImage;
                 const nmi = blk3: {
-                    if (self.core.module_by_symbol.get(nested_bytes)) |x| break :blk3 x;
-                    break :blk3 interp_loader.loadModule(&self.core, self.allocator, &self.provider, nested_bytes) catch |e| switch (e) {
+                    if (self.loaded.module_by_symbol.get(nested_bytes)) |x| break :blk3 x;
+                    break :blk3 interp_loader.loadModule(&self.loaded, self.allocator, &self.provider, nested_bytes) catch |e| switch (e) {
                         error.ModuleNotFound, error.InvalidArtifact, error.LoaderCycle, error.ContextRunning => return error.InvalidImage,
                         error.OutOfMemory => return error.OutOfMemory,
                     };
@@ -323,26 +321,26 @@ pub const VmCtx = struct {
     /// header at `[0, 3)` carries `invalid_pc` in all three cells. The
     /// standalone entry contract is a parameterless function.
     fn installRootFrame(self: *VmCtx, entry_fn: u32) !void {
-        const f = self.core.funcs.items[entry_fn].desc;
-        if (self.core.funcs.items[entry_fn].arity.params != 0) return error.InvalidImage;
-        self.core.running = true;
+        const f = self.loaded.funcs.items[entry_fn].desc;
+        if (self.loaded.funcs.items[entry_fn].arity.params != 0) return error.InvalidImage;
+        self.runtime.running = true;
         // The host argument buffer grows with demand (syscall dispatch).
         var max_args: usize = 0;
         for (self.curImage().syscall_descs) |d| max_args = @max(max_args, d.args_len);
-        if (max_args > self.host_args.items.len) {
-            try self.host_args.resize(self.allocator, max_args);
+        if (max_args > self.runtime.host_args.items.len) {
+            try self.runtime.host_args.resize(self.allocator, max_args);
         }
         const fp: u32 = 3;
         const end: usize = llir.frameEnd(fp, f);
         try self.ensure(end);
-        @memset(self.core.stack.items[0..end], 0);
-        self.core.stack.items[0] = invalid_pc;
-        self.core.stack.items[1] = invalid_pc;
-        self.core.stack.items[2] = invalid_pc;
-        self.core.fp = fp;
-        self.core.sp = @intCast(end);
-        self.core.pc = f.entry_pc;
-        self.core.current_fn = entry_fn;
+        @memset(self.runtime.stack.items[0..end], 0);
+        self.runtime.stack.items[0] = invalid_pc;
+        self.runtime.stack.items[1] = invalid_pc;
+        self.runtime.stack.items[2] = invalid_pc;
+        self.runtime.fp = fp;
+        self.runtime.sp = @intCast(end);
+        self.runtime.pc = f.entry_pc;
+        self.runtime.current_fn = entry_fn;
     }
 
     /// Publish a borrowed artifact as the root module (no provider
@@ -350,12 +348,12 @@ pub const VmCtx = struct {
     /// root frame for its local `FunctionId` entry (the single-artifact
     /// API). The artifact must already be structurally valid.
     pub fn setupRootArtifact(self: *VmCtx, image: *llir.LlirProgram, entry: llir.FunctionId) !void {
-        if (self.core.running or self.core.terminated) return error.ContextAlreadyRun;
+        if (self.runtime.running or self.runtime.terminated) return error.ContextAlreadyRun;
         if (entry >= image.functions.len) return error.InvalidImage;
-        if (self.core.module_by_symbol.get(image.strings[0..0]) != null) return error.ContextAlreadyRun;
-        const mi = try interp_loader.publishRoot(&self.core, self.allocator, image);
-        errdefer interp_loader.abortLoad(&self.core, self.allocator);
-        const entry_global = self.core.modules.items[mi].func_base + entry;
+        if (self.loaded.module_by_symbol.get(image.strings[0..0]) != null) return error.ContextAlreadyRun;
+        const mi = try interp_loader.publishRoot(&self.loaded, self.allocator, image);
+        errdefer interp_loader.abortLoad(&self.loaded, self.allocator);
+        const entry_global = self.loaded.modules.items[mi].func_base + entry;
         try self.installRootFrame(entry_global);
         // Root modules initialize eagerly (Runtime §3.3).
         _ = try self.ensureModule(mi);
@@ -365,11 +363,11 @@ pub const VmCtx = struct {
     /// artifact's entry export as a parameterless function through the
     /// same resolver, then enter its function pc.
     pub fn setupRootSymbolic(self: *VmCtx, image: *llir.LlirProgram) !void {
-        if (self.core.running or self.core.terminated) return error.ContextAlreadyRun;
+        if (self.runtime.running or self.runtime.terminated) return error.ContextAlreadyRun;
         if (image.entry_member == llir.no_index) return error.InvalidImage;
-        const mi = try interp_loader.publishRoot(&self.core, self.allocator, image);
-        errdefer interp_loader.abortLoad(&self.core, self.allocator);
-        const m = self.core.modules.items[mi];
+        const mi = try interp_loader.publishRoot(&self.loaded, self.allocator, image);
+        errdefer interp_loader.abortLoad(&self.loaded, self.allocator);
+        const m = self.loaded.modules.items[mi];
         // Resolve the entry export through the same resolver.
         const bytes = m.symbolBytes(image.entry_member) orelse return error.InvalidImage;
         const row = m.findExport(bytes) orelse {
@@ -392,11 +390,11 @@ pub const VmCtx = struct {
     /// failure the old module is untouched. The embedding observes the
     /// new slot through `core.module_by_symbol`.
     pub fn reloadModule(self: *VmCtx, symbol: []const u8) LoadError!u32 {
-        return interp_loader.reloadModule(&self.core, self.allocator, &self.provider, symbol);
+        return interp_loader.reloadModule(&self.loaded, &self.runtime, self.allocator, &self.provider, symbol);
     }
 
     pub fn hookActive(self: *const VmCtx) bool {
-        return self.continuations.items.len != 0 and self.continuations.items[self.continuations.items.len - 1].kind == .hook;
+        return self.runtime.continuations.items.len != 0 and self.runtime.continuations.items[self.runtime.continuations.items.len - 1].kind == .hook;
     }
     /// on return.
     /// Initialize a loaded module exactly once (Runtime §2.3):
@@ -407,7 +405,7 @@ pub const VmCtx = struct {
     /// (pc moved to the initializer's entry); callers that started one
     /// must return before the default pc advance.
     pub fn ensureModule(self: *VmCtx, module_id: u32) !bool {
-        const m = self.core.modules.items[module_id];
+        const m = self.loaded.modules.items[module_id];
         switch (m.state) {
             .initialized => return false,
             .initializing, .loading => return error.InvalidImage, // init/load cycle
@@ -419,23 +417,21 @@ pub const VmCtx = struct {
             m.state = .initialized;
             return false;
         }
-        const fe = self.core.funcs.items[m.func_base + init_fn];
-        const new_fp = self.core.sp + 3;
+        const fe = self.loaded.funcs.items[m.func_base + init_fn];
+        const new_fp = self.runtime.sp + 3;
         const end: usize = llir.frameEnd(new_fp, fe.desc);
         try self.ensure(end);
-        self.core.stack.items[new_fp - 3] = self.core.fp;
-        self.core.stack.items[new_fp - 2] = self.core.current_fn;
-        self.core.stack.items[new_fp - 1] = vm_internal_pc;
-        try self.continuations.append(self.allocator, .{
-            .caller_fn = self.core.current_fn,
-            .caller_sp = self.core.sp,
-            .resume_pc = self.core.pc,
+        self.runtime.stack.items[new_fp - 3] = self.runtime.fp;
+        self.runtime.stack.items[new_fp - 2] = self.runtime.current_fn;
+        self.runtime.stack.items[new_fp - 1] = vm_internal_pc;
+        try self.runtime.continuations.append(self.allocator, .{
+            .resume_pc = self.runtime.pc,
             .kind = .{ .module = module_id },
         });
-        self.core.fp = new_fp;
-        self.core.sp = @intCast(end);
-        self.core.pc = fe.desc.entry_pc;
-        self.core.current_fn = m.func_base + init_fn;
+        self.runtime.fp = new_fp;
+        self.runtime.sp = @intCast(end);
+        self.runtime.pc = fe.desc.entry_pc;
+        self.runtime.current_fn = m.func_base + init_fn;
         return true;
     }
 
@@ -443,8 +439,8 @@ pub const VmCtx = struct {
     /// exceeding the configured limit. Failure leaves nothing partial.
     pub fn ensure(self: *VmCtx, need: usize) !void {
         if (need >= self.stack_limit) return error.StackOverflow;
-        if (need >= self.core.stack.items.len) {
-            try self.core.stack.resize(self.allocator, need + 1);
+        if (need >= self.runtime.stack.items.len) {
+            try self.runtime.stack.resize(self.allocator, need + 1);
         }
     }
 
@@ -478,12 +474,12 @@ pub const VmCtx = struct {
                     items[n] = .{ .value = .{ .type_id = elem_ty, .addr = head } };
                     n += 1;
                 }
-                for (items[0..n]) |it| try self.destroy_work.append(self.allocator, it);
+                for (items[0..n]) |it| try self.runtime.destroy_work.append(self.allocator, it);
             },
             .box_ => {
                 const elem_ty = image.types[type_id].a;
                 const v = h.cell(0);
-                if (v != 0) try self.destroy_work.append(self.allocator, .{ .value = .{ .type_id = elem_ty, .addr = v } });
+                if (v != 0) try self.runtime.destroy_work.append(self.allocator, .{ .value = .{ .type_id = elem_ty, .addr = v } });
             },
             .tuple_ => {
                 const row = image.types[type_id];
@@ -494,7 +490,7 @@ pub const VmCtx = struct {
                 while (k > 0) {
                     k -= 1;
                     const v = h.cell(k);
-                    if (v != 0) try self.destroy_work.append(self.allocator, .{ .value = .{ .type_id = row.a + k, .addr = v } });
+                    if (v != 0) try self.runtime.destroy_work.append(self.allocator, .{ .value = .{ .type_id = row.a + k, .addr = v } });
                 }
             },
             .struct_ => {
@@ -505,7 +501,7 @@ pub const VmCtx = struct {
                     // The hook's parameter receives the doomed object's
                     // address (startHookCall writes it into F0).
                     h.track.UniqueValue = true;
-                    try self.destroy_work.append(self.allocator, .{ .resume_struct = .{ .type_id = type_id, .h = h } });
+                    try self.runtime.destroy_work.append(self.allocator, .{ .resume_struct = .{ .type_id = type_id, .h = h } });
                     try self.startHookCall(decl.b, @intFromPtr(h));
                     return;
                 }
@@ -515,7 +511,7 @@ pub const VmCtx = struct {
                     const ft = image.type_decl_fields[k];
                     if (ft == llir.no_index) continue;
                     const v = h.cell(k - decl.c);
-                    if (v != 0) try self.destroy_work.append(self.allocator, .{ .value = .{ .type_id = ft, .addr = v } });
+                    if (v != 0) try self.runtime.destroy_work.append(self.allocator, .{ .value = .{ .type_id = ft, .addr = v } });
                 }
             },
             .union_ => {
@@ -530,7 +526,7 @@ pub const VmCtx = struct {
                         const pt = image.union_payloads[v.payloads_start + k];
                         const pv = h.cell(1 + k);
                         if (pv != 0 and pt != llir.no_index) {
-                            try self.destroy_work.append(self.allocator, .{ .value = .{ .type_id = pt, .addr = pv } });
+                            try self.runtime.destroy_work.append(self.allocator, .{ .value = .{ .type_id = pt, .addr = pv } });
                         }
                     }
                 }
@@ -539,13 +535,13 @@ pub const VmCtx = struct {
                 const pt: u32 = @truncate(h.cell(0));
                 const pv = h.cell(1);
                 if (pv != 0 and pt != llir.no_index) {
-                    try self.destroy_work.append(self.allocator, .{ .value = .{ .type_id = pt, .addr = pv } });
+                    try self.runtime.destroy_work.append(self.allocator, .{ .value = .{ .type_id = pt, .addr = pv } });
                 }
             },
             .opaque_ => {
                 // Host-owned: dispose through the resource registry.
                 const addr = @intFromPtr(h);
-                if (self.host_resources.fetchRemove(addr)) |kv| {
+                if (self.runtime.host_resources.fetchRemove(addr)) |kv| {
                     kv.value.disposer(kv.value.user, addr);
                 }
             },
@@ -567,25 +563,23 @@ pub const VmCtx = struct {
     fn startHookCall(self: *VmCtx, hook_fn: u32, doomed: Value) !void {
         const image = self.curImage();
         const callee = image.functions[hook_fn];
-        const p: u32 = self.core.funcs.items[self.curMod().func_base + hook_fn].arity.params;
-        const new_fp = self.core.sp + 3;
+        const p: u32 = self.loaded.funcs.items[self.curMod().func_base + hook_fn].arity.params;
+        const new_fp = self.runtime.sp + 3;
         const end: usize = llir.frameEnd(new_fp, callee);
         try self.ensure(end);
         const hb = new_fp - 3;
-        self.core.stack.items[hb + 0] = self.core.fp; // the interrupted frame's base
-        self.core.stack.items[hb + 1] = self.core.current_fn;
-        self.core.stack.items[hb + 2] = vm_internal_pc;
-        for (0..p) |k| self.core.stack.items[new_fp + k] = doomed; // the hook's parameter
-        try self.continuations.append(self.allocator, .{
-            .caller_fn = self.core.current_fn,
-            .caller_sp = self.core.sp,
-            .resume_pc = self.core.pc,
+        self.runtime.stack.items[hb + 0] = self.runtime.fp; // the interrupted frame's base
+        self.runtime.stack.items[hb + 1] = self.runtime.current_fn;
+        self.runtime.stack.items[hb + 2] = vm_internal_pc;
+        for (0..p) |k| self.runtime.stack.items[new_fp + k] = doomed; // the hook's parameter
+        try self.runtime.continuations.append(self.allocator, .{
+            .resume_pc = self.runtime.pc,
             .kind = .hook,
         });
-        self.core.fp = new_fp;
-        self.core.sp = @intCast(end);
-        self.core.pc = self.core.funcs.items[self.curMod().func_base + hook_fn].desc.entry_pc;
-        self.core.current_fn = self.curMod().func_base + hook_fn;
+        self.runtime.fp = new_fp;
+        self.runtime.sp = @intCast(end);
+        self.runtime.pc = self.loaded.funcs.items[self.curMod().func_base + hook_fn].desc.entry_pc;
+        self.runtime.current_fn = self.curMod().func_base + hook_fn;
     }
 
     /// Termination cleanup (docs/interpreter-vm.md §6.4, §10): release the
@@ -593,28 +587,28 @@ pub const VmCtx = struct {
     /// resource exactly once, then raw-free whatever still lives on the
     /// heap — no Stilla hooks run here. Counts end at zero on every path.
     pub fn finishCleanup(self: *VmCtx) void {
-        var sit = self.string_consts.valueIterator();
+        var sit = self.runtime.string_consts.valueIterator();
         while (sit.next()) |v| {
-            if (self.heap.registry.get(v.*)) |h| {
+            if (self.runtime.heap.registry.get(v.*)) |h| {
                 if (h.track.CopyValue > 0) h.track.CopyValue -= 1; // loader-owned str reference
             }
         }
-        self.string_consts.clearRetainingCapacity();
+        self.runtime.string_consts.clearRetainingCapacity();
         self.drainDestroyWork() catch {};
         // Registered host resources are disposed exactly once each.
-        while (self.host_resources.count() > 0) {
-            var it = self.host_resources.iterator();
+        while (self.runtime.host_resources.count() > 0) {
+            var it = self.runtime.host_resources.iterator();
             const kv = it.next().?;
             const payload = kv.key_ptr.*;
             kv.value_ptr.disposer(kv.value_ptr.user, payload);
-            _ = self.host_resources.remove(payload);
+            _ = self.runtime.host_resources.remove(payload);
         }
-        while (self.heap.registry.count() > 0) {
-            var it = self.heap.registry.iterator();
+        while (self.runtime.heap.registry.count() > 0) {
+            var it = self.runtime.heap.registry.iterator();
             const kv = it.next().?;
-            self.heap.freeShell(kv.value_ptr.*);
+            self.runtime.heap.freeShell(kv.value_ptr.*);
         }
-        self.destroy_work.clearRetainingCapacity();
+        self.runtime.destroy_work.clearRetainingCapacity();
     }
 
     /// Drain the destruction work stack. While a user drop hook runs,
@@ -622,29 +616,29 @@ pub const VmCtx = struct {
     /// returns).
     pub fn drainDestroyWork(self: *VmCtx) HeapErr!void {
         while (!self.hookActive()) {
-            const item = self.destroy_work.pop() orelse return;
+            const item = self.runtime.destroy_work.pop() orelse return;
             switch (item) {
-                .free_obj => |h| self.heap.freeShell(h),
+                .free_obj => |h| self.runtime.heap.freeShell(h),
                 .resume_struct => |w| {
                     // The hook finished: expand fields + shell now.
-                    if (self.heap.registry.get(@intFromPtr(w.h)) == null) continue;
+                    if (self.runtime.heap.registry.get(@intFromPtr(w.h)) == null) continue;
                     w.h.track.UniqueValue = true;
                     try self.expandDestruction(w.type_id, w.h);
-                    self.heap.freeShell(w.h);
+                    self.runtime.heap.freeShell(w.h);
                     try self.drainDestroyWork();
                     return;
                 },
                 .value => |w| {
                     if (w.addr == 0) continue;
-                    const h = self.heap.registry.get(w.addr) orelse continue; // synthetic or already freed
+                    const h = self.runtime.heap.registry.get(w.addr) orelse continue; // synthetic or already freed
                     // Counted shells only die at rc 0.
                     if (h.isCounted() and h.track.CopyValue > 0) continue;
                     try self.expandDestruction(w.type_id, h);
                     if (self.hookActive()) {
                         // Shell frees when the resumed expansion finishes.
-                        try self.destroy_work.append(self.allocator, .{ .free_obj = h });
+                        try self.runtime.destroy_work.append(self.allocator, .{ .free_obj = h });
                     } else {
-                        self.heap.freeShell(h);
+                        self.runtime.heap.freeShell(h);
                         try self.drainDestroyWork();
                         return;
                     }
@@ -653,16 +647,20 @@ pub const VmCtx = struct {
         }
     }
 
-    /// Teardown in reverse initialization order (Runtime §3.4): each
-    /// recorded slot store is undone — the stored value is released
-    /// and the slot cleared.
+    /// Teardown in reverse initialization order (Runtime §2.5): each
+    /// module's destruction log is popped in reverse — the stored value
+    /// is released and the slot cleared — then the next module.
     pub fn teardownModules(self: *VmCtx) HeapErr!void {
-        while (self.initialized_slots.pop()) |rec| {
-            const m = self.core.modules.items[rec.mod];
-            const slot_ty = m.image.module_slots[rec.slot].type_;
-            const v = m.slots[rec.slot];
-            m.slots[rec.slot] = 0;
-            if (v != 0) try vm_dispatch.destroyValue(self, slot_ty, v);
+        var mi = self.loaded.modules.items.len;
+        while (mi > 0) {
+            mi -= 1;
+            const m = self.loaded.modules.items[mi];
+            while (m.slot_log.pop()) |slot| {
+                const slot_ty = m.image.module_slots[slot].type_;
+                const v = m.slots[slot];
+                m.slots[slot] = 0;
+                if (v != 0) try vm_dispatch.destroyValue(self, slot_ty, v);
+            }
         }
         try self.drainDestroyWork();
     }

@@ -957,11 +957,9 @@ pub const ExportDesc = struct {
     public: u32,
 };
 
-/// One constant slot of a module (Runtime §2.5): its type and teardown
-/// rank (unique slots destroy in reverse `init_order`).
+/// One constant slot of a module (Runtime §2.5): its teardown type.
 pub const ModuleSlot = struct {
     type_: TypeId,
-    init_order: u32,
 };
 
 // ---------------------------------------------------------------------------

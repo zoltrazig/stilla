@@ -441,7 +441,7 @@ fn serializeArtifact(bld: *Builder) error{OutOfMemory}!void {
     }
     // Constant slots, in slot order (Runtime §2.5).
     for (m.slots) |slot| {
-        try bld.module_slots.append(bld.arena, .{ .type_ = try internType(bld, slot.type_), .init_order = slot.init_order });
+        try bld.module_slots.append(bld.arena, .{ .type_ = try internType(bld, slot.type_) });
     }
 }
 

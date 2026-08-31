@@ -350,21 +350,21 @@ test "fast bank: zero/ra discard, cond and T are raw-index independent" {
     // zero: writing a nonzero value leaves index 0 all-zero.
     vm_dispatch.write(&vm, llir.zero_reg, 0xdead_beef);
     try testing.expectEqual(@as(Value, 0), vm_dispatch.read(&vm, llir.zero_reg));
-    try testing.expectEqual(@as(Value, 0), vm.core.fast_regs[llir.zero_reg]);
+    try testing.expectEqual(@as(Value, 0), vm.runtime.fast_regs[llir.zero_reg]);
 
     // ra (index 2) is the reserved hole: a write discards.
     vm_dispatch.write(&vm, llir.ra_reg, 0xbaad_f00d);
-    try testing.expectEqual(@as(Value, 0), vm.core.fast_regs[llir.ra_reg]);
+    try testing.expectEqual(@as(Value, 0), vm.runtime.fast_regs[llir.ra_reg]);
 
     // cond and T0 are independent cells at their raw encodings (1 and 3).
     vm_dispatch.write(&vm, llir.cond_reg, 0x11);
     vm_dispatch.write(&vm, llir.temp_base, 0x22);
     try testing.expectEqual(@as(Value, 0x11), vm_dispatch.read(&vm, llir.cond_reg));
     try testing.expectEqual(@as(Value, 0x22), vm_dispatch.read(&vm, llir.temp_base));
-    try testing.expectEqual(@as(Value, 0x11), vm.core.fast_regs[llir.cond_reg]);
-    try testing.expectEqual(@as(Value, 0x22), vm.core.fast_regs[llir.temp_base]);
-    try testing.expectEqual(@as(Value, 0), vm.core.fast_regs[llir.zero_reg]); // still zero after the cond/T writes
-    try testing.expectEqual(@as(Value, 0), vm.core.fast_regs[llir.ra_reg]); // hole still dead
+    try testing.expectEqual(@as(Value, 0x11), vm.runtime.fast_regs[llir.cond_reg]);
+    try testing.expectEqual(@as(Value, 0x22), vm.runtime.fast_regs[llir.temp_base]);
+    try testing.expectEqual(@as(Value, 0), vm.runtime.fast_regs[llir.zero_reg]); // still zero after the cond/T writes
+    try testing.expectEqual(@as(Value, 0), vm.runtime.fast_regs[llir.ra_reg]); // hole still dead
 }
 
 // ---------------------------------------------------------------------------
@@ -543,10 +543,10 @@ test "O aliases are call-clobbered: the call's arg staging overwrites the caller
     defer vm.deinit();
     try vm.setupRootArtifact(l.image, try l.fid("main"));
     try drainRootInit(&vm, try l.fid("main"));
-    const main_fp = vm.core.fp;
+    const main_fp = vm.runtime.fp;
     const alias_cell = llir.frameCell(main_fp, main_fd, o_alias);
     vm_dispatch.write(&vm, o_alias, 0xdead); // a stale value in the O alias
-    try testing.expectEqual(@as(u32, 0xdead), @as(u32, @truncate(vm.core.stack.items[alias_cell])));
+    try testing.expectEqual(@as(u32, 0xdead), @as(u32, @truncate(vm.runtime.stack.items[alias_cell])));
     const call_pc = blk: {
         for (l.image.instructions, 0..) |rec, pc| {
             const d = llir.decode(rec) orelse continue;
@@ -557,11 +557,11 @@ test "O aliases are call-clobbered: the call's arg staging overwrites the caller
     // Stepping to the call runs the arg staging: the `slot_move` into
     // the window overwrites the O alias — the stale value is gone.
     try testing.expectEqual(@as(?interpreter.Termination, null), try stepToPc(&vm, call_pc));
-    try testing.expectEqual(@as(u32, 1), @as(u32, @truncate(vm.core.stack.items[alias_cell])));
+    try testing.expectEqual(@as(u32, 1), @as(u32, @truncate(vm.runtime.stack.items[alias_cell])));
     // The call itself (the frame write) leaves the alias holding the
     // callee's r0.
     try testing.expectEqual(@as(?interpreter.Termination, null), try vm_dispatch.step(&vm));
-    try testing.expectEqual(@as(u32, 1), @as(u32, @truncate(vm.core.stack.items[alias_cell])));
+    try testing.expectEqual(@as(u32, 1), @as(u32, @truncate(vm.runtime.stack.items[alias_cell])));
     // The take moves the result out of the alias (clearing it) and
     // main returns it.
     const v = try runToEnd(&vm);
@@ -576,7 +576,7 @@ fn runLoaded(image: *llir.LlirProgram, entry: llir.FunctionId) !Value {
     defer vm.deinit();
     try vm.setupRootArtifact(image, entry);
     var steps: usize = 0;
-    while (!vm.core.terminated) {
+    while (!vm.runtime.terminated) {
         if (try vm_dispatch.step(&vm)) |t| {
             if (t == .panic) {
                 testing.allocator.free(t.panic);
@@ -595,20 +595,20 @@ fn runLoaded(image: *llir.LlirProgram, entry: llir.FunctionId) !Value {
 /// termination if it ended first, null if it reached the target.
 fn stepToPc(vm: *interpreter.VmCtx, target: u32) !?interpreter.Termination {
     var steps: usize = 0;
-    while (vm.core.pc != target and !vm.core.terminated) {
+    while (vm.runtime.pc != target and !vm.runtime.terminated) {
         if (try vm_dispatch.step(vm)) |t| return t;
         try vm.drainDestroyWork();
         steps += 1;
         if (steps > 100_000) return error.TestUnexpectedResult;
     }
-    if (vm.core.terminated) return error.TestUnexpectedResult;
+    if (vm.runtime.terminated) return error.TestUnexpectedResult;
     return null;
 }
 
 /// Step a VM to termination, returning the root result cell.
 fn runToEnd(vm: *interpreter.VmCtx) !Value {
     var steps: usize = 0;
-    while (!vm.core.terminated) {
+    while (!vm.runtime.terminated) {
         if (try vm_dispatch.step(vm)) |t| {
             if (t == .panic) {
                 testing.allocator.free(t.panic);
@@ -655,16 +655,16 @@ test "j discards no link — an intra-function jump never switches frames" {
     defer vm.deinit();
     try vm.setupRootArtifact(l.image, try l.fid("main"));
     try drainRootInit(&vm, try l.fid("main"));
-    const fp0 = vm.core.fp;
-    const sp0 = vm.core.sp;
+    const fp0 = vm.runtime.fp;
+    const sp0 = vm.runtime.sp;
     // Step to the jump record (the caller may have prologue records
     // before it).
     try testing.expectEqual(@as(?interpreter.Termination, null), try stepToPc(&vm, call_pc));
     try testing.expectEqual(@as(?interpreter.Termination, null), try vm_dispatch.step(&vm));
     // The j moved pc only — fp/sp untouched (pure jump), and no
     // header/link cell was written (the jump does not enter a callee).
-    try testing.expectEqual(fp0, vm.core.fp);
-    try testing.expectEqual(sp0, vm.core.sp);
+    try testing.expectEqual(fp0, vm.runtime.fp);
+    try testing.expectEqual(sp0, vm.runtime.sp);
     const d1 = llir.decode(instrs[call_pc]).?;
     try testing.expect(d1.op == .j);
 }
@@ -694,16 +694,16 @@ test "jal ra is a direct call: link/target ordering, three-cell header" {
     try vm.setupRootArtifact(l.image, try l.fid("main"));
     // Step to the call record (arg moves precede it).
     try testing.expectEqual(@as(?interpreter.Termination, null), try stepToPc(&vm, call_pc));
-    const sp0 = vm.core.sp;
+    const sp0 = vm.runtime.sp;
     try testing.expectEqual(sp_before_call, sp0);
     try testing.expectEqual(@as(?interpreter.Termination, null), try vm_dispatch.step(&vm));
     // Header recorded below the window at the callee's frame base.
     const a: u32 = 1;
     const new_fp = sp0 - a;
-    try testing.expectEqual(callee_entry, vm.core.pc); // pc moved to callee
-    try testing.expectEqual(new_fp, vm.core.fp); // frame switched
-    try testing.expectEqual(@as(u32, 3), @as(u32, @truncate(vm.core.stack.items[llir.headerBase(new_fp)]))); // saved_fp = root base
-    try testing.expectEqual(call_pc + 1, @as(u32, @truncate(vm.core.stack.items[llir.headerBase(new_fp) + 2]))); // saved_ra
+    try testing.expectEqual(callee_entry, vm.runtime.pc); // pc moved to callee
+    try testing.expectEqual(new_fp, vm.runtime.fp); // frame switched
+    try testing.expectEqual(@as(u32, 3), @as(u32, @truncate(vm.runtime.stack.items[llir.headerBase(new_fp)]))); // saved_fp = root base
+    try testing.expectEqual(call_pc + 1, @as(u32, @truncate(vm.runtime.stack.items[llir.headerBase(new_fp) + 2]))); // saved_ra
     // The result flows back through the callee's F0 — the caller's
     // register `F(L+3+O-A)` — and the generic `take`. The
     // callee may have more than one record before its `ret`, so run to
@@ -719,7 +719,7 @@ test "jal ra is a direct call: link/target ordering, three-cell header" {
     try testing.expectEqual(@as(?interpreter.Termination, null), try stepToPc(&vm, ret_pc));
     const t = try vm_dispatch.step(&vm); // callee ret (pc back, result published)
     try testing.expectEqual(@as(?interpreter.Termination, null), t);
-    try testing.expectEqual(call_pc + 1, vm.core.pc);
+    try testing.expectEqual(call_pc + 1, vm.runtime.pc);
     // Step 8 coalescing: `main` returns the call result directly, so the
     // post-call `take` is dropped — the result stays in the caller's
     // result alias `F(L+3+O-A)` and the fallthrough `ret` reads it.
@@ -785,7 +785,7 @@ test "jalr: positive and negative signed offsets reach the entry" {
         vm_dispatch.write(&vm, base_reg, callee_entry - 1);
         const t = try vm_dispatch.step(&vm); // jalr
         try testing.expectEqual(@as(?interpreter.Termination, null), t);
-        try testing.expectEqual(callee_entry, vm.core.pc);
+        try testing.expectEqual(callee_entry, vm.runtime.pc);
         // Finish to root.
         try testing.expectEqual(@as(Value, 9), try runToEnd(&vm));
     }
@@ -801,7 +801,7 @@ test "jalr: positive and negative signed offsets reach the entry" {
         vm_dispatch.write(&vm, base_reg, callee_entry + 1);
         const t = try vm_dispatch.step(&vm); // jalr
         try testing.expectEqual(@as(?interpreter.Termination, null), t);
-        try testing.expectEqual(callee_entry, vm.core.pc);
+        try testing.expectEqual(callee_entry, vm.runtime.pc);
         try testing.expectEqual(@as(Value, 9), try runToEnd(&vm));
     }
 }
@@ -835,8 +835,8 @@ test "jalr: base-plus-offset overflow and non-entry targets trap before any writ
         try vm.setupRootArtifact(l.image, try l.fid("main"));
         try drainRootInit(&vm, try l.fid("main"));
         vm_dispatch.write(&vm, base_reg, std.math.maxInt(u64));
-        const fp0 = vm.core.fp;
-        const sp0 = vm.core.sp;
+        const fp0 = vm.runtime.fp;
+        const sp0 = vm.runtime.sp;
         try testing.expectEqual(@as(?interpreter.Termination, null), try stepToPc(&vm, call_pc));
         vm_dispatch.write(&vm, base_reg, std.math.maxInt(u64));
         const t = try vm_dispatch.step(&vm);
@@ -844,8 +844,8 @@ test "jalr: base-plus-offset overflow and non-entry targets trap before any writ
         try testing.expect(std.mem.indexOf(u8, t.?.panic, "overflow") != null);
         testing.allocator.free(t.?.panic);
         // Failure atomicity: pc/fp/sp untouched.
-        try testing.expectEqual(fp0, vm.core.fp);
-        try testing.expectEqual(sp0, vm.core.sp);
+        try testing.expectEqual(fp0, vm.runtime.fp);
+        try testing.expectEqual(sp0, vm.runtime.sp);
     }
     // Non-entry target: base = callee_entry + 1 (interior of callee).
     instrs[call_pc] = llir.instrI(.jalr, base_reg, 0);
@@ -873,7 +873,7 @@ test "jalr: base-plus-offset overflow and non-entry targets trap before any writ
         vm_dispatch.write(&vm, base_reg, callee_entry);
         const t = try vm_dispatch.step(&vm); // jalr
         try testing.expectEqual(@as(?interpreter.Termination, null), t);
-        try testing.expectEqual(callee_entry, vm.core.pc);
+        try testing.expectEqual(callee_entry, vm.runtime.pc);
         try testing.expectEqual(@as(Value, 9), try runToEnd(&vm));
     }
 }
@@ -916,15 +916,15 @@ test "dynamic take contract mismatch fails before ra/header/frame write" {
     try vm.setupRootArtifact(l.image, try l.fid("main"));
     try drainRootInit(&vm, try l.fid("main"));
     vm_dispatch.write(&vm, base_reg, callee_entry);
-    const fp0 = vm.core.fp;
-    const sp0 = vm.core.sp;
-    const pc0 = vm.core.pc;
+    const fp0 = vm.runtime.fp;
+    const sp0 = vm.runtime.sp;
+    const pc0 = vm.runtime.pc;
     // Prospective header cells (below the window).
     const a: u32 = 1;
     const new_fp = sp0 - a;
     const hb = llir.headerBase(new_fp);
-    const hdr0 = vm.core.stack.items[hb];
-    const hdr1 = vm.core.stack.items[hb + 1];
+    const hdr0 = vm.runtime.stack.items[hb];
+    const hdr1 = vm.runtime.stack.items[hb + 1];
     // Step to the call; re-seed base (a prologue record may not touch
     // base_reg F2, but re-seed for determinism).
     try testing.expectEqual(@as(?interpreter.Termination, null), try stepToPc(&vm, call_pc));
@@ -934,11 +934,11 @@ test "dynamic take contract mismatch fails before ra/header/frame write" {
     try testing.expect(std.mem.indexOf(u8, t.?.panic, "take contract mismatch") != null);
     testing.allocator.free(t.?.panic);
     // Failure atomicity: nothing written.
-    try testing.expectEqual(pc0, vm.core.pc);
-    try testing.expectEqual(fp0, vm.core.fp);
-    try testing.expectEqual(sp0, vm.core.sp);
-    try testing.expectEqual(hdr0, vm.core.stack.items[hb]);
-    try testing.expectEqual(hdr1, vm.core.stack.items[hb + 1]);
+    try testing.expectEqual(pc0, vm.runtime.pc);
+    try testing.expectEqual(fp0, vm.runtime.fp);
+    try testing.expectEqual(sp0, vm.runtime.sp);
+    try testing.expectEqual(hdr0, vm.runtime.stack.items[hb]);
+    try testing.expectEqual(hdr1, vm.runtime.stack.items[hb + 1]);
     // Restore and confirm a clean run takes the result.
     instrs[take_pc] = orig;
     instrs[call_pc] = llir.instrU(.jal, llir.ra_reg, call_d.imm20);
@@ -979,10 +979,10 @@ test "T0–T15 call-clobber: callee's T writes are never restored" {
     defer vm.deinit();
     try vm.setupRootArtifact(l.image, try l.fid("main"));
     const t0_before: Value = 0xdead_beef;
-    vm.core.fast_regs[llir.temp_base] = t0_before;
+    vm.runtime.fast_regs[llir.temp_base] = t0_before;
     var completed = false;
     var steps: usize = 0;
-    while (!vm.core.terminated and steps < 1000) {
+    while (!vm.runtime.terminated and steps < 1000) {
         if (try vm_dispatch.step(&vm)) |r| {
             if (r == .panic) {
                 testing.allocator.free(r.panic);
@@ -998,5 +998,5 @@ test "T0–T15 call-clobber: callee's T writes are never restored" {
     // The callee wrote 0xbeef into T0. The VM does not restore the
     // caller's 0xdead_beef across the call (docs/interpreter-vm.md §5:
     // T0–T15 are a global volatile bank the VM never saves/restores).
-    try testing.expectEqual(@as(Value, 0xbeef), vm.core.fast_regs[llir.temp_base]);
+    try testing.expectEqual(@as(Value, 0xbeef), vm.runtime.fast_regs[llir.temp_base]);
 }

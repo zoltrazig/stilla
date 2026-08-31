@@ -10,17 +10,23 @@
 //! - the public load types (`ModuleState`, `ModuleLoader`, `LoadResult`,
 //!   `LoadError`, `RuntimeModule`, `imageSelfSymbol`) — moved from
 //!   `interpreter_types.zig`;
-//! - `VmCore` — the minimal, self-contained run image: the decoded
-//!   instruction arena, the relocated function registry, the loaded
-//!   modules (one replaceable slot per canonical symbol), and the root
-//!   identity. Pure data; the execution code in `interpreter.zig` reads
-//!   it but never mutates publication state;
+//! - `VmLoadedData` — the loaded data, what the loader produces and
+//!   execution reads: the decoded instruction arena, the relocated
+//!   function registry, the loaded modules (one replaceable slot per
+//!   canonical symbol, including registered host modules), and the
+//!   root identity. The runtime state it executes against
+//!   (`VmRuntimeState` in `interpreter_types.zig` — the value stack,
+//!   register file, `pc`/`sp`/`fp`/`current_fn`, run status, and the
+//!   dispatch-chain out-of-band state) is a separate struct owned by
+//!   `VmCtx`; the loader only reads its `running`/`terminated` flags for
+//!   the `reloadModule` quiesce check;
 //! - the loader functions — `loadModule` (fetch → parse → validate →
 //!   decode → publish atomically, with rollback of failed loads),
 //!   `publishRoot`, `publishArtifact`, and `abortLoad`. Each takes an
-//!   explicit `core: *VmCore` (and, for `loadModule`, the provider
-//!   callback); `VmCtx` (interpreter.zig) carries the core and provider
-//!   and calls them. Hot-reload is designed for (append-only arenas keep
+//!   explicit `loaded: *VmLoadedData` (and, for `loadModule`, the
+//!   provider callback); `VmCtx` (interpreter.zig) carries the loaded
+//!   data, runtime state, and provider and calls them. Hot-reload is
+//!   designed for (append-only arenas keep
 //!   superseded versions resident; `module_by_symbol` can be repointed
 //!   at a fresh slot), but the reload entry point is a later change.
 //!
@@ -38,6 +44,7 @@ const interp_types = @import("interpreter_types.zig");
 const FnEntry = interp_types.FnEntry;
 const Termination = interp_types.Termination;
 const RunError = interp_types.RunError;
+const VmRuntimeState = interp_types.VmRuntimeState;
 const VmInstr = vm_instr.VmInstr;
 const Value = vm_types.Value;
 
@@ -117,6 +124,10 @@ pub const RuntimeModule = struct {
     owned_image: bool,
     /// Constant-slot storage (Runtime §2.2).
     slots: []Value,
+    /// Slot-teardown destruction log (Runtime §2.5): slot indices
+    /// written by `store_member` inside `@init`, in initialization
+    /// order; normal teardown pops it in reverse.
+    slot_log: std.ArrayList(u32) = .empty,
     /// Resolved-member cache, parallel to the artifact's `imports`
     /// table; null = not yet resolved.
     import_cache: []?u64,
@@ -151,15 +162,18 @@ pub const RuntimeModule = struct {
 };
 
 // ---------------------------------------------------------------------------
-// VmCore: the run context the loader produces (docs/interpreter-vm.md §8).
-// The decoded image, loaded modules, root identity — plus the runtime
-// state: the value stack, the register file, the execution position
-// (pc/sp/fp/current_fn), run status, and the dispatch-chain out-of-band
-// state. Execution code reads and mutates it; only the loader functions
-// mutate the publication side.
+// VmLoadedData: the loaded data the loader produces (docs/interpreter-vm.md
+// §8). The decoded image, loaded modules, and root identity — everything
+// execution reads that is not where execution is. The runtime state
+// (the value stack, the register file, the execution position
+// pc/sp/fp/current_fn, run status, and the dispatch-chain out-of-band
+// state) lives in `VmRuntimeState` (interpreter_types.zig), owned
+// separately by `VmCtx`. Execution code reads and (via lazy loading and
+// hot-reload) mutates the loaded data; the loader functions own the
+// publication side.
 // ---------------------------------------------------------------------------
 
-pub const VmCore = struct {
+pub const VmLoadedData = struct {
     /// The append-only decoded instruction image (docs/interpreter-vm.md
     /// §1): one `VmInstr` per artifact instruction, in artifact order,
     /// relocated by each module's `code_base`. Published modules are
@@ -170,7 +184,9 @@ pub const VmCore = struct {
     funcs: std.ArrayList(FnEntry) = .empty,
     /// The loaded runtime modules, in load order. One replaceable slot
     /// per canonical symbol — the hot-reload hook repoints
-    /// `module_by_symbol` at a freshly published version.
+    /// `module_by_symbol` at a freshly published version. Registered
+    /// host modules (no artifact, no Stilla initializer) occupy a slot
+    /// too, marked `is_host`.
     modules: std.ArrayList(*RuntimeModule) = .empty,
     /// Canonical module symbol → current registry index.
     module_by_symbol: std.StringHashMapUnmanaged(u32) = .empty,
@@ -181,43 +197,9 @@ pub const VmCore = struct {
     /// Fallback canonical-metadata image for hand-built test VMs.
     meta_image: ?*llir.LlirProgram = null,
 
-    // --- runtime state (the execution position, register file, run
-    // --- status, and dispatch-chain out-of-band state) — the core is
-    // --- the run context: the image plus where execution is. -----------
-
-    /// The value stack: dynamic cells, hard-capped by `VmCtx.stack_limit`.
-    stack: std.ArrayList(Value) = .empty,
-    /// The directly-indexed fast bank: `zero` at index 0 (kept
-    /// permanently all-zero — writes to `zero` drop), `cond` at index
-    /// 1, `ra` at index 2 (a reserved call-convention hole — never a
-    /// scratch cell), T0–T15 at indexes 3–18 (Instruction Set §3.1.1).
-    /// A register read below `frame_base` is one bounds check and one
-    /// indexed load.
-    fast_regs: [llir.fast_reg_count]Value = .{0} ** llir.fast_reg_count,
-    /// Execution position: the executing pc (an index into `code`), the
-    /// stack pointer, the current frame base, and the executing
-    /// function's registry index.
-    pc: u32 = 0,
-    sp: u32 = 0,
-    fp: u32 = 0,
-    current_fn: llir.FunctionId = 0,
-    running: bool = false,
-    terminated: bool = false,
-    /// Threaded-dispatch out-of-band state (docs/interpreter-vm.md §7):
-    /// handler functions return `void`; terminations, errors, and the
-    /// hook-resume flag travel here instead of through call/return
-    /// values.
-    result: ?Termination = null,
-    pending_err: ?RunError = null,
-    /// Set by `returnFrom` when a drop-hook continuation resumed: the
-    /// `ret` handler stops the chain so the run loop re-drives from the
-    /// restored pc (a resumed hook's drain may have armed a new one).
-    popped_hook_cont: bool = false,
-
-    pub fn deinit(self: *VmCore, allocator: std.mem.Allocator) void {
+    pub fn deinit(self: *VmLoadedData, allocator: std.mem.Allocator) void {
         self.code.deinit(allocator);
         self.funcs.deinit(allocator);
-        self.stack.deinit(allocator);
         for (self.modules.items) |m| {
             if (m.owned_image) {
                 llir_emit_bin.freeImage(allocator, m.image);
@@ -226,6 +208,7 @@ pub const VmCore = struct {
             allocator.free(m.symbol);
             allocator.free(m.slots);
             allocator.free(m.import_cache);
+            m.slot_log.deinit(allocator);
             allocator.destroy(m);
         }
         self.modules.deinit(allocator);
@@ -233,34 +216,34 @@ pub const VmCore = struct {
     }
 
     /// The module at registry index `i`.
-    pub inline fn curMod(self: *const VmCore, i: u32) *const RuntimeModule {
+    pub inline fn curMod(self: *const VmLoadedData, i: u32) *const RuntimeModule {
         return self.modules.items[i];
     }
 
     /// The artifact of the module at registry index `i`.
-    pub inline fn curImage(self: *const VmCore, i: u32) *const llir.LlirProgram {
+    pub inline fn curImage(self: *const VmLoadedData, i: u32) *const llir.LlirProgram {
         return self.modules.items[i].image;
     }
 
     /// The unique function containing `pc` across every loaded module's
     /// relocated code ranges, or null (binary search over the sorted
     /// registry — see `interpreter_types.functionAtPc`).
-    pub fn functionAtPc(self: *const VmCore, pc: u32) ?u32 {
+    pub fn functionAtPc(self: *const VmLoadedData, pc: u32) ?u32 {
         return interp_types.functionAtPc(self.funcs.items, pc);
     }
 };
 
 // ---------------------------------------------------------------------------
-// Loader functions: the machinery that generates and maintains a `VmCore`
-// (docs/interpreter-vm.md §11). Stateless — each function takes the core it
-// operates on (and, for `loadModule`, the provider callback). `VmCtx`
-// (interpreter.zig) owns the `VmCore` and the `ModuleLoader` provider and
-// calls these.
+// Loader functions: the machinery that generates and maintains the
+// `VmLoadedData` (docs/interpreter-vm.md §11). Stateless — each function
+// takes the loaded data it operates on (and, for `loadModule`, the
+// provider callback). `VmCtx` (interpreter.zig) owns the `VmLoadedData`
+// and the `ModuleLoader` provider and calls these.
 // ---------------------------------------------------------------------------
 
 /// Publish a parsed artifact as a runtime module: validate, decode,
 /// relocate, and fill the registry entry — the provisional
-/// `.loading` entry at `core.modules.items.len - 1` (under `symbol`)
+/// `.loading` entry at `loaded.modules.items.len - 1` (under `symbol`)
 /// becomes `.loaded` only after every fallible step succeeded.
 ///
 /// Atomic publication: every fallible step (decode, slot/cache
@@ -269,19 +252,19 @@ pub const VmCore = struct {
 /// pre-reserved capacity). A rejected load therefore never leaves
 /// phantom instructions or function entries in the `code`/`funcs`
 /// arenas (Runtime §2.1: malformed loads publish no runtime state).
-pub fn publishArtifact(core: *VmCore, allocator: std.mem.Allocator, img: *llir.LlirProgram, owned: bool) !void {
-    const mi: u32 = @intCast(core.modules.items.len - 1);
-    const m = core.modules.items[mi];
+pub fn publishArtifact(loaded: *VmLoadedData, allocator: std.mem.Allocator, img: *llir.LlirProgram, owned: bool) !void {
+    const mi: u32 = @intCast(loaded.modules.items.len - 1);
+    const m = loaded.modules.items[mi];
     // A load is rejected when the module would run into the reserved
     // continuation sentinels.
-    const base: u64 = core.code.items.len;
+    const base: u64 = loaded.code.items.len;
     if (base + img.instructions.len >= interp_types.vm_internal_pc) return error.InvalidArtifact;
     // Decode 1:1 into a temporary buffer first: a reserved or
     // unassigned word fails the whole load before anything enters
     // the arena.
     const decoded = allocator.alloc(VmInstr, img.instructions.len) catch return error.OutOfMemory;
     defer allocator.free(decoded);
-    const func_base: u32 = @intCast(core.funcs.items.len);
+    const func_base: u32 = @intCast(loaded.funcs.items.len);
     for (img.instructions, 0..) |w, i| {
         var vi = vm_instr.decodeInstr(w) catch return error.InvalidArtifact;
         // Static `jal ra` targets are load-time constants: resolve
@@ -309,14 +292,14 @@ pub fn publishArtifact(core: *VmCore, allocator: std.mem.Allocator, img: *llir.L
     errdefer allocator.free(cache);
     @memset(cache, null);
     // Reserve capacity up front so the commit below cannot fail.
-    core.code.ensureTotalCapacity(allocator, core.code.items.len + img.instructions.len) catch return error.OutOfMemory;
-    core.funcs.ensureTotalCapacity(allocator, core.funcs.items.len + img.functions.len) catch return error.OutOfMemory;
+    loaded.code.ensureTotalCapacity(allocator, loaded.code.items.len + img.instructions.len) catch return error.OutOfMemory;
+    loaded.funcs.ensureTotalCapacity(allocator, loaded.funcs.items.len + img.functions.len) catch return error.OutOfMemory;
     // Commit: relocation by `code_base` (pc-relative branch/jump/
     // switch offsets stay unchanged).
-    for (decoded) |vi| core.code.appendAssumeCapacity(vi);
+    for (decoded) |vi| loaded.code.appendAssumeCapacity(vi);
     for (img.functions) |fd| {
         const sig = img.signatures[fd.signature_id];
-        core.funcs.appendAssumeCapacity(.{
+        loaded.funcs.appendAssumeCapacity(.{
             .desc = .{
                 .code_start = fd.code_start + @as(u32, @intCast(base)),
                 .code_end = fd.code_end + @as(u32, @intCast(base)),
@@ -342,9 +325,9 @@ pub fn publishArtifact(core: *VmCore, allocator: std.mem.Allocator, img: *llir.L
 
 /// Abort a failed load: remove the provisional entry and free all
 /// temporary state. No partial module ever escapes.
-pub fn abortLoad(core: *VmCore, allocator: std.mem.Allocator) void {
-    const m = core.modules.pop().?;
-    _ = core.module_by_symbol.remove(m.symbol);
+pub fn abortLoad(loaded: *VmLoadedData, allocator: std.mem.Allocator) void {
+    const m = loaded.modules.pop().?;
+    _ = loaded.module_by_symbol.remove(m.symbol);
     // If the module was already published before a later step failed
     // (e.g. the root frame or its eager initializer), roll its decoded
     // code and relocated functions back out of the arenas so no phantom
@@ -353,8 +336,8 @@ pub fn abortLoad(core: *VmCore, allocator: std.mem.Allocator) void {
     // publish no code (their `code_base` is never set), so they are
     // skipped to avoid wiping an earlier module's range.
     if (m.state != .loading and !m.is_host) {
-        core.code.shrinkRetainingCapacity(@intCast(m.code_base));
-        core.funcs.shrinkRetainingCapacity(@intCast(m.func_base));
+        loaded.code.shrinkRetainingCapacity(@intCast(m.code_base));
+        loaded.funcs.shrinkRetainingCapacity(@intCast(m.func_base));
     }
     if (m.owned_image) {
         llir_emit_bin.freeImage(allocator, m.image);
@@ -363,6 +346,7 @@ pub fn abortLoad(core: *VmCore, allocator: std.mem.Allocator) void {
     allocator.free(m.symbol);
     if (m.slots.len != 0) allocator.free(m.slots);
     if (m.import_cache.len != 0) allocator.free(m.import_cache);
+    m.slot_log.deinit(allocator);
     allocator.destroy(m);
 }
 
@@ -374,9 +358,9 @@ pub fn abortLoad(core: *VmCore, allocator: std.mem.Allocator) void {
 /// demand loads its module **eagerly**: the whole fetch → parse →
 /// validate → decode → publish sequence completes before any
 /// instruction of the module can execute.
-pub fn loadModule(core: *VmCore, allocator: std.mem.Allocator, provider: *const ModuleLoader, symbol: []const u8) LoadError!u32 {
-    if (core.module_by_symbol.get(symbol)) |mi| {
-        const st = core.modules.items[mi].state;
+pub fn loadModule(loaded: *VmLoadedData, allocator: std.mem.Allocator, provider: *const ModuleLoader, symbol: []const u8) LoadError!u32 {
+    if (loaded.module_by_symbol.get(symbol)) |mi| {
+        const st = loaded.modules.items[mi].state;
         if (st == .loading) return error.LoaderCycle; // recursive load
         return mi;
     }
@@ -398,18 +382,18 @@ pub fn loadModule(core: *VmCore, allocator: std.mem.Allocator, provider: *const 
         .import_cache = &.{},
         .is_host = false,
     };
-    core.modules.append(allocator, m) catch {
+    loaded.modules.append(allocator, m) catch {
         allocator.free(sym_copy);
         allocator.destroy(m);
         return error.OutOfMemory;
     };
-    core.module_by_symbol.put(allocator, m.symbol, @intCast(core.modules.items.len - 1)) catch {
-        _ = core.modules.pop();
+    loaded.module_by_symbol.put(allocator, m.symbol, @intCast(loaded.modules.items.len - 1)) catch {
+        _ = loaded.modules.pop();
         allocator.free(sym_copy);
         allocator.destroy(m);
         return error.OutOfMemory;
     };
-    errdefer abortLoad(core, allocator);
+    errdefer abortLoad(loaded, allocator);
     // Ask the provider: one provider per symbol.
     var res: LoadResult = .not_found;
     provider.load(provider.userdata, allocator, symbol, &res) catch |e| {
@@ -422,7 +406,7 @@ pub fn loadModule(core: *VmCore, allocator: std.mem.Allocator, provider: *const 
             // no Stilla initializer, no artifact.
             m.state = .loaded;
             m.is_host = true;
-            return @intCast(core.modules.items.len - 1);
+            return @intCast(loaded.modules.items.len - 1);
         },
         .bytes => |bytes| {
             defer allocator.free(bytes);
@@ -449,20 +433,20 @@ pub fn loadModule(core: *VmCore, allocator: std.mem.Allocator, provider: *const 
                 allocator.free(msg);
                 return error.InvalidArtifact;
             }
-            publishArtifact(core, allocator, img, true) catch |e| return switch (e) {
+            publishArtifact(loaded, allocator, img, true) catch |e| return switch (e) {
                 error.OutOfMemory => error.OutOfMemory,
                 else => error.InvalidArtifact,
             };
-            return @intCast(core.modules.items.len - 1);
+            return @intCast(loaded.modules.items.len - 1);
         },
     }
 }
 
 /// Publish a borrowed artifact as the root module (no provider
-/// round-trip) and set the core's root identity. Returns the new
+/// round-trip) and set the loaded data's root identity. Returns the new
 /// module's registry index. The artifact must already be
 /// structurally valid.
-pub fn publishRoot(core: *VmCore, allocator: std.mem.Allocator, image: *llir.LlirProgram) !u32 {
+pub fn publishRoot(loaded: *VmLoadedData, allocator: std.mem.Allocator, image: *llir.LlirProgram) !u32 {
     const m = allocator.create(RuntimeModule) catch return error.OutOfMemory;
     const sym_copy = allocator.dupe(u8, imageSelfSymbol(image)) catch {
         allocator.destroy(m);
@@ -480,22 +464,22 @@ pub fn publishRoot(core: *VmCore, allocator: std.mem.Allocator, image: *llir.Lli
         .import_cache = &.{},
         .is_host = false,
     };
-    core.modules.append(allocator, m) catch {
+    loaded.modules.append(allocator, m) catch {
         allocator.free(sym_copy);
         allocator.destroy(m);
         return error.OutOfMemory;
     };
-    core.module_by_symbol.put(allocator, m.symbol, @intCast(core.modules.items.len - 1)) catch {
-        _ = core.modules.pop();
+    loaded.module_by_symbol.put(allocator, m.symbol, @intCast(loaded.modules.items.len - 1)) catch {
+        _ = loaded.modules.pop();
         allocator.free(sym_copy);
         allocator.destroy(m);
         return error.OutOfMemory;
     };
-    errdefer abortLoad(core, allocator);
-    try publishArtifact(core, allocator, image, false);
-    core.root_symbol = sym_copy;
-    core.root_module = @intCast(core.modules.items.len - 1);
-    return core.root_module;
+    errdefer abortLoad(loaded, allocator);
+    try publishArtifact(loaded, allocator, image, false);
+    loaded.root_symbol = sym_copy;
+    loaded.root_module = @intCast(loaded.modules.items.len - 1);
+    return loaded.root_module;
 }
 
 /// Hot-reload one loaded module: `reloadModule(symbol)` re-fetches,
@@ -508,40 +492,41 @@ pub fn publishRoot(core: *VmCore, allocator: std.mem.Allocator, image: *llir.Lli
 ///
 /// Quiesce contract (docs/interpreter-vm.md §11): reload is only sound
 /// when no running frame references the old image, so it is refused
-/// while the VM is executing — the caller must drain the VM first (run
-/// to termination, or never start it). The superseded module stays
+/// while the VM is executing (`runtime` carries the run status — the
+/// caller must drain the VM first (run to
+/// termination, or never start it). The superseded module stays
 /// resident in the append-only arenas (its code, functions, image, and
-/// symbol are freed exactly once by `VmCore.deinit` when the VM
+/// symbol are freed exactly once by `VmLoadedData.deinit` when the VM
 /// quiesces for good), and every other module's `import_cache` is
 /// cleared so import resolution re-targets the new module on demand.
 /// A module that was never loaded (`ModuleNotFound`) or is mid-load
 /// (`LoaderCycle`) cannot be reloaded.
-pub fn reloadModule(core: *VmCore, allocator: std.mem.Allocator, provider: *const ModuleLoader, symbol: []const u8) LoadError!u32 {
-    if (core.running and !core.terminated) return error.ContextRunning;
-    const old_index = core.module_by_symbol.get(symbol) orelse return error.ModuleNotFound;
-    const old = core.modules.items[old_index];
+pub fn reloadModule(loaded: *VmLoadedData, runtime: *const VmRuntimeState, allocator: std.mem.Allocator, provider: *const ModuleLoader, symbol: []const u8) LoadError!u32 {
+    if (runtime.running and !runtime.terminated) return error.ContextRunning;
+    const old_index = loaded.module_by_symbol.get(symbol) orelse return error.ModuleNotFound;
+    const old = loaded.modules.items[old_index];
     if (old.state == .loading) return error.LoaderCycle;
     // Temporarily unpublish the symbol so `loadModule` does not return
     // the cached module: the fresh load appends a new provisional entry
     // and repoints the map on success. Reserve the restore slot first so
     // the rollback mapping cannot fail even on OutOfMemory.
-    core.module_by_symbol.ensureUnusedCapacity(allocator, 1) catch return error.OutOfMemory;
-    _ = core.module_by_symbol.remove(symbol);
+    loaded.module_by_symbol.ensureUnusedCapacity(allocator, 1) catch return error.OutOfMemory;
+    _ = loaded.module_by_symbol.remove(symbol);
     errdefer {
         // Restore the old mapping on failure (`abortLoad` already removed
         // the provisional entry and its map entry). The old module's own
         // symbol copy is the map key, so the key storage outlives the
         // caller's `symbol` slice.
-        core.module_by_symbol.putAssumeCapacity(old.symbol, old_index);
+        loaded.module_by_symbol.putAssumeCapacity(old.symbol, old_index);
     }
-    const new_index = loadModule(core, allocator, provider, symbol) catch |err| return err;
+    const new_index = loadModule(loaded, allocator, provider, symbol) catch |err| return err;
     // On success the map already points at the new module (keyed by its
     // own symbol copy).
-    if (std.mem.eql(u8, core.root_symbol, symbol)) core.root_module = new_index;
+    if (std.mem.eql(u8, loaded.root_symbol, symbol)) loaded.root_module = new_index;
     // Any module that imported `symbol` cached the old index in its
     // `import_cache`; clear every cache so resolution re-targets the new
     // module on demand.
-    for (core.modules.items) |m| {
+    for (loaded.modules.items) |m| {
         if (m.import_cache.len > 0) @memset(m.import_cache, null);
     }
     return new_index;

@@ -1172,9 +1172,6 @@ pub fn rewriteUses(f: *IrFunc, from: *Value, to: *Value) void {
 
 pub const SlotMeta = struct {
     type_: Type,
-    /// Rank in the module's declaration order (teardown destroys unique
-    /// slots in reverse rank — Runtime §2.5).
-    init_order: u32,
 };
 
 /// One row of a module's member table (air.md §9.6 `ModuleMember`): a

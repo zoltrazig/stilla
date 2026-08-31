@@ -404,7 +404,7 @@ Only `ConstSlot` members are runtime storage. `Function`, `ModuleRef`, and `Host
 Each module has an `@init` function (absent for host modules, which have no Stilla definitions to evaluate). Its job is to evaluate the module's constant members and nothing else:
 
 1. evaluate module constants **strictly in declaration order**, `store_member`-ing each `ConstSlot` member into its slot; module-valued members are never stored — they resolve statically as `ModuleRef` members, and imported modules are instantiated by the runtime in dependency order (per the Stilla Runtime Specification) without `@init` involvement;
-2. record slot metadata (`type_`, `init_order`) so the runtime can destroy module-owned *Unique* constants in **reverse initialization order** during teardown (per the Stilla Runtime Specification) without a separate teardown function.
+2. the runtime records each `store_member`'s slot on the module's runtime record, so it can destroy module-owned *Unique* constants in **reverse initialization order** during teardown (per the Stilla Runtime Specification) without a separate teardown function.
 
 ---
 
@@ -604,8 +604,8 @@ IrFunc     ::= { id: u32, name: Name, params: [Param], ret: Type,
 ## 9.6 Modules and the program
 
 ```text
-SlotMeta     ::= { type: Type, init_order: u32 }   -- teardown destroys unique constant
-                                                    -- slots in reverse rank
+SlotMeta     ::= { type: Type }   -- unique constant slots destroy in reverse store
+                                -- order, via the runtime's per-module teardown log
 ModuleMember ::= { name: Name, type: Type, kind: MemberKind }
 MemberKind   ::= const_slot(u32?) | function(IrFunc?) | module_ref(Spec) | host_binding
 IrModule     ::= { name: Spec, init: IrFunc?, funcs: [IrFunc],

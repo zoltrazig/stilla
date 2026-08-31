@@ -1737,7 +1737,7 @@ SymRange       { start: u32, len: u32 }        // SymbolId → bytes
 ImportDesc     { module_sym: u32, member_sym: u32 }   // member_sym: 0xffffffff for a module-only import
 ExportDesc     { member_sym: u32, kind: ExportKind, ref: u32, public: u32 }
 ExportKind     = const_slot | function | nested_module | host_binding
-ModuleSlot     { type_: TypeId, init_order: u32 }
+ModuleSlot     { type_: TypeId }
 ```
 
 - `ConstRecord` (`const`): `type_` carries the constant's `TypeId` — the

@@ -64,7 +64,7 @@ test "stage-2: the instruction path runs a scalar program with 0 allocations" {
     var failing = testing.FailingAllocator.init(testing.allocator, .{ .fail_index = 0 });
     vm.allocator = failing.allocator();
     defer vm.allocator = testing.allocator;
-    while (!vm.core.terminated) {
+    while (!vm.runtime.terminated) {
         if (try vm_dispatch.step(&vm)) |t| {
             try testing.expectEqual(@as(vm_types.Value, 42), t.normal);
             break;
@@ -563,10 +563,10 @@ test "M7: a malformed dependency load publishes no runtime state" {
     vm.provider = .{ .userdata = &probe, .load = ProbeLoader.load };
     defer vm.deinit();
     try vm.setupRootArtifact(&pr.back, pr.entry);
-    const code_before = vm.core.code.items.len;
-    const funcs_before = vm.core.funcs.items.len;
+    const code_before = vm.loaded.code.items.len;
+    const funcs_before = vm.loaded.funcs.items.len;
     var trapped = false;
-    while (!vm.core.terminated) {
+    while (!vm.runtime.terminated) {
         if (vm_dispatch.step(&vm)) |_| {} else |e| {
             try testing.expect(e == error.InvalidImage);
             trapped = true;
@@ -576,9 +576,9 @@ test "M7: a malformed dependency load publishes no runtime state" {
     try testing.expect(trapped);
     // The failed `dep` load must leave no phantom instructions, function
     // entries, or second published module behind.
-    try testing.expectEqual(code_before, vm.core.code.items.len);
-    try testing.expectEqual(funcs_before, vm.core.funcs.items.len);
-    try testing.expectEqual(@as(usize, 1), vm.core.modules.items.len);
+    try testing.expectEqual(code_before, vm.loaded.code.items.len);
+    try testing.expectEqual(funcs_before, vm.loaded.funcs.items.len);
+    try testing.expectEqual(@as(usize, 1), vm.loaded.modules.items.len);
 }
 
 test "M7: publication is atomic — a reserved instruction publishes no code" {
@@ -608,9 +608,9 @@ test "M7: publication is atomic — a reserved instruction publishes no code" {
     defer vm.deinit();
     try testing.expectError(error.InvalidArtifact, vm.setupRootArtifact(&image, pr.entry));
     // No phantom instructions, function entries, or published module.
-    try testing.expectEqual(@as(usize, 0), vm.core.code.items.len);
-    try testing.expectEqual(@as(usize, 0), vm.core.funcs.items.len);
-    try testing.expectEqual(@as(usize, 0), vm.core.modules.items.len);
+    try testing.expectEqual(@as(usize, 0), vm.loaded.code.items.len);
+    try testing.expectEqual(@as(usize, 0), vm.loaded.funcs.items.len);
+    try testing.expectEqual(@as(usize, 0), vm.loaded.modules.items.len);
 }
 
 /// A `ModuleLoader` that serves a fixed byte stream for one target symbol
@@ -679,16 +679,16 @@ test "M7: a published root aborts roll its code and functions back out" {
     defer vm.deinit();
     try testing.expectError(error.InvalidImage, vm.setupRootArtifact(&pr.back, pr.entry));
     // No phantom instructions, function entries, or published module.
-    try testing.expectEqual(@as(usize, 0), vm.core.code.items.len);
-    try testing.expectEqual(@as(usize, 0), vm.core.funcs.items.len);
-    try testing.expectEqual(@as(usize, 0), vm.core.modules.items.len);
+    try testing.expectEqual(@as(usize, 0), vm.loaded.code.items.len);
+    try testing.expectEqual(@as(usize, 0), vm.loaded.funcs.items.len);
+    try testing.expectEqual(@as(usize, 0), vm.loaded.modules.items.len);
 }
 
 // ---------------------------------------------------------------------------
 // M8 — hot reload (docs/interpreter-vm.md §11): `reloadModule` re-fetches a
 // loaded module's artifact through the provider and atomically repoints
 // `module_by_symbol` at the fresh version, with rollback on failure and the
-// superseded image kept resident for exactly-once teardown by `VmCore.deinit`.
+// superseded image kept resident for exactly-once teardown by `VmLoadedData.deinit`.
 // ---------------------------------------------------------------------------
 
 /// A `ModuleLoader` probe for reload tests: serves `v1` (serialized LLIR
@@ -760,21 +760,21 @@ test "M8: reloadModule swaps a module's artifact and the new behavior runs" {
     defer vm.deinit();
 
     // Load dep v1 into a quiescent VM (no root frame installed).
-    const old_index = try interpreter_loader.loadModule(&vm.core, testing.allocator, &vm.provider, "dep");
-    const old_code_len = vm.core.code.items.len;
-    const old_funcs_len = vm.core.funcs.items.len;
-    const old = vm.core.modules.items[old_index];
+    const old_index = try interpreter_loader.loadModule(&vm.loaded, testing.allocator, &vm.provider, "dep");
+    const old_code_len = vm.loaded.code.items.len;
+    const old_funcs_len = vm.loaded.funcs.items.len;
+    const old = vm.loaded.modules.items[old_index];
     try testing.expectEqualStrings("dep", old.symbol);
 
     // Reload with the changed artifact: atomic repoint, old image retained.
     const new_index = try vm.reloadModule("dep");
     try testing.expect(new_index != old_index);
-    try testing.expectEqual(new_index, vm.core.module_by_symbol.get("dep").?);
-    try testing.expectEqual(@as(usize, 2), vm.core.modules.items.len);
-    try testing.expectEqual(old_code_len + dep_v2.instructions.len, vm.core.code.items.len);
-    try testing.expectEqual(old_funcs_len + dep_v2.functions.len, vm.core.funcs.items.len);
+    try testing.expectEqual(new_index, vm.loaded.module_by_symbol.get("dep").?);
+    try testing.expectEqual(@as(usize, 2), vm.loaded.modules.items.len);
+    try testing.expectEqual(old_code_len + dep_v2.instructions.len, vm.loaded.code.items.len);
+    try testing.expectEqual(old_funcs_len + dep_v2.functions.len, vm.loaded.funcs.items.len);
     // The superseded module is intact at its old index.
-    const old2 = vm.core.modules.items[old_index];
+    const old2 = vm.loaded.modules.items[old_index];
     try testing.expectEqual(old2.state, .loaded);
     try testing.expectEqual(dep_v1.instructions.len, old2.code_len);
 
@@ -810,19 +810,19 @@ test "M8: a failed reload rolls back; the old image is intact and still runs" {
     vm.provider = .{ .userdata = &probe, .load = ReloadLoader.load };
     defer vm.deinit();
 
-    const old_index = try interpreter_loader.loadModule(&vm.core, testing.allocator, &vm.provider, "dep");
-    const code_before = vm.core.code.items.len;
-    const funcs_before = vm.core.funcs.items.len;
+    const old_index = try interpreter_loader.loadModule(&vm.loaded, testing.allocator, &vm.provider, "dep");
+    const code_before = vm.loaded.code.items.len;
+    const funcs_before = vm.loaded.funcs.items.len;
 
     // The reload serves garbage: it must fail with rollback, leaving the
     // old mapping and no phantom state.
     try testing.expectError(error.InvalidArtifact, vm.reloadModule("dep"));
-    try testing.expectEqual(old_index, vm.core.module_by_symbol.get("dep").?);
-    try testing.expectEqual(@as(usize, 1), vm.core.modules.items.len);
-    try testing.expectEqual(code_before, vm.core.code.items.len);
-    try testing.expectEqual(funcs_before, vm.core.funcs.items.len);
+    try testing.expectEqual(old_index, vm.loaded.module_by_symbol.get("dep").?);
+    try testing.expectEqual(@as(usize, 1), vm.loaded.modules.items.len);
+    try testing.expectEqual(code_before, vm.loaded.code.items.len);
+    try testing.expectEqual(funcs_before, vm.loaded.funcs.items.len);
     // The old module's state is untouched.
-    try testing.expectEqual(vm.core.modules.items[old_index].state, .loaded);
+    try testing.expectEqual(vm.loaded.modules.items[old_index].state, .loaded);
 
     // The old image still runs (7, not 42).
     try vm.setupRootArtifact(&pr.back, pr.entry);
@@ -836,7 +836,7 @@ test "M8: a failed reload rolls back; the old image is intact and still runs" {
 
 test "M8: two consecutive reloads keep every superseded image resident" {
     // Three generations of `dep` (7, 42, 100). Each reload appends; the
-    // map points at the latest; `VmCore.deinit` frees each image exactly
+    // map points at the latest; `VmLoadedData.deinit` frees each image exactly
     // once (the `testing.allocator` leak check fails otherwise).
     var g1 = try buildBundleRun(
         testing.allocator,
@@ -877,7 +877,7 @@ test "M8: two consecutive reloads keep every superseded image resident" {
     vm.provider = .{ .userdata = &probe, .load = ReloadLoader.load };
     defer vm.deinit();
 
-    const idx1 = try interpreter_loader.loadModule(&vm.core, testing.allocator, &vm.provider, "dep");
+    const idx1 = try interpreter_loader.loadModule(&vm.loaded, testing.allocator, &vm.provider, "dep");
     // The second reload must serve the third generation, not the second:
     // swap the probe's v2 payload first.
     probe.v2 = b3;
@@ -885,15 +885,15 @@ test "M8: two consecutive reloads keep every superseded image resident" {
     probe.v2 = b3;
     const idx3 = try vm.reloadModule("dep");
     try testing.expect(idx1 != idx2 and idx2 != idx3);
-    try testing.expectEqual(idx3, vm.core.module_by_symbol.get("dep").?);
-    try testing.expectEqual(@as(usize, 3), vm.core.modules.items.len);
-    for (vm.core.modules.items) |m| try testing.expectEqual(m.state, .loaded);
+    try testing.expectEqual(idx3, vm.loaded.module_by_symbol.get("dep").?);
+    try testing.expectEqual(@as(usize, 3), vm.loaded.modules.items.len);
+    for (vm.loaded.modules.items) |m| try testing.expectEqual(m.state, .loaded);
     var expected_code: usize = 0;
-    for (vm.core.modules.items) |m| expected_code += m.code_len;
-    try testing.expectEqual(expected_code, vm.core.code.items.len);
+    for (vm.loaded.modules.items) |m| expected_code += m.code_len;
+    try testing.expectEqual(expected_code, vm.loaded.code.items.len);
     var expected_funcs: usize = 0;
-    for (vm.core.modules.items) |m| expected_funcs += m.image.functions.len;
-    try testing.expectEqual(expected_funcs, vm.core.funcs.items.len);
+    for (vm.loaded.modules.items) |m| expected_funcs += m.image.functions.len;
+    try testing.expectEqual(expected_funcs, vm.loaded.funcs.items.len);
 }
 
 test "M8: reload is refused while the VM is executing (quiesce contract)" {
@@ -943,11 +943,11 @@ test "M8: reloading the root module repoints the root identity" {
     vm.provider = .{ .userdata = &probe, .load = ReloadLoader.load };
     defer vm.deinit();
 
-    const old_root = try interpreter_loader.publishRoot(&vm.core, testing.allocator, &g1.back);
-    try testing.expectEqual(old_root, vm.core.root_module);
+    const old_root = try interpreter_loader.publishRoot(&vm.loaded, testing.allocator, &g1.back);
+    try testing.expectEqual(old_root, vm.loaded.root_module);
     const new_root = try vm.reloadModule(root_symbol);
     try testing.expect(new_root != old_root);
-    try testing.expectEqual(new_root, vm.core.module_by_symbol.get(root_symbol).?);
-    try testing.expectEqual(new_root, vm.core.root_module);
-    try testing.expectEqualStrings(root_symbol, vm.core.root_symbol);
+    try testing.expectEqual(new_root, vm.loaded.module_by_symbol.get(root_symbol).?);
+    try testing.expectEqual(new_root, vm.loaded.root_module);
+    try testing.expectEqualStrings(root_symbol, vm.loaded.root_symbol);
 }

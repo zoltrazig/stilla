@@ -227,17 +227,17 @@ test "frame header: root carries sentinels; normal calls record the caller frame
     defer vm.deinit();
     const entry = try l.fid("main");
     try vm.setupRootArtifact(l.image, entry);
-    while (!vm.core.terminated) {
+    while (!vm.runtime.terminated) {
         if (try vm_dispatch.step(&vm)) |_| break;
     }
 
     // Root header: the fixed three-cell header at [0, 3) — sentinels
     // distinguished by position, never by bits.
-    try testing.expectEqual(interpreter.invalid_pc, @as(u32, @truncate(vm.core.stack.items[0])));
-    try testing.expectEqual(interpreter.invalid_pc, @as(u32, @truncate(vm.core.stack.items[1])));
-    try testing.expectEqual(interpreter.invalid_pc, @as(u32, @truncate(vm.core.stack.items[2])));
-    const root_hdr = interpreter.readHeader(vm.core.stack.items, 3);
-    try testing.expect(root_hdr.check(vm.core.funcs.items, 3));
+    try testing.expectEqual(interpreter.invalid_pc, @as(u32, @truncate(vm.runtime.stack.items[0])));
+    try testing.expectEqual(interpreter.invalid_pc, @as(u32, @truncate(vm.runtime.stack.items[1])));
+    try testing.expectEqual(interpreter.invalid_pc, @as(u32, @truncate(vm.runtime.stack.items[2])));
+    const root_hdr = interpreter.readHeader(vm.runtime.stack.items, 3);
+    try testing.expect(root_hdr.check(vm.loaded.funcs.items, 3));
 
     // The callee frame sits below main's window; its three-cell header
     // records the caller's frame base, function index, and the resume pc
@@ -245,8 +245,8 @@ test "frame header: root carries sentinels; normal calls record the caller frame
     const main_fd = l.image.functions[entry];
     const a: u32 = @max(2, 1); // P=2 params, R=1 result
     const callee_fp = llir.frameEnd(3, main_fd) - a; // the value area aliases the window top
-    const hdr = interpreter.readHeader(vm.core.stack.items, callee_fp);
-    try testing.expect(hdr.check(vm.core.funcs.items, callee_fp));
+    const hdr = interpreter.readHeader(vm.runtime.stack.items, callee_fp);
+    try testing.expect(hdr.check(vm.loaded.funcs.items, callee_fp));
     try testing.expectEqual(@as(u32, 3), hdr.saved_fp); // the caller's frame base (root fp)
     try testing.expectEqual(entry, hdr.saved_fn); // the caller's function registry index
     // The recorded return pc names main's instruction after its call.
@@ -256,7 +256,7 @@ test "frame header: root carries sentinels; normal calls record the caller frame
     // result alias); the caller's `ret` then reads the alias directly
     // (Step 8 coalescing: `main` returns the call result, so the
     // post-call `take` is dropped and the alias is never cleared).
-    try testing.expectEqual(@as(u32, 42), @as(u32, @truncate(vm.core.stack.items[callee_fp])));
+    try testing.expectEqual(@as(u32, 42), @as(u32, @truncate(vm.runtime.stack.items[callee_fp])));
     _ = resumed;
 }
 
@@ -278,28 +278,28 @@ test "frame header: internal-continuation sentinel validates by position" {
     try drainRootInit(&vm, entry);
     // Rewrite the root header into a runtime-initiated call: the
     // continuation machinery (modules/drop hooks) will consume this.
-    vm.core.stack.items[1] = 0; // saved_fn: a valid registry index (root fn)
-    vm.core.stack.items[2] = interpreter.vm_internal_pc;
-    try testing.expect(interpreter.readHeader(vm.core.stack.items, vm.core.fp).check(vm.core.funcs.items, vm.core.fp));
+    vm.runtime.stack.items[1] = 0; // saved_fn: a valid registry index (root fn)
+    vm.runtime.stack.items[2] = interpreter.vm_internal_pc;
+    try testing.expect(interpreter.readHeader(vm.runtime.stack.items, vm.runtime.fp).check(vm.loaded.funcs.items, vm.runtime.fp));
     // A corrupt header — saved_fp not below the current fp — fails validation.
-    vm.core.stack.items[0] = 999999;
-    try testing.expect(!interpreter.readHeader(vm.core.stack.items, vm.core.fp).check(vm.core.funcs.items, vm.core.fp));
+    vm.runtime.stack.items[0] = 999999;
+    try testing.expect(!interpreter.readHeader(vm.runtime.stack.items, vm.runtime.fp).check(vm.loaded.funcs.items, vm.runtime.fp));
     // A saved_fn out of range (with a real return pc) fails validation.
-    vm.core.stack.items[0] = 0;
-    vm.core.stack.items[1] = 999999;
-    try testing.expect(!interpreter.readHeader(vm.core.stack.items, vm.core.fp).check(vm.core.funcs.items, vm.core.fp));
+    vm.runtime.stack.items[0] = 0;
+    vm.runtime.stack.items[1] = 999999;
+    try testing.expect(!interpreter.readHeader(vm.runtime.stack.items, vm.runtime.fp).check(vm.loaded.funcs.items, vm.runtime.fp));
     // A saved_fn whose range does NOT contain the saved_ra fails too —
     // the O(1) position-consistent check is stronger than the old
     // "any function contains the pc" scan. saved_ra is a real pc
     // (leaf's own entry); saved_fn names leaf → consistent, passes.
     const leaf_fd = l.image.functions[entry];
-    vm.core.stack.items[0] = interpreter.invalid_pc;
-    vm.core.stack.items[1] = entry;
-    vm.core.stack.items[2] = leaf_fd.entry_pc;
-    try testing.expect(interpreter.readHeader(vm.core.stack.items, vm.core.fp).check(vm.core.funcs.items, vm.core.fp));
+    vm.runtime.stack.items[0] = interpreter.invalid_pc;
+    vm.runtime.stack.items[1] = entry;
+    vm.runtime.stack.items[2] = leaf_fd.entry_pc;
+    try testing.expect(interpreter.readHeader(vm.runtime.stack.items, vm.runtime.fp).check(vm.loaded.funcs.items, vm.runtime.fp));
     // Out of range with a real return pc fails validation.
-    vm.core.stack.items[1] = 999999;
-    try testing.expect(!interpreter.readHeader(vm.core.stack.items, vm.core.fp).check(vm.core.funcs.items, vm.core.fp));
+    vm.runtime.stack.items[1] = 999999;
+    try testing.expect(!interpreter.readHeader(vm.runtime.stack.items, vm.runtime.fp).check(vm.loaded.funcs.items, vm.runtime.fp));
 }
 
 test "frame header: a corrupted saved_fn traps at return" {
@@ -319,7 +319,7 @@ test "frame header: a corrupted saved_fn traps at return" {
     // Step until the callee's frame is live (pc inside `leaf`), then
     // corrupt its saved_fn cell (the middle of the three header cells).
     var steps: usize = 0;
-    while (steps < 100 and llir.functionAtPc(l.image.functions, vm.core.pc) != try l.fid("leaf")) {
+    while (steps < 100 and llir.functionAtPc(l.image.functions, vm.runtime.pc) != try l.fid("leaf")) {
         var t = try vm_dispatch.step(&vm);
         if (t != null) {
             t.?.deinit(testing.allocator);
@@ -334,7 +334,7 @@ test "frame header: a corrupted saved_fn traps at return" {
     // saved_fn names `leaf` — a real index whose code range does NOT
     // contain the return pc (which lies in main): the position-consistent
     // check fails and the ret traps.
-    vm.core.stack.items[llir.headerBase(callee_fp) + 1] = try l.fid("leaf");
+    vm.runtime.stack.items[llir.headerBase(callee_fp) + 1] = try l.fid("leaf");
     // Run until the callee's `ret` executes (it follows its const).
     var term: ?interpreter.Termination = null;
     var n: usize = 0;
@@ -367,7 +367,7 @@ test "jal: the published operand is the load-resolved callee index" {
     // The root publishes at func_base 0, so the registry index equals
     // the local FunctionId.
     var found = false;
-    for (vm.core.code.items) |vi| {
+    for (vm.loaded.code.items) |vi| {
         if (vi.op != .jal) continue;
         found = true;
         try testing.expectEqual(@as(u32, try l.fid("callee")), vi.operand);
@@ -443,7 +443,7 @@ test "stack limit: deep recursion terminates with a deterministic trap" {
     defer vm.deinit();
     vm.stack_limit = 256;
     try vm.setupRootArtifact(l.image, try l.fid("main"));
-    while (!vm.core.terminated) {
+    while (!vm.runtime.terminated) {
         const t = vm_dispatch.step(&vm) catch |e| switch (e) {
             error.StackOverflow => {
                 std.log.info("stack overflow trapped as expected", .{});
@@ -454,7 +454,7 @@ test "stack limit: deep recursion terminates with a deterministic trap" {
         if (t != null) break;
     }
     // The trap fired before the limit was exceeded unboundedly.
-    try testing.expect(vm.core.stack.items.len <= 512);
+    try testing.expect(vm.runtime.stack.items.len <= 512);
 }
 
 // ---------------------------------------------------------------------------
@@ -518,7 +518,7 @@ test "u64 shifts: counts are taken modulo 64" {
     var vm = interpreter.VmCtx.init(testing.allocator);
     defer vm.deinit();
     try vm.setupRootArtifact(l.image, try l.fid("main"));
-    while (!vm.core.terminated) {
+    while (!vm.runtime.terminated) {
         if (try vm_dispatch.step(&vm)) |_| break;
         try vm.drainDestroyWork();
     }
@@ -609,17 +609,17 @@ test "f64 signed zero: -0.0 is preserved through arithmetic" {
     var vm = interpreter.VmCtx.init(testing.allocator);
     defer vm.deinit();
     try vm.setupRootArtifact(l.image, try l.fid("main"));
-    while (!vm.core.terminated) {
+    while (!vm.runtime.terminated) {
         if (try vm_dispatch.step(&vm)) |_| break;
         try vm.drainDestroyWork();
     }
     // Somewhere in the frame or temp bank lives -0.0: the sign bit is
     // set with an otherwise-zero pattern.
     var saw_negative_zero = false;
-    for (vm.core.stack.items) |c| {
+    for (vm.runtime.stack.items) |c| {
         if (c == 0x8000_0000_0000_0000) saw_negative_zero = true;
     }
-    for (vm.core.fast_regs) |t| {
+    for (vm.runtime.fast_regs) |t| {
         if (t == 0x8000_0000_0000_0000) saw_negative_zero = true;
     }
     try testing.expect(saw_negative_zero);

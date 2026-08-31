@@ -1112,7 +1112,6 @@ test "frontend materializes the module member table with distinct member and slo
     // The storage layout holds exactly the constant member, in slot
     // order — slot 0, distinct from member index 3.
     try testing.expectEqual(@as(usize, 1), app.slots.len);
-    try testing.expectEqual(@as(u32, 0), app.slots[0].init_order);
     try testing.expectEqual(@as(cfg.Type, .{ .primitive = .str }), app.slots[0].type_);
 
     // `load_member` resolves through the module identity of its base

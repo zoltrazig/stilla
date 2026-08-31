@@ -1,14 +1,17 @@
 //! Interpreter VM shared types (docs/interpreter-vm.md): the raw-cell
-//! value model, module identity/loader contract, and the host-resource
-//! and destruction-work records the interpreter and its adapters share.
-//! No `VmCtx` dependency — loaded by `interpreter`, `interpreter_dispatch`,
-//! and `interpreter_host`.
+//! value model, module identity/loader contract, the runtime state
+//! (`VmRuntimeState` — the execution position plus every per-run
+//! execution resource), and the host-resource and destruction-work
+//! records the interpreter and its adapters share.
+//! No `VmCtx` dependency — loaded by `interpreter`, `interpreter_loader`,
+//! `interpreter_dispatch`, and `interpreter_host`.
 
 const std = @import("std");
 const llir = @import("llir.zig");
 const vm_types = @import("vm_types.zig");
 const ObjectHeader = vm_types.ObjectHeader;
 const Value = vm_types.Value;
+const VmHeap = vm_types.VmHeap;
 
 // ---------------------------------------------------------------------------
 // Header sentinels (interpreter-vm.md §7) — payload values only ever
@@ -144,9 +147,10 @@ test "functionAtPc: binary search over tiled ranges" {
 // atomic publication, initialize-once, reverse-order teardown.
 //
 // The load types (`ModuleState`, `ModuleLoader`, `LoadResult`,
-// `LoadError`, `RuntimeModule`, `imageSelfSymbol`) and the run image
-// (`VmCore` and the loader functions) moved to `interpreter_loader.zig`;
-// this file
+// `LoadError`, `RuntimeModule`, `imageSelfSymbol`) and the loaded data
+// (`VmLoadedData` and the loader functions) live in
+// `interpreter_loader.zig`; the execution state (`VmRuntimeState`)
+// stays here. This file
 // keeps the shared records both sides read.
 // ---------------------------------------------------------------------------
 
@@ -184,16 +188,23 @@ pub const RunError = error{ OutOfMemory, InvalidImage, InvalidArtifact, ContextA
 
 /// Result of one host-binding invocation.
 pub const HostResult = vm_types.HostResult;
+
+/// One pending runtime-initiated call (module init / drop hook). The
+/// interrupted frame's identity is not recorded here — the frame header
+/// already carries it (`saved_fp`/`saved_fn`; the interrupted `sp` is the
+/// frame end, `frameEnd(saved_fp, funcs[saved_fn])`, since `sp` equals
+/// `frameEnd(current frame)` at every instruction boundary). The
+/// continuation carries only what the frozen three-cell header cannot:
+/// the resume pc (the header's `saved_ra` is the `vm_internal_pc`
+/// sentinel) and the kind that tells `returnFrom` what to do on return.
 pub const Continuation = struct {
-    caller_fn: u32,
-    caller_sp: u32,
+    /// The pc to resume at: for a module init, the triggering
+    /// instruction (it re-executes now that the module is initialized);
+    /// for a hook, the interrupted instruction (the destruction drain
+    /// resumes from it, possibly arming the next hook).
     resume_pc: u32,
     kind: union(enum) { hook, module: u32 },
 };
-
-/// One initialized module's slot teardown record, appended in
-/// initialization order; normal teardown destroys in reverse.
-pub const SlotRef = struct { mod: u32, slot: u32 };
 
 /// A registered host-owned resource: keyed by the full payload value.
 pub const HostResource = struct {
@@ -213,4 +224,78 @@ pub const DestroyWork = union(enum) {
     free_obj: *ObjectHeader,
     /// Resume a struct's destruction after its user drop hook returns.
     resume_struct: struct { type_id: u32, h: *ObjectHeader },
+};
+
+// ---------------------------------------------------------------------------
+// Runtime state (docs/interpreter-vm.md §4, §8): where execution is. The
+// loader functions leave it untouched except for the `reloadModule` quiesce
+// check (`running`/`terminated`); `interpreter.zig` and
+// `interpreter_dispatch.zig` own it. The loaded data it executes against
+// (`VmLoadedData`) lives in `interpreter_loader.zig`.
+// ---------------------------------------------------------------------------
+
+/// The runtime state: the value stack, the register file, the execution
+/// position, run status, the threaded-dispatch out-of-band state, and
+/// every per-run execution resource (the heap, the host-resource and
+/// string-constant registries, the destruction-work and continuation
+/// stacks, the host argument buffer, and the
+/// panic scratch buffer). Split out of the former `VmCore` (and the
+/// former `VmCtx` per-run fields) so the loaded data (modules, the
+/// decoded image, the function registry, root identity) and everything
+/// that changes with the run are distinct structs owned separately by
+/// `VmCtx` (`runtime` vs `loaded`). `VmRuntimeState.deinit` tears the
+/// whole run down; the loaded data outlives it.
+pub const VmRuntimeState = struct {
+    /// The value stack: dynamic cells, hard-capped by `VmCtx.stack_limit`.
+    stack: std.ArrayList(Value) = .empty,
+    /// The directly-indexed fast bank: `zero` at index 0 (kept
+    /// permanently all-zero — writes to `zero` drop), `cond` at index
+    /// 1, `ra` at index 2 (a reserved call-convention hole — never a
+    /// scratch cell), T0–T15 at indexes 3–18 (Instruction Set §3.1.1).
+    /// A register read below `frame_base` is one bounds check and one
+    /// indexed load.
+    fast_regs: [llir.fast_reg_count]Value = .{0} ** llir.fast_reg_count,
+    /// Execution position: the executing pc (an index into the loaded
+    /// data's `code`), the stack pointer, the current frame base, and
+    /// the executing function's registry index.
+    pc: u32 = 0,
+    sp: u32 = 0,
+    fp: u32 = 0,
+    current_fn: llir.FunctionId = 0,
+    running: bool = false,
+    terminated: bool = false,
+    /// Threaded-dispatch out-of-band state (docs/interpreter-vm.md §7):
+    /// handler functions return `void`; terminations, errors, and the
+    /// hook-resume flag travel here instead of through call/return
+    /// values.
+    result: ?Termination = null,
+    pending_err: ?RunError = null,
+    /// Set by `returnFrom` when a drop-hook continuation resumed: the
+    /// `ret` handler stops the chain so the run loop re-drives from the
+    /// restored pc (a resumed hook's drain may have armed a new one).
+    popped_hook_cont: bool = false,
+
+    /// The interpreter's heap: allocation plus provenance dereference.
+    heap: VmHeap,
+    /// Registered host-owned resources, keyed by full payload value.
+    host_resources: std.AutoHashMapUnmanaged(u64, HostResource) = .empty,
+    /// Context-owned string constants (one reference for the whole run).
+    string_consts: std.AutoHashMapUnmanaged(u64, Value) = .empty,
+    /// Iterative destruction work stack.
+    destroy_work: std.ArrayList(DestroyWork) = .empty,
+    continuations: std.ArrayList(Continuation) = .empty,
+    host_args: std.ArrayList(Value) = .empty,
+    /// Scratch buffer for `panicFmt` messages (borrowed; `sitePrefixed`
+    /// copies into the owned Termination message and this is reused).
+    panic_buf: [1024]u8 = undefined,
+
+    pub fn deinit(self: *VmRuntimeState, allocator: std.mem.Allocator) void {
+        self.heap.deinit();
+        self.host_resources.deinit(allocator);
+        self.string_consts.deinit(allocator);
+        self.destroy_work.deinit(allocator);
+        self.continuations.deinit(allocator);
+        self.host_args.deinit(allocator);
+        self.stack.deinit(allocator);
+    }
 };

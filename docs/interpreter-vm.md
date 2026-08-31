@@ -138,35 +138,71 @@ const VmCtx = struct {
     /// the provider is an execution dependency; the publication
     /// algorithms themselves stay in `interpreter_loader.zig`.
     provider: ModuleLoader = .{},
-    /// The run context (`VmCore`, §8): the decoded instruction arena,
-    /// the function registry, the loaded modules, the root identity,
-    /// AND the runtime state (the value stack, the register file
-    /// `fast_regs`, the execution position `pc`/`sp`/`fp`/`current_fn`,
-    /// run status `running`/`terminated`, and the dispatch-chain
-    /// out-of-band state `result`/`pending_err`/`popped_hook_cont`).
-    /// Execution reads `core` and never loads or publishes itself.
-    core: VmCore = .{},
+    /// The loaded data (`VmLoadedData`, §8): the decoded instruction
+    /// arena, the function registry, the loaded modules, and the root
+    /// identity — what the loader produces and execution reads.
+    loaded: VmLoadedData = .{},
+    /// The runtime state (`VmRuntimeState`, §8): every per-run mutable
+    /// resource — the value stack, the register file `fast_regs`, the
+    /// execution position `pc`/`sp`/`fp`/`current_fn`, run status
+    /// `running`/`terminated`, the dispatch-chain out-of-band state
+    /// `result`/`pending_err`/`popped_hook_cont`, and the execution
+    /// resources below (the heap, the host-resource and
+    /// string-constant registries, the destruction-work and
+    /// continuation stacks, the host argument
+    /// buffer, and the panic scratch buffer) — where execution is. No
+    /// default: the heap requires the allocator at construction.
+    runtime: VmRuntimeState,
     stack_limit: u32 = 1 << 20,
+    /// Host-binding dispatch (phase 6): the default adapter implements
+    /// the required `builtin` interface; an embedding replaces it to
+    /// provide its own host modules.
+    host: HostCall = .{},
+};
+
+/// The runtime state in full: the execution position plus every
+/// per-run resource. `VmCtx.runtime` owns all of these; the loaded
+/// data (`VmLoadedData`) is the only other per-context state.
+const VmRuntimeState = struct {
+    stack: std.ArrayList(Value) = .empty,
+    fast_regs: [llir.fast_reg_count]Value = .{0} ** llir.fast_reg_count,
+    pc: u32 = 0,
+    sp: u32 = 0,
+    fp: u32 = 0,
+    current_fn: llir.FunctionId = 0,
+    running: bool = false,
+    terminated: bool = false,
+    result: ?Termination = null,
+    pending_err: ?RunError = null,
+    popped_hook_cont: bool = false,
 
     heap: VmHeap,
     host_resources: std.AutoHashMapUnmanaged(u64, HostResource) = .empty,
     string_consts: std.AutoHashMapUnmanaged(u64, Value) = .empty,
     destroy_work: std.ArrayList(DestroyWork) = .empty,
     continuations: std.ArrayList(Continuation) = .empty,
-    /// Initialized modules' slot teardown log, in initialization order.
-    initialized_slots: std.ArrayList(SlotRef) = .empty,
     host_args: std.ArrayList(Value) = .empty,
     /// Scratch buffer for `panicFmt` messages.
     panic_buf: [1024]u8 = undefined,
-    host: HostCall = .{},
 };
 ```
 
-The runtime state — the value stack, the fast register bank, the
-`pc`/`sp`/`fp`/`current_fn` execution position, `running`/`terminated`,
-and the threaded-dispatch out-of-band state (`result`/`pending_err`/
-`popped_hook_cont`, §7) — lives in `core` (`VmCore`, §8), so the
-core is the complete run context: the image plus where execution is.
+`VmCtx` is the run context: the fixed configuration (the allocator, the
+module-loading provider, the host adapter, the stack limit) plus the
+loaded data (the program image plus the loaded modules and host-module
+registrations — `VmLoadedData`, §8) plus the runtime state
+(`VmRuntimeState` — the value stack, the fast register bank, the
+`pc`/`sp`/`fp`/`current_fn` execution position,
+`running`/`terminated`, the threaded-dispatch out-of-band state
+(`result`/`pending_err`/`popped_hook_cont`, §7), and every per-run
+resource: the heap, the host-resource and string-constant registries,
+the destruction-work and continuation stacks, the host argument
+buffer, and the panic scratch buffer). The split is by
+kind, not by mutability: lazy loading
+and hot-reload mutate the loaded data during a run (appending modules,
+repointing `module_by_symbol`, flipping initialization state, filling
+slots and caches), while the runtime state is everything that changes
+with the run and dies with it.
 
 `VmCtx` owns the allocator, the module instances and their slots, host
 registrations, the live host-resource registry, and termination data. The
@@ -177,7 +213,7 @@ field: a call writes `ra = pc + 1` into the frame's
 validator artifact and no `ValidatedLlir`: `validate(image)` returns after
 its checks and the interpreter runs the same `image`. The one stream the run
 image owns beyond the artifact is the decoded instruction image —
-`core.code` above, filled once per module at load with exactly one
+`loaded.code` above, filled once per module at load with exactly one
 `VmInstr` per wire record (§7). Nothing is allocated per *executed*
 instruction; decoding is a load-time, not a step-time, cost.
 
@@ -659,6 +695,7 @@ RuntimeModule {
     code_base: u32,             // image base in `code` (vm_pc = code_base + llir_pc)
     code_len: u32, func_base: u32,
     slots: []Value,             // module constant slots (Runtime §2.5)
+    slot_log: ArrayList(u32),   // teardown log: slots written by @init, in store order
     import_cache: []?u64,       // resolved member values, by import-descriptor index
     owned_image: bool, is_host: bool,
 }
@@ -666,8 +703,8 @@ RuntimeModule {
 
 Runtime module loading lives in `interpreter_loader.zig`: the top-level
 loader functions (`loadModule`, `publishRoot`, `publishArtifact`,
-`abortLoad`) generate and maintain a `VmCore`, the run image
-execution reads through `VmCtx.core`. `loadModule(symbol)` publishes at most
+`abortLoad`) generate and maintain a `VmLoadedData`, the loaded data
+execution reads through `VmCtx.loaded`. `loadModule(symbol)` publishes at most
 one module per symbol: the cached module returns immediately; otherwise a
 provisional `.loading` registry
 entry (cycle detection) is created, the `ModuleLoader` provider returns
@@ -686,7 +723,7 @@ complete fetch → parse → validate → decode → publish sequence before any
 instruction of that module can execute. Successful member resolutions cache
 in the importing module's `import_cache` by import-descriptor index.
 
-The `VmCore` is the loader functions' product: the append-only decoded
+The `VmLoadedData` is the loader functions' product: the append-only decoded
 instruction arena, the relocated function registry, and the loaded modules (one
 replaceable slot per canonical symbol). It stays minimal — modules are
 discrete units that can be re-published, which is what the hot-reload entry
@@ -695,10 +732,11 @@ re-decodes a loaded module's artifact through the provider and atomically
 repoints `module_by_symbol` (and the root identity, when the reloaded module
 is the root) at the fresh version, returning its new registry index. Superseded
 versions remain resident in the append-only arenas (live pcs stay valid, and
-`VmCore.deinit` frees every appended image exactly once), and every other
-module's `import_cache` is cleared so import resolution re-targets the new
-module on demand. Quiesce contract: reload is only sound when no running frame
-references the old image, so it is refused while the VM is executing — the
+`VmLoadedData.deinit` frees every appended image exactly once), and every
+other module's `import_cache` is cleared so import resolution re-targets the
+new module on demand. Quiesce contract: reload is only sound when no running frame
+references the old image, so it is refused while the VM is executing (`reloadModule`
+takes both the loaded data and the runtime state for this check) — the
 caller must drain the VM first (run to termination, or never start it). On
 failure the old module is untouched: the provisional load is rolled back
 (`abortLoad`) and the previous mapping restored, so a bad artifact never
@@ -865,7 +903,7 @@ terminated, and completes cleanup before returning; a run cannot be resumed.
 Put value encoding in `vm_types.zig` and the execution implementation in
 `interpreter.zig`; runtime module loading lives in
 `interpreter_loader.zig` — the loader functions build the
-`VmCore` run image the `VmCtx` executes against. `VmCtx` carries the
+`VmLoadedData` the `VmCtx` executes against; `VmCtx` carries the
 `ModuleLoader` provider (runtime `module_ref`/`load_member` can load
 lazily during execution). Re-export the public
 modules from `root.zig`. Binary loading remains a thin caller of `read` and
