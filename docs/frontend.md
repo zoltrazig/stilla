@@ -256,7 +256,10 @@ typed-assembly printer (`printTyped`) renders what Layer A sees.
   `borrow` ops for the runtime.
 - **Module-value runtime model** — `module_ref` values are static; the
   runtime's exact storage representation of module values is open
-  (`src/interpreter_loader.zig`).
+  (`src/interpreter_loader.zig`). The loader also owns the hot-reload
+  entry point `reloadModule` (docs/interpreter-vm.md §11): it re-fetches
+  and atomically repoints one loaded module under a quiesce contract
+  (refused while the VM executes) with rollback on failure.
 - **Host interface discovery** — the mechanism by which a host module's
   statically known interface is described (registry schema) is host-side
   policy; only the frontend's consumption of it is specified here.

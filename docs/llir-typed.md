@@ -1,7 +1,8 @@
 # The typed LLIR lowering layer
 
-*Part of the lowering-boundary overhaul (docs/frontend.md §Value forms,
-docs/optimizer.md §The LLIR lowering boundary). Status: the typed layer
+*Part of the lowering-boundary overhaul (docs/frontend.md §The typed
+lowering boundary, docs/optimizer.md §The LLIR lowering boundary).
+Status: the typed layer
 is wired into the emitter. `Builder.lowerLlir` runs `typed.compute` per
 function (cfg_lower_llir.zig) and the body emitter routes every
 arithmetic op through it: `emitArith` builds a `TypedOp` per op and the
