@@ -355,6 +355,15 @@ pub const cse = cfg_optimize.cse;
 pub const copyProp = cfg_optimize.copyProp;
 pub const deadInstr = cfg_optimize.deadInstr;
 pub const optimize = cfg_optimize.optimize;
+/// Bounded-iteration (fixpoint) optimizer driver (optimizer.md, §8.9):
+/// loop the Pass 7–8 sequence — iteration 1 full (inliner included),
+/// later iterations with the one-shot inliner skipped — until a full
+/// iteration changes nothing or `max_iters` iterations have run;
+/// `optimizeAggressive(…, 1)` is exactly `optimize`. The validator
+/// guards every rewrite inside each iteration.
+pub const optimizeAggressive = cfg_optimize.optimizeAggressive;
+/// The compile-time cap for the aggressive loop (optimizer.md, §8.9).
+pub const aggressive_max_iters = cfg_optimize.aggressive_max_iters;
 /// The air.md §13 AIR validator (frontend.md Pass 6.1), re-exported for
 /// the frontend and tests.
 pub const validate = cfg_optimize.validate;

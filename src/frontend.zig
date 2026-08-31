@@ -15,9 +15,11 @@
 const std = @import("std");
 const ast = @import("ast.zig");
 const cfg = @import("cfg.zig");
+const frontend_cache = @import("frontend_cache.zig");
 const lower = @import("lower.zig");
 const moduleinfo = @import("moduleinfo.zig");
 const checker = @import("passes/checker.zig");
+const cfg_optimize = @import("passes/cfg_optimize.zig");
 const cfg_parse = @import("passes/cfg_parse.zig");
 
 pub const CompileError = error{ OutOfMemory, Diagnostic };
@@ -41,6 +43,13 @@ pub const Options = struct {
     /// `sources.search_dirs`; null in embeddings that supply every module
     /// as in-memory text.
     io: ?std.Io = null,
+    /// Optional per-module frontend cache (PLAN item 3): when set,
+    /// repeated `compile` calls reuse each unchanged module's parsed
+    /// `ast.Program`/`ast.Source` from the cache's arena, skipping
+    /// lex/parse for them (validated by content hash + byte comparison).
+    /// Member tables and all phase-2/3 side tables are still re-derived
+    /// every compile. Null = today's fresh-compile behavior.
+    cache: ?*frontend_cache.FrontendCache = null,
     /// Run the mid-level optimizer (Passes 7–8) over the lowered CFG
     /// before returning (optimizer.md): tail call elimination, constant
     /// folding, CSE, PRE, copy propagation, dead-block elimination, jump
@@ -52,6 +61,17 @@ pub const Options = struct {
     /// embedders and tests keep the faithful raw CFG; the `stilla`
     /// executable enables it. The toggle is code-only (no CLI flag).
     optimize: bool = false,
+    /// When `optimize` is set, run the Pass 7–8 sequence to a bounded
+    /// fixpoint instead of once (optimizer.md, §8.9): iteration 1 is the
+    /// full sequence; each later iteration repeats the same fixed order
+    /// with the one-shot inliner skipped (re-running it on spliced
+    /// recursive callees would grow the CFG without bound), until a full
+    /// iteration changes nothing or the compile-time cap
+    /// `cfg_optimize.aggressive_max_iters` is reached, with the air.md
+    /// §13 validator still guarding every rewrite inside each iteration.
+    /// Code-only toggle (no CLI flag), like `optimize`; the default
+    /// keeps the single ordered pass and its near-linear compile time.
+    optimize_aggressive: bool = false,
 };
 
 /// The frontend's output: the arena, the phase-1 graph, and the phase-3
@@ -109,6 +129,20 @@ fn failed(
     };
 }
 
+/// Run the optimizer (optimizer.md): the default single ordered pass,
+/// or the bounded fixpoint loop when `aggressive` — `optimizeAggressive`
+/// with `max_iters = 1` is exactly the single pass, so the aggressive
+/// mode is a pure extension of the same driver. The validator inside
+/// `optimize`/`optimizeAggressive` guards every rewrite; a violation
+/// surfaces as `error.ValidationFailed` here.
+fn runOptimizer(program: *cfg.IrProgram, allocator: std.mem.Allocator, aggressive: bool) !void {
+    if (aggressive) {
+        try lower.optimizeAggressive(program, allocator, cfg_optimize.aggressive_max_iters);
+    } else {
+        try lower.optimize(program, allocator);
+    }
+}
+
 /// Compile a program: entry module → AIR (frontend.md §1, §2).
 pub fn compile(allocator: std.mem.Allocator, options: Options) CompileError!Compilation {
     // The arena struct is embedded in its own first chunk rather than
@@ -126,6 +160,7 @@ pub fn compile(allocator: std.mem.Allocator, options: Options) CompileError!Comp
     // Phase 1: module graph (load, parse, annotate, sort).
     var builder = moduleinfo.Builder.init(arena_alloc, options.sources);
     builder.io = options.io;
+    builder.cache = options.cache;
     const graph = builder.build(options.entry) catch |err| switch (err) {
         error.Diagnostic, error.Syntax => {
             // Parse and module-graph errors carry diagnostics (the
@@ -171,14 +206,16 @@ pub fn compile(allocator: std.mem.Allocator, options: Options) CompileError!Comp
         }}, graph, builder.loaded_sources.items);
     }
 
-    // Mid-level optimizer (Passes 7–8, optimizer.md): a single ordered
-    // pass over the lowered CFG. The lowering validator already ran inside
-    // lowerProgram (before the sequence); afterwards the optimized program
-    // is re-validated structurally by round-tripping it through the
-    // canonical text form and its parser (air.md §13), so an optimizer bug
-    // surfaces as a diagnostic here rather than at the runtime consumer.
+    // Mid-level optimizer (Passes 7–8, optimizer.md): by default a
+    // single ordered pass over the lowered CFG; `optimize_aggressive`
+    // loops the same sequence to a bounded fixpoint. The lowering
+    // validator already ran inside lowerProgram (before the sequence);
+    // afterwards the optimized program is re-validated structurally by
+    // round-tripping it through the canonical text form and its parser
+    // (air.md §13), so an optimizer bug surfaces as a diagnostic here
+    // rather than at the runtime consumer.
     if (options.optimize) {
-        lower.optimize(&program, arena_alloc) catch |err| switch (err) {
+        runOptimizer(&program, arena_alloc, options.optimize_aggressive) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             error.ValidationFailed => {
                 // The air.md §13 validator rejected the program after a

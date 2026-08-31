@@ -72,8 +72,15 @@ fn preFunc(f: *cfg.IrFunc, allocator: std.mem.Allocator) !void {
 
 /// Dominators as a bit matrix `dom[i][j]` = "block j dominates block i",
 /// computed by the standard iterative fixpoint over predecessors.
+/// Sized by the largest block id, not the block count: a prior optimizer
+/// iteration's dead-block elimination removes blocks without renumbering
+/// (air.md §13 — ids are not part of the text form), so `f.blocks.len`
+/// under-counts live ids; the single-pass driver never re-runs PRE on a
+/// mutated program, but the aggressive fixpoint loop does.
 fn dominators(f: *cfg.IrFunc, allocator: std.mem.Allocator) ![][]bool {
-    const n = f.blocks.len;
+    var max_id: usize = 0;
+    for (f.blocks) |b| max_id = @max(max_id, b.id);
+    const n = max_id + 1;
     const dom = try allocator.alloc([]bool, n);
     errdefer allocator.free(dom);
     for (dom) |*d| d.* = try allocator.alloc(bool, n);

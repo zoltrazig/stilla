@@ -116,6 +116,7 @@ pub const vm_instr = @import("vm_instr.zig");
 pub const cfg = @import("cfg.zig");
 pub const checker = @import("passes/checker.zig");
 pub const frontend = @import("frontend.zig");
+pub const frontend_cache = @import("frontend_cache.zig");
 pub const host = @import("host.zig");
 pub const interpreter = @import("interpreter.zig");
 pub const vm_types = @import("vm_types.zig");
@@ -176,4 +177,5 @@ test {
     _ = @import("frontend_llir_bin_tests.zig");
     _ = @import("frontend_llir_typed_tests.zig");
     _ = @import("ownership_fused_tests.zig");
+    _ = @import("frontend_cache_tests.zig");
 }

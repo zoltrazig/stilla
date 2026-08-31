@@ -89,6 +89,29 @@ predecessor produced errors does not run. `frontend.Compilation` exposes
 the collected list (`diags`, in source order) and a first-diagnostic
 accessor; `main.zig` renders all of them, capped at 32.
 
+**Incremental compilation (optional)** — `Options.cache` accepts an
+optional `FrontendCache` (src/frontend_cache.zig): repeated `compile`
+calls reuse each unchanged module's parsed `ast.Program`/`ast.Source`
+from the cache's arena (keyed by resolved specifier, validated by the
+content hash + byte comparison), so an unchanged program's second
+compile performs zero lex/parse work. The cached artifact is the parse
+only — phase-1 member tables and the phase-2/3 side tables are
+re-derived each compile, keeping `TypeId`s consistent with the fresh
+per-compile interner and making stale-dependency reuse impossible.
+See phase1-module-graph.md, Loading, parsing, and deduplication.
+
+**Aggressive optimization (optional)** — `Options.optimize_aggressive`
+(code-only, like `optimize`) runs the Pass 7–8 sequence to a bounded
+fixpoint instead of once: iteration 1 is the full sequence; each later
+iteration repeats the same fixed order with the one-shot inliner
+skipped (re-running it on spliced recursive callees would grow the CFG
+without bound), until a full iteration changes nothing or the cap
+`cfg_optimize.aggressive_max_iters` is reached, with the §6.1 validator
+guarding every rewrite inside each iteration. The default (`false`)
+keeps the single ordered pass and its near-linear compile time; `true`
+is for embedders who want more aggressive simplification and accept the
+bounded extra cost (optimizer.md, §8.9).
+
 ## 3. Phase documentation
 
 Each phase has its own detailed document:

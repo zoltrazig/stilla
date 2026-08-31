@@ -14,11 +14,18 @@ and before the runtime consumes the AIR. It is wired into
 `frontend.compile` behind `frontend.Options.optimize` (default off;
 the `stilla` executable hardcodes it on; code-only toggle, no CLI flag).
 
-The sequence runs as a **single ordered pass — no iteration to
-fixpoint** — so compile time stays near-linear. The full air.md §13
-validator (`cfg.validate`) runs before the sequence and after every
-rewrite: an optimizer bug that violates structure, SSA, typing, or the
-ownership dataflow is a compile-time diagnostic.
+The sequence runs as a **single ordered pass by default — no
+iteration to fixpoint** — so compile time stays near-linear.
+`frontend.Options.optimize_aggressive` (code-only, like `optimize`)
+requests bounded iteration instead: the sequence loops until a full
+iteration changes nothing (the printed text form is unchanged) or the
+compile-time cap `cfg_optimize.aggressive_max_iters` is reached
+(§8.9). The full air.md §13 validator (`cfg.validate`) runs before the
+sequence and after every rewrite *within each iteration*: an optimizer
+bug that violates structure, SSA, typing, or the ownership dataflow is
+a compile-time diagnostic in either mode. The single-pass default is
+byte-identical in both modes' shared path: `optimizeAggressive` with
+`max_iters = 1` is exactly the default single pass.
 
 Constant folding, arithmetic simplification, common subexpression
 elimination, and copy propagation no longer exist as separate
@@ -214,6 +221,45 @@ two edge copies, and the only producer/consumer of the condition
 register (`cond`, Instruction Set §3.1). Selects do not yet participate
 in CSE (the pass runs after it); merging identical selects across
 blocks is a follow-up.
+
+### 8.9 Optional fixpoint iteration (aggressive mode)
+
+`src/passes/cfg_optimize.zig`'s `optimizeAggressive(program, allocator,
+max_iters)` runs the Pass 7–8 sequence repeatedly — iteration 1 is the
+full fixed order of §8.0–8.6; each later iteration is the same order
+with the one-shot inliner (§8.0) skipped — until a full iteration
+produces a byte-identical printed text form (the fixpoint: no rewrite
+in the sequence changed anything) or `max_iters` iterations have run.
+The inliner is excluded from later iterations by contract: it is
+explicitly one-shot ("the spliced body's own call sites are not
+re-scanned this round, keeping the pass one shot"), and re-running it
+on a spliced *recursive* callee keeps finding new call sites inside
+its own copies — the CFG grows without bound (fib.st measures 26 →
+138 non-phi instructions over four iterations) instead of converging.
+The remaining passes re-run over the same order with the same §6.1
+validator after every rewrite; the loop always terminates at equality
+or the cap. Whether a later iteration shrinks, reshapes (PRE inserts
+edge computations, if-conversion trades phis for selects), or leaves a
+program alone is program-dependent, so "aggressive never worse than
+the default single pass" is enforced empirically over the example
+corpus (below), not by construction. The documented one-shot behaviors
+a later iteration does catch:
+
+- **jump-threading chains** — a chain collapsed in one pass may leave
+  one forwarding block behind (§8.6), which the next iteration's
+  threading removes;
+- **dead blocks from late passes** — a block orphaned by a pass that
+  runs after dead-block elimination (threading, phi simplification) is
+  removed by the next iteration's §8.3.
+
+`frontend.Options.optimize_aggressive` (default off) wires the loop
+into `frontend.compile` with the cap `cfg_optimize.aggressive_max_iters`
+(4). Every iteration is guarded by the §6.1 validator, so the mode
+cannot weaken the optimizer's invariant contract; it only spends more
+compile time. The corpus harness (Optimization harness, below) doubles
+as the never-worse
+check: aggressive output is asserted ≤ the default single-pass output
+on the example corpus (text bytes, non-phi instructions, blocks).
 
 ### 8.7 Drop lowering (post-optimization)
 

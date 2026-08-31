@@ -47,6 +47,20 @@ pub fn compileOpt(entry: []const u8, texts: []const struct { []const u8, []const
     return frontend.compile(testing.allocator, .{ .entry = entry, .sources = sources, .entry_fn = "main", .optimize = true });
 }
 
+/// Compile with the mid-level optimizer on in aggressive (bounded
+/// fixpoint) mode (optimizer.md, §8.9): the Pass 7–8 sequence loops
+/// until a full iteration changes nothing or the cap is reached.
+pub fn compileAggressive(entry: []const u8, texts: []const struct { []const u8, []const u8 }) !frontend.Compilation {
+    var sources = moduleinfo.Sources{};
+    var source_map = std.StringHashMapUnmanaged([]const u8).empty;
+    defer source_map.deinit(testing.allocator);
+    for (texts) |pair| {
+        try source_map.put(testing.allocator, pair[0], pair[1]);
+    }
+    sources.source = source_map;
+    return frontend.compile(testing.allocator, .{ .entry = entry, .sources = sources, .entry_fn = "main", .optimize = true, .optimize_aggressive = true });
+}
+
 /// The printed body of one function (after its `func @…` header, before
 /// the closing brace), or "" when the header is absent.
 pub fn funcBody(out: []const u8, header: []const u8) []const u8 {

@@ -56,6 +56,7 @@
 const std = @import("std");
 const ast = @import("ast.zig");
 const cfg = @import("cfg.zig");
+const frontend_cache = @import("frontend_cache.zig");
 const module_check = @import("passes/module_check.zig");
 const module_load = @import("passes/module_load.zig");
 const module_materialize = @import("passes/module_materialize.zig");
@@ -444,6 +445,11 @@ pub const Builder = struct {
     /// `sources.search_dirs`; null in embeddings that supply every module
     /// as in-memory text.
     io: ?std.Io = null,
+    /// Optional per-module frontend cache (PLAN item 3): when set, the
+    /// load pass reuses each unchanged module's parsed `ast.Program` /
+    /// `ast.Source` (from the cache's arena) instead of re-lexing and
+    /// re-parsing. See frontend_cache.zig.
+    cache: ?*frontend_cache.FrontendCache = null,
     raws: std.ArrayList(*RawModule) = .empty,
     by_specifier: std.StringHashMapUnmanaged(*ModuleInfo) = .{},
     raw_of: std.StringHashMapUnmanaged(*RawModule) = .{},
@@ -466,6 +472,16 @@ pub const Builder = struct {
 
     pub fn init(arena: std.mem.Allocator, sources: Sources) Builder {
         return .{ .arena = arena, .sources = sources, .type_interner = .{ .arena = arena } };
+    }
+
+    /// The next source id for a fresh module. With a frontend cache the
+    /// id comes from the cache's monotonic counter — cached modules keep
+    /// their stored ids, so a fresh id must never collide with one; the
+    /// builder's own creation-order counter applies without a cache.
+    pub fn nextSourceId(self: *Builder) u32 {
+        if (self.cache) |c| return c.allocSourceId();
+        defer self.next_source_id += 1;
+        return self.next_source_id;
     }
 
     /// Run phase 1 from an entry specifier. On failure `diag` holds the

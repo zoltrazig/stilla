@@ -47,6 +47,25 @@ A `ModuleInfo` node is created for the resolved specifier. Modules already
 present in the graph (by resolved specifier) are never re-loaded — this is
 the frontend-side form of "instantiated at most once per context".
 
+**Frontend cache** (PLAN item 3). When `frontend.Options.cache` is set,
+steps 1–2 above are skipped for unchanged modules: `FrontendCache`
+(`src/frontend_cache.zig`) keeps one entry per resolved specifier — the
+source's content hash plus the parsed `ast.Program` and `ast.Source`,
+allocated in the cache's own arena so the compile that reuses them need
+not copy. On a hit (same specifier, same hash, and byte-equal text — the
+hash is a fast filter, the byte comparison is the correctness backstop)
+the module is registered against the cached parse; on a miss the module
+is parsed fresh (into the cache arena) and stored. A failed parse is
+never cached. The cached artifact is the parsed AST only: the member
+tables, module scan, and all phase-2/3 side tables are re-derived every
+compile, so a dependency change can never serve stale member data and
+`TypeId`s stay consistent with the fresh per-compile interner. Source ids
+are stable per specifier (a cached module keeps the id it was first
+stored with; fresh modules draw from the cache's monotonic counter), so
+spans resolve correctly across changing module sets. The cache carries a
+counting hook (`Stats.hits` / `Stats.parses`) for embedders measuring the
+lex/parse share of repeated compiles.
+
 ## Module-level information computed per module
 
 For each module, phase 1 computes and annotates everything that is
@@ -246,8 +265,10 @@ alone.
 
 | File | Role |
 | --- | --- |
-| `src/frontend.zig` | Pipeline driver |
+| `src/frontend.zig` | Pipeline driver; wires `Options.cache` into the builder |
+| `src/frontend_cache.zig` | `FrontendCache`: per-module parsed-AST cache + counting hook |
 | `src/moduleinfo.zig` | `ModuleInfo`, `ModuleGraph`, resolver, cycle detection, topo sort |
+| `src/passes/module_load.zig` | Specifier resolution; cache lookup/store around lex/parse |
 | `src/passes/type_resolve.zig` | Type resolution against module member tables |
 | `src/passes/topo_sort.zig` | Three-color DFS cycle detection and reverse postorder |
 | `src/stdbundle.zig` | Standard-library bundle registration |

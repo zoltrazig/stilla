@@ -21,6 +21,7 @@ const testing = std.testing;
 const helpers = @import("frontend_test_support.zig");
 const compileText = helpers.compileText;
 const compileOpt = helpers.compileOpt;
+const compileAggressive = helpers.compileAggressive;
 const irText = helpers.irText;
 const funcBody = helpers.funcBody;
 // ---------------------------------------------------------------------------
@@ -1819,4 +1820,235 @@ test "Pass 8.5 keeps diamonds with impure arms branchy" {
     defer testing.allocator.free(out);
     try testing.expect(std.mem.indexOf(u8, out, "select ") == null);
     try testing.expect(std.mem.indexOf(u8, out, "br %") != null);
+}
+
+// ---------------------------------------------------------------------------
+// Pass 8.9 — optional optimizer fixpoint iteration (optimizer.md, §8.9)
+// ---------------------------------------------------------------------------
+
+// Compile-time regression guard for the aggressive loop cap: the
+// demonstrating test below needs a second iteration to fire, so a cap
+// below 2 would silently turn aggressive mode into the single pass and
+// the test would stop demonstrating. The check fails at compile time,
+// not at runtime.
+comptime {
+    if (lower.aggressive_max_iters < 2) {
+        @compileError("optimizer aggressive_max_iters must be >= 2 (the demonstrating fixpoint test needs a second iteration)");
+    }
+}
+
+test "Pass 8.3 PRE survives block-id gaps left by a prior dead-block pass" {
+    // The aggressive fixpoint loop re-runs PRE (and every other pass)
+    // over a program whose previous iteration's dead-block elimination
+    // removed blocks without renumbering — block ids are creation
+    // indices, not part of the text form (air.md §13), so a removed
+    // block leaves a gap. PRE's dominator matrix must be sized by the
+    // largest id, not the block count, or the re-run indexes out of
+    // bounds (the single-pass driver never re-runs PRE on a mutated
+    // program, which is why the bug was latent).
+    var t = try cfg_parse.parseText(
+        \\module "app" {
+        \\func @f(a: int32, b: int32, c: bool) -> bool {
+        \\entry:
+        \\    br %2 ? pos : neg
+        \\pos:
+        \\    j join
+        \\neg:
+        \\    %3: bool = lt %0, %1
+        \\    j join
+        \\dead:
+        \\    %4: bool = lt %0, %1
+        \\    j join
+        \\join:
+        \\    %5: bool = lt %0, %1
+        \\    ret %5
+        \\}
+        \\}
+    );
+    defer t.arena.deinit();
+    try lower.deadBlock(&t.program, t.arena.allocator());
+    // `dead` is gone but its id slot is not reclaimed: the survivors are
+    // ids 0, 1, 2, 4 — blocks.len (4) under-counts the live id space.
+    try testing.expectEqual(@as(usize, 4), t.program.funcs[0].blocks.len);
+    try lower.pre(&t.program, t.arena.allocator());
+    // PRE still rewrites the join's partially redundant comparison (only
+    // the `neg` edge computes it) into a join phi.
+    const join = t.program.funcs[0].blocks[t.program.funcs[0].blocks.len - 1];
+    try testing.expect(join.instrs[0].op == .phi);
+}
+
+test "Pass 8.9 a second iteration enables a further simplification" {
+    // The inliner splices make/show/consume into `main`, and the splice
+    // continuations form a forwarding chain. Iteration 1's jump threading
+    // collapses most of it but leaves the chain's tail blocks behind —
+    // the pass's own doc (cfg_jump_thread.zig): "a chain collapsed in one
+    // pass may leave one forwarding block behind, which a later
+    // optimization invocation removes". The aggressive loop's second
+    // iteration re-runs threading and removes both leftovers, so the
+    // edges jump straight to their targets and the blocks are gone. This
+    // is the plan's "tail-call enabling a dead-block removal" family: a
+    // late-pass leftover that only the next iteration's dead/forwarding
+    // elimination reaches.
+    const src = &.{
+        .{
+            "app",
+            \\struct Token { id: int32; }
+            \\fn make(id: int32) -> Token {
+            \\    Token { id: id }
+            \\}
+            \\fn show(borrow t: Token) -> int32 {
+            \\    t.id
+            \\}
+            \\fn consume(move t: Token) -> void {
+            \\    drop t;
+            \\}
+            \\fn main() -> void {
+            \\    let a = make(7);
+            \\    let n = show(a);
+            \\    consume(move a);
+            \\}
+            ,
+        },
+    };
+
+    // Default single pass: the chain tail blocks survive as empty
+    // forwarding blocks (`inline_join_1:` / `inline_join_2:`), each a
+    // bare `j` to the next segment.
+    var def = try compileOpt("app", src);
+    defer def.deinit();
+    const def_text = try irText(&def.program.?);
+    defer testing.allocator.free(def_text);
+    try testing.expect(std.mem.indexOf(u8, def_text, "inline_join_1:\n        j inline_join") != null);
+    try testing.expect(std.mem.indexOf(u8, def_text, "inline_join_2:\n        j entry_2") != null);
+
+    // Aggressive mode (bounded fixpoint): the second iteration's jump
+    // threading removes both leftovers — the forwarding blocks are gone
+    // and the edges go straight to their ultimate targets. The output is
+    // strictly smaller.
+    var agg = try compileAggressive("app", src);
+    defer agg.deinit();
+    const agg_text = try irText(&agg.program.?);
+    defer testing.allocator.free(agg_text);
+    try testing.expect(std.mem.indexOf(u8, agg_text, "inline_join_1:\n        j inline_join") == null);
+    try testing.expect(std.mem.indexOf(u8, agg_text, "inline_join_2:\n        j entry_2") == null);
+    try testing.expect(agg_text.len < def_text.len);
+    try testing.expect(countBlocks(&agg.program.?) < countBlocks(&def.program.?));
+
+    // The aggressive output is stable at the fixpoint: the same raw
+    // program optimized with two iterations and with the full cap
+    // produces the same text, so the loop stopped on "no change", not
+    // on the cap.
+    var agg_cap = try compileText("app", src);
+    defer agg_cap.deinit();
+    var agg_cap_prog = agg_cap.program.?;
+    try lower.optimizeAggressive(&agg_cap_prog, agg_cap.arena.allocator(), lower.aggressive_max_iters);
+    const agg_cap_text = try irText(&agg_cap_prog);
+    defer testing.allocator.free(agg_cap_text);
+    var agg_two = try compileText("app", src);
+    defer agg_two.deinit();
+    var agg_two_prog = agg_two.program.?;
+    try lower.optimizeAggressive(&agg_two_prog, agg_two.arena.allocator(), 2);
+    const agg_two_text = try irText(&agg_two_prog);
+    defer testing.allocator.free(agg_two_text);
+    try testing.expectEqualStrings(agg_two_text, agg_cap_text);
+    // The two-iteration result is the full-pipeline aggressive output
+    // (drop-lowered) modulo the drop expansion itself: the leftover
+    // forwarding blocks are gone in both.
+    try testing.expect(std.mem.indexOf(u8, agg_two_text, "inline_join_1:") == null);
+    try testing.expect(std.mem.indexOf(u8, agg_two_text, "inline_join_2:") == null);
+
+    // Default output is deterministic (two fresh compiles, byte-identical)
+    // and the aggressive output re-parses to itself (air.md §13).
+    var def2 = try compileOpt("app", src);
+    defer def2.deinit();
+    const def2_text = try irText(&def2.program.?);
+    defer testing.allocator.free(def2_text);
+    try testing.expectEqualStrings(def_text, def2_text);
+    var p = cfg.Parser.init(testing.allocator);
+    defer p.deinit();
+    const reparsed = try p.parse(agg_text);
+    const retext = try irText(&reparsed);
+    defer testing.allocator.free(retext);
+    try testing.expectEqualStrings(agg_text, retext);
+}
+
+test "Pass 8.9 aggressive mode is never worse than the default on the corpus" {
+    // The whole existing optimizer corpus (the same examples the Pass 8.9
+    // harness in frontend_cfg_passes_tests.zig measures): aggressive
+    // output must be ≤ the default single-pass output in text bytes,
+    // non-phi instructions, and blocks. The default is byte-identical
+    // across two fresh compiles (determinism guard for "default output
+    // byte-identical to today").
+    const corpus = [_][]const u8{
+        "examples/basics.st",
+        "examples/fib.st",
+        "examples/functions.st",
+        "examples/structs.st",
+        "examples/any.st",
+        "examples/fib_tail_call.st",
+        "examples/minmax.st",
+        "examples/nest.st",
+        "examples/ownership.st",
+        "examples/match.st",
+        "examples/strings.st",
+        "examples/floats.st",
+        "examples/fold.st",
+        "examples/box.st",
+        "examples/maps.st",
+        "examples/arrays.st",
+        "examples/generics.st",
+        "examples/madd.st",
+    };
+    const io = std.testing.io;
+    for (corpus) |path| {
+        const src = try std.Io.Dir.cwd().readFileAlloc(io, path, testing.allocator, .limited(1 << 20));
+        defer testing.allocator.free(src);
+        const texts = &.{.{ "app", src }};
+
+        var def = try compileOpt("app", texts);
+        defer def.deinit();
+        const def_text = try irText(&def.program.?);
+        defer testing.allocator.free(def_text);
+
+        var def2 = try compileOpt("app", texts);
+        defer def2.deinit();
+        const def2_text = try irText(&def2.program.?);
+        defer testing.allocator.free(def2_text);
+        try testing.expectEqualStrings(def_text, def2_text);
+
+        var agg = try compileAggressive("app", texts);
+        defer agg.deinit();
+        const agg_text = try irText(&agg.program.?);
+        defer testing.allocator.free(agg_text);
+        try testing.expect(agg_text.len <= def_text.len);
+        try testing.expect(countNonPhi(&agg.program.?) <= countNonPhi(&def.program.?));
+        try testing.expect(countBlocks(&agg.program.?) <= countBlocks(&def.program.?));
+
+        var p = cfg.Parser.init(testing.allocator);
+        defer p.deinit();
+        const reparsed = try p.parse(agg_text);
+        const retext = try irText(&reparsed);
+        defer testing.allocator.free(retext);
+        try testing.expectEqualStrings(agg_text, retext);
+    }
+}
+
+/// The corpus measurements (optimizer.md, §8.9): instructions, non-phi
+/// instructions, and blocks across the program.
+fn countNonPhi(program: *const cfg.IrProgram) usize {
+    var n: usize = 0;
+    for (program.funcs) |f| {
+        for (f.blocks) |b| {
+            for (b.instrs) |instr| {
+                if (instr.op != .phi) n += 1;
+            }
+        }
+    }
+    return n;
+}
+
+fn countBlocks(program: *const cfg.IrProgram) usize {
+    var n: usize = 0;
+    for (program.funcs) |f| n += f.blocks.len;
+    return n;
 }

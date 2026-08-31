@@ -16,6 +16,7 @@ const std = @import("std");
 const ast = @import("stilla").ast;
 const parser = @import("stilla").parser;
 const stdbundle = @import("stilla").stdbundle;
+const frontend_cache = @import("stilla").frontend_cache;
 const module_scan = @import("module_scan.zig");
 const moduleinfo = @import("stilla").moduleinfo;
 
@@ -48,17 +49,17 @@ pub fn load(self: *Builder, written: []const u8, span: ast.Span) !?*RawModule {
         break :blk null;
     };
     if (self.sources.source.get(spec)) |text| {
-        return try newModule(self, spec, .source, text);
+        return try loadText(self, spec, .source, text);
     } else if (stdbundle_module) |bm| {
         // Only the embedded bundle is intrinsic origin (Intrinsics §2):
         // caller-supplied `standard_library` extensions and source/host
         // modules load with `bundle_origin` unset, even when they spell
         // the same members.
-        const raw = try newModule(self, spec, .standard_library, bm.source);
+        const raw = try loadText(self, spec, .standard_library, bm.source);
         raw.info.bundle_origin = true;
         return raw;
     } else if (self.sources.standard_library.get(spec)) |text| {
-        return try newModule(self, spec, .standard_library, text);
+        return try loadText(self, spec, .standard_library, text);
     } else if (self.sources.host.contains(spec)) {
         return newHostModule(self, spec);
     }
@@ -97,26 +98,75 @@ fn loadFromSearchDirs(self: *Builder, written: []const u8, span: ast.Span) !?*Ra
                 return error.Diagnostic;
             },
         };
-        return try newModule(self, written, .source, text);
+        return try loadText(self, written, .source, text);
     }
     return null;
 }
 
+/// Load one module from its source text through the frontend cache
+/// (PLAN item 3): hash the text and reuse the cached parse when the
+/// specifier's content is unchanged; otherwise parse fresh (into the
+/// cache arena, when a cache is present) and store. The content hash is
+/// a fast validity filter — a hit is confirmed by byte-comparing the
+/// cached text with the current text, so a hash collision can never
+/// serve stale source.
+fn loadText(self: *Builder, specifier: []const u8, kind: ModuleKind, text: []const u8) !*RawModule {
+    const cache = self.cache;
+    const hash = if (cache != null) std.hash.Wyhash.hash(0, text) else 0;
+    if (cache) |c| {
+        if (c.get(specifier)) |entry| {
+            if (entry.hash == hash and std.mem.eql(u8, entry.source.text, text)) {
+                c.stats.hits += 1;
+                return try newCachedModule(self, specifier, kind, entry);
+            }
+        }
+    }
+    const raw = try newModule(self, specifier, kind, text);
+    if (cache) |c| {
+        try c.store(specifier, hash, raw.info.source.?, raw.info.program.?);
+    }
+    return raw;
+}
+
+/// Register a module whose parse was reused from the frontend cache.
+/// The cached source/program live in the cache's arena (which outlives
+/// this compile); the module is registered and scanned exactly like a
+/// fresh parse (the scan is a cheap AST walk re-derived every compile,
+/// so import edges and module values never go stale).
+fn newCachedModule(
+    self: *Builder,
+    specifier: []const u8,
+    kind: ModuleKind,
+    entry: frontend_cache.FrontendCache.Entry,
+) !*RawModule {
+    try self.loaded_sources.append(self.arena, entry.source);
+    return try newRawModule(self, specifier, kind, entry.source, entry.program);
+}
+
 fn newModule(self: *Builder, specifier: []const u8, kind: ModuleKind, text: []const u8) !*RawModule {
-    const source = try self.arena.create(ast.Source);
-    source.* = try ast.Source.init(self.arena, specifier, self.next_source_id, text);
-    self.next_source_id += 1;
+    // Count every parse attempt (successful or not) — a failed parse is
+    // never stored, but the counting hook must still show the work.
+    if (self.cache) |c| c.stats.parses += 1;
+    // With a frontend cache the parse goes into the cache's arena (the
+    // entry outlives this compile), and the text/name are duped so the
+    // cached source is self-contained even if the caller frees theirs;
+    // without one everything lives in the compile arena as before.
+    const cache_alloc = if (self.cache) |c| c.arena.allocator() else self.arena;
+    const source = try cache_alloc.create(ast.Source);
+    const name = if (self.cache != null) try cache_alloc.dupe(u8, specifier) else specifier;
+    const text_copy = if (self.cache != null) try cache_alloc.dupe(u8, text) else text;
+    source.* = try ast.Source.init(cache_alloc, name, self.nextSourceId(), text_copy);
     try self.loaded_sources.append(self.arena, source);
 
-    var p = parser.Parser.init(self.arena);
+    var p = parser.Parser.init(cache_alloc);
     // The parsed program outlives this frame (module info is
     // arena-owned), so allocate it in the arena: storing `&program`
     // (a stack local) would leave every module aliasing the same,
     // later-overwritten AST.
-    const program = try self.arena.create(ast.Program);
+    const program = try cache_alloc.create(ast.Program);
     program.* = p.parse(source) catch |err| {
         // Carry over every diagnostic the lexer/parser collected (the
-        // parser's arena is the builder's, so the list is arena-owned).
+        // parser's arena is the cache's, so the list is arena-owned).
         for (p.diags.items) |d| self.recordDiag(d.span, d.message);
         return err;
     };
