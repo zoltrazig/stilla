@@ -143,6 +143,73 @@ test "host: custom adapter captures print and delegates the rest" {
     try testing.expectEqualStrings("hello host", state.buffer[0..state.len]);
 }
 
+test "host: builtin.print dispatches through the HostCall.print hook" {
+    // The registry path: with no `invoke` overrider, `builtin.print`
+    // resolves through the default registry and calls the embedding's
+    // `HostCall.print` hook — the message bytes plus the hook's own
+    // userdata. The hook is responsible for the line ending (the old
+    // default wrote message + "\n" to stdout; there is no default now).
+    const Capture = struct {
+        buffer: [64]u8 = undefined,
+        len: usize = 0,
+    };
+    var state = Capture{};
+    const Hook = struct {
+        fn invoke(userdata: ?*anyopaque, bytes: []const u8) void {
+            const c: *Capture = @ptrCast(@alignCast(userdata.?));
+            @memcpy(c.buffer[c.len..][0..bytes.len], bytes);
+            c.len += bytes.len;
+            c.buffer[c.len] = '\n';
+            c.len += 1;
+        }
+    };
+    var l = try load(
+        \\const builtin = import("builtin");
+        \\fn main() -> void {
+        \\    builtin.print("one");
+        \\    builtin.print("two");
+        \\}
+    , false);
+    defer l.deinit();
+    var term = try interpreter.runWithEntry(
+        testing.allocator,
+        l.image,
+        try l.fid("main"),
+        .{ .print = .{ .userdata = &state, .invoke = Hook.invoke } },
+    );
+    defer term.deinit(testing.allocator);
+    switch (term) {
+        .normal => {},
+        .panic => |m| {
+            std.log.err("unexpected panic: {s}", .{m});
+            return error.TestUnexpectedResult;
+        },
+    }
+    try testing.expectEqualStrings("one\ntwo\n", state.buffer[0..state.len]);
+}
+
+test "host: builtin.print without a hook traps as not implemented" {
+    // There is no default print implementation: a program that calls
+    // `builtin.print` under the default `HostCall` traps deterministically
+    // with the standard not-implemented message.
+    var l = try load(
+        \\const builtin = import("builtin");
+        \\fn main() -> void {
+        \\    builtin.print("hi");
+        \\}
+    , false);
+    defer l.deinit();
+    var term = try interpreter.runWithEntry(testing.allocator, l.image, try l.fid("main"), .{});
+    defer term.deinit(testing.allocator);
+    switch (term) {
+        .normal => return error.TestUnexpectedResult,
+        .panic => |m| {
+            try testing.expect(std.mem.indexOf(u8, m, "not implemented") != null);
+            try testing.expect(std.mem.indexOf(u8, m, "builtin#print") != null);
+        },
+    }
+}
+
 test "host: box/unbox round-trips ownership through the default adapter" {
     var l = try load(
         \\const builtin = import("builtin");

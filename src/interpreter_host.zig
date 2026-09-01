@@ -13,6 +13,9 @@ const vm_dispatch = @import("interpreter_dispatch.zig");
 const types = @import("interpreter_types.zig");
 const loader_mod = @import("interpreter_loader.zig");
 const host_bind = @import("host_bind.zig");
+const frontend = @import("frontend.zig");
+const moduleinfo = @import("moduleinfo.zig");
+const artifact_bundle = @import("artifact_bundle.zig");
 const VmCtx = interpreter.VmCtx;
 const Value = vm_types.Value;
 const ValueCodec = vm_types.ValueCodec;
@@ -21,12 +24,27 @@ const RunError = types.RunError;
 const HostResult = types.HostResult;
 const ModuleLoader = loader_mod.ModuleLoader;
 
+/// The host-passed `builtin.print` output hook (Runtime §4.1): there is
+/// no runtime default, so a program that calls `print` traps with
+/// `not_implemented` unless the embedding supplies one. The callback
+/// receives the message bytes (without a terminator) and is responsible
+/// for emitting one line — the previous default wrote `message` + `"\n"`
+/// to process stdout, which required an `Io` the runtime does not carry.
+pub const PrintHook = struct {
+    /// Host-side state for the callback (never a Stilla value).
+    userdata: ?*anyopaque = null,
+    invoke: *const fn (userdata: ?*anyopaque, bytes: []const u8) void,
+};
+
 pub const HostCall = struct {
     userdata: ?*anyopaque = null,
     /// The default dispatch: a member-table registry (docs/host-bindings.md
     /// §3.3). The stdlib modules are pre-registered (`defaultHostRegistry`);
     /// an embedding adds modules by providing its own registry.
     registry: host_bind.HostRegistry = defaultHostRegistry,
+    /// The `builtin.print` output hook — no default implementation
+    /// (docs/host-bindings.md §7). Null: `print` traps as not implemented.
+    print: ?PrintHook = null,
     /// Opt-out for dynamic hosts: when set, every syscall dispatches
     /// through this function and `registry` is bypassed — the pre-registry
     /// adapter contract (docs/host-bindings.md §3.3).
@@ -109,6 +127,101 @@ pub fn runWithHostAndLoader(
     loader: ModuleLoader,
 ) RunError!Termination {
     return runSetup(allocator, image, null, host, loader);
+}
+
+// ---------------------------------------------------------------------------
+// Embed path (host-bindings.md §3.4): build once, run many
+// ---------------------------------------------------------------------------
+
+/// One app source module: written specifier → Stilla text.
+pub const SourceText = struct { specifier: []const u8, text: []const u8 };
+
+/// One host module interface: module symbol → `.st` text (typically
+/// `host_bind.interfaceOf(M, "")` plus hand-written lines for members
+/// that derivation cannot render).
+pub const IfaceText = struct { specifier: []const u8, text: []const u8 };
+
+pub const RunProgramOptions = struct {
+    /// Written specifier of the entry module.
+    entry: []const u8,
+    /// App source modules (the entry plus its imports), in memory.
+    sources: []const SourceText,
+    /// The entry function (runtime convention `main`); null = no entry.
+    entry_fn: ?[]const u8 = null,
+    /// Host modules beyond the default registry.
+    modules: []const host_bind.RegisteredModule = &.{},
+    /// Interface text per module symbol.
+    ifaces: []const IfaceText = &.{},
+    /// The `builtin.print` output hook — no default (docs/host-bindings.md §7).
+    print: ?PrintHook = null,
+};
+
+pub const BuildProgramError = frontend.CompileError ||
+    artifact_bundle.ArtifactBundle.Error ||
+    host_bind.MergeError || error{CompileFailed};
+
+/// A built program: the per-module artifacts and the merged host
+/// registry, ready to run (the build stage's output). Arena-shaped —
+/// the bundle and registry are released with the arena passed to
+/// `buildProgram`; there is no deinit of their own.
+pub const BuiltProgram = struct {
+    bundle: artifact_bundle.ArtifactBundle,
+    host: HostCall,
+};
+
+/// The build stage of the embed path (host-bindings.md §3.4):
+/// build the source/interface maps, `frontend.compile`, lower to the
+/// per-module artifacts (`ArtifactBundle.build`), and merge the host
+/// modules into the default registry. The result is run with
+/// `runProgram` — one build, many runs. The layered API
+/// (frontend.compile / ArtifactBundle / runWithHostAndLoader) is
+/// unchanged for embedders who need finer control.
+///
+/// On `error.CompileFailed`, `out_compilation` (when non-null) receives
+/// the failed compilation — `deinit` it after reading `diag`/`diags`
+/// (its arena outlives this call).
+pub fn buildProgram(
+    allocator: std.mem.Allocator,
+    options: RunProgramOptions,
+    out_compilation: ?*frontend.Compilation,
+) BuildProgramError!BuiltProgram {
+    var sources = moduleinfo.Sources{};
+    var source_map = std.StringHashMapUnmanaged([]const u8){};
+    defer source_map.deinit(allocator);
+    for (options.sources) |s| try source_map.put(allocator, s.specifier, s.text);
+    sources.source = source_map;
+    var iface_map = std.StringHashMapUnmanaged([]const u8){};
+    defer iface_map.deinit(allocator);
+    for (options.ifaces) |i| try iface_map.put(allocator, i.specifier, i.text);
+    sources.standard_library = iface_map;
+    var compilation = frontend.compile(allocator, .{
+        .entry = options.entry,
+        .sources = sources,
+        .entry_fn = options.entry_fn,
+    }) catch |err| switch (err) {
+        error.Diagnostic => return error.CompileFailed, // never carries a value; the value path below is the norm
+        error.OutOfMemory => return error.OutOfMemory,
+    };
+    const program = &(compilation.program orelse {
+        if (out_compilation) |oc| oc.* = compilation;
+        return error.CompileFailed;
+    });
+    defer compilation.deinit();
+    const bundle = try artifact_bundle.ArtifactBundle.build(allocator, program);
+    const reg = if (options.modules.len == 0)
+        defaultHostRegistry
+    else
+        try host_bind.mergeRegistry(allocator, defaultHostRegistry, options.modules);
+    return .{ .bundle = bundle, .host = HostCall{ .registry = reg, .print = options.print } };
+}
+
+/// The run stage of the embed path: execute a `BuiltProgram`'s symbolic
+/// entry (the `entry_fn` from the build options). `allocator` is
+/// arena-shaped like the build's; the returned `Termination` is
+/// allocator-owned, as usual. The program can be run again (the VM
+/// decodes the artifacts fresh per run).
+pub fn runProgram(allocator: std.mem.Allocator, built: *BuiltProgram) RunError!Termination {
+    return runWithHostAndLoader(allocator, &built.bundle.root, built.host, built.bundle.loaderHandle());
 }
 
 /// The shared execution loop: step until a termination, then — for a
@@ -206,12 +319,16 @@ pub fn defaultHostCall(vm: *VmCtx, userdata: ?*const anyopaque, module_symbol: [
 
 /// The `builtin` module (Runtime §4): `print`/`assert`/`panic` bind
 /// typed; `str`/`hash` bind typed-args with a hidden ctx (type-dependent
-/// decode); `box`/`unbox` stay raw (move mode).
+/// decode); `box`/`unbox` stay raw (move mode). `print` has no default
+/// implementation: it dispatches to the embedding's `HostCall.print`
+/// hook, trapping `not_implemented` when none is set.
 const builtin_module = struct {
     pub const symbol = "builtin";
 
-    pub fn print(message: host_bind.Str) void {
-        host_module.hostPrint(message.bytes);
+    pub fn print(ctx: *host_bind.HostCtx, message: host_bind.Str) HostResult {
+        const hook = ctx.vm.host.print orelse return .{ .not_implemented = {} };
+        hook.invoke(hook.userdata, message.bytes);
+        return .{ .value = 0 };
     }
     pub fn assert(cond: bool, message: host_bind.Str) HostResult {
         if (cond) return .{ .value = 0 };

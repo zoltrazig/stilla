@@ -43,9 +43,25 @@ For each newly resolved source/standard-library module:
 2. lex and parse to `ast.Program` (existing `lex.zig` / `parser.zig`);
 3. assign the module a `SourceId` in the compilation's source table.
 
-A `ModuleInfo` node is created for the resolved specifier. Modules already
-present in the graph (by resolved specifier) are never re-loaded — this is
-the frontend-side form of "instantiated at most once per context".
+The loader (`src/passes/module_load.zig`, `module_load.load`) performs steps
+1–2, consults the optional frontend cache, registers a `RawModule`, and
+hands it to the scanner (`src/passes/module_scan.zig`, `module_scan.scanModule`),
+which pre-scans module-level consts for `import(...)` initializers and
+module-value aliases and seeds the transitive `module_values` set. A
+`ModuleInfo` node is created for the resolved specifier at materialization
+(`src/passes/module_materialize.zig`; Module-level information, below).
+Modules already present in the graph (by resolved specifier) are never
+re-loaded — this is the frontend-side form of "instantiated at most once
+per context".
+
+The whole of phase 1 is driven by `moduleinfo.Builder.build`: load the
+entry → worklist-expand the transitive closure over import edges (each
+module loaded at most once) → `topo_sort` (cycle detection + reverse
+postorder) → `module_materialize.materialize` for every module in
+topological order → `module_check.checkModule` for every module →
+assemble the `ModuleGraph` (and pre-populate the nominal-type interner,
+air.md §11). The ordered inventory is canonical in
+[passes.md](passes.md).
 
 **Frontend cache** (PLAN item 3). When `frontend.Options.cache` is set,
 steps 1–2 above are skipped for unchanged modules: `FrontendCache`
@@ -114,6 +130,8 @@ statically knowable **without analyzing function bodies**:
   identity (source spoofing).
 
 ### Module-level checks
+
+Implemented in `src/passes/module_check.zig` (`module_check.checkModule`):
 
 - every `import(...)` appears only as a module-level `const` initializer,
   and its argument is a string literal (Core §2.2, §2.4);
@@ -265,12 +283,15 @@ alone.
 
 | File | Role |
 | --- | --- |
-| `src/frontend.zig` | Pipeline driver; wires `Options.cache` into the builder |
+| `src/frontend.zig` | Pipeline driver; wires `Options.cache` / `Options.io` into the builder |
 | `src/frontend_cache.zig` | `FrontendCache`: per-module parsed-AST cache + counting hook |
-| `src/moduleinfo.zig` | `ModuleInfo`, `ModuleGraph`, resolver, cycle detection, topo sort |
-| `src/passes/module_load.zig` | Specifier resolution; cache lookup/store around lex/parse |
-| `src/passes/type_resolve.zig` | Type resolution against module member tables |
+| `src/moduleinfo.zig` | Phase-1 driver `Builder.build` (load → expand → sort → materialize → check → assemble); `ModuleInfo`, `ModuleGraph` |
+| `src/passes/module_load.zig` | Specifier resolution; cache lookup/store around lex/parse; `RawModule` registration and scanner handoff |
+| `src/passes/module_scan.zig` | `RawModule` pre-scan: import and module-value consts, transitive module-value aliases |
 | `src/passes/topo_sort.zig` | Three-color DFS cycle detection and reverse postorder |
+| `src/passes/module_materialize.zig` | Member tables (values, types, using aliases, host bindings, import edges), in topological order |
+| `src/passes/module_check.zig` | Module-level checks (duplicate member names) |
+| `src/passes/type_resolve.zig` | Type resolution against module member tables |
 | `src/stdbundle.zig` | Standard-library bundle registration |
 | `std/bundle.zig` | Embedded standard-library sources |
 

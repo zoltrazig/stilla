@@ -29,6 +29,6 @@ Zig implementation of the Stilla v1.3 runtime and Stilla-to-CFG-AIR compiler. Us
 - `root.zig` is the static-library root; `main.zig` is the compiler CLI. `build.zig` produces both artifacts and owns all test wiring.
 - Drivers are thin: `moduleinfo.zig` builds the module graph, checker passes annotate and validate it, `lower.zig` produces CFG AIR, CFG passes optimize and lower drops, and LLIR passes lower, validate, assemble, and serialize it.
 - Keep one pass per file under `parse/` or `passes/`. Subdirectory passes import top-level modules through `@import("stilla")`, whose self-import is configured in `build.zig`.
-- CFG AIR data structures live in `cfg.zig`; its lexer, parser, printer, optimizer, validator, and lowerings live in pass files. The format and pipeline are documented in `air.md` and `frontend.md`.
+- CFG AIR data structures live in `cfg.zig`; its lexer, parser, printer, optimizer, validator, and lowerings live in pass files. The format and pipeline are documented in `air.md` and `frontend.md`; the canonical pass order is `passes.md`, the system map `architecture.md` (index: `docs/README.md`).
 - Standard-library sources are compile-time embedded. Add each new `*.st` module to both `bundle.zig` and `stdbundle.zig`.
 - The specifications under `spec/` are normative. Where Core and Runtime disagree about execution, Runtime governs.

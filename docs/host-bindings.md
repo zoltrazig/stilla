@@ -1,46 +1,35 @@
 # Host bindings: a typed registry for Zig/C host functions
 
-Design for replacing the single-string-switch host call with a comptime
-registered, signature-checked binding table. This document is the
-authority for the change; the Runtime spec's host contract (Runtime §3)
-and the `.st` interface sources remain normative and unchanged.
+How a Stilla host module — a specifier, a member table, and typed
+functions — is declared and bound to Zig or C. The Runtime spec's host
+contract (Runtime §3) and the `.st` interface sources remain normative.
 
-## 1. Problem: how host calls look today
+## 1. How host calls work
 
 A host binding is a bodyless `fn` declaration in a host module interface
 (`Sources.standard_library` text, e.g. `builtin`'s stdlib sources). The
 frontend lowers calls to it as `syscall` instructions carrying a symbolic
 `(module_symbol, member_symbol)` pair (phase3-cfg-lowering.md, "System
-calls for host bindings"). At runtime `hSyscall` resolves the pair and
-calls the embedding's adapter:
+calls for host bindings"). At runtime `hSyscall` resolves the pair against
+the **registry** — a comptime-built, sorted member table (§3, §4) — and
+calls the member's thunk with a resolved signature view and the decoded
+canonical cells:
 
 ```zig
-self.host.invoke(vm, self.host.userdata, mod_bytes, member, dd.signature_id, args)
+thunk(vm, module_userdata, sig, args)
 ```
 
-where `HostCall.invoke` (interpreter_host.zig) is one hand-written
-dispatch: `defaultHostCall` string-compares `(module_symbol, member)` and
-forwards to a per-module adapter — `hostBuiltin`, `hostMath`,
-`hostString`, `hostList`, `hostArray`, `hostHashMap`. Every adapter then
-hand-decodes `args: []const Value` (cell → `strSliceOf` / `decodeScalar` /
-payload-cell / cons-chain walk), hand-encodes the result (`ValueCodec`,
-`newStr`, `allocObject`, `optionCell`, `wrapOpaque`), and hand-wires
-retain/release and host-resource registration.
+The default path is the registry; a dynamic host (one that cannot
+enumerate members statically) opts out by setting `HostCall.invoke`
+(§4), which bypasses the registry entirely. The registry replaced the
+earlier single-string-switch dispatch `defaultHostCall`, which survives
+only as that opt-out adapter.
 
-Pain points this change targets:
-
-- **One giant switch**: adding a host module means editing core dispatch
-  (`defaultHostCall`) or forking it; there is no per-module registration.
-- **Raw cells everywhere**: the embedding decodes every argument by hand
-  with VM-internal knowledge (`vm.runtime.heap.*`, `ValueCodec`).
-- **`sig` is an artifact-local index, not signature data**; the adapters
-  reach into `image.signatures[sig]` themselves (hostBuiltin,
-  hostString, hostList, hostArray, hostHashMap) and resolve `TypeId`s
-  through the artifact's types table by hand. There is no host-facing
-  signature interface — the embedding receives `sig: u32` and nothing
-  else, and each adapter re-implements the same resolution.
-- **No C-ABI support**: a C function needs handwritten glue (str cells are
-  length-prefixed, not NUL-terminated; canonical floats are `f32`).
+A member thunk never misdecodes: it signature-checks the call (§5)
+before decoding cells into typed parameters (§3), so an interface that
+disagrees with its Zig binding is a deterministic trap at the first call
+rather than corrupted values. C functions bind directly through
+`callconv(.c)` members.
 
 ## 2. Goals and non-goals
 
@@ -55,12 +44,14 @@ Goals:
   adapter logic, unchanged).
 - The stdlib modules migrate onto the same registry mechanism.
 
-Non-goals (explicitly out of scope for this change):
+Non-goals (out of scope today):
 
 - **Frontend interface derivation.** The bodyless `.st` interface text
-  stays the authoritative compile-time contract; `Sources.host` and the
-  documented host-interface registry stay stubbed (frontend.md §2). No
-  checker/LLIR/artifact changes.
+  is the authoritative compile-time contract the frontend checks call
+  sites against (§3.4). For a typed member it can now be *derived* from
+  the binding's Zig signature (`interfaceOf`), so the two can't drift;
+  the `Sources.host` interface *registry* (automatic discovery without
+  the embedder supplying each interface) stays future work (§9).
 - **Ownership transfer through typed glue.** `move` parameters, lists,
   unions, and retained/owned returns do not go through the typed layer;
   they use a raw-shaped member (`raw`, §3.3).
@@ -71,12 +62,9 @@ Non-goals (explicitly out of scope for this change):
 
 ### 3.0 The signature interface
 
-Today there is no host-facing signature interface: `invoke` receives a
-bare `sig: llir.SignatureId` and the adapters resolve it against the
-artifact themselves. The redesign makes the signature first-class — a
-zero-allocation view over the artifact's signature row, resolved once
-by the syscall path and passed to every thunk. Hosts never touch
-`TypeId` tables.
+The signature is a first-class host-facing interface: a zero-allocation
+view over the artifact's signature row, resolved once by the syscall path
+and passed to every thunk. Hosts never touch `TypeId` tables.
 
 ```zig
 /// Host-facing projection of a Stilla type, resolved from a `TypeId`
@@ -111,13 +99,13 @@ pub const HostSignature = struct {
 };
 ```
 
-The syscall path builds the view once per call — bounds-checking
-`dd.signature_id` (today's `defaultHostCall` range check) — so a thunk
+The syscall path builds the view once per call, bounds-checking
+`dd.signature_id` — so a thunk
 can compare before decoding and never misdecode. `matches` rejects any
 difference; a `move`-mode parameter fails immediately (typed glue
 cannot honor ownership transfer).
 
-### 3.1 Value wrappers (host.zig, new)
+### 3.1 Value wrappers (host.zig)
 
 Bare pointers are ambiguous (str vs opaque payload vs hostdata; borrowed
 vs owned), so typed bindings declare parameters with explicit wrappers:
@@ -145,9 +133,11 @@ result itself — e.g. a str/list/union object through the hidden ctx),
 or `HostResult` (typed arguments with a full raw body: allocation,
 panics). A return may be an error union over any of these: the thunk
 turns the error into a deterministic trap (§5). Two hidden leading
-parameters are excluded from the signature: `?*anyopaque` module
-userdata and `*HostCtx` adapter context (the VM plus the current
-call's signature, with the shared adapter helpers). `Opaque`
+parameters are excluded from the signature: `?*anyopaque` or `*T`
+module userdata (a typed `*T` is cast by the generated thunk, so
+members read their state directly — random_demo.zig) and `*HostCtx`
+adapter context (the VM plus the current call's signature, with the
+shared adapter helpers). `Opaque`
 parameters are accepted in v1 (payload pass-through); `BorrowedOpaque`
 and borrowed-`str` parameters are deferred — a `borrow`-mode parameter
 uses a `raw()` handler instead.
@@ -163,7 +153,9 @@ const mydb = struct {
     pub const symbol = "mydb";
     /// Typed member: scalars, host.Str, host.Opaque, host.RawValue, and
     /// C-ABI types ([*:0]const u8, c_int, ...). A leading `?*anyopaque`
-    /// parameter is the module-userdata injection point; a leading
+    /// or `*T` parameter is the module-userdata injection point — a
+    /// typed `*T` is cast by the generated thunk, so members read their
+    /// state directly (random_demo.zig); a leading
     /// `*HostCtx` is the adapter context (the VM + the current call's
     /// signature, plus the shared decode/alloc/trap helpers).
     pub fn query(s: host_bind.Str) i32 { return @intCast(s.bytes.len); }
@@ -222,7 +214,7 @@ pub const HostRegistry = struct {
 };
 
 /// Hand-written handler for ownership-sensitive members. `raw` gets the
-/// full `sig` + `args` surface, exactly like today's adapters.
+/// full `sig` + `args` surface.
 pub fn raw(comptime name: []const u8, comptime f: anytype) Binding;
 ```
 
@@ -237,10 +229,97 @@ const registry = HostRegistry{ .modules = &.{ .{ .desc = &mydb_desc, .userdata =
 `expected` signature); a fn with the raw thunk shape gets `expected =
 null` (raw, no check).
 
+### 3.4 The worked example: random_demo.zig
+
+The runnable embedding example is `examples/embed/random_demo.zig` —
+`zig build embed` compiles it, runs it, and prints the round trip it
+observed. It is the demonstration of everything in §3, so the excerpt
+below is deliberately thin; the file is the single source of truth.
+
+The embedder gives Stilla a `random` host module (a plain struct: `pub
+const symbol` names the module, every `pub fn` is a member binding). A
+leading `*Rng` parameter is the module's injected state — the generated
+thunk comptime-casts the registered userdata, so members read `Rng`
+directly, never a Stilla parameter. `register` derives the sorted,
+signature-checked member table; `interfaceOf` renders the `.st` text the
+frontend checks call sites against, so the Zig signatures and the
+interface can't drift:
+
+```zig
+const random = struct {
+    pub const symbol = "random";
+    pub fn next(rng: *Rng) i32 { /* ... */ }
+    pub fn int(rng: *Rng, max: i32) i32 { /* ... */ }
+    pub fn seed(rng: *Rng, s: i32) void { rng.prng = ...; }
+    pub fn time(rng: *Rng) i32 { /* reads the host clock through std.Io */ }
+};
+const random_desc: host_bind.ModuleDesc = host_bind.register(random);
+const random_iface = host_bind.interfaceOf(random, "");
+// fn next() -> int32;  fn int(arg0: int32) -> int32;
+// fn seed(arg0: int32) -> void;  fn time() -> int32;
+```
+
+(Parameter names render as `arg0`, `arg1`, … — call sites are
+positional. Members whose concrete Stilla signature can't be derived —
+`raw()` thunks, `RawValue`/`HostResult` returns, borrow/`move` modes —
+are skipped; pass their lines as `interfaceOf`'s second argument,
+appended verbatim.)
+
+The Stilla side imports it as an ordinary module; each call lowers to a
+`syscall` dispatched through the registry:
+
+```stilla
+const random = import("random");
+const builtin = import("builtin");
+fn main() -> int32 {
+    random.seed(random.time());
+    let a = random.next();
+    let b = random.int(6);
+    builtin.print("draw b");
+    builtin.print(builtin.str(b));
+    a + b
+}
+```
+
+`builtin.print` has no runtime default (§7) — the embedder supplies the
+output sink as a `PrintHook` with its own userdata and an `invoke`
+callback; the CLI `--run` mode passes one that writes to stdout.
+
+Compile, lower, and run through the two-stage embed path (`buildProgram`
+builds the source/interface maps, compiles, lowers, and merges the
+module into the default host registry; `runProgram` executes the built
+program, so one build runs many times):
+
+```zig
+var failed: stilla.frontend.Compilation = undefined;
+var built = stilla.interpreter.buildProgram(arena, .{
+    .entry = "app",
+    .sources = &.{.{ .specifier = "app", .text = APP }},
+    .ifaces = &.{.{ .specifier = "random", .text = random_iface }},
+    .modules = &.{.{ .desc = &random_desc, .userdata = &rng }},
+    .entry_fn = "main",
+    .print = .{ .userdata = &print_sink, .invoke = appPrint },
+}, &failed) catch |err| switch (err) {
+    error.CompileFailed => {
+        // render failed.diag.message, then
+        return error.CompileFailed;
+    },
+    else => return err,
+};
+const term = try stilla.interpreter.runProgram(arena, &built);
+```
+
+The example then verifies the round trip: the run's `Termination` switch
+checks that `main`'s return equals the draws the host observed. The
+layered API this wraps (`frontend.compile`, `ArtifactBundle.build`,
+`runWithHostAndLoader` — interpreter-vm.md §11) stays available for
+embedders who need finer control; on a compile failure the failed
+compilation comes back through the `&failed` out-param for its
+diagnostic.
+
 ## 4. Dispatch (interpreter_host.zig, interpreter_dispatch.zig)
 
-`HostCall.invoke` (the single-string-switch adapter) becomes an
-**opt-out**: when set, every syscall dispatches through it and the
+`HostCall.invoke` is an **opt-out**: when set, every syscall dispatches through it and the
 registry is bypassed (the pre-registry adapter contract, kept for
 dynamic hosts and existing embedders). The default path is the
 registry:
@@ -294,11 +373,12 @@ error name otherwise.
 
 ## 6. HostScratch: no per-call allocation
 
-`VmRuntimeState.host_args` becomes
+Per-call scratch (argument staging and C-string buffers) is a reusable
+`HostScratch` on the runtime state:
 
 ```zig
 pub const HostScratch = struct {
-    /// Argument staging (today's `host_args`): one canonical cell per
+    /// Argument staging: one canonical cell per
     /// parameter, gathered by hSyscall.
     values: std.ArrayList(Value) = .empty,
     /// C-string staging: reusable NUL-terminated byte buffer.
@@ -312,52 +392,47 @@ computes the total length of all `[*:0]const u8` parameters, resizes
 `bytes` once, writes each string with its NUL terminator (stable
 pointers — fill after the single resize), calls `f`, and discards. An
 embedded NUL in a Stilla string traps deterministically (it cannot be
-represented in a `[*:0]const u8`). The existing root-frame pre-size of
-`host_args` (interpreter.zig `installRootFrame`) carries over to
-`HostScratch.values`; `bytes` grows on demand like any scratch buffer.
+represented in a `[*:0]const u8`). The root frame pre-sizes
+`HostScratch.values` (interpreter.zig `installRootFrame`); `bytes` grows on demand like any scratch buffer.
 
 C-ABI members return **scalar or void only**. `char *` returns are
 excluded: ownership/freeing is ambiguous at the boundary.
 
-## 7. Stdlib migration (staged — done)
+## 7. The standard-library modules
 
 One mechanism, several member kinds: generated typed thunks for members
 whose Stilla signature is expressible, raw-shaped fns for
-ownership-sensitive ones. Order:
+ownership-sensitive ones. The six stdlib modules (`builtin`, `math`,
+`string`, `list`, `array`, `hashmap`) are plain module structs
+registered through `host_bind.register` (interpreter_host.zig); 47 of the
+60 members are typed bindings with signature checks:
 
-1. **Registered as-is**: every `builtin`/`math`/`string`/`list`/`array`/
-   `hashmap` member was a registry `Binding` via `raw()` trampolines
-   around the existing adapters (a `moduleFromFields` helper deriving
-   the member tables from the handler structs) — behavior identical,
-   zero rewrites.
-2. **Parity**: the interpreter_host_tests suite passed against the
-   registry before any adapter was touched.
-3. **Converted** *(done)*: the six modules are module structs
-   registered through `host_bind.register` (interpreter_host.zig).
-   47 of the 60 members are typed bindings with signature checks:
-   - plain typed — all 20 `math` functions (inlined `std.math`),
-     `builtin.print`/`assert`/`panic`, the four pure `string`
-     predicates, `string.len` (error return);
-   - hidden `*HostCtx` + error return — the `string` producers
-     (`concat`/`substring`/`trim`/`lower`/`upper`/`replace`/`repeat`,
-     returning `StringErr!RawValue` with the result str allocated
-     directly);
-   - hidden `*HostCtx` + `HostResult` body (typed arguments, raw
-     body) — `builtin.str`/`hash`, `string`
-     `index_of`/`split`/`to_utf8`/`to_codepoints`, `list.range`;
-   - the rest bind typed-args through `RawValue`/wildcard params
-     (`builtin.str`/`hash`).
-   The per-module member dispatch switches, the dispatch enums
-   (`MathMember`/`StringMember`/`ArrayMember`/`HashMapMember`), and
-   `moduleFromFields` are deleted.
-4. **Handlers collapse** *(done)*: the host.zig handler structs
-   (`DefaultHostCall`/`MathHostCall`/`StringHostCall`/`ListHostCall`)
-   are gone — the implementations are plain `pub` fns in host.zig
-   (`hostPrint`..`hostHash`, `stringLen`..`stringFromCodepoints`,
-   `listLen`/`listRange`; userdata params dropped) that the members
-   call. `defaultHostCall` survives as the opt-out adapter: a registry
-   dispatch used by dynamic-host `invoke` overriders to delegate
-   non-intercepted members.
+- plain typed — all 20 `math` functions (inlined `std.math`),
+  `builtin.assert`/`panic`, the four pure `string`
+  predicates, `string.len` (error return);
+- hidden `*HostCtx` + error return — the `string` producers
+  (`concat`/`substring`/`trim`/`lower`/`upper`/`replace`/`repeat`,
+  returning `StringErr!RawValue` with the result str allocated
+  directly);
+- hidden `*HostCtx` + `HostResult` body (typed arguments, raw
+  body) — `builtin.print`/`str`/`hash`, `string`
+  `index_of`/`split`/`to_utf8`/`to_codepoints`, `list.range`;
+- the rest bind typed-args through `RawValue`/wildcard params
+  (`builtin.str`/`hash`).
+
+The member implementations are plain `pub` fns in host.zig
+(`hostStr`..`hostHash`, `stringLen`..`stringFromCodepoints`,
+`listLen`/`listRange`); `defaultHostCall` survives only as the opt-out
+adapter for dynamic hosts (§4).
+
+`builtin.print` is a host hook, not a default implementation: it
+dispatches to the `HostCall.print` hook (`PrintHook` — a callback plus
+its own userdata); without one, `print` resolves through the registry to
+a `not_implemented` trap. The runtime has no `std.Io` output dependency —
+the embedding decides where program output goes. The CLI `--run` mode
+passes a hook that writes message + newline to its `Io`'s stdout; the
+embed path (`RunProgramOptions.print`) passes the hook through
+`buildProgram`.
 
 **Still raw** (13 members, by design, §9): `list.len` (borrow mode),
 all of `array` (borrow/move + opaque) and `hashmap` (borrow/move +
@@ -366,7 +441,7 @@ list parameters (`join`, `from_utf8`, `from_codepoints`).
 
 ## 8. Tests
 
-Staged in host_bind_tests.zig (new) and the existing suites:
+In host_bind_tests.zig and the existing suites:
 
 1. typed Zig scalar + `Str` bindings round-trip values;
 2. arity/type/mode mismatches trap deterministically (signature check);
@@ -381,8 +456,10 @@ Staged in host_bind_tests.zig (new) and the existing suites:
 
 ## 9. Out of scope / future
 
-- Frontend interface derivation from Zig (`Sources.host`, the host
-  interface registry) — separate change.
+- `Sources.host` and the host interface **registry** — automatic
+  discovery of each host module's interface without the embedder
+  supplying it (§3.4 uses `interfaceOf` per module; the registry stays
+  future work).
 - Typed ownership: `move`/`borrow` transfer, list/union/opaque
   **parameters**, retained returns through the typed layer — stays on
   `raw()` (the mode check rejects them deterministically). List/union

@@ -14,7 +14,7 @@
 //! described as execution of Stilla `drop` hooks (Runtime §3.4).
 //!
 //! The stdlib host implementations live here as plain functions
-//! (`hostPrint`..`hostHash`, `stringLen`..`stringFromCodepoints`,
+//! (`hostStr`..`hostHash`, `stringLen`..`stringFromCodepoints`,
 //! `listLen`/`listRange`) — the module structs in interpreter_host.zig
 //! bind them (docs/host-bindings.md §7). Handlers receive only verified
 //! plain data and never touch the VM; the binding layer does the heap
@@ -27,12 +27,10 @@ const std = @import("std");
 const vm_types = @import("vm_types.zig");
 const unicode_case = @import("unicode_case.zig");
 
-/// `builtin.print` — Runtime §4.1: write one line to the host's output.
-pub fn hostPrint(message: []const u8) void {
-    std.Io.File.writeStreamingAll(std.Io.File.stdout(), std.Options.debug_io, message) catch return;
-    std.Io.File.writeStreamingAll(std.Io.File.stdout(), std.Options.debug_io, "\n") catch {};
-}
-
+/// `builtin.print` — Runtime §4.1 — has no runtime implementation: it
+/// dispatches to the embedding's `HostCall.print` hook (host-bindings.md
+/// §7). The other `builtin` members:
+///
 /// `builtin.str` — Runtime §4.2: canonical decimal form of the decoded
 /// scalar; a str view is returned unchanged.
 pub fn hostStr(value: vm_types.ScalarView, buf: []u8) anyerror![]const u8 {

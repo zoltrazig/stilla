@@ -207,6 +207,25 @@ pub fn build(b: *std.Build) void {
     bad_src_probe.expectStdErrMatch("error:");
     test_step.dependOn(&bad_src_probe.step);
 
+    // `zig build embed`: the host-embedding example (README, "Defining
+    // host functions") — the embedder defines a `random` host module and
+    // a Stilla program calls it. The example self-verifies (a round-trip
+    // mismatch returns nonzero), so it also runs under `zig build test`.
+    const embed_module = b.createModule(.{
+        .root_source_file = b.path("examples/embed/random_demo.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    embed_module.addImport("stilla", mod);
+    const embed_exe = b.addExecutable(.{
+        .name = "embed-random",
+        .root_module = embed_module,
+    });
+    const embed_run = b.addRunArtifact(embed_exe);
+    const embed_step = b.step("embed", "Run the host-embedding example (a `random` host module)");
+    embed_step.dependOn(&embed_run.step);
+    test_step.dependOn(&embed_run.step);
+
     // ------------------------------------------------------------------
     // `zig build examples`: compile every examples/*.st into three output
     // artifacts — CFG AIR text, LLIR assembly, and LLIR binary — under

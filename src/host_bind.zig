@@ -299,6 +299,36 @@ pub const HostRegistry = struct {
     }
 };
 
+fn lessBySymbol(_: void, a: RegisteredModule, b: RegisteredModule) bool {
+    return std.mem.order(u8, a.desc.symbol, b.desc.symbol) == .lt;
+}
+
+/// Merge errors: `DuplicateModule` when two modules share a symbol.
+pub const MergeError = error{ OutOfMemory, DuplicateModule };
+
+/// Merge `extra` modules into `base` (e.g. `defaultHostRegistry`) into
+/// a fresh array sorted by symbol — the binary-search invariant the
+/// lookup relies on, enforced here instead of by the embedder. `extra`
+/// may be unsorted; duplicate symbols (an embedder shadowing a stdlib
+/// module, or two extras with the same symbol) are an error rather than
+/// an ambiguous binary-search hit. The returned registry's `modules`
+/// slice is allocated from `allocator`; the caller owns it.
+pub fn mergeRegistry(
+    allocator: std.mem.Allocator,
+    base: HostRegistry,
+    extra: []const RegisteredModule,
+) MergeError!HostRegistry {
+    const modules = try allocator.alloc(RegisteredModule, base.modules.len + extra.len);
+    errdefer allocator.free(modules);
+    @memcpy(modules[0..base.modules.len], base.modules);
+    @memcpy(modules[base.modules.len..], extra);
+    std.sort.insertion(RegisteredModule, modules, {}, lessBySymbol);
+    for (modules[1..], 0..) |m, i| {
+        if (std.mem.eql(u8, modules[i].desc.symbol, m.desc.symbol)) return error.DuplicateModule;
+    }
+    return .{ .modules = modules };
+}
+
 fn lookupMember(module: RegisteredModule, member: []const u8) ?Lookup {
     const members = module.desc.members;
     var lo: usize = 0;
@@ -334,8 +364,10 @@ pub fn raw(comptime name: []const u8, comptime thunk: anytype) Binding {
 /// registers raw (no signature check); any other member is a typed
 /// binding — its parameters are the Stilla signature (scalars, `Str`,
 /// `Opaque("...")`, `RawValue`, `[*:0]const u8` for C functions, and an
-/// optional hidden leading parameter: `?*anyopaque` module userdata or
-/// `*HostCtx` adapter context). Returns may be scalars, `void`, `Str`
+/// optional hidden leading parameter: `?*anyopaque` or `*T` module
+/// userdata (the thunk casts the registered userdata to `*T` — no
+/// per-member `@ptrCast` boilerplate) or `*HostCtx` adapter context).
+/// Returns may be scalars, `void`, `Str`
 /// (owned), `RawValue`, an error union over those (trapping with the
 /// deterministic spec message, docs/host-bindings.md §5), or `HostResult`
 /// verbatim (typed arguments, full raw body). Evaluate at comptime (a
@@ -367,6 +399,125 @@ pub fn register(comptime M: type) ModuleDesc {
         break :blk sortBindings(arr);
     };
     return .{ .symbol = @field(M, "symbol"), .members = &members };
+}
+
+// ---------------------------------------------------------------------------
+// Comptime interface derivation (interfaceOf): the Stilla `.st` text for
+// a module struct, rendered from the same type mapping the registry uses
+// — so the embedder's Zig signatures and the frontend's interface can't
+// drift. Members that can't be derived (raw thunks, `RawValue`/`HostResult`
+// returns — the concrete Stilla type lives only in the hand-written
+// interface) are skipped; pass their lines as `extra`.
+// ---------------------------------------------------------------------------
+
+/// The Stilla type name for a binding type, or null when the type has no
+/// derivable Stilla spelling.
+fn hostTypeName(comptime T: type) ?[]const u8 {
+    return switch (T) {
+        i32, c_int => "int32",
+        u32, c_uint => "uint32",
+        i64 => "int64",
+        u64 => "uint64",
+        f32 => "float32",
+        f64 => "float64",
+        bool => "bool",
+        Str, [*:0]const u8 => "str",
+        else => null,
+    };
+}
+
+/// One member as `fn <name>(<p0: t0, ...>) -> <ret>;\n`, or null when
+/// the member's Stilla signature is not derivable from Zig (a
+/// `RawValue`/`HostResult` return, or a parameter type with no Stilla
+/// spelling) — skipped by `interfaceOf`, covered by its `extra` text.
+fn renderMember(comptime name: []const u8, comptime f: anytype) ?[]const u8 {
+    const hid = comptime hiddenKind(f) != .none;
+    const ret = comptime retType(f);
+    if (ret == RawValue or ret == HostResult) return null;
+    const R = comptime if (ret == void) "void" else (hostTypeName(ret) orelse return null);
+    const params = comptime paramTypes(f, hid);
+    comptime var total = "fn ".len + name.len + 6 + R.len + 2; // "fn " name "(" ") -> " R ";\n"
+    inline for (params, 0..) |T, i| {
+        if (i > 0) total += 2; // ", "
+        total += argName(i).len + 2; // "arg{i}: "
+        total += (comptime hostTypeName(T) orelse return null).len;
+    }
+    comptime var buf: [total]u8 = undefined;
+    comptime var pos: usize = 0;
+    append(&buf, &pos, "fn ");
+    append(&buf, &pos, name);
+    append(&buf, &pos, "(");
+    inline for (params, 0..) |T, i| {
+        if (i > 0) append(&buf, &pos, ", ");
+        append(&buf, &pos, argName(i));
+        append(&buf, &pos, ": ");
+        append(&buf, &pos, comptime hostTypeName(T).?);
+    }
+    append(&buf, &pos, ") -> ");
+    append(&buf, &pos, R);
+    append(&buf, &pos, ";\n");
+    return &buf;
+}
+
+/// Positional Stilla parameter name — Zig's `Fn.Param` carries no name
+/// in 0.16, and call sites are positional anyway, so `arg{i}` is used.
+fn argName(comptime i: usize) []const u8 {
+    return comptime std.fmt.comptimePrint("arg{d}", .{i});
+}
+
+/// Append `s` to `buf` at `pos` (comptime-only helper).
+fn append(comptime buf: anytype, comptime pos: *usize, comptime s: []const u8) void {
+    @memcpy(buf.*[pos.*..][0..s.len], s);
+    pos.* += s.len;
+}
+
+/// Derive the module's `.st` interface text at comptime: every typed
+/// (non-raw) member whose parameters and return all have a Stilla
+/// spelling appears as a bodyless `fn` declaration, in declaration
+/// order, with positional `arg0`/`arg1` parameter names (Zig's
+/// `Fn.Param` carries no names; call sites are positional anyway). Members without a derivable
+/// signature (raw thunks, `RawValue`/`HostResult` returns — e.g. a
+/// list-returning member whose concrete Stilla type exists only in the
+/// hand-written interface) are skipped; supply their lines as `extra`,
+/// appended verbatim. Evaluate at comptime (a top-level `const`).
+///
+/// ```zig
+/// const random_iface = host_bind.interfaceOf(random, "");
+/// // "fn next() -> int32;\nfn int(max: int32) -> int32;\n..."
+/// ```
+pub inline fn interfaceOf(comptime M: type, comptime extra: []const u8) []const u8 {
+    if (!@hasDecl(M, "symbol")) {
+        @compileError("host_bind.interfaceOf: module struct must declare `pub const symbol`");
+    }
+    // The whole derivation runs at comptime even when the call site is
+    // runtime (`const derived = interfaceOf(testdb, "")` in a fn body);
+    // `inline` + the `const final` binding materialize the buffer as a
+    // constant at the call site (same shape as std.fmt.comptimePrint).
+    const text = comptime blk: {
+        const names = memberFns(M);
+        var parts: [names.len + @intFromBool(extra.len > 0)][]const u8 = undefined;
+        var n: usize = 0;
+        for (names) |name| {
+            const f = @field(M, name);
+            if (isRawThunk(@TypeOf(f))) continue; // no Stilla signature to derive
+            if (renderMember(name, f)) |line| {
+                parts[n] = line;
+                n += 1;
+            }
+        }
+        if (extra.len > 0) {
+            parts[n] = extra;
+            n += 1;
+        }
+        var total: usize = 0;
+        for (parts[0..n]) |p| total += p.len;
+        var buf: [total]u8 = undefined;
+        var pos: usize = 0;
+        for (parts[0..n]) |p| append(&buf, &pos, p);
+        const final = buf;
+        break :blk &final;
+    };
+    return text;
 }
 
 /// The module struct's `pub fn` decl names (its members), excluding the
@@ -450,10 +601,11 @@ fn paramType(comptime p: std.builtin.Type.Fn.Param) type {
     return p.type orelse @compileError("generic host binding parameters are not supported");
 }
 
-/// A hidden leading parameter: `?*anyopaque` module userdata or `*HostCtx`
+/// A hidden leading parameter: `?*anyopaque` module userdata, a typed
+/// `*T` userdata (the thunk casts the registered userdata), or `*HostCtx`
 /// adapter context — excluded from the expected signature, filled by the
 /// generated thunk.
-const Hidden = enum { none, userdata, host_ctx };
+const Hidden = enum { none, userdata, userdata_typed, host_ctx };
 
 fn hiddenKind(comptime f: anytype) Hidden {
     const Fn = fnInfo(f);
@@ -461,6 +613,15 @@ fn hiddenKind(comptime f: anytype) Hidden {
     const T = paramType(Fn.params[0]);
     if (T == ?*anyopaque) return .userdata;
     if (T == *HostCtx) return .host_ctx;
+    // Any other single pointer is a typed userdata (`*T`): the thunk
+    // casts the registered userdata to `*T` at the call boundary, so
+    // members read their state directly instead of casting `?*anyopaque`
+    // themselves. Many-pointers (`[*:0]const u8` C strings) and fn
+    // pointers stay ordinary parameters.
+    if (@typeInfo(T) == .pointer) {
+        const p = @typeInfo(T).pointer;
+        if (p.size == .one and @typeInfo(p.child) != .@"fn") return .userdata_typed;
+    }
     return .none;
 }
 
@@ -560,6 +721,7 @@ fn callArgs(comptime f: anytype, comptime kind: Hidden, userdata: ?*anyopaque, h
         if (i == 0 and kind != .none) {
             t[0] = switch (kind) {
                 .userdata => userdata,
+                .userdata_typed => @as(paramType(Fn.params[0]), @ptrCast(@alignCast(userdata orelse unreachable))),
                 .host_ctx => hctx,
                 .none => unreachable,
             };

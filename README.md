@@ -1,26 +1,28 @@
 # Stilla Runtime (Zig)
 
-A Zig implementation of the **Stilla v1.3 runtime**: the embedding-host side
-of the Stilla execution model — execution contexts, module instantiation,
-the `builtin` interface, deterministic evaluation, runtime destruction,
-and panic/trap semantics.
+A Zig implementation of the **Stilla v1.3 runtime** and its toolchain: the
+frontend compiler (module graph → type-checked CFG AIR → LLIR assembly and
+binary), the interpreter VM that executes it, and the host-embedding surface
+that connects both to a Zig or C host.
 
-> **Status:** early skeleton. The library builds, tests, and exposes the
-> architecture; the runtime itself is a long-term project.
+> **Status:** the compiler frontend (phases 1–3, the LLIR backend) and the
+> LLIR interpreter VM build, test, and run the examples (`zig build
+> examples`, the `--run` CLI mode). Execution follows the Runtime
+> Specification; the interpreter is the current execution engine.
 
 ## What is Stilla?
 
-Stilla is a small, statically typed language designed for embedded
-scripting, deterministic execution, host integration, and machine-generated
-code. Its design is visible from the source code: immutable bindings,
-explicit ownership (`borrow` / `move`, no GC), deterministic
-left-to-right evaluation, deterministic destruction, algebraic data types,
-and statically resolved modules. See the language's design principles in
-Core §1.2.
+Stilla is a small, statically typed language for embedded scripting,
+deterministic execution, host integration, and machine-generated code.
+Its design is visible from the source: immutable bindings, explicit
+ownership (`borrow` / `move`, no GC), deterministic left-to-right
+evaluation and destruction, algebraic data types, and statically resolved
+modules (Core §1.2).
 
-This repository implements the **runtime** half of the language — what a
-conforming implementation must *do* when a program runs, and what an
-embedding host must provide — in Zig.
+This repository implements what a conforming implementation must *do* when
+a program runs (the runtime), what an embedding host must provide (the host
+contract), and the compiler that turns Stilla source into executable AIR —
+in Zig.
 
 ## Specifications
 
@@ -28,65 +30,60 @@ The normative documents live in [`spec/`](spec/):
 
 | Document | Covers |
 | --- | --- |
-| [Stilla Core Language Specification](spec/Stilla%20Core%20Language%20Specification.md) | v1.3 Draft — syntax and compile-time constraints: type system, ownership checking, generic specialization, static module rules, formal static semantics, grammar (version recorded inside) |
-| [Stilla Runtime Specification](spec/Stilla%20Runtime%20Specification.md) | v1.3 Draft — the execution model this library implements: module instantiation, host environment, `builtin` interface, evaluation order, runtime destruction, termination and traps (version recorded inside) |
-| [Stilla Standard Library](spec/Stilla%20Standard%20Library.md) | v1.3 Draft — standard-library modules (e.g. `math`, `text`) and their contracts (version recorded inside) |
+| [Stilla Core Language Specification](spec/Stilla%20Core%20Language%20Specification.md) | v1.3 Draft — syntax and compile-time constraints (type system, ownership, generics, module rules, semantics, grammar) |
+| [Stilla Runtime Specification](spec/Stilla%20Runtime%20Specification.md) | v1.3 Draft — the execution model: module instantiation, host environment, `builtin` interface, evaluation order, destruction, traps |
+| [Stilla Standard Library](spec/Stilla%20Standard%20Library.md) | v1.3 Draft — standard-library modules (e.g. `math`, `text`) and their contracts |
 | [Stilla Intrinsics Specification](spec/Stilla%20Intrinsics%20Specification.md) | v1.3 Draft — frontend recognition and mandatory AIR expansion before LLIR |
-| [Stilla Core Grammar](spec/Stilla%20Core%20Grammar%20Draft.abnf) | Normative ABNF grammar (RFC 5234) for the core language — the lexical and syntactic productions and their descriptive notes (version recorded inside: v1.3 Draft) |
+| [Stilla Core Grammar](spec/Stilla%20Core%20Grammar%20Draft.abnf) | Normative ABNF grammar (RFC 5234) for the core language |
 
-Where a behavior is described in both the Core and Runtime documents, the
-**Runtime specification governs execution**.
+Where Core and Runtime disagree about execution, the **Runtime
+specification governs**.
 
-## Library layout
+## Documentation
 
-`src/` mirrors the Runtime specification section-by-section so the long-term
-work has a home:
+The implementation documents live in [`docs/`](docs/) (indexed by
+[docs/README.md](docs/README.md)):
 
-| File | Runtime spec | Role |
-| --- | --- | --- |
-| [`src/root.zig`](src/root.zig) | — | Library root: public API surface and version |
-| [`src/context.zig`](src/context.zig) | §1.3, §2, §8 | Execution context: owns module storage, instantiates standard-library modules (`builtin` included), unit of panic termination |
-| [`src/module.zig`](src/module.zig) | §2 | Module instantiation and immutable module storage, keyed by specifier |
-| [`src/host.zig`](src/host.zig) | §3 | Embedding-host contract: allocator, `builtin` implementation, host state |
-| [`src/builtin.zig`](src/builtin.zig) | §4 | Required `builtin` interface (`print`, `panic`, …) as a host-supplied vtable |
-| [`src/panic.zig`](src/panic.zig) | §7 | Termination and traps: `Panic` + `Termination` without unwinding |
-| [`src/ast.zig`](src/ast.zig) | — (compile-time) | Source spans, line index, AST node types, and diagnostics |
-| [`src/lex.zig`](src/lex.zig) | — (compile-time) | Lexer for the core language grammar: source text → tokens |
-| [`src/parser.zig`](src/parser.zig) | — (compile-time) | LL(k) parser: token stream → AST |
-| [`src/passes/checker.zig`](src/passes/checker.zig) | — (compile-time) | Phase-2 type checker (phase2-checker.md): per-module annotation (name/type/ownership/expression side tables), generic expansion via `monomorphize.zig`, and the phase-2 checks — type mismatch, match exhaustiveness, refutable patterns, non-capture, borrow lifetimes, module-const init order, recursive types without indirection, and drop-hook destruction-view restrictions |
-| [`src/passes/`](src/passes/) | — (compile-time) | The pass implementations, one file per pass: phase-1 module graph (`module_load`…`module_check`, `topo_sort`), type resolution (`type_resolve`, `type_shape`, `type_infer`), phase-2 annotation and checks (`checker`, `checker_annotate`, `checker_validate`, `checker_ownership`, `monomorphize`), CFG lowering (`cfg_lower_*`; `cfg_lower_emit` also runs the on-the-fly constant folding / arithmetic simplification / CSE / copy propagation of braun13cc.pdf §3.1), the mid-level optimizer (`cfg_optimize`, `cfg_pre`, `cfg_dead_block`, `cfg_tail_call`), the AIR text form's lexer, parser, and printer (`cfg_lex`, `cfg_parse`, `cfg_print`, re-exported by `cfg`), and the CFG → LLIR backend passes over the shared `cfg_lower_llir.Builder` (`llir_alloc` slot allocation, `cfg_lower_lifecycle` release placement, `llir_fusion` peephole fusion) |
-| [`src/moduleinfo.zig`](src/moduleinfo.zig) | — (compile-time) | Module graph construction (frontend phase 1): `Builder`, `ModuleInfo`, `ModuleGraph`, specifier resolution, member-table materialization (type-resolution helpers re-exported from `src/passes/type_resolve.zig`) |
-| [`src/frontend.zig`](src/frontend.zig) | — (compile-time) | Frontend pipeline driver: entry module → phase-1 graph → phase-3 `cfg.IrProgram` (`Compilation`) |
-| [`src/cfg.zig`](src/cfg.zig) | — (compile-time) | The CFG AIR data structures of air.md §11 (text lexer/parser/printer re-exported from `src/passes/`) |
-| [`src/lower.zig`](src/lower.zig) | — (compile-time) | CFG lowering (frontend phase 3): annotated AST + module graph → `cfg.IrProgram`, destruction placement, module init functions |
-| [`src/stdbundle.zig`](src/stdbundle.zig) + [`std/bundle.zig`](std/bundle.zig) | — (compile-time) | The embedded standard library: every `std/*.st` source registered as a specifier→source row |
+| Document | Covers |
+| --- | --- |
+| [stilla-intro.md](docs/stilla-intro.md) | The language and its design, for new readers |
+| [architecture.md](docs/architecture.md) | End-to-end map: artifacts, pipeline, boundaries, host embedding |
+| [passes.md](docs/passes.md) | Canonical ordered pass inventory, with links to the detail documents |
+| [frontend.md](docs/frontend.md) | The compiler pipeline end to end: phase-1 module graph → phase-2 checker → phase-3 CFG AIR → LLIR backend |
+| [phase1-module-graph.md](docs/phase1-module-graph.md) | Phase 1: module identity, resolution, cycle detection, topo sort |
+| [phase2-checker.md](docs/phase2-checker.md) | Phase 2: inference, generic expansion, ownership analysis, checks |
+| [phase3-cfg-lowering.md](docs/phase3-cfg-lowering.md) | Phase 3: annotated AST → CFG AIR, destruction placement, module init functions |
+| [optimizer.md](docs/optimizer.md) | Passes 7–8: tail-call elimination, inlining, CSE, copy propagation, and the mid-level rewrites |
+| [llir-typed.md](docs/llir-typed.md) | The typed LLIR lowering layer |
+| [host-bindings.md](docs/host-bindings.md) | The typed host-binding layer: comptime registry, signature checks, embedding |
+| [interpreter-vm.md](docs/interpreter-vm.md) | The LLIR interpreter VM: instruction image, execution loop, host adapters, destruction |
 
 ## Build and test
 
 Requires **Zig 0.16.0** (see `build.zig.zon`).
 
 ```sh
-zig build            # build + install the static library (zig-out/lib/libstilla.a)
+zig build            # build + install both artifacts:
+                     #   zig-out/bin/stilla      — the compiler/interpreter CLI
+                     #   zig-out/lib/libstilla.a — the embeddable static library
+zig build examples   # compile every examples/*.st to AIR, LLIR asm, and LLIR bin under zig-out/examples/
+zig build embed      # run the host-embedding example (examples/embed/random_demo.zig)
 zig build test       # run unit tests
-zig build test --summary all   # same, with the full step tree
 ```
 
-For consumers (C, C++, or any host that can link a static library):
+For consumers that link the static library (C, C++, …):
 
 ```sh
 zig build -Doptimize=ReleaseSafe -p <prefix>   # install libstilla.a under <prefix>
 ```
 
-## The frontend compiler
+## The `stilla` executable
 
-Alongside the library, the build produces a **frontend compiler**
-(`src/main.zig`): it parses a Stilla source file (plus its imports, resolved
-against the embedded `std/` bundle) and prints the program's **CFG AIR** in
-the air.md §9 text form. The frontend compiler expands the embedded-bundle intrinsics at lowering
-time: each use becomes ordinary AIR — a materialized constant or a call
-to an existing host binding — and canonical AIR carries no intrinsic
-identity (the Intrinsics Specification). `syscall` targets in the output
-name the host binding, exactly as the Runtime spec defines them.
+A single executable (`src/main.zig`) that is both the **frontend
+compiler** and the **interpreter**: it parses a Stilla source file (plus
+its imports, resolved against the embedded `std/` bundle), expands the
+embedded-bundle intrinsics into ordinary AIR, and prints the program's
+**CFG AIR** text form:
 
 ```sh
 zig build run -- app.st              # compile app.st, print CFG AIR to stdout
@@ -103,55 +100,12 @@ module "app" {
 }
 ```
 
-Options: `--output <file>` writes to a file, `--module <spec>` overrides the
-module specifier (default: the input file's stem), and `--entry-fn <name>` /
-`--no-entry-fn` selects or suppresses the host entry function (default
-`main`). Diagnostics are `<file>:<line>:<col>: error: <message>`.
-
-The pipeline is documented in [`frontend.md`](frontend.md): phase 1 builds
-the module graph (`src/moduleinfo.zig`, with the import-ordering algorithm
-in `src/passes/topo_sort.zig`), phase 2 annotates and checks every module
-(`src/passes/checker.zig` + `checker_annotate.zig` + `checker_validate.zig`
-
-+ `checker_ownership.zig` + `monomorphize.zig`), and phase 3 lowers the
-annotated AST to the CFG structures of air.md §11 (`src/lower.zig`,
-`src/cfg.zig`; the AIR text form's lexer, parser, and printer live in
-`src/passes/cfg_lex.zig` / `src/passes/cfg_parse.zig` /
-`src/passes/cfg_print.zig`, re-exported by `cfg`). A mid-level optimizer is
-planned: Pass 7 rewrites calls in tail position into frame-reusing jumps so
-self-recursion becomes iteration (`src/passes/cfg_tail_call.zig`), and Pass
-8 (`src/passes/cfg_optimize.zig`) runs semantics-preserving rewrites —
-constant folding, common subexpression elimination, partial redundancy
-elimination, copy propagation, dead-block elimination, drop elision, and
-phi simplification — one file per rewrite under `src/passes/`.
-
-With `--emit-asm` or `--emit-bin <file>` the same CLI lowers further to
-the **LLIR backend** (Stilla LLIR Specification). Eleven named stages run
-in a fixed order — prepare (dense IDs, `cfg_lower_llir_prepare`),
-allocate (registers and frame
-layout, `llir_alloc`), lifecycle plan (release placement,
-`cfg_lower_lifecycle`), edge blocks (LLIR-only edge blocks for
-path-specific effects, `cfg_lower_llir_edges`), budget (per-block record sizing,
-`cfg_lower_llir_budget`), intern (side
-tables, `cfg_lower_llir_intern`), body emit
-(`cfg_lower_llir_emit`), edge emit (phi copies and lifecycle
-kills, `cfg_lower_llir_edges`), control emit (terminators,
-`cfg_lower_llir_control`),
-LLIR rewrites (fusion and spill expansion), and linearize (PC
-assignment, code ranges, target fixups). The input
-CFG is never rewritten; the per-stage invariants are documented in
-[`frontend.md`](docs/frontend.md).
-
-With `--run` the CLI executes instead of emitting: a source file
-compiles, lowers, and runs from its entry function; a file starting with
-the LLIR magic loads as a self-contained binary and runs from the entry
-id recorded in its header (interpreter-vm.md §13 M5). Exit codes: 0
-normal termination, 1 Stilla panic (the owned message, with the trap
-site, goes to stderr), 2 load/compile error.
-
-No absolute PC exists anywhere before linearization: records carry
-unresolved targets derived from the input CFG, and only the final
-stage computes PCs and writes relative offsets.
+Options: `--output <file>`, `--module <spec>`, `--entry-fn <name>` /
+`--no-entry-fn`, `-I <dir>`, and the emission modes `--emit-asm`,
+`--emit-bin <file>`, and `--run` (compile and execute). Diagnostics are
+`<file>:<line>:<col>: error: <message>`. The pipeline is documented in
+[frontend.md](docs/frontend.md); the LLIR backend it lowers to is in
+[frontend.md](docs/frontend.md) and [interpreter-vm.md](docs/interpreter-vm.md).
 
 ## Using the library
 
@@ -168,22 +122,120 @@ Add to your `build.zig.zon`:
 },
 ```
 
-Then import and use it in `build.zig`:
+Then wire it in `build.zig`:
 
 ```zig
-const stilla = b.dependency("stilla", .{
-    .target = target,
-    .optimize = optimize,
-});
+const stilla = b.dependency("stilla", .{ .target = target, .optimize = optimize });
 // module.addImport("stilla", stilla.module("stilla"));
 ```
 
-And in Zig source:
+And in Zig source, the compile-and-run path (what the CLI takes):
 
 ```zig
 const stilla = @import("stilla");
-const runtime = stilla.context; // execution context, module storage, builtin vtable, ...
+
+// Compile: entry module → CFG AIR. Diagnostics arrive as
+// `compilation.diag(s)` (file:line:col).
+var compilation = try stilla.frontend.compile(allocator, .{ .entry = "app.st" });
+defer compilation.deinit();
+const program = &(compilation.program orelse return error.CompileFailed);
+
+// Lower to per-module LLIR artifacts and run from the entry export.
+// `term` is a `Termination`: `.normal` (the root's return cell) or
+// `.panic` (an owned message to report).
+var bundle = try stilla.artifact_bundle.ArtifactBundle.build(allocator, program);
+var term = try stilla.interpreter.runWithHostAndLoader(allocator, &bundle.root, .{}, bundle.loaderHandle());
+defer term.deinit(allocator);
 ```
+
+### Defining host functions
+
+The runnable example is `examples/embed/random_demo.zig` — `zig build
+embed` builds it, runs it, and reports the round trip. The blocks below
+are quoted from that file (it is the example; this README only annotates
+it). The embedder gives Stilla a `random` host module: one `pub fn` per
+member, module state injected as the leading `*Rng` parameter (never a
+Stilla parameter):
+
+```zig
+/// The module's state: injected as the leading `*Rng` parameter of
+/// every member.
+const Rng = struct { prng: std.Random.DefaultPrng, io: std.Io, ... };
+
+/// The host module: `pub const symbol` names the module; every `pub fn`
+/// is a member binding.
+const random = struct {
+    pub const symbol = "random";
+
+    pub fn next(rng: *Rng) i32 {
+        const v = rng.prng.random().int(i32);
+        rng.record(v);
+        return v;
+    }
+
+    /// Uniform draw in [0, max).
+    pub fn int(rng: *Rng, max: i32) i32 {
+        const v = rng.prng.random().intRangeLessThan(i32, 0, max);
+        rng.record(v);
+        return v;
+    }
+
+    /// Reseed the module's PRNG — state mutated from Stilla.
+    pub fn seed(rng: *Rng, s: i32) void {
+        rng.prng = std.Random.DefaultPrng.init(@as(u64, @bitCast(@as(i64, s))));
+    }
+
+    /// Host time (seconds since the Unix epoch) — host information
+    /// flowing into the program, read through the embedding's Io.
+    pub fn time(rng: *Rng) i32 { ... }
+};
+const random_desc: host_bind.ModuleDesc = host_bind.register(random);
+const random_iface = host_bind.interfaceOf(random, "");
+```
+
+`register` derives the sorted, signature-checked member table; the
+**interface** — the `.st` text the frontend checks the program's call
+sites against — is derived from the same Zig signatures by
+`interfaceOf`, so the two can't drift. Stilla accesses it as an ordinary
+imported module:
+
+```stilla
+const random = import("random");
+const builtin = import("builtin");
+fn main() -> int32 {
+    random.seed(random.time());
+    let a = random.next();
+    let b = random.int(6);
+    builtin.print("draw a");
+    builtin.print(builtin.str(a));
+    a + b
+}
+```
+
+Then compile, lower, and run through the two-stage embed path
+(`buildProgram` builds the source/interface maps, compiles, lowers, and
+merges the module into the default host registry; `runProgram` executes
+the built program, so one build runs many times):
+
+```zig
+var failed: stilla.frontend.Compilation = undefined;
+var built = try stilla.interpreter.buildProgram(arena, .{
+    .entry = "app",
+    .sources = &.{.{ .specifier = "app", .text = APP }},
+    .ifaces  = &.{.{ .specifier = "random", .text = random_iface }},
+    .modules = &.{.{ .desc = &random_desc, .userdata = &rng }},
+    .entry_fn = "main",
+    .print = .{ .userdata = &print_sink, .invoke = appPrint },
+}, &failed);
+const term = try stilla.interpreter.runProgram(arena, &built);
+```
+
+`builtin.print` has no runtime default — the embedder supplies the
+output hook (`appPrint` above writes message + newline to stdout). The
+program's `main` returns `a + b`, which the example then verifies
+against the draws the host observed. See
+[host-bindings.md](docs/host-bindings.md) §3.4 for the full walkthrough;
+`examples/embed/random_demo.zig` is the verbatim source.
 
 ### As a C embedder
 

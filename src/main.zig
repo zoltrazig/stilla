@@ -209,6 +209,19 @@ fn lowerWithEntry(
 /// builder-resolved entry function when one exists, otherwise through
 /// the artifact's recorded entry export. Exit codes: 0 normal, 1 panic
 /// (owned message → stderr), 2 load/compile error.
+/// The `builtin.print` hook context for the `--run` mode: the CLI's Io,
+/// so program output reaches this process's stdout.
+const CliPrint = struct { io: std.Io };
+
+/// `--run`'s `builtin.print` hook (the CLI is a host; the runtime has no
+/// default print implementation): write the message plus a line ending
+/// to stdout through the CLI's Io.
+fn cliPrint(userdata: ?*anyopaque, bytes: []const u8) void {
+    const c: *CliPrint = @ptrCast(@alignCast(userdata.?));
+    std.Io.File.writeStreamingAll(std.Io.File.stdout(), c.io, bytes) catch return;
+    std.Io.File.writeStreamingAll(std.Io.File.stdout(), c.io, "\n") catch {};
+}
+
 fn runProgram(io: std.Io, gpa: std.mem.Allocator, arena: std.mem.Allocator, opts: Options) u8 {
     var image: stilla.llir.LlirProgram = undefined;
     var entry: ?stilla.llir.FunctionId = null;
@@ -250,17 +263,22 @@ fn runProgram(io: std.Io, gpa: std.mem.Allocator, arena: std.mem.Allocator, opts
     }
 
     var term = blk: {
+        // The CLI is a host: `builtin.print` has no runtime default, so
+        // `--run` passes its own hook — the message plus a line ending
+        // go to this process's stdout through the CLI's Io.
+        var print_ctx = CliPrint{ .io = io };
+        const host = stilla.interpreter.HostCall{ .print = .{ .userdata = &print_ctx, .invoke = cliPrint } };
         if (image.entry_member != stilla.llir.no_index) {
             break :blk if (bundle) |*b|
-                stilla.interpreter.runWithHostAndLoader(arena, &image, .{}, b.loaderHandle())
+                stilla.interpreter.runWithHostAndLoader(arena, &image, host, b.loaderHandle())
             else
-                stilla.interpreter.run(arena, &image);
+                stilla.interpreter.runWithHost(arena, &image, host);
         }
         if (entry) |e| {
             break :blk if (bundle) |*b|
-                stilla.interpreter.runWithEntryAndLoader(arena, &image, e, .{}, b.loaderHandle())
+                stilla.interpreter.runWithEntryAndLoader(arena, &image, e, host, b.loaderHandle())
             else
-                stilla.interpreter.runWithEntry(arena, &image, e, .{});
+                stilla.interpreter.runWithEntry(arena, &image, e, host);
         }
         errPrint(io, gpa, "stilla: no entry function in '{s}'\n", .{opts.input}) catch {};
         return 2;

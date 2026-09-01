@@ -110,7 +110,7 @@ without bound), until a full iteration changes nothing or the cap
 guarding every rewrite inside each iteration. The default (`false`)
 keeps the single ordered pass and its near-linear compile time; `true`
 is for embedders who want more aggressive simplification and accept the
-bounded extra cost (optimizer.md, §8.9).
+bounded extra cost (optimizer.md, §8.10).
 
 ## 3. Phase documentation
 
@@ -136,12 +136,13 @@ Each phase has its own detailed document:
   system calls for host bindings, integration with phase 2, outputs.
 
 - **[Optimizer — Tail Call and Mid-Level Rewrites](optimizer.md)**
-  AIR validator (Pass 6.1), tail call optimization (Pass 7), mid-level
-  optimizer driver (Pass 8) with partial redundancy elimination,
-  if-conversion (the branchless `select`), dead-instruction/block elimination,
-  drop elision, phi simplification,
-  jump threading; on-the-fly constant folding, arithmetic simplification,
-  CSE, and copy propagation at construction; optimization harness.
+  AIR validator (Pass 6.1), tail call optimization (Pass 7), the Pass 8
+  driver: inlining, module/member CSE, copy propagation, partial
+  redundancy elimination, if-conversion (the branchless `select`),
+  dead-block/instruction elimination, drop elision, jump threading, phi
+  simplification; on-the-fly constant folding, arithmetic
+  simplification, CSE, and copy folding at construction; post-optimization
+  drop lowering; optimization harness.
 
 ## 4. Implementation passes and status
 
@@ -149,7 +150,9 @@ The pipeline is implemented in **passes**. Passes 1–8 are complete.
 
 - [x] **Pass 1 — Lexer, parser, AST** (`src/lex.zig`, `src/parser.zig`,
       `src/ast.zig`).
-- [x] **Pass 2 — Phase 1: module graph** (`src/moduleinfo.zig`, `src/passes/topo_sort.zig`,
+- [x] **Pass 2 — Phase 1: module graph** (`src/moduleinfo.zig`,
+      `src/passes/module_load.zig`, `module_scan.zig`, `module_materialize.zig`,
+      `module_check.zig`, `src/passes/topo_sort.zig`,
       `src/passes/type_resolve.zig`, `src/stdbundle.zig`, `std/bundle.zig`,
       `src/frontend.zig`, `src/main.zig`).
 - [x] **Pass 3 — Phase 2: annotation and checks** (the checker,
@@ -167,8 +170,9 @@ The pipeline is implemented in **passes**. Passes 1–8 are complete.
       (`src/passes/cfg_validate.zig`), cycle diagnostics, docs sync.
 - [x] **Pass 7 — Tail call optimization** (`src/passes/cfg_tail_call.zig`).
 - [x] **Pass 8 — Mid-level optimizer** (`src/passes/cfg_optimize.zig` plus
-      `cfg_pre`, `cfg_select`, `cfg_dead_instr`, `cfg_dead_block`, `cfg_drop_elide`,
-      `cfg_jump_thread`, `cfg_phi_simplify`).
+      `cfg_tail_call`, `cfg_inline`, `cfg_cse`, `cfg_copy_prop`, `cfg_pre`, `cfg_select`,
+      `cfg_dead_instr`, `cfg_dead_block`, `cfg_drop_elide`, `cfg_jump_thread`,
+      `cfg_phi_simplify`).
 - [x] **Drop lowering (post-optimization)** — expand every
       statically-expandable `drop` in the CFG (`src/passes/cfg_lower_drop.zig`):
       structs (hook call + `unpack_struct` + reverse field drops), tuples,
@@ -261,7 +265,7 @@ typed-assembly printer (`printTyped`) renders what Layer A sees.
 | lex / parse | `src/lex.zig`, `src/parser.zig` (+ grammars under `src/parse/`); tokens → `ast.Program` per file |
 | 1 — module graph | `src/frontend.zig` (pipeline driver), `src/moduleinfo.zig` (`ModuleInfo`, `ModuleGraph`, resolver, cycle detection, topo sort), `src/passes/type_resolve.zig`, `src/stdbundle.zig` + `std/bundle.zig` (embedded stdlib) |
 | 2 — annotation | `src/passes/checker.zig` (phase-2 driver), `checker_annotate.zig` (name resolution, inference, binding states), `checker_validate.zig` (the checks), `checker_ownership.zig` (conditional-release state merging, Types & Ownership §10.10), `src/passes/monomorphize.zig` (generic expansion) — resolved types are `cfg.Type` |
-| 3 — CFG AIR | `src/cfg.zig` (op schema `opInfo`, types, `IrProgram`), `src/passes/cfg_lex.zig` + `cfg_parse.zig` + `cfg_print.zig` (AIR text form, re-exported by `cfg`), `src/lower.zig` + `src/passes/cfg_lower_*.zig` (annotated AST → CFG, destruction placement, module init functions), `src/host.zig` (host-call handlers; dispatch is `src/interpreter_host.zig`) |
+| 3 — CFG AIR | `src/cfg.zig` (op schema `opInfo`, types, `IrProgram`), `src/passes/cfg_lex.zig` + `cfg_parse.zig` + `cfg_print.zig` (AIR text form, re-exported by `cfg`), `src/lower.zig` + `src/passes/cfg_lower_*.zig` (annotated AST → CFG, destruction placement, module init functions), `src/host.zig` (stdlib host implementations as plain functions; dispatch is the member-table registry in `src/interpreter_host.zig`, typed bindings in `src/host_bind.zig`) |
 | optimizer + validator | `src/passes/cfg_optimize.zig` (+ `cfg_tail_call`, `cfg_pre`, `cfg_select`, `cfg_dead_instr`, `cfg_dead_block`, `cfg_drop_elide`, `cfg_jump_thread`, `cfg_phi_simplify`) and `src/passes/cfg_validate.zig` (air.md §12 validator); on-the-fly constant folding, arithmetic simplification, CSE, and copy propagation in `cfg_lower_emit.zig` |
 | drop lowering | `src/passes/cfg_lower_drop.zig` — post-optimization expansion of statically-expandable `drop`s (struct/tuple/box/union) into explicit CFG operations; only opaque, `hostdata`, `list`, and `any` drops remain single instructions. Wired into `frontend.zig`'s optimize path after Pass 8, re-validated before the AIR text round-trip |
 

@@ -295,5 +295,5 @@ Phase 2 output is consumed by:
   concrete signatures, instantiated types, and ownership decisions;
   generic functions are lowered per used specialization (one monomorphic
   `IrFunc` per instance);
-- **The AIR validator** ([Pass 6.1](optimizer.md#ir-validator)) — validates
+- **The AIR validator** ([Pass 6.1](optimizer.md#air-validator-pass-61)) — validates
   the lowered CFG against phase-2 invariants.

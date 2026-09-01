@@ -786,13 +786,16 @@ trap.
 
 The six stdlib modules are module structs registered through
 `host_bind.register` (host-bindings.md §7): 47 of the 60 members are
-typed bindings — plain typed (all 20 `math` functions, `builtin.print`/
-`assert`/`panic`, the four pure `string` predicates, `string.len`),
-hidden-`*HostCtx` + error-return typed (the `string` producers
-`concat`/`substring`/`trim`/`lower`/`upper`/`replace`/`repeat`), and
-typed-args-with-`HostResult` (typed arguments, raw body:
-`builtin.str`/`hash`, `string` `index_of`/`split`/`to_utf8`/
-`to_codepoints`, `list.range`). The rest (borrow/move modes, list/opaque
+typed bindings — plain typed (all 20 `math` functions,
+`builtin.assert`/`panic`, the four pure `string` predicates,
+`string.len`), hidden-`*HostCtx` + error-return typed (the `string`
+producers `concat`/`substring`/`trim`/`lower`/`upper`/`replace`/
+`repeat`), and hidden-`*HostCtx` + `HostResult` body (typed arguments,
+raw body: `builtin.print`/`str`/`hash`, `string`
+`index_of`/`split`/`to_utf8`/`to_codepoints`, `list.range`). `print`
+dispatches to the embedding's `HostCall.print` hook and traps
+`not_implemented` when none is set — there is no default. The rest
+(borrow/move modes, list/opaque
 parameters: `list.len`, `builtin.box`/`unbox`, all of `array`/`hashmap`,
 `string` `join`/`from_utf8`/`from_codepoints`) are raw-shaped fns. The
 per-module member dispatch switches are deleted. Typed members with a
@@ -818,7 +821,7 @@ Each member (typed or raw) is responsible for:
 
 The member fns keep the VM heap mechanics (decode cells, walk lists,
 allocate objects); the implementations are plain `pub` fns in `host.zig`
-(`hostPrint`..`hostHash`, `stringLen`..`stringFromCodepoints`,
+(`hostStr`..`hostHash`, `stringLen`..`stringFromCodepoints`,
 `listLen`/`listRange` — the M2 handler structs collapsed into them) that
 receive only verified plain data and never touch the VM. The typed
 member machinery generates the decode/encode glue from a Zig/C function
@@ -1061,7 +1064,7 @@ Implemented milestones:
   `HostResult` bodies, module userdata injection, reusable
   `HostScratch` for NUL-terminated C strings). The six stdlib modules
   migrated onto it: 47 of 60 members are typed bindings (all 20
-  `math`, `builtin.print`/`assert`/`panic`/`str`/`hash`, the `string`
+  `math`, `builtin.assert`/`panic`/`str`/`hash`, the `string`
   predicates + producers + list-returning members, `list.range`); the
   borrow/move/opaque/list-parameter members stay raw-shaped. The
   per-module member dispatch switches, `moduleFromFields`, and the

@@ -106,6 +106,13 @@ pub const runWithEntryAndLoader = interp_host.runWithEntryAndLoader;
 pub const runWithHostAndLoader = interp_host.runWithHostAndLoader;
 pub const runValidated = interp_host.runValidated;
 pub const runValidatedWithEntry = interp_host.runValidatedWithEntry;
+pub const runProgram = interp_host.runProgram;
+pub const buildProgram = interp_host.buildProgram;
+pub const BuiltProgram = interp_host.BuiltProgram;
+pub const RunProgramOptions = interp_host.RunProgramOptions;
+pub const BuildProgramError = interp_host.BuildProgramError;
+pub const SourceText = interp_host.SourceText;
+pub const IfaceText = interp_host.IfaceText;
 
 /// The execution context (docs/interpreter-vm.md §4): the fixed
 /// configuration plus the loaded data plus the runtime state. The
