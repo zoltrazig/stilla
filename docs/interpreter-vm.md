@@ -789,8 +789,10 @@ The six stdlib modules are module structs registered through
 scalar/str signature bind typed (all 20 `math` functions, `builtin.print`,
 and the four pure `string` predicates), and every other member is a
 raw-shaped fn carrying the adapter logic directly — the per-module
-member dispatch switches are deleted. `defaultHostCall` survives as the
-opt-out adapter: a registry dispatch that dynamic-host `invoke`
+member dispatch switches are deleted. The raw-shaped members share a
+`HostCtx` wrapper around `VmCtx` (interpreter_host.zig) for the decode,
+allocation, list-walk, and trap helpers. `defaultHostCall` survives as
+the opt-out adapter: a registry dispatch that dynamic-host `invoke`
 overriders delegate non-intercepted members to.
 
 Each member (typed or raw) is responsible for:
