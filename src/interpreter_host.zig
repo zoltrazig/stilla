@@ -16,12 +16,10 @@ const host_bind = @import("host_bind.zig");
 const VmCtx = interpreter.VmCtx;
 const Value = vm_types.Value;
 const ValueCodec = vm_types.ValueCodec;
-const HeapErr = vm_types.HeapErr;
 const Termination = types.Termination;
 const RunError = types.RunError;
 const HostResult = types.HostResult;
 const ModuleLoader = loader_mod.ModuleLoader;
-const HostDisposer = types.HostDisposer;
 
 pub const HostCall = struct {
     userdata: ?*anyopaque = null,
@@ -198,143 +196,256 @@ pub fn defaultHostCall(vm: *VmCtx, userdata: ?*const anyopaque, module_symbol: [
 // The stdlib registry (docs/host-bindings.md §7): the six stdlib modules
 // are module structs registered through `host_bind.register`. Members
 // with a plain scalar/str signature bind typed (signature-checked
-// decode/encode); ownership-sensitive members (move/borrow, list/union/
-// box/opaque cells, type-dependent decode, the panic path) are
-// raw-shaped fns. The `host_module` handler structs (`DefaultHostCall`,
-// `MathHostCall`, `StringHostCall`, `ListHostCall`) remain the
-// implementations; the members forward to them.
+// decode/encode); error-returning and scratch-building members bind
+// typed with a hidden `*HostCtx`; list/union-returning members bind
+// typed-args with a `HostResult` body. The `host_module` plain fns
+// (host.zig) remain the implementations; the members call them. Only
+// the ownership-sensitive members (move/borrow modes, list/opaque
+// parameters) stay raw-shaped.
 // ---------------------------------------------------------------------------
 
-/// The `builtin` module (Runtime §4): `print` binds typed; the rest
-/// need type-dependent decode, box mechanics, or the panic path
-/// (raw-shaped fns below).
+/// The `builtin` module (Runtime §4): `print`/`assert`/`panic` bind
+/// typed; `str`/`hash` bind typed-args with a hidden ctx (type-dependent
+/// decode); `box`/`unbox` stay raw (move mode).
 const builtin_module = struct {
     pub const symbol = "builtin";
 
-    pub fn print(ctx: ?*anyopaque, message: host_bind.Str) void {
-        host_module.defaultHostCall.print(ctx, message.bytes);
+    pub fn print(message: host_bind.Str) void {
+        host_module.hostPrint(message.bytes);
     }
-    pub const str = hostBuiltinStr;
+    pub fn assert(cond: bool, message: host_bind.Str) HostResult {
+        if (cond) return .{ .value = 0 };
+        return .{ .panic = host_module.hostAssert(message.bytes) };
+    }
+    pub fn panic(message: host_bind.Str) HostResult {
+        return .{ .panic = host_module.hostPanic(message.bytes) };
+    }
+    pub fn hash(ctx: *host_bind.HostCtx, v: host_bind.RawValue) HostResult {
+        // The declared param type decides the hash input: str contents
+        // when the argument is a str, else the raw scalar cell.
+        const bytes = if (ctx.vm.runtime.heap.strSliceOf(v.value)) |b| b else std.mem.asBytes(&v.value);
+        return .{ .value = host_module.hostHash(bytes) };
+    }
+    pub fn str(ctx: *host_bind.HostCtx, v: host_bind.RawValue) HostResult {
+        // Decode by the declared parameter type, format the scalar into
+        // the stack buffer, allocate the str object.
+        const image = ctx.vm.curImage();
+        const params = image.params[ctx.sig.desc.params_start..][0..ctx.sig.desc.params_len];
+        const pt = image.types[params[0].type_];
+        const pid: llir.PrimitiveId = if (pt.kind == .primitive) @enumFromInt(pt.a) else .hostdata;
+        if (pid == .hostdata) return .{ .panic = "builtin.str: unsupported value" };
+        const view = vm_types.decodeScalar(&ctx.vm.runtime.heap, pid, v.value) catch return .{ .panic = "builtin.str: unsupported value" };
+        var buf: [64]u8 = undefined;
+        const text = host_module.hostStr(view, &buf) catch return .{ .panic = "builtin.str: unsupported value" };
+        const cell = ctx.vm.runtime.heap.newStr(ctx.sig.desc.ret, text) catch return .{ .panic = "builtin.str: out of memory" };
+        return .{ .value = cell };
+    }
     pub const box = hostBuiltinBox;
     pub const unbox = hostBuiltinUnbox;
-    pub const panic = hostBuiltinPanic;
-    pub const assert = hostBuiltinAssert;
-    pub const hash = hostBuiltinHash;
 };
 
 /// The `math` module (StdLib §4): all twenty members are plain
-/// `float32` functions — typed bindings around the `MathHostCall` table.
+/// `float32` functions — typed bindings, the impls inlined.
 const math_module = struct {
     pub const symbol = "math";
 
-    pub fn sqrt(ctx: ?*anyopaque, x: f32) f32 {
-        return host_module.mathHostCall.sqrt(ctx, x);
+    pub fn sqrt(x: f32) f32 {
+        return std.math.sqrt(x);
     }
-    pub fn pow(ctx: ?*anyopaque, x: f32, y: f32) f32 {
-        return host_module.mathHostCall.pow(ctx, x, y);
+    pub fn pow(x: f32, y: f32) f32 {
+        return std.math.pow(f32, x, y);
     }
-    pub fn exp(ctx: ?*anyopaque, x: f32) f32 {
-        return host_module.mathHostCall.exp(ctx, x);
+    pub fn exp(x: f32) f32 {
+        return @exp(x);
     }
-    pub fn ln(ctx: ?*anyopaque, x: f32) f32 {
-        return host_module.mathHostCall.ln(ctx, x);
+    pub fn ln(x: f32) f32 {
+        return @log(x);
     }
-    pub fn log2(ctx: ?*anyopaque, x: f32) f32 {
-        return host_module.mathHostCall.log2(ctx, x);
+    pub fn log2(x: f32) f32 {
+        return @log2(x);
     }
-    pub fn log10(ctx: ?*anyopaque, x: f32) f32 {
-        return host_module.mathHostCall.log10(ctx, x);
+    pub fn log10(x: f32) f32 {
+        return @log10(x);
     }
-    pub fn sin(ctx: ?*anyopaque, x: f32) f32 {
-        return host_module.mathHostCall.sin(ctx, x);
+    pub fn sin(x: f32) f32 {
+        return @sin(x);
     }
-    pub fn cos(ctx: ?*anyopaque, x: f32) f32 {
-        return host_module.mathHostCall.cos(ctx, x);
+    pub fn cos(x: f32) f32 {
+        return @cos(x);
     }
-    pub fn tan(ctx: ?*anyopaque, x: f32) f32 {
-        return host_module.mathHostCall.tan(ctx, x);
+    pub fn tan(x: f32) f32 {
+        return @tan(x);
     }
-    pub fn asin(ctx: ?*anyopaque, x: f32) f32 {
-        return host_module.mathHostCall.asin(ctx, x);
+    pub fn asin(x: f32) f32 {
+        return std.math.asin(x);
     }
-    pub fn acos(ctx: ?*anyopaque, x: f32) f32 {
-        return host_module.mathHostCall.acos(ctx, x);
+    pub fn acos(x: f32) f32 {
+        return std.math.acos(x);
     }
-    pub fn atan(ctx: ?*anyopaque, x: f32) f32 {
-        return host_module.mathHostCall.atan(ctx, x);
+    pub fn atan(x: f32) f32 {
+        return std.math.atan(x);
     }
-    pub fn atan2(ctx: ?*anyopaque, y: f32, x: f32) f32 {
-        return host_module.mathHostCall.atan2(ctx, y, x); // y first, matching IEEE 754
+    pub fn atan2(y: f32, x: f32) f32 {
+        return std.math.atan2(y, x); // y first, matching IEEE 754
     }
-    pub fn floor(ctx: ?*anyopaque, x: f32) f32 {
-        return host_module.mathHostCall.floor(ctx, x);
+    pub fn floor(x: f32) f32 {
+        return @floor(x);
     }
-    pub fn ceil(ctx: ?*anyopaque, x: f32) f32 {
-        return host_module.mathHostCall.ceil(ctx, x);
+    pub fn ceil(x: f32) f32 {
+        return @ceil(x);
     }
-    pub fn round(ctx: ?*anyopaque, x: f32) f32 {
-        return host_module.mathHostCall.round(ctx, x);
+    pub fn round(x: f32) f32 {
+        return std.math.round(x); // ties away from zero
     }
-    pub fn trunc(ctx: ?*anyopaque, x: f32) f32 {
-        return host_module.mathHostCall.trunc(ctx, x);
+    pub fn trunc(x: f32) f32 {
+        return @trunc(x);
     }
-    pub fn abs(ctx: ?*anyopaque, x: f32) f32 {
-        return host_module.mathHostCall.abs(ctx, x);
+    pub fn abs(x: f32) f32 {
+        return @abs(x);
     }
-    pub fn min(ctx: ?*anyopaque, a: f32, b: f32) f32 {
-        return host_module.mathHostCall.min(ctx, a, b);
+    pub fn min(a: f32, b: f32) f32 {
+        return vm_types.fminIeee(f32, a, b); // IEEE fmin
     }
-    pub fn max(ctx: ?*anyopaque, a: f32, b: f32) f32 {
-        return host_module.mathHostCall.max(ctx, a, b);
+    pub fn max(a: f32, b: f32) f32 {
+        return vm_types.fmaxIeee(f32, a, b); // IEEE fmax
     }
 };
 
-/// The `string` module (StdLib §5): the four pure predicates bind typed;
-/// the rest error or allocate through scratch buffers (raw-shaped fns
-/// below).
+/// The `string` module (StdLib §5): pure predicates bind typed; the
+/// error-returning/scratch-building members bind typed with a hidden
+/// `HostCtx` (results built in the per-syscall scratch, host-bindings.md
+/// §6); the list-returning members bind typed-args with a `HostResult`
+/// body; the list-parameter members (`join`, `from_utf8`,
+/// `from_codepoints`) stay raw.
 const string_module = struct {
     pub const symbol = "string";
 
-    pub fn is_empty(ctx: ?*anyopaque, s: host_bind.Str) bool {
-        return host_module.stringHostCall.is_empty(ctx, s.bytes);
+    pub fn is_empty(s: host_bind.Str) bool {
+        return host_module.stringIsEmpty(s.bytes);
     }
-    pub fn contains(ctx: ?*anyopaque, haystack: host_bind.Str, needle: host_bind.Str) bool {
-        return host_module.stringHostCall.contains(ctx, haystack.bytes, needle.bytes);
+    pub fn contains(haystack: host_bind.Str, needle: host_bind.Str) bool {
+        return host_module.stringContains(haystack.bytes, needle.bytes);
     }
-    pub fn starts_with(ctx: ?*anyopaque, s: host_bind.Str, prefix: host_bind.Str) bool {
-        return host_module.stringHostCall.starts_with(ctx, s.bytes, prefix.bytes);
+    pub fn starts_with(s: host_bind.Str, prefix: host_bind.Str) bool {
+        return host_module.stringStartsWith(s.bytes, prefix.bytes);
     }
-    pub fn ends_with(ctx: ?*anyopaque, s: host_bind.Str, suffix: host_bind.Str) bool {
-        return host_module.stringHostCall.ends_with(ctx, s.bytes, suffix.bytes);
+    pub fn ends_with(s: host_bind.Str, suffix: host_bind.Str) bool {
+        return host_module.stringEndsWith(s.bytes, suffix.bytes);
     }
-    pub const len = hostStringLen;
-    pub const concat = hostStringConcat;
-    pub const index_of = hostStringIndexOf;
-    pub const substring = hostStringSubstring;
-    pub const split = hostStringSplit;
+    pub fn len(s: host_bind.Str) host_module.StringErr!i32 {
+        return host_module.stringLen(s.bytes);
+    }
+    pub fn concat(ctx: *host_bind.HostCtx, a: host_bind.Str, b: host_bind.Str) host_module.StringErr!host_bind.RawValue {
+        var out = std.array_list.Managed(u8).init(ctx.vm.allocator);
+        defer out.deinit();
+        try host_module.stringConcat(a.bytes, b.bytes, &out);
+        return .{ .value = ctx.vm.runtime.heap.newStr(ctx.sig.desc.ret, out.items) catch return error.OutOfMemory };
+    }
+    pub fn substring(ctx: *host_bind.HostCtx, s: host_bind.Str, start: i32, end: i32) host_module.StringErr!host_bind.RawValue {
+        var out = std.array_list.Managed(u8).init(ctx.vm.allocator);
+        defer out.deinit();
+        try host_module.stringSubstring(s.bytes, start, end, &out);
+        return .{ .value = ctx.vm.runtime.heap.newStr(ctx.sig.desc.ret, out.items) catch return error.OutOfMemory };
+    }
+    pub fn trim(ctx: *host_bind.HostCtx, s: host_bind.Str) host_module.StringErr!host_bind.RawValue {
+        var out = std.array_list.Managed(u8).init(ctx.vm.allocator);
+        defer out.deinit();
+        try host_module.stringTrim(s.bytes, &out);
+        return .{ .value = ctx.vm.runtime.heap.newStr(ctx.sig.desc.ret, out.items) catch return error.OutOfMemory };
+    }
+    pub fn lower(ctx: *host_bind.HostCtx, s: host_bind.Str) host_module.StringErr!host_bind.RawValue {
+        var out = std.array_list.Managed(u8).init(ctx.vm.allocator);
+        defer out.deinit();
+        try host_module.stringLower(s.bytes, &out);
+        return .{ .value = ctx.vm.runtime.heap.newStr(ctx.sig.desc.ret, out.items) catch return error.OutOfMemory };
+    }
+    pub fn upper(ctx: *host_bind.HostCtx, s: host_bind.Str) host_module.StringErr!host_bind.RawValue {
+        var out = std.array_list.Managed(u8).init(ctx.vm.allocator);
+        defer out.deinit();
+        try host_module.stringUpper(s.bytes, &out);
+        return .{ .value = ctx.vm.runtime.heap.newStr(ctx.sig.desc.ret, out.items) catch return error.OutOfMemory };
+    }
+    pub fn replace(ctx: *host_bind.HostCtx, s: host_bind.Str, from: host_bind.Str, to: host_bind.Str) host_module.StringErr!host_bind.RawValue {
+        var out = std.array_list.Managed(u8).init(ctx.vm.allocator);
+        defer out.deinit();
+        try host_module.stringReplace(s.bytes, from.bytes, to.bytes, &out);
+        return .{ .value = ctx.vm.runtime.heap.newStr(ctx.sig.desc.ret, out.items) catch return error.OutOfMemory };
+    }
+    pub fn repeat(ctx: *host_bind.HostCtx, s: host_bind.Str, count: i32) host_module.StringErr!host_bind.RawValue {
+        var out = std.array_list.Managed(u8).init(ctx.vm.allocator);
+        defer out.deinit();
+        try host_module.stringRepeat(s.bytes, count, &out);
+        return .{ .value = ctx.vm.runtime.heap.newStr(ctx.sig.desc.ret, out.items) catch return error.OutOfMemory };
+    }
+    pub fn index_of(ctx: *host_bind.HostCtx, haystack: host_bind.Str, needle: host_bind.Str) HostResult {
+        const found = host_module.stringIndexOf(haystack.bytes, needle.bytes) catch |e| return ctx.stringErr(e, "index_of");
+        const cell = if (found) |idx|
+            ctx.optionCell(ctx.sig.desc.ret, true, ValueCodec.encodeInt32(idx)) catch return ctx.oomPanic()
+        else
+            ctx.optionCell(ctx.sig.desc.ret, false, 0) catch return ctx.oomPanic();
+        return .{ .value = cell };
+    }
+    pub fn split(ctx: *host_bind.HostCtx, s: host_bind.Str, sep: host_bind.Str) HostResult {
+        var pieces = std.array_list.Managed([]const u8).init(ctx.vm.allocator);
+        defer pieces.deinit();
+        host_module.stringSplit(s.bytes, sep.bytes, &pieces) catch |e| return ctx.stringErr(e, "split");
+        // Copy each piece (a slice into the input str) into a fresh str
+        // object; the list chain owns them (no retain).
+        const elem_ty = ctx.vm.curImage().types[ctx.sig.desc.ret].a;
+        var cells = std.ArrayList(Value).empty;
+        defer cells.deinit(ctx.vm.allocator);
+        for (pieces.items) |p| {
+            const c = ctx.vm.runtime.heap.newStr(elem_ty, p) catch return ctx.oomPanic();
+            cells.append(ctx.vm.allocator, c) catch return ctx.oomPanic();
+        }
+        const cell = ctx.newListCells(ctx.sig.desc.ret, cells.items) catch return ctx.oomPanic();
+        return .{ .value = cell };
+    }
+    pub fn to_utf8(ctx: *host_bind.HostCtx, s: host_bind.Str) HostResult {
+        var out = std.array_list.Managed(u8).init(ctx.vm.allocator);
+        defer out.deinit();
+        host_module.stringToUtf8(s.bytes, &out) catch |e| return ctx.stringErr(e, "to_utf8");
+        var cells = std.ArrayList(Value).empty;
+        defer cells.deinit(ctx.vm.allocator);
+        for (out.items) |b| cells.append(ctx.vm.allocator, @as(Value, b)) catch return ctx.oomPanic();
+        const cell = ctx.newListCells(ctx.sig.desc.ret, cells.items) catch return ctx.oomPanic();
+        return .{ .value = cell };
+    }
+    pub fn to_codepoints(ctx: *host_bind.HostCtx, s: host_bind.Str) HostResult {
+        var out = std.array_list.Managed(u32).init(ctx.vm.allocator);
+        defer out.deinit();
+        host_module.stringToCodepoints(s.bytes, &out) catch |e| return ctx.stringErr(e, "to_codepoints");
+        var cells = std.ArrayList(Value).empty;
+        defer cells.deinit(ctx.vm.allocator);
+        for (out.items) |cp| cells.append(ctx.vm.allocator, ValueCodec.encodeUint32(cp)) catch return ctx.oomPanic();
+        const cell = ctx.newListCells(ctx.sig.desc.ret, cells.items) catch return ctx.oomPanic();
+        return .{ .value = cell };
+    }
     pub const join = hostStringJoin;
-    pub const trim = hostStringTrim;
-    pub const lower = hostStringLower;
-    pub const upper = hostStringUpper;
-    pub const replace = hostStringReplace;
-    pub const repeat = hostStringRepeat;
-    pub const to_utf8 = hostStringToUtf8;
     pub const from_utf8 = hostStringFromUtf8;
-    pub const to_codepoints = hostStringToCodepoints;
     pub const from_codepoints = hostStringFromCodepoints;
 };
 
-/// The `list` module (Runtime §4.3–§4.4): both members need heap
-/// mechanics (borrowed-list deref, cons-chain materialization).
+/// The `list` module (Runtime §4.3–§4.4): `range` binds typed-args with
+/// a hidden ctx (cons-chain materialization); `len` stays raw (borrow).
 const list_module = struct {
     pub const symbol = "list";
 
+    pub fn range(ctx: *host_bind.HostCtx, start: i32, end: i32) HostResult {
+        var vals = std.array_list.Managed(i32).init(ctx.vm.allocator);
+        defer vals.deinit();
+        host_module.listRange(start, end, &vals) catch return ctx.oomPanic();
+        var cells = std.ArrayList(Value).empty;
+        defer cells.deinit(ctx.vm.allocator);
+        for (vals.items) |v| cells.append(ctx.vm.allocator, ValueCodec.encodeInt32(v)) catch return ctx.oomPanic();
+        const cell = ctx.newListCells(ctx.sig.desc.ret, cells.items) catch return ctx.oomPanic();
+        return .{ .value = cell };
+    }
     pub const len = hostListLen;
-    pub const range = hostListRange;
 };
 
 /// The `array` module (StdLib §2): opaque payloads and retain/release
-/// mechanics — raw-shaped fns.
+/// mechanics — raw-shaped fns (borrow/move modes).
 const array_module = struct {
     pub const symbol = "array";
 
@@ -346,7 +457,7 @@ const array_module = struct {
 };
 
 /// The `hashmap` module (StdLib §3): opaque payloads, key-type checks,
-/// and retain/release mechanics — raw-shaped fns.
+/// and retain/release mechanics — raw-shaped fns (borrow/move modes).
 const hashmap_module = struct {
     pub const symbol = "hashmap";
 
@@ -379,27 +490,12 @@ pub const defaultHostRegistry: host_bind.HostRegistry = blk: {
     break :blk .{ .modules = &modules };
 };
 
-/// `builtin.str` — Runtime §4.2: decode by the declared parameter type,
-/// format the scalar into the stack buffer, allocate the str object.
-fn hostBuiltinStr(vm: *VmCtx, userdata: ?*anyopaque, sig: types.HostSignature, args: []const Value) HostResult {
-    if (args.len < 1 or sig.desc.params_len < 1) return .{ .panic = "builtin.str: expected 1 argument" };
-    const image = vm.curImage();
-    const params = image.params[sig.desc.params_start..][0..sig.desc.params_len];
-    const pt = image.types[params[0].type_];
-    const pid: llir.PrimitiveId = if (pt.kind == .primitive) @enumFromInt(pt.a) else .hostdata;
-    if (pid == .hostdata) return .{ .panic = "builtin.str: unsupported value" };
-    const view = vm_types.decodeScalar(&vm.runtime.heap, pid, args[0]) catch return .{ .panic = "builtin.str: unsupported value" };
-    var buf: [64]u8 = undefined;
-    const text = host_module.defaultHostCall.str(userdata, view, &buf) catch return .{ .panic = "builtin.str: unsupported value" };
-    const cell = vm.runtime.heap.newStr(sig.desc.ret, text) catch return .{ .panic = "builtin.str: out of memory" };
-    return .{ .value = cell };
-}
-
 /// `builtin.box` — Runtime §4.5: allocate the box shell around the payload.
 fn hostBuiltinBox(vm: *VmCtx, userdata: ?*anyopaque, sig: types.HostSignature, args: []const Value) HostResult {
+    _ = userdata;
     if (args.len < 1) return .{ .panic = "builtin.box: expected 1 argument" };
     const h = vm.runtime.heap.allocObject(.box_, sig.desc.ret, 1, 0) catch return .{ .panic = "builtin.box: out of memory" };
-    h.setCell(0, host_module.defaultHostCall.box(userdata, args[0]));
+    h.setCell(0, host_module.hostBox(args[0]));
     return .{ .value = @intFromPtr(h) };
 }
 
@@ -407,6 +503,7 @@ fn hostBuiltinBox(vm: *VmCtx, userdata: ?*anyopaque, sig: types.HostSignature, a
 /// a *Copy* `box[T]` call without `move` reads the payload and leaves the
 /// shell usable (the mode rides on the signature's first parameter).
 fn hostBuiltinUnbox(vm: *VmCtx, userdata: ?*anyopaque, sig: types.HostSignature, args: []const Value) HostResult {
+    _ = userdata;
     if (args.len < 1) return .{ .panic = "builtin.unbox: expected 1 argument" };
     const h = vm.runtime.heap.deref(args[0]) catch return .{ .panic = "builtin.unbox: not a box" };
     if (h.kind != .box_) return .{ .panic = "builtin.unbox: not a box" };
@@ -421,109 +518,13 @@ fn hostBuiltinUnbox(vm: *VmCtx, userdata: ?*anyopaque, sig: types.HostSignature,
         h.setCell(0, 0);
         vm.runtime.heap.freeShell(h);
     }
-    return .{ .value = host_module.defaultHostCall.unbox(userdata, payload) };
-}
-
-/// `builtin.panic` — Runtime §4.7: terminate with the message.
-fn hostBuiltinPanic(vm: *VmCtx, userdata: ?*anyopaque, sig: types.HostSignature, args: []const Value) HostResult {
-    _ = sig;
-    if (args.len < 1) return .{ .panic = "builtin.panic: expected 1 argument" };
-    const msg = vm.runtime.heap.strSliceOf(args[0]) orelse return .{ .panic = "builtin.panic: not a str" };
-    return .{ .panic = host_module.defaultHostCall.panic(userdata, msg) };
-}
-
-/// `builtin.assert` — Runtime §4.8: panic with the message on the false path.
-fn hostBuiltinAssert(vm: *VmCtx, userdata: ?*anyopaque, sig: types.HostSignature, args: []const Value) HostResult {
-    _ = sig;
-    if (args.len < 2) return .{ .panic = "builtin.assert: expected 2 arguments" };
-    if (args[0] == 0) {
-        const msg = vm.runtime.heap.strSliceOf(args[1]) orelse return .{ .panic = "builtin.assert: message not a str" };
-        return .{ .panic = host_module.defaultHostCall.assert(userdata, msg) };
-    }
-    return .{ .value = 0 };
-}
-
-/// `builtin.hash` — Runtime §4.9: hash str contents when the first
-/// parameter is a str, else the raw scalar cell.
-fn hostBuiltinHash(vm: *VmCtx, userdata: ?*anyopaque, sig: types.HostSignature, args: []const Value) HostResult {
-    if (args.len < 1) return .{ .panic = "builtin.hash: expected 1 argument" };
-    // The declared param type decides the hash input: str contents when
-    // the first parameter is a str, else the raw scalar cell.
-    const str_bytes = if (sig.paramCount() != 0 and sig.param(0).ty == .str) vm.runtime.heap.strSliceOf(args[0]) orelse return .{ .panic = "builtin.hash: not a str" } else null;
-    var scalar = args[0];
-    return .{ .value = host_module.defaultHostCall.hash(userdata, str_bytes orelse std.mem.asBytes(&scalar)) };
-}
-
-/// `string.len` — StdLib §5: lengths are in code points, never bytes.
-fn hostStringLen(vm: *VmCtx, userdata: ?*anyopaque, sig: types.HostSignature, args: []const Value) HostResult {
-    _ = sig;
-    const ctx = HostCtx{ .vm = vm };
-    const a = ctx.strArg(args, 0) orelse return .{ .panic = "string.len: expected a str argument" };
-    const n = host_module.stringHostCall.len(userdata, a) catch |e| return ctx.stringErr(e, "len");
-    return .{ .value = ValueCodec.encodeInt32(n) };
-}
-
-/// `string.concat` — StdLib §5.
-fn hostStringConcat(vm: *VmCtx, userdata: ?*anyopaque, sig: types.HostSignature, args: []const Value) HostResult {
-    const ctx = HostCtx{ .vm = vm };
-    const a = ctx.strArg(args, 0) orelse return .{ .panic = "string.concat: expected 2 str arguments" };
-    const b = ctx.strArg(args, 1) orelse return .{ .panic = "string.concat: expected 2 str arguments" };
-    var out = std.array_list.Managed(u8).init(vm.allocator);
-    defer out.deinit();
-    host_module.stringHostCall.concat(userdata, a, b, &out) catch |e| return ctx.stringErr(e, "concat");
-    return ctx.newStrCell(sig.desc.ret, out.items);
-}
-
-/// `string.index_of` — StdLib §5: code-point index of the first
-/// occurrence, or `Option::None`.
-fn hostStringIndexOf(vm: *VmCtx, userdata: ?*anyopaque, sig: types.HostSignature, args: []const Value) HostResult {
-    const ctx = HostCtx{ .vm = vm };
-    const a = ctx.strArg(args, 0) orelse return .{ .panic = "string.index_of: expected 2 str arguments" };
-    const b = ctx.strArg(args, 1) orelse return .{ .panic = "string.index_of: expected 2 str arguments" };
-    const found = host_module.stringHostCall.index_of(userdata, a, b) catch |e| return ctx.stringErr(e, "index_of");
-    const cell = if (found) |idx|
-        ctx.optionCell(sig.desc.ret, true, ValueCodec.encodeInt32(idx)) catch return ctx.oomPanic()
-    else
-        ctx.optionCell(sig.desc.ret, false, 0) catch return ctx.oomPanic();
-    return .{ .value = cell };
-}
-
-/// `string.substring` — StdLib §5: half-open interval [start, end).
-fn hostStringSubstring(vm: *VmCtx, userdata: ?*anyopaque, sig: types.HostSignature, args: []const Value) HostResult {
-    const ctx = HostCtx{ .vm = vm };
-    const a = ctx.strArg(args, 0) orelse return .{ .panic = "string.substring: expected a str argument" };
-    const start = ctx.intArg(args, 1) orelse return .{ .panic = "string.substring: expected int32 offsets" };
-    const end = ctx.intArg(args, 2) orelse return .{ .panic = "string.substring: expected int32 offsets" };
-    var out = std.array_list.Managed(u8).init(vm.allocator);
-    defer out.deinit();
-    host_module.stringHostCall.substring(userdata, a, start, end, &out) catch |e| return ctx.stringErr(e, "substring");
-    return ctx.newStrCell(sig.desc.ret, out.items);
-}
-
-/// `string.split` — StdLib §5: pieces as fresh str objects in a list.
-fn hostStringSplit(vm: *VmCtx, userdata: ?*anyopaque, sig: types.HostSignature, args: []const Value) HostResult {
-    const ctx = HostCtx{ .vm = vm };
-    const a = ctx.strArg(args, 0) orelse return .{ .panic = "string.split: expected 2 str arguments" };
-    const sep = ctx.strArg(args, 1) orelse return .{ .panic = "string.split: expected 2 str arguments" };
-    var pieces = std.array_list.Managed([]const u8).init(vm.allocator);
-    defer pieces.deinit();
-    host_module.stringHostCall.split(userdata, a, sep, &pieces) catch |e| return ctx.stringErr(e, "split");
-    // Copy each piece (a slice into the input str) into a fresh str
-    // object; the list chain owns them (no retain).
-    const elem_ty = vm.curImage().types[sig.desc.ret].a;
-    var cells = std.ArrayList(Value).empty;
-    defer cells.deinit(vm.allocator);
-    for (pieces.items) |p| {
-        const c = vm.runtime.heap.newStr(elem_ty, p) catch return ctx.oomPanic();
-        cells.append(vm.allocator, c) catch return ctx.oomPanic();
-    }
-    const cell = ctx.newListCells(sig.desc.ret, cells.items) catch return ctx.oomPanic();
-    return .{ .value = cell };
+    return .{ .value = host_module.hostUnbox(payload) };
 }
 
 /// `string.join` — StdLib §5.
 fn hostStringJoin(vm: *VmCtx, userdata: ?*anyopaque, sig: types.HostSignature, args: []const Value) HostResult {
-    const ctx = HostCtx{ .vm = vm };
+    _ = userdata;
+    const ctx = host_bind.HostCtx{ .vm = vm };
     if (args.len < 2) return .{ .panic = "string.join: expected 2 arguments" };
     const sep = ctx.strArg(args, 1) orelse return .{ .panic = "string.join: separator not a str" };
     var elems = std.ArrayList(Value).empty;
@@ -536,81 +537,14 @@ fn hostStringJoin(vm: *VmCtx, userdata: ?*anyopaque, sig: types.HostSignature, a
     }
     var out = std.array_list.Managed(u8).init(vm.allocator);
     defer out.deinit();
-    host_module.stringHostCall.join(userdata, parts.items, sep, &out) catch |e| return ctx.stringErr(e, "join");
+    host_module.stringJoin(parts.items, sep, &out) catch |e| return ctx.stringErr(e, "join");
     return ctx.newStrCell(sig.desc.ret, out.items);
-}
-
-/// `string.trim` — StdLib §5: removes leading and trailing Unicode
-/// whitespace.
-fn hostStringTrim(vm: *VmCtx, userdata: ?*anyopaque, sig: types.HostSignature, args: []const Value) HostResult {
-    const ctx = HostCtx{ .vm = vm };
-    const a = ctx.strArg(args, 0) orelse return .{ .panic = "string.trim: expected a str argument" };
-    var out = std.array_list.Managed(u8).init(vm.allocator);
-    defer out.deinit();
-    host_module.stringHostCall.trim(userdata, a, &out) catch |e| return ctx.stringErr(e, "trim");
-    return ctx.newStrCell(sig.desc.ret, out.items);
-}
-
-/// `string.lower` — StdLib §5: full Unicode default case conversion.
-fn hostStringLower(vm: *VmCtx, userdata: ?*anyopaque, sig: types.HostSignature, args: []const Value) HostResult {
-    const ctx = HostCtx{ .vm = vm };
-    const a = ctx.strArg(args, 0) orelse return .{ .panic = "string.lower: expected a str argument" };
-    var out = std.array_list.Managed(u8).init(vm.allocator);
-    defer out.deinit();
-    host_module.stringHostCall.lower(userdata, a, &out) catch |e| return ctx.stringErr(e, "lower");
-    return ctx.newStrCell(sig.desc.ret, out.items);
-}
-
-/// `string.upper` — StdLib §5: full Unicode default case conversion.
-fn hostStringUpper(vm: *VmCtx, userdata: ?*anyopaque, sig: types.HostSignature, args: []const Value) HostResult {
-    const ctx = HostCtx{ .vm = vm };
-    const a = ctx.strArg(args, 0) orelse return .{ .panic = "string.upper: expected a str argument" };
-    var out = std.array_list.Managed(u8).init(vm.allocator);
-    defer out.deinit();
-    host_module.stringHostCall.upper(userdata, a, &out) catch |e| return ctx.stringErr(e, "upper");
-    return ctx.newStrCell(sig.desc.ret, out.items);
-}
-
-/// `string.replace` — StdLib §5.
-fn hostStringReplace(vm: *VmCtx, userdata: ?*anyopaque, sig: types.HostSignature, args: []const Value) HostResult {
-    const ctx = HostCtx{ .vm = vm };
-    const a = ctx.strArg(args, 0) orelse return .{ .panic = "string.replace: expected 3 str arguments" };
-    const from = ctx.strArg(args, 1) orelse return .{ .panic = "string.replace: expected 3 str arguments" };
-    const to = ctx.strArg(args, 2) orelse return .{ .panic = "string.replace: expected 3 str arguments" };
-    var out = std.array_list.Managed(u8).init(vm.allocator);
-    defer out.deinit();
-    host_module.stringHostCall.replace(userdata, a, from, to, &out) catch |e| return ctx.stringErr(e, "replace");
-    return ctx.newStrCell(sig.desc.ret, out.items);
-}
-
-/// `string.repeat` — StdLib §5; a negative count traps.
-fn hostStringRepeat(vm: *VmCtx, userdata: ?*anyopaque, sig: types.HostSignature, args: []const Value) HostResult {
-    const ctx = HostCtx{ .vm = vm };
-    const a = ctx.strArg(args, 0) orelse return .{ .panic = "string.repeat: expected a str argument" };
-    const count = ctx.intArg(args, 1) orelse return .{ .panic = "string.repeat: expected an int32 count" };
-    var out = std.array_list.Managed(u8).init(vm.allocator);
-    defer out.deinit();
-    host_module.stringHostCall.repeat(userdata, a, count, &out) catch |e| return ctx.stringErr(e, "repeat");
-    return ctx.newStrCell(sig.desc.ret, out.items);
-}
-
-/// `string.to_utf8` — StdLib §5: the bytes of the str as a `list[byte]`.
-fn hostStringToUtf8(vm: *VmCtx, userdata: ?*anyopaque, sig: types.HostSignature, args: []const Value) HostResult {
-    const ctx = HostCtx{ .vm = vm };
-    const a = ctx.strArg(args, 0) orelse return .{ .panic = "string.to_utf8: expected a str argument" };
-    var out = std.array_list.Managed(u8).init(vm.allocator);
-    defer out.deinit();
-    host_module.stringHostCall.to_utf8(userdata, a, &out) catch |e| return ctx.stringErr(e, "to_utf8");
-    var cells = std.ArrayList(Value).empty;
-    defer cells.deinit(vm.allocator);
-    for (out.items) |b| cells.append(vm.allocator, @as(Value, b)) catch return ctx.oomPanic();
-    const cell = ctx.newListCells(sig.desc.ret, cells.items) catch return ctx.oomPanic();
-    return .{ .value = cell };
 }
 
 /// `string.from_utf8` — StdLib §5; invalid UTF-8 traps.
 fn hostStringFromUtf8(vm: *VmCtx, userdata: ?*anyopaque, sig: types.HostSignature, args: []const Value) HostResult {
-    const ctx = HostCtx{ .vm = vm };
+    _ = userdata;
+    const ctx = host_bind.HostCtx{ .vm = vm };
     if (args.len < 1) return .{ .panic = "string.from_utf8: expected 1 argument" };
     var elems = std.ArrayList(Value).empty;
     defer elems.deinit(vm.allocator);
@@ -620,28 +554,14 @@ fn hostStringFromUtf8(vm: *VmCtx, userdata: ?*anyopaque, sig: types.HostSignatur
     for (elems.items) |c| bytes.append(vm.allocator, @truncate(c)) catch return ctx.oomPanic();
     var out = std.array_list.Managed(u8).init(vm.allocator);
     defer out.deinit();
-    host_module.stringHostCall.from_utf8(userdata, bytes.items, &out) catch |e| return ctx.stringErr(e, "from_utf8");
+    host_module.stringFromUtf8(bytes.items, &out) catch |e| return ctx.stringErr(e, "from_utf8");
     return ctx.newStrCell(sig.desc.ret, out.items);
-}
-
-/// `string.to_codepoints` — StdLib §5: the code points as a
-/// `list[uint32]`.
-fn hostStringToCodepoints(vm: *VmCtx, userdata: ?*anyopaque, sig: types.HostSignature, args: []const Value) HostResult {
-    const ctx = HostCtx{ .vm = vm };
-    const a = ctx.strArg(args, 0) orelse return .{ .panic = "string.to_codepoints: expected a str argument" };
-    var out = std.array_list.Managed(u32).init(vm.allocator);
-    defer out.deinit();
-    host_module.stringHostCall.to_codepoints(userdata, a, &out) catch |e| return ctx.stringErr(e, "to_codepoints");
-    var cells = std.ArrayList(Value).empty;
-    defer cells.deinit(vm.allocator);
-    for (out.items) |cp| cells.append(vm.allocator, ValueCodec.encodeUint32(cp)) catch return ctx.oomPanic();
-    const cell = ctx.newListCells(sig.desc.ret, cells.items) catch return ctx.oomPanic();
-    return .{ .value = cell };
 }
 
 /// `string.from_codepoints` — StdLib §5; non-scalar code points trap.
 fn hostStringFromCodepoints(vm: *VmCtx, userdata: ?*anyopaque, sig: types.HostSignature, args: []const Value) HostResult {
-    const ctx = HostCtx{ .vm = vm };
+    _ = userdata;
+    const ctx = host_bind.HostCtx{ .vm = vm };
     if (args.len < 1) return .{ .panic = "string.from_codepoints: expected 1 argument" };
     var elems = std.ArrayList(Value).empty;
     defer elems.deinit(vm.allocator);
@@ -651,7 +571,7 @@ fn hostStringFromCodepoints(vm: *VmCtx, userdata: ?*anyopaque, sig: types.HostSi
     for (elems.items) |c| cps.append(vm.allocator, ValueCodec.decodeUint32(c) orelse return .{ .panic = "string.from_codepoints: element not a uint32" }) catch return ctx.oomPanic();
     var out = std.array_list.Managed(u8).init(vm.allocator);
     defer out.deinit();
-    host_module.stringHostCall.from_codepoints(userdata, cps.items, &out) catch |e| return ctx.stringErr(e, "from_codepoints");
+    host_module.stringFromCodepoints(cps.items, &out) catch |e| return ctx.stringErr(e, "from_codepoints");
     return ctx.newStrCell(sig.desc.ret, out.items);
 }
 
@@ -659,6 +579,7 @@ fn hostStringFromCodepoints(vm: *VmCtx, userdata: ?*anyopaque, sig: types.HostSi
 /// (O(1)).
 fn hostListLen(vm: *VmCtx, userdata: ?*anyopaque, sig: types.HostSignature, args: []const Value) HostResult {
     _ = sig;
+    _ = userdata;
     if (args.len < 1) return .{ .panic = "list.len: expected 1 argument" };
 
     var count: i32 = 0;
@@ -671,198 +592,13 @@ fn hostListLen(vm: *VmCtx, userdata: ?*anyopaque, sig: types.HostSignature, args
         }
         count = @intCast(head.len);
     }
-    return .{ .value = ValueCodec.encodeInt32(host_module.listHostCall.len(userdata, count)) };
+    return .{ .value = ValueCodec.encodeInt32(host_module.listLen(count)) };
 }
 
-/// `list.range` — Runtime §4.4: the inclusive [start, end] integer range
-/// as a `list[int32]` cons chain.
-fn hostListRange(vm: *VmCtx, userdata: ?*anyopaque, sig: types.HostSignature, args: []const Value) HostResult {
-    const ctx = HostCtx{ .vm = vm };
-    const start = ctx.intArg(args, 0) orelse return .{ .panic = "list.range: expected 2 int32 arguments" };
-    const end = ctx.intArg(args, 1) orelse return .{ .panic = "list.range: expected 2 int32 arguments" };
-    var vals = std.array_list.Managed(i32).init(vm.allocator);
-    defer vals.deinit();
-    host_module.listHostCall.range(userdata, start, end, &vals) catch return ctx.oomPanic();
-    var cells = std.ArrayList(Value).empty;
-    defer cells.deinit(vm.allocator);
-    for (vals.items) |v| cells.append(vm.allocator, ValueCodec.encodeInt32(v)) catch return ctx.oomPanic();
-    const cell = ctx.newListCells(sig.desc.ret, cells.items) catch return ctx.oomPanic();
-    return .{ .value = cell };
-}
-
-/// Host-call-side VM mechanics (docs/interpreter-vm.md §9): a thin
-/// wrapper around `VmCtx` exposing the decode, allocation, list-walk,
-/// and trap helpers the stdlib module members share. The raw-shaped
-/// members construct one per call (`const ctx = HostCtx{ .vm = vm };`);
-/// the callback-shaped helpers (`hashmapKeyHash`/`hashmapKeyEq`, the
-/// disposers) reconstruct it from their opaque `user` pointer.
-const HostCtx = struct {
-    vm: *VmCtx,
-
-    /// One str argument decoded from the canonical cells; null when
-    /// absent or not a live str object.
-    fn strArg(self: *const HostCtx, args: []const Value, i: usize) ?[]const u8 {
-        if (i >= args.len) return null;
-        return self.vm.runtime.heap.strSliceOf(args[i]);
-    }
-
-    /// One canonical int32 argument; null when absent or non-canonical.
-    fn intArg(self: *const HostCtx, args: []const Value, i: usize) ?i32 {
-        _ = self;
-        if (i >= args.len) return null;
-        return ValueCodec.decodeInt32(args[i]);
-    }
-
-    /// Owned panic message for an adapter-side allocation failure (reachable
-    /// trap paths, e.g. a huge `list.range` — never a static string).
-    fn oomPanic(self: *const HostCtx) HostResult {
-        _ = self;
-        return .{ .panic = "out of memory" };
-    }
-
-    /// Borrowed deterministic panic message (adapter trap paths): formatted
-    /// into the VM's scratch buffer, which `sitePrefixed` copies into the
-    /// owned Termination message before the buffer is reused.
-    fn panicFmt(self: *const HostCtx, comptime fmt: []const u8, args: anytype) HostResult {
-        const slice = std.fmt.bufPrint(&self.vm.runtime.panic_buf, fmt, args) catch return self.oomPanic();
-        return .{ .panic = slice };
-    }
-
-    /// Map a string-handler error to an owned deterministic trap message
-    /// (StdLib §5, Runtime §7.2).
-    fn stringErr(self: *const HostCtx, e: host_module.StringErr, member: []const u8) HostResult {
-        const msg = switch (e) {
-            error.InvalidUtf8 => "invalid UTF-8",
-            error.Range => "index out of range",
-            error.BadCodepoint => "not a Unicode scalar value",
-            error.OutOfMemory => return self.oomPanic(),
-        };
-        const slice = std.fmt.bufPrint(&self.vm.runtime.panic_buf, "string.{s}: {s}", .{ member, msg }) catch return self.oomPanic();
-        return .{ .panic = slice };
-    }
-
-    /// Allocate a str object holding `bytes`; OOM is a panic.
-    fn newStrCell(self: *const HostCtx, ty: u32, bytes: []const u8) HostResult {
-        const cell = self.vm.runtime.heap.newStr(ty, bytes) catch return self.oomPanic();
-        return .{ .value = cell };
-    }
-
-    /// Build a list cons chain from element cells, right to left, with each
-    /// node's suffix length recorded (the head's `len` is the element
-    /// count — the O(1) read `list#len` and `read_index` rely on). The
-    /// element cells are NOT retained: they are freshly-owned objects or
-    /// scalars the chain takes over.
-    fn newListCells(self: *const HostCtx, ty: u32, elems: []const Value) HeapErr!Value {
-        var next: Value = 0;
-        var suffix_len: u32 = 0;
-        var k = elems.len;
-        while (k > 0) {
-            k -= 1;
-            const h = try self.vm.runtime.heap.allocObjectIn(.list_cons, self.vm.curModIdx(), ty, 2, 0);
-            h.setCell(0, elems[k]);
-            h.setCell(1, next);
-            h.len = suffix_len + 1;
-            suffix_len += 1;
-            next = @intFromPtr(h);
-        }
-        return next;
-    }
-
-    /// The builtin `Option[T]` union in the image's union layout: `Some` is
-    /// variant tag 0 with the payload in cell 1, `None` variant tag 1
-    /// (std/builtin.st declaration order; `read_tag`/`read_payload` and the
-    /// destruction walker read the same cells).
-    fn optionCell(self: *const HostCtx, ty: u32, some: bool, payload: Value) HeapErr!Value {
-        const h = try self.vm.runtime.heap.allocObject(.union_, ty, 1 + @as(usize, @intFromBool(some)), 0);
-        h.setCell(0, if (some) 0 else 1);
-        if (some) h.setCell(1, payload);
-        return @intFromPtr(h);
-    }
-
-    /// Walk a list cons chain, appending each element cell to `out`. The
-    /// element cells are not retained — callers convert them into fresh
-    /// scalar cells or copy the referenced objects immediately.
-    fn walkList(self: *const HostCtx, cell: Value, out: *std.ArrayList(Value)) HeapErr!void {
-        var cur = cell;
-        while (cur != 0) {
-            const node = try self.vm.runtime.heap.deref(cur);
-            if (node.kind != .list_cons) return error.TypeMismatch;
-            try out.append(self.vm.allocator, node.cell(0));
-            cur = node.cell(1);
-        }
-    }
-
-    /// Resolve an opaque argument's host object; callers turn a null into
-    /// their deterministic "not an <what>" trap. Unreachable in validated
-    /// programs.
-    fn arrayPayload(self: *const HostCtx, v: Value) ?*host_module.ArrayObject {
-        const h = self.vm.runtime.heap.deref(v) catch return null;
-        if (h.kind != .opaque_) return null;
-        return @ptrFromInt(@as(usize, @intCast(h.cell(0))));
-    }
-
-    fn mapPayload(self: *const HostCtx, v: Value) ?*host_module.HashMapObject {
-        const h = self.vm.runtime.heap.deref(v) catch return null;
-        if (h.kind != .opaque_) return null;
-        return @ptrFromInt(@as(usize, @intCast(h.cell(0))));
-    }
-
-    /// StdLib §3: key type `K` must be hashable. `builtin.hash` covers the
-    /// primitive scalar types and str; anything else (e.g. a list key,
-    /// which the frontend does not reject today) is a deterministic trap
-    /// before any mutation.
-    fn checkHashableKey(self: *const HostCtx, map_ty: u32) bool {
-        const row = self.vm.metaImage().types[map_ty];
-        // The `named` arg range is `{ b = start, c = len }`.
-        if (row.kind != .named or row.c == 0) return false;
-        const k = self.vm.metaImage().types[row.b];
-        return k.kind == .primitive and switch (@as(llir.PrimitiveId, @enumFromInt(k.a))) {
-            .byte, .bool, .int32, .uint32, .float32, .str => true,
-            else => false,
-        };
-    }
-
-    /// Wyhash (seed 0) over str contents or the raw scalar cell —
-    /// bit-identical to `builtin.hash` (Runtime §4.9).
-    fn keyHash(self: *const HostCtx, key: Value) u64 {
-        if (self.vm.runtime.heap.strSliceOf(key)) |bytes| return std.hash.Wyhash.hash(0, bytes);
-        var v = key;
-        return std.hash.Wyhash.hash(0, std.mem.asBytes(&v));
-    }
-
-    /// Str content equality (mirroring `==`, `str_eq`) for str keys; raw
-    /// cell equality for scalars.
-    fn keyEq(self: *const HostCtx, a: Value, b: Value) bool {
-        if (self.vm.runtime.heap.strSliceOf(a) != null) return vm_dispatch.strEqual(self.vm, a, b) catch false;
-        return a == b;
-    }
-
-    /// Release one stored/displaced cell if it is a counted shell; scalars
-    /// and unique (non-counted) Copy shells have no reference to drop.
-    fn releaseCellIfCounted(self: *const HostCtx, addr: Value) HeapErr!void {
-        if (addr == 0) return;
-        const h = self.vm.runtime.heap.registry.get(addr) orelse return; // scalar cell
-        if (!h.isCounted()) return;
-        try vm_dispatch.releaseCounted(self.vm, addr);
-    }
-
-    /// Register a freshly built host object behind an opaque shell. On
-    /// registration failure the shell is freed before the panic commits
-    /// (docs/interpreter-vm.md §6.4: uncommitted-result disposal).
-    fn wrapOpaque(self: *const HostCtx, ty: u32, obj: *anyopaque, disposer: HostDisposer) HostResult {
-        const row = self.vm.metaImage().types[ty];
-        if (row.kind != .named) return .{ .panic = "host object: unexpected result type" };
-        const host_type_id = self.vm.metaImage().type_decls[row.a].a;
-        _ = &host_type_id;
-        const h = self.vm.runtime.heap.allocObject(.opaque_, ty, 1, 0) catch return self.oomPanic();
-        h.setCell(0, @intFromPtr(obj));
-        self.vm.registerHostResource(host_type_id, @intFromPtr(h), disposer, self.vm) catch {
-            self.vm.runtime.heap.freeShell(h);
-            return self.oomPanic();
-        };
-        return .{ .value = @intFromPtr(h) };
-    }
-};
+/// The adapter context lives in the binding layer (host_bind.zig §3.2);
+/// this alias keeps the raw-shaped members' `const ctx = HostCtx{ .vm = vm };`
+/// spelling. The typed members receive it as a hidden leading parameter.
+const HostCtx = host_bind.HostCtx;
 
 // ---------------------------------------------------------------------------
 // The `array` and `hashmap` adapters (StdLib §2, §3) — M3. Each opaque

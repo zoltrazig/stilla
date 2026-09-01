@@ -139,7 +139,15 @@ pub const RawValue = struct { value: Value };
 
 Scalars map directly: `bool`, `i32`, `u32`, `i64`, `u64`, `f32`, `f64`
 and the C-ABI `c_int`/`c_uint` (Stilla primitive widths: `PrimitiveId`
-in llir.zig). Returns may also be `void` or `Str` (owned). `Opaque`
+in llir.zig). Returns may be `void`, a scalar, `Str` (owned — the
+thunk allocates the str object), `RawValue` (the member allocated the
+result itself — e.g. a str/list/union object through the hidden ctx),
+or `HostResult` (typed arguments with a full raw body: allocation,
+panics). A return may be an error union over any of these: the thunk
+turns the error into a deterministic trap (§5). Two hidden leading
+parameters are excluded from the signature: `?*anyopaque` module
+userdata and `*HostCtx` adapter context (the VM plus the current
+call's signature, with the shared adapter helpers). `Opaque`
 parameters are accepted in v1 (payload pass-through); `BorrowedOpaque`
 and borrowed-`str` parameters are deferred — a `borrow`-mode parameter
 uses a `raw()` handler instead.
@@ -155,11 +163,19 @@ const mydb = struct {
     pub const symbol = "mydb";
     /// Typed member: scalars, host.Str, host.Opaque, host.RawValue, and
     /// C-ABI types ([*:0]const u8, c_int, ...). A leading `?*anyopaque`
-    /// parameter is the module-userdata injection point.
+    /// parameter is the module-userdata injection point; a leading
+    /// `*HostCtx` is the adapter context (the VM + the current call's
+    /// signature, plus the shared decode/alloc/trap helpers).
     pub fn query(s: host_bind.Str) i32 { return @intCast(s.bytes.len); }
     /// A C function, callconv(.c): strs map to `[*:0]const u8`
     /// (NUL-terminated via HostScratch, §6); scalar/void returns only.
     pub fn connect(s: [*:0]const u8) callconv(.c) c_int { ... }
+    /// Hidden ctx + error return: the thunk maps the error to a
+    /// deterministic trap ("concat: <spec message>", §5).
+    pub fn concat(ctx: *host_bind.HostCtx, a: host_bind.Str, b: host_bind.Str) host_module.StringErr!host_bind.RawValue { ... }
+    /// Typed arguments with a raw body: signature-checked and decoded,
+    /// but the member keeps full control (unions, lists, panics).
+    pub fn index_of(ctx: *host_bind.HostCtx, haystack: host_bind.Str, needle: host_bind.Str) interp_types.HostResult { ... }
     /// Raw member: the (vm, userdata, sig, args) thunk shape registers
     /// raw — no signature check, the full surface for ownership-sensitive
     /// members.
@@ -174,7 +190,8 @@ Each member's generated thunk:
 1. checks the expected signature (see §5);
 2. decodes each canonical cell according to the declared parameter type,
    trapping deterministically on mismatch — never misdecoding;
-3. calls the fn, encoding the result back into a cell.
+3. calls the fn, mapping an error-union result to a deterministic trap
+   (§5) and encoding the result back into a cell.
 
 ### 3.3 Registry
 
@@ -255,16 +272,25 @@ of the artifact's actual signature for the call. The comparison is
 element-wise: param count, each param's mode and type, and the return
 type. `matches` is exact: a `Str` binding requires a `str` param, an
 `Opaque` binding requires an `opaque` type, a `.composite` expected
-matches only `.composite`. Typed bindings declare `plain`-mode
-parameters (the `?*anyopaque` first parameter is the module userdata
-injection point, excluded from the signature); a `move`-mode runtime
-parameter always fails — the typed glue cannot honor ownership
-transfer, and the binding must use `raw()` instead.
+matches only `.composite`. `RawValue` maps to a wildcard that accepts
+any type, and `HostResult` returns skip the return check. Typed
+bindings declare `plain`-mode parameters (a hidden leading `?*anyopaque`
+module-userdata or `*HostCtx` adapter-context parameter is excluded
+from the signature); a `move`-mode runtime parameter always fails —
+the typed glue cannot honor ownership transfer, and the binding must
+use `raw()` instead.
 
 A mismatch is a deterministic trap ("binding signature mismatch for
 mydb.query"), never a misdecode. This catches embedding bugs (interface
 `.st` and Zig binding disagree) at the first call instead of corrupting
 values.
+
+An error-union return is also a deterministic trap: the thunk formats
+`"{member}: {message}"` into the VM's panic scratch, where the message
+is the spec text for the stdlib string errors (`InvalidUtf8` → "invalid
+UTF-8", `Range` → "index out of range", `BadCodepoint` → "not a
+Unicode scalar value", `OutOfMemory` → "out of memory") and the
+error name otherwise.
 
 ## 6. HostScratch: no per-call allocation
 
@@ -295,8 +321,8 @@ excluded: ownership/freeing is ambiguous at the boundary.
 
 ## 7. Stdlib migration (staged — done)
 
-One mechanism, two member kinds: generated typed thunks for members
-whose Stilla signature is plain scalars/str, raw-shaped fns for
+One mechanism, several member kinds: generated typed thunks for members
+whose Stilla signature is expressible, raw-shaped fns for
 ownership-sensitive ones. Order:
 
 1. **Registered as-is**: every `builtin`/`math`/`string`/`list`/`array`/
@@ -306,22 +332,37 @@ ownership-sensitive ones. Order:
    zero rewrites.
 2. **Parity**: the interpreter_host_tests suite passed against the
    registry before any adapter was touched.
-3. **Converted** *(done)*: the six modules are now module structs
+3. **Converted** *(done)*: the six modules are module structs
    registered through `host_bind.register` (interpreter_host.zig).
-   Members with a plain scalar/str signature bind typed — all 20
-   `math` functions (`float32` in/out), `builtin.print`, and the four
-   pure `string` predicates (`is_empty`/`contains`/`starts_with`/
-   `ends_with`). Every other member is a raw-shaped fn carrying the
-   adapter logic directly; the per-module member dispatch switches, the
-   dispatch enums (`MathMember`/`StringMember`/`ArrayMember`/
-   `HashMapMember`), and `moduleFromFields` are deleted.
-4. **Handlers stay**: the host.zig handler structs (`DefaultHostCall`/
-   `MathHostCall`/`StringHostCall`/`ListHostCall`) remain the
-   implementations — the module members forward to them, so the
-   host-customization surface (`Sources.host`) is untouched.
-   `defaultHostCall` survives as the opt-out adapter: a registry
+   47 of the 60 members are typed bindings with signature checks:
+   - plain typed — all 20 `math` functions (inlined `std.math`),
+     `builtin.print`/`assert`/`panic`, the four pure `string`
+     predicates, `string.len` (error return);
+   - hidden `*HostCtx` + error return — the `string` producers
+     (`concat`/`substring`/`trim`/`lower`/`upper`/`replace`/`repeat`,
+     returning `StringErr!RawValue` with the result str allocated
+     directly);
+   - hidden `*HostCtx` + `HostResult` body (typed arguments, raw
+     body) — `builtin.str`/`hash`, `string`
+     `index_of`/`split`/`to_utf8`/`to_codepoints`, `list.range`;
+   - the rest bind typed-args through `RawValue`/wildcard params
+     (`builtin.str`/`hash`).
+   The per-module member dispatch switches, the dispatch enums
+   (`MathMember`/`StringMember`/`ArrayMember`/`HashMapMember`), and
+   `moduleFromFields` are deleted.
+4. **Handlers collapse** *(done)*: the host.zig handler structs
+   (`DefaultHostCall`/`MathHostCall`/`StringHostCall`/`ListHostCall`)
+   are gone — the implementations are plain `pub` fns in host.zig
+   (`hostPrint`..`hostHash`, `stringLen`..`stringFromCodepoints`,
+   `listLen`/`listRange`; userdata params dropped) that the members
+   call. `defaultHostCall` survives as the opt-out adapter: a registry
    dispatch used by dynamic-host `invoke` overriders to delegate
    non-intercepted members.
+
+**Still raw** (13 members, by design, §9): `list.len` (borrow mode),
+all of `array` (borrow/move + opaque) and `hashmap` (borrow/move +
+opaque), `builtin.box`/`unbox` (move), and the `string` members with
+list parameters (`join`, `from_utf8`, `from_codepoints`).
 
 ## 8. Tests
 
@@ -342,9 +383,12 @@ Staged in host_bind_tests.zig (new) and the existing suites:
 
 - Frontend interface derivation from Zig (`Sources.host`, the host
   interface registry) — separate change.
-- Typed ownership: `move`/`borrow` transfer, lists, unions, retained
-  returns through the typed layer — stays on `raw()`. `BorrowedOpaque` and
-  borrowed-`str` parameters are deferred.
+- Typed ownership: `move`/`borrow` transfer, list/union/opaque
+  **parameters**, retained returns through the typed layer — stays on
+  `raw()` (the mode check rejects them deterministically). List/union
+  **returns** are handled by hidden-ctx members returning `RawValue` or
+  `HostResult`. `BorrowedOpaque` and borrowed-`str` parameters are
+  deferred.
 - C string (`char *`) returns.
 - Hosts that cannot enumerate members statically — the `invoke` opt-out
   covers them today.

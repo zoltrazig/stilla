@@ -785,15 +785,23 @@ via the member tables; a module or member with no handler reports
 trap.
 
 The six stdlib modules are module structs registered through
-`host_bind.register` (host-bindings.md §7): members with a plain
-scalar/str signature bind typed (all 20 `math` functions, `builtin.print`,
-and the four pure `string` predicates), and every other member is a
-raw-shaped fn carrying the adapter logic directly — the per-module
-member dispatch switches are deleted. The raw-shaped members share a
-`HostCtx` wrapper around `VmCtx` (interpreter_host.zig) for the decode,
-allocation, list-walk, and trap helpers. `defaultHostCall` survives as
-the opt-out adapter: a registry dispatch that dynamic-host `invoke`
-overriders delegate non-intercepted members to.
+`host_bind.register` (host-bindings.md §7): 47 of the 60 members are
+typed bindings — plain typed (all 20 `math` functions, `builtin.print`/
+`assert`/`panic`, the four pure `string` predicates, `string.len`),
+hidden-`*HostCtx` + error-return typed (the `string` producers
+`concat`/`substring`/`trim`/`lower`/`upper`/`replace`/`repeat`), and
+typed-args-with-`HostResult` (typed arguments, raw body:
+`builtin.str`/`hash`, `string` `index_of`/`split`/`to_utf8`/
+`to_codepoints`, `list.range`). The rest (borrow/move modes, list/opaque
+parameters: `list.len`, `builtin.box`/`unbox`, all of `array`/`hashmap`,
+`string` `join`/`from_utf8`/`from_codepoints`) are raw-shaped fns. The
+per-module member dispatch switches are deleted. Typed members with a
+hidden `*HostCtx` and the raw-shaped members share the `HostCtx` adapter
+context (host_bind.zig §3.2 — the VM plus the current call's signature,
+with the decode, allocation, list-walk, and trap helpers).
+`defaultHostCall` survives as the opt-out adapter: a registry dispatch
+that dynamic-host `invoke` overriders delegate non-intercepted members
+to.
 
 Each member (typed or raw) is responsible for:
 
@@ -808,11 +816,12 @@ Each member (typed or raw) is responsible for:
 - converting the host result into the declared Stilla representation
   (allocating str/list/union objects, encoding scalars).
 
-The adapters keep the VM heap mechanics (decode cells, walk lists, allocate
-objects); the handler structs in `host.zig` (`DefaultHostCall`,
-`MathHostCall`, `StringHostCall`, `ListHostCall`) receive only verified
-plain data and never touch the VM (M2). The typed member machinery
-generates the same decode/encode glue from a Zig/C function
+The member fns keep the VM heap mechanics (decode cells, walk lists,
+allocate objects); the implementations are plain `pub` fns in `host.zig`
+(`hostPrint`..`hostHash`, `stringLen`..`stringFromCodepoints`,
+`listLen`/`listRange` — the M2 handler structs collapsed into them) that
+receive only verified plain data and never touch the VM. The typed
+member machinery generates the decode/encode glue from a Zig/C function
 signature, with signature verification against the artifact before
 decoding (host-bindings.md §3, §5). The string handlers operate on code
 points, never byte offsets; their errors map to owned deterministic trap
@@ -1047,16 +1056,20 @@ Implemented milestones:
   row, resolved once — hosts never touch `TypeId` tables) instead of a
   bare signature index; `host_bind.zig` adds the typed member layer
   (`host_bind.register` over a module struct — `pub const symbol` +
-  `pub fn` members; comptime decode/encode glue, module userdata
-  injection, reusable `HostScratch` for NUL-terminated C strings). The
-  six stdlib modules migrated onto it: members with a plain
-  scalar/str signature bind typed (the 20 `math` functions,
-  `builtin.print`, the four pure `string` predicates), the rest are
-  raw-shaped fns carrying the adapter logic — the per-module member
-  dispatch switches and `moduleFromFields` are deleted. The
-  pre-registry adapter contract remains as the `invoke` opt-out for
-  dynamic hosts (`defaultHostCall` now dispatches through the
-  registry).
+  `pub fn` members; comptime decode/encode glue, hidden `*HostCtx`
+  adapter context, error-union returns with spec trap messages,
+  `HostResult` bodies, module userdata injection, reusable
+  `HostScratch` for NUL-terminated C strings). The six stdlib modules
+  migrated onto it: 47 of 60 members are typed bindings (all 20
+  `math`, `builtin.print`/`assert`/`panic`/`str`/`hash`, the `string`
+  predicates + producers + list-returning members, `list.range`); the
+  borrow/move/opaque/list-parameter members stay raw-shaped. The
+  per-module member dispatch switches, `moduleFromFields`, and the
+  handler structs (`DefaultHostCall`/`MathHostCall`/`StringHostCall`/
+  `ListHostCall`) are deleted — host.zig keeps the plain `pub` impl
+  fns. The pre-registry adapter contract remains as the `invoke`
+  opt-out for dynamic hosts (`defaultHostCall` now dispatches through
+  the registry).
 
 Do not implement all opcode handlers before the execution skeleton has a real
 end-to-end test. Conversely, do not declare completion until mechanical

@@ -5,15 +5,20 @@
 //! for ownership-sensitive members.
 
 const std = @import("std");
+const llir = @import("llir.zig");
 const vm_types = @import("vm_types.zig");
 const interp_types = @import("interpreter_types.zig");
 const interpreter = @import("interpreter.zig");
+const host_module = @import("host.zig");
+const vm_dispatch = @import("interpreter_dispatch.zig");
 
 const Value = vm_types.Value;
 const ValueCodec = vm_types.ValueCodec;
+const HeapErr = vm_types.HeapErr;
 const HostResult = interp_types.HostResult;
 const HostSignature = interp_types.HostSignature;
 const HostType = interp_types.HostType;
+const HostDisposer = interp_types.HostDisposer;
 const ExpectedSignature = interp_types.ExpectedSignature;
 const VmCtx = interpreter.VmCtx;
 
@@ -65,6 +70,184 @@ fn hostTypeOf(comptime T: type) HostType {
             @compileError("host binding: unsupported parameter type '" ++ @typeName(T) ++ "' (use a scalar, host.Str, host.Opaque(\"...\"), host.RawValue, or a raw() handler)"),
     };
 }
+
+// ---------------------------------------------------------------------------
+// HostCtx — the adapter's VM-side context (docs/host-bindings.md §3.2)
+// ---------------------------------------------------------------------------
+
+/// Host-call-side VM mechanics (docs/interpreter-vm.md §9): a thin
+/// wrapper around `VmCtx` exposing the decode, allocation, list-walk,
+/// and trap helpers the stdlib module members share. A typed member
+/// receives one as a hidden leading `*HostCtx` parameter (excluded from
+/// the expected signature; `sig` is the current call's signature);
+/// raw-shaped members construct one per call, and the callback-shaped
+/// helpers (`hashmapKeyHash`/`hashmapKeyEq`, the disposers) reconstruct
+/// it from their opaque `user` pointer.
+pub const HostCtx = struct {
+    vm: *VmCtx,
+    /// The current syscall's signature (the typed thunk sets it when the
+    /// member takes a hidden ctx; raw members read their `sig` parameter
+    /// directly).
+    sig: HostSignature = undefined,
+
+    /// One str argument decoded from the canonical cells; null when
+    /// absent or not a live str object.
+    pub fn strArg(self: *const HostCtx, args: []const Value, i: usize) ?[]const u8 {
+        if (i >= args.len) return null;
+        return self.vm.runtime.heap.strSliceOf(args[i]);
+    }
+
+    /// One canonical int32 argument; null when absent or non-canonical.
+    pub fn intArg(self: *const HostCtx, args: []const Value, i: usize) ?i32 {
+        _ = self;
+        if (i >= args.len) return null;
+        return ValueCodec.decodeInt32(args[i]);
+    }
+
+    /// Owned panic message for an adapter-side allocation failure (reachable
+    /// trap paths, e.g. a huge `list.range` — never a static string).
+    pub fn oomPanic(self: *const HostCtx) HostResult {
+        _ = self;
+        return .{ .panic = "out of memory" };
+    }
+
+    /// Borrowed deterministic panic message (adapter trap paths): formatted
+    /// into the VM's scratch buffer, which `sitePrefixed` copies into the
+    /// owned Termination message before the buffer is reused.
+    pub fn panicFmt(self: *const HostCtx, comptime fmt: []const u8, args: anytype) HostResult {
+        const slice = std.fmt.bufPrint(&self.vm.runtime.panic_buf, fmt, args) catch return self.oomPanic();
+        return .{ .panic = slice };
+    }
+
+    /// Map a string-handler error to an owned deterministic trap message
+    /// (StdLib §5, Runtime §7.2): the shared `{member}: {spec message}`
+    /// format (docs/host-bindings.md §5). OOM is a panic.
+    pub fn stringErr(self: *const HostCtx, e: host_module.StringErr, member: []const u8) HostResult {
+        if (e == error.OutOfMemory) return self.oomPanic();
+        return errPanic(member, self.vm, e);
+    }
+
+    /// Allocate a str object holding `bytes`; OOM is a panic.
+    pub fn newStrCell(self: *const HostCtx, ty: u32, bytes: []const u8) HostResult {
+        const cell = self.vm.runtime.heap.newStr(ty, bytes) catch return self.oomPanic();
+        return .{ .value = cell };
+    }
+
+    /// Build a list cons chain from element cells, right to left, with each
+    /// node's suffix length recorded (the head's `len` is the element
+    /// count — the O(1) read `list#len` and `read_index` rely on). The
+    /// element cells are NOT retained: they are freshly-owned objects or
+    /// scalars the chain takes over.
+    pub fn newListCells(self: *const HostCtx, ty: u32, elems: []const Value) HeapErr!Value {
+        var next: Value = 0;
+        var suffix_len: u32 = 0;
+        var k = elems.len;
+        while (k > 0) {
+            k -= 1;
+            const h = try self.vm.runtime.heap.allocObjectIn(.list_cons, self.vm.curModIdx(), ty, 2, 0);
+            h.setCell(0, elems[k]);
+            h.setCell(1, next);
+            h.len = suffix_len + 1;
+            suffix_len += 1;
+            next = @intFromPtr(h);
+        }
+        return next;
+    }
+
+    /// The builtin `Option[T]` union in the image's union layout: `Some` is
+    /// variant tag 0 with the payload in cell 1, `None` variant tag 1
+    /// (std/builtin.st declaration order; `read_tag`/`read_payload` and the
+    /// destruction walker read the same cells).
+    pub fn optionCell(self: *const HostCtx, ty: u32, some: bool, payload: Value) HeapErr!Value {
+        const h = try self.vm.runtime.heap.allocObject(.union_, ty, 1 + @as(usize, @intFromBool(some)), 0);
+        h.setCell(0, if (some) 0 else 1);
+        if (some) h.setCell(1, payload);
+        return @intFromPtr(h);
+    }
+
+    /// Walk a list cons chain, appending each element cell to `out`. The
+    /// element cells are not retained — callers convert them into fresh
+    /// scalar cells or copy the referenced objects immediately.
+    pub fn walkList(self: *const HostCtx, cell: Value, out: *std.ArrayList(Value)) HeapErr!void {
+        var cur = cell;
+        while (cur != 0) {
+            const node = try self.vm.runtime.heap.deref(cur);
+            if (node.kind != .list_cons) return error.TypeMismatch;
+            try out.append(self.vm.allocator, node.cell(0));
+            cur = node.cell(1);
+        }
+    }
+
+    /// Resolve an opaque argument's host object; callers turn a null into
+    /// their deterministic "not an <what>" trap. Unreachable in validated
+    /// programs.
+    pub fn arrayPayload(self: *const HostCtx, v: Value) ?*host_module.ArrayObject {
+        const h = self.vm.runtime.heap.deref(v) catch return null;
+        if (h.kind != .opaque_) return null;
+        return @ptrFromInt(@as(usize, @intCast(h.cell(0))));
+    }
+
+    pub fn mapPayload(self: *const HostCtx, v: Value) ?*host_module.HashMapObject {
+        const h = self.vm.runtime.heap.deref(v) catch return null;
+        if (h.kind != .opaque_) return null;
+        return @ptrFromInt(@as(usize, @intCast(h.cell(0))));
+    }
+
+    /// StdLib §3: key type `K` must be hashable. `builtin.hash` covers the
+    /// primitive scalar types and str; anything else (e.g. a list key,
+    /// which the frontend does not reject today) is a deterministic trap
+    /// before any mutation.
+    pub fn checkHashableKey(self: *const HostCtx, map_ty: u32) bool {
+        const row = self.vm.metaImage().types[map_ty];
+        // The `named` arg range is `{ b = start, c = len }`.
+        if (row.kind != .named or row.c == 0) return false;
+        const k = self.vm.metaImage().types[row.b];
+        return k.kind == .primitive and switch (@as(llir.PrimitiveId, @enumFromInt(k.a))) {
+            .byte, .bool, .int32, .uint32, .float32, .str => true,
+            else => false,
+        };
+    }
+
+    /// Wyhash (seed 0) over str contents or the raw scalar cell —
+    /// bit-identical to `builtin.hash` (Runtime §4.9).
+    pub fn keyHash(self: *const HostCtx, key: Value) u64 {
+        if (self.vm.runtime.heap.strSliceOf(key)) |bytes| return std.hash.Wyhash.hash(0, bytes);
+        var v = key;
+        return std.hash.Wyhash.hash(0, std.mem.asBytes(&v));
+    }
+
+    /// Str content equality (mirroring `==`, `str_eq`) for str keys; raw
+    /// cell equality for scalars.
+    pub fn keyEq(self: *const HostCtx, a: Value, b: Value) bool {
+        if (self.vm.runtime.heap.strSliceOf(a) != null) return vm_dispatch.strEqual(self.vm, a, b) catch false;
+        return a == b;
+    }
+
+    /// Release one stored/displaced cell if it is a counted shell; scalars
+    /// and unique (non-counted) Copy shells have no reference to drop.
+    pub fn releaseCellIfCounted(self: *const HostCtx, addr: Value) HeapErr!void {
+        if (addr == 0) return;
+        const h = self.vm.runtime.heap.registry.get(addr) orelse return; // scalar cell
+        if (!h.isCounted()) return;
+        try vm_dispatch.releaseCounted(self.vm, addr);
+    }
+
+    /// Register a freshly built host object behind an opaque shell. On
+    /// registration failure the shell is freed before the panic commits
+    /// (docs/interpreter-vm.md §6.4: uncommitted-result disposal).
+    pub fn wrapOpaque(self: *const HostCtx, ty: u32, obj: *anyopaque, disposer: HostDisposer) HostResult {
+        const row = self.vm.metaImage().types[ty];
+        if (row.kind != .named) return .{ .panic = "host object: unexpected result type" };
+        const host_type_id = self.vm.metaImage().type_decls[row.a].a;
+        const h = self.vm.runtime.heap.allocObject(.opaque_, ty, 1, 0) catch return self.oomPanic();
+        h.setCell(0, @intFromPtr(obj));
+        self.vm.registerHostResource(host_type_id, @intFromPtr(h), disposer, self.vm) catch {
+            self.vm.runtime.heap.freeShell(h);
+            return self.oomPanic();
+        };
+        return .{ .value = @intFromPtr(h) };
+    }
+};
 
 // ---------------------------------------------------------------------------
 // Binding and the registry (docs/host-bindings.md §3.3)
@@ -151,9 +334,13 @@ pub fn raw(comptime name: []const u8, comptime thunk: anytype) Binding {
 /// registers raw (no signature check); any other member is a typed
 /// binding — its parameters are the Stilla signature (scalars, `Str`,
 /// `Opaque("...")`, `RawValue`, `[*:0]const u8` for C functions, and an
-/// optional leading `?*anyopaque` module-userdata injection point).
-/// Evaluate at comptime (a top-level `const` or `comptime`); the derived
-/// member table must back a global.
+/// optional hidden leading parameter: `?*anyopaque` module userdata or
+/// `*HostCtx` adapter context). Returns may be scalars, `void`, `Str`
+/// (owned), `RawValue`, an error union over those (trapping with the
+/// deterministic spec message, docs/host-bindings.md §5), or `HostResult`
+/// verbatim (typed arguments, full raw body). Evaluate at comptime (a
+/// top-level `const` or `comptime`); the derived member table must back a
+/// global.
 ///
 /// ```zig
 /// const testdb = struct {
@@ -263,33 +450,55 @@ fn paramType(comptime p: std.builtin.Type.Fn.Param) type {
     return p.type orelse @compileError("generic host binding parameters are not supported");
 }
 
-fn injectsUserdata(comptime f: anytype) bool {
+/// A hidden leading parameter: `?*anyopaque` module userdata or `*HostCtx`
+/// adapter context — excluded from the expected signature, filled by the
+/// generated thunk.
+const Hidden = enum { none, userdata, host_ctx };
+
+fn hiddenKind(comptime f: anytype) Hidden {
     const Fn = fnInfo(f);
-    return Fn.params.len != 0 and paramType(Fn.params[0]) == ?*anyopaque;
+    if (Fn.params.len == 0) return .none;
+    const T = paramType(Fn.params[0]);
+    if (T == ?*anyopaque) return .userdata;
+    if (T == *HostCtx) return .host_ctx;
+    return .none;
 }
 
-/// The Stilla parameter types of `f` (excluding an injected userdata
-/// first parameter of type `?*anyopaque`), as a comptime array value.
-fn paramTypes(comptime f: anytype, comptime inject: bool) [fnInfo(f).params.len - @intFromBool(inject)]type {
+/// The Stilla parameter types of `f` (excluding a hidden leading
+/// parameter), as a comptime array value.
+fn paramTypes(comptime f: anytype, comptime hide: bool) [fnInfo(f).params.len - @intFromBool(hide)]type {
     const Fn = fnInfo(f);
-    comptime var ts: [Fn.params.len - @intFromBool(inject)]type = undefined;
-    for (Fn.params[@intFromBool(inject)..], 0..) |p, i| ts[i] = paramType(p);
+    comptime var ts: [Fn.params.len - @intFromBool(hide)]type = undefined;
+    for (Fn.params[@intFromBool(hide)..], 0..) |p, i| ts[i] = paramType(p);
     return ts;
 }
 
+/// The fn's declared return type, with an error union unwrapped to its
+/// payload.
+fn retType(comptime f: anytype) type {
+    const R = fnInfo(f).return_type orelse void;
+    return switch (@typeInfo(R)) {
+        .error_union => |eu| eu.payload,
+        else => R,
+    };
+}
+
+fn isErrorRet(comptime f: anytype) bool {
+    return @typeInfo(fnInfo(f).return_type orelse void) == .error_union;
+}
+
 fn retHostType(comptime f: anytype) HostType {
-    const Fn = fnInfo(f);
-    const R = Fn.return_type orelse void;
+    const R = retType(f);
     if (R == void) return .void;
-    if (R == RawValue) return .wildcard;
+    if (R == RawValue or R == HostResult) return .wildcard;
     return hostTypeOf(R);
 }
 
 fn expectedOf(comptime f: anytype) ExpectedSignature {
-    const inject = comptime injectsUserdata(f);
+    const hide = comptime hiddenKind(f) != .none;
     const params = comptime blk: {
-        var arr: [paramTypes(f, inject).len]interp_types.HostParam = undefined;
-        for (paramTypes(f, inject), 0..) |T, i| {
+        var arr: [paramTypes(f, hide).len]interp_types.HostParam = undefined;
+        for (paramTypes(f, hide), 0..) |T, i| {
             arr[i] = .{ .mode = .plain, .ty = hostTypeOf(T) };
         }
         break :blk arr;
@@ -297,8 +506,7 @@ fn expectedOf(comptime f: anytype) ExpectedSignature {
     return .{ .params = &params, .ret = retHostType(f) };
 }
 
-/// The bound function's full argument tuple type (userdata slot included
-/// when injected).
+/// The bound function's full argument tuple type (hidden slot included).
 fn CallArgs(comptime f: anytype) type {
     const Fn = fnInfo(f);
     comptime var ts: [Fn.params.len]type = undefined;
@@ -344,13 +552,17 @@ fn decodeArg(comptime T: type, vm: *VmCtx, cell: Value) ArgErr!T {
     };
 }
 
-fn callArgs(comptime f: anytype, comptime inject: bool, userdata: ?*anyopaque, dec: anytype) CallArgs(f) {
+fn callArgs(comptime f: anytype, comptime kind: Hidden, userdata: ?*anyopaque, hctx: *HostCtx, dec: anytype) CallArgs(f) {
     const Fn = fnInfo(f);
     var t: CallArgs(f) = undefined;
     comptime var di: usize = 0;
     inline for (Fn.params, 0..) |_, i| {
-        if (i == 0 and inject) {
-            t[0] = userdata;
+        if (i == 0 and kind != .none) {
+            t[0] = switch (kind) {
+                .userdata => userdata,
+                .host_ctx => hctx,
+                .none => unreachable,
+            };
         } else {
             t[i] = dec[di];
             di += 1;
@@ -372,18 +584,41 @@ fn encodeResult(comptime name: []const u8, vm: *VmCtx, sig: HostSignature, r: an
         bool => .{ .value = ValueCodec.encodeBool(r) },
         Str => .{ .value = vm.runtime.heap.newStr(sig.desc.ret, r.bytes) catch return .{ .panic = comptime name ++ ": out of memory" } },
         RawValue => .{ .value = r.value },
-        else => @compileError("host binding '" ++ name ++ "': unsupported return type '" ++ @typeName(R) ++ "' (use a scalar, host.Str, host.RawValue, or void)"),
+        HostResult => r,
+        else => @compileError("host binding '" ++ name ++ "': unsupported return type '" ++ @typeName(R) ++ "' (use a scalar, host.Str, host.RawValue, void, an error union over those, or HostResult)"),
     };
+}
+
+/// Deterministic trap text for a host error (docs/host-bindings.md §5):
+/// the spec message for the stdlib string errors, else the error name.
+fn errorMessage(e: anyerror) []const u8 {
+    return switch (e) {
+        error.InvalidUtf8 => "invalid UTF-8",
+        error.Range => "index out of range",
+        error.BadCodepoint => "not a Unicode scalar value",
+        error.OutOfMemory => "out of memory",
+        else => @errorName(e),
+    };
+}
+
+/// An error-returning member's trap: `"{name}: {spec message}"` formatted
+/// into the VM's panic scratch (copied into the owned Termination message
+/// before reuse, docs/interpreter-vm.md §10).
+fn errPanic(name: []const u8, vm: *VmCtx, e: anyerror) HostResult {
+    const msg = errorMessage(e);
+    const slice = std.fmt.bufPrint(&vm.runtime.panic_buf, "{s}: {s}", .{ name, msg }) catch return .{ .panic = "out of memory" };
+    return .{ .panic = slice };
 }
 
 /// Generate one named `Binding` from a typed function: expected signature
 /// at comptime, thunk that checks signature + arity, decodes, calls, and
 /// encodes (docs/host-bindings.md §5).
 fn makeBinding(comptime name: []const u8, comptime f: anytype) Binding {
-    const inject = comptime injectsUserdata(f);
+    const kind = comptime hiddenKind(f);
+    const hide = kind != .none;
     const Fn = comptime fnInfo(f);
     const expected = comptime expectedOf(f);
-    const want = comptime Fn.params.len - @intFromBool(inject);
+    const want = comptime Fn.params.len - @intFromBool(hide);
     const sig_msg = comptime name ++ ": signature mismatch (interface and binding disagree)";
     const arity_msg = comptime name ++ ": wrong argument count";
     const bad_msg = comptime name ++ ": argument type mismatch";
@@ -395,14 +630,20 @@ fn makeBinding(comptime name: []const u8, comptime f: anytype) Binding {
             fn thunk(vm: *VmCtx, userdata: ?*anyopaque, sig: HostSignature, args: []const Value) HostResult {
                 if (!sig.matches(expected)) return .{ .panic = sig_msg };
                 if (args.len != want) return .{ .panic = arity_msg };
-                var dec: std.meta.Tuple(&paramTypes(f, inject)) = undefined;
-                inline for (paramTypes(f, inject), 0..) |T, i| {
+                var dec: std.meta.Tuple(&paramTypes(f, hide)) = undefined;
+                inline for (paramTypes(f, hide), 0..) |T, i| {
                     dec[i] = decodeArg(T, vm, args[i]) catch |e| return switch (e) {
                         error.BadArg => .{ .panic = bad_msg },
                         error.OutOfMemory => .{ .panic = oom_msg },
                     };
                 }
-                const r = @call(.auto, f, callArgs(f, inject, userdata, dec));
+                // The adapter context lives for the duration of the call
+                // (a hidden `*HostCtx` member reads `vm`/`sig` through it).
+                var hctx = HostCtx{ .vm = vm, .sig = sig };
+                const r = if (comptime isErrorRet(f))
+                    @call(.auto, f, callArgs(f, kind, userdata, &hctx, dec)) catch |e| return errPanic(name, vm, e)
+                else
+                    @call(.auto, f, callArgs(f, kind, userdata, &hctx, dec));
                 return encodeResult(name, vm, sig, r);
             }
         }.thunk,

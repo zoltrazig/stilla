@@ -13,226 +13,71 @@
 //! Host cleanup is outside Stilla source semantics and must not be
 //! described as execution of Stilla `drop` hooks (Runtime §3.4).
 //!
-//! M2: the per-module handler structs (`DefaultHostCall`,
-//! `MathHostCall`, `StringHostCall`, `ListHostCall`) implement the
-//! stdlib host interfaces the default adapter dispatches by
-//! `(specifier, member)` (docs/interpreter-vm.md §9). Handlers receive
-//! only verified plain data and never touch the VM; the adapter does
-//! the heap mechanics. M3 adds the `array`/`hashmap` opaque host
-//! objects: their storage (`ArrayObject`, `HashMapObject`) lives here
-//! as plain data and the interpreter adapters own the retain/release
-//! and exactly-once disposal contract (docs/interpreter-vm.md §9).
+//! The stdlib host implementations live here as plain functions
+//! (`hostPrint`..`hostHash`, `stringLen`..`stringFromCodepoints`,
+//! `listLen`/`listRange`) — the module structs in interpreter_host.zig
+//! bind them (docs/host-bindings.md §7). Handlers receive only verified
+//! plain data and never touch the VM; the binding layer does the heap
+//! mechanics. M3 adds the `array`/`hashmap` opaque host objects: their
+//! storage (`ArrayObject`, `HashMapObject`) lives here as plain data and
+//! the interpreter bindings own the retain/release and exactly-once
+//! disposal contract (docs/interpreter-vm.md §9).
 
 const std = @import("std");
 const vm_types = @import("vm_types.zig");
 const unicode_case = @import("unicode_case.zig");
 
-/// Default implementations of the required `builtin` host module (Runtime
-/// §4) as standalone function pointers, one per member. The interpreter
-/// has already verified each call — signature, argument count, and str
-/// arguments — and performed the VM heap mechanics (box allocation, unbox
-/// extraction, str-object allocation, panic-message duplication), so a
-/// handler receives only plain, verified data and never touches the VM.
-/// The only type dependencies are `vm_types` (`Value`, `ScalarView`).
-pub const DefaultHostCall = struct {
-    print: *const fn (userdata: ?*const anyopaque, message: []const u8) void = hostPrint,
-    str: *const fn (userdata: ?*const anyopaque, value: vm_types.ScalarView, buf: []u8) anyerror![]const u8 = hostStr,
-    box: *const fn (userdata: ?*const anyopaque, value: vm_types.Value) vm_types.Value = hostBox,
-    unbox: *const fn (userdata: ?*const anyopaque, payload: vm_types.Value) vm_types.Value = hostUnbox,
-    panic: *const fn (userdata: ?*const anyopaque, message: []const u8) []const u8 = hostPanic,
-    assert: *const fn (userdata: ?*const anyopaque, message: []const u8) []const u8 = hostAssert,
-    hash: *const fn (userdata: ?*const anyopaque, bytes: []const u8) vm_types.Value = hostHash,
-};
-
-/// The default `builtin` implementation (Runtime §4): the interpreter
-/// dispatches verified builtin invocations through this table.
-pub const defaultHostCall = DefaultHostCall{};
-
 /// `builtin.print` — Runtime §4.1: write one line to the host's output.
-fn hostPrint(userdata: ?*const anyopaque, message: []const u8) void {
-    _ = userdata;
+pub fn hostPrint(message: []const u8) void {
     std.Io.File.writeStreamingAll(std.Io.File.stdout(), std.Options.debug_io, message) catch return;
     std.Io.File.writeStreamingAll(std.Io.File.stdout(), std.Options.debug_io, "\n") catch {};
 }
 
 /// `builtin.str` — Runtime §4.2: canonical decimal form of the decoded
 /// scalar; a str view is returned unchanged.
-fn hostStr(userdata: ?*const anyopaque, value: vm_types.ScalarView, buf: []u8) anyerror![]const u8 {
-    _ = userdata;
+pub fn hostStr(value: vm_types.ScalarView, buf: []u8) anyerror![]const u8 {
     return vm_types.formatView(value, buf);
 }
 
 /// `builtin.box` — Runtime §4.5: the payload to wrap. The interpreter
 /// allocates the box shell around the returned value.
-fn hostBox(userdata: ?*const anyopaque, value: vm_types.Value) vm_types.Value {
-    _ = userdata;
+pub fn hostBox(value: vm_types.Value) vm_types.Value {
     return value;
 }
 
 /// `builtin.unbox` — Runtime §4.6: the extracted payload. The interpreter
 /// frees the box shell after the handler returns.
-fn hostUnbox(userdata: ?*const anyopaque, payload: vm_types.Value) vm_types.Value {
-    _ = userdata;
+pub fn hostUnbox(payload: vm_types.Value) vm_types.Value {
     return payload;
 }
 
 /// `builtin.panic` — Runtime §4.7: the termination message.
-fn hostPanic(userdata: ?*const anyopaque, message: []const u8) []const u8 {
-    _ = userdata;
+pub fn hostPanic(message: []const u8) []const u8 {
     return message;
 }
 
 /// `builtin.assert` — Runtime §4.8: the panic message; the interpreter
 /// calls this only on the false path.
-fn hostAssert(userdata: ?*const anyopaque, message: []const u8) []const u8 {
-    _ = userdata;
+pub fn hostAssert(message: []const u8) []const u8 {
     return message;
 }
 
 /// `builtin.hash` — Runtime §4.9: hash the verified bytes (str contents
 /// or raw scalar cell).
-fn hostHash(userdata: ?*const anyopaque, bytes: []const u8) vm_types.Value {
-    _ = userdata;
+pub fn hostHash(bytes: []const u8) vm_types.Value {
     return std.hash.Wyhash.hash(0, bytes);
-}
-
-// ---------------------------------------------------------------------------
-// The `math` module (StdLib §4) — IEEE 754 `float32` functions. Handlers
-// receive decoded `f32` arguments and return `f32` results; the adapter
-// decodes the canonical cells and encodes the result (M2).
-// ---------------------------------------------------------------------------
-
-/// One unary `f32 -> f32` handler.
-const MathFn1 = *const fn (userdata: ?*const anyopaque, x: f32) f32;
-/// One binary `f32 × f32 -> f32` handler.
-const MathFn2 = *const fn (userdata: ?*const anyopaque, x: f32, y: f32) f32;
-
-/// The `math` member names are the `math_module` struct's fns in
-/// interpreter_host.zig (StdLib §4 order); the handlers are the
-/// `MathHostCall` fields below.
-/// Default implementations of the `math` module members (StdLib §4) as
-/// standalone function pointers, one per member, beside `DefaultHostCall`.
-/// Results follow IEEE 754, including NaN and infinity, and are
-/// deterministic within a single execution context. `atan2(y, x)` takes
-/// y first; `round` rounds ties away from zero; `min`/`max` follow IEEE
-/// `fmin`/`fmax` (NaN propagates, `min(-0, +0) = -0`).
-pub const MathHostCall = struct {
-    sqrt: MathFn1 = mathSqrt,
-    pow: MathFn2 = mathPow,
-    exp: MathFn1 = mathExp,
-    ln: MathFn1 = mathLn,
-    log2: MathFn1 = mathLog2,
-    log10: MathFn1 = mathLog10,
-    sin: MathFn1 = mathSin,
-    cos: MathFn1 = mathCos,
-    tan: MathFn1 = mathTan,
-    asin: MathFn1 = mathAsin,
-    acos: MathFn1 = mathAcos,
-    atan: MathFn1 = mathAtan,
-    atan2: MathFn2 = mathAtan2,
-    floor: MathFn1 = mathFloor,
-    ceil: MathFn1 = mathCeil,
-    round: MathFn1 = mathRound,
-    trunc: MathFn1 = mathTrunc,
-    abs: MathFn1 = mathAbs,
-    min: MathFn2 = mathMin,
-    max: MathFn2 = mathMax,
-};
-
-/// The default `math` implementation (StdLib §4).
-pub const mathHostCall = MathHostCall{};
-
-fn mathSqrt(userdata: ?*const anyopaque, x: f32) f32 {
-    _ = userdata;
-    return std.math.sqrt(x);
-}
-fn mathPow(userdata: ?*const anyopaque, x: f32, y: f32) f32 {
-    _ = userdata;
-    return std.math.pow(f32, x, y);
-}
-fn mathExp(userdata: ?*const anyopaque, x: f32) f32 {
-    _ = userdata;
-    return @exp(x);
-}
-fn mathLn(userdata: ?*const anyopaque, x: f32) f32 {
-    _ = userdata;
-    return @log(x);
-}
-fn mathLog2(userdata: ?*const anyopaque, x: f32) f32 {
-    _ = userdata;
-    return @log2(x);
-}
-fn mathLog10(userdata: ?*const anyopaque, x: f32) f32 {
-    _ = userdata;
-    return @log10(x);
-}
-fn mathSin(userdata: ?*const anyopaque, x: f32) f32 {
-    _ = userdata;
-    return @sin(x);
-}
-fn mathCos(userdata: ?*const anyopaque, x: f32) f32 {
-    _ = userdata;
-    return @cos(x);
-}
-fn mathTan(userdata: ?*const anyopaque, x: f32) f32 {
-    _ = userdata;
-    return @tan(x);
-}
-fn mathAsin(userdata: ?*const anyopaque, x: f32) f32 {
-    _ = userdata;
-    return std.math.asin(x);
-}
-fn mathAcos(userdata: ?*const anyopaque, x: f32) f32 {
-    _ = userdata;
-    return std.math.acos(x);
-}
-fn mathAtan(userdata: ?*const anyopaque, x: f32) f32 {
-    _ = userdata;
-    return std.math.atan(x);
-}
-fn mathAtan2(userdata: ?*const anyopaque, y: f32, x: f32) f32 {
-    _ = userdata;
-    return std.math.atan2(y, x); // y first, matching IEEE 754
-}
-fn mathFloor(userdata: ?*const anyopaque, x: f32) f32 {
-    _ = userdata;
-    return @floor(x);
-}
-fn mathCeil(userdata: ?*const anyopaque, x: f32) f32 {
-    _ = userdata;
-    return @ceil(x);
-}
-fn mathRound(userdata: ?*const anyopaque, x: f32) f32 {
-    _ = userdata;
-    return std.math.round(x); // ties away from zero
-}
-fn mathTrunc(userdata: ?*const anyopaque, x: f32) f32 {
-    _ = userdata;
-    return @trunc(x);
-}
-fn mathAbs(userdata: ?*const anyopaque, x: f32) f32 {
-    _ = userdata;
-    return @abs(x);
-}
-fn mathMin(userdata: ?*const anyopaque, a: f32, b: f32) f32 {
-    _ = userdata;
-    return vm_types.fminIeee(f32, a, b); // IEEE fmin
-}
-fn mathMax(userdata: ?*const anyopaque, a: f32, b: f32) f32 {
-    _ = userdata;
-    return vm_types.fmaxIeee(f32, a, b); // IEEE fmax
 }
 
 // ---------------------------------------------------------------------------
 // The `string` module (StdLib §5) — Unicode text operations. Handlers
 // receive verified plain data (`[]const u8` UTF-8 byte slices, decoded
-// scalars, or scratch buffers) and never touch the VM; the adapter
+// scalars, or scratch buffers) and never touch the VM; the binding layer
 // performs the heap mechanics (str/list object allocation, list walks)
 // and maps handler errors to owned trap messages. All text processing
 // operates on code points, never byte offsets (StdLib §5).
 // ---------------------------------------------------------------------------
 
-/// Errors a string handler reports; the interpreter adapter maps each to
+/// Errors a string handler reports; the interpreter binding maps each to
 /// an owned deterministic trap message (StdLib §5, Runtime §7.2).
 pub const StringErr = error{
     /// Invalid UTF-8 in a str or byte sequence.
@@ -245,78 +90,36 @@ pub const StringErr = error{
     OutOfMemory,
 };
 
-/// The `string` member names are the `string_module` struct's fns in
-/// interpreter_host.zig (StdLib §5, std/string.st); the handlers are the
-/// `StringHostCall` fields below.
-/// Default implementations of the `string` module members (StdLib §5) as
-/// standalone function pointers, one per member, beside `DefaultHostCall`.
-/// String-producing handlers append into a caller-provided scratch
-/// buffer (the adapter copies into VM str objects); `split` appends
-/// pieces as slices into the input (the adapter copies immediately);
-/// `join` receives the parts already materialized by the adapter.
-pub const StringHostCall = struct {
-    len: *const fn (userdata: ?*const anyopaque, s: []const u8) StringErr!i32 = stringLen,
-    is_empty: *const fn (userdata: ?*const anyopaque, s: []const u8) bool = stringIsEmpty,
-    concat: *const fn (userdata: ?*const anyopaque, a: []const u8, b: []const u8, out: *std.array_list.Managed(u8)) StringErr!void = stringConcat,
-    contains: *const fn (userdata: ?*const anyopaque, haystack: []const u8, needle: []const u8) bool = stringContains,
-    starts_with: *const fn (userdata: ?*const anyopaque, s: []const u8, prefix: []const u8) bool = stringStartsWith,
-    ends_with: *const fn (userdata: ?*const anyopaque, s: []const u8, suffix: []const u8) bool = stringEndsWith,
-    index_of: *const fn (userdata: ?*const anyopaque, haystack: []const u8, needle: []const u8) StringErr!?i32 = stringIndexOf,
-    substring: *const fn (userdata: ?*const anyopaque, s: []const u8, start: i32, end: i32, out: *std.array_list.Managed(u8)) StringErr!void = stringSubstring,
-    split: *const fn (userdata: ?*const anyopaque, s: []const u8, sep: []const u8, out: *std.array_list.Managed([]const u8)) StringErr!void = stringSplit,
-    join: *const fn (userdata: ?*const anyopaque, parts: []const []const u8, sep: []const u8, out: *std.array_list.Managed(u8)) StringErr!void = stringJoin,
-    trim: *const fn (userdata: ?*const anyopaque, s: []const u8, out: *std.array_list.Managed(u8)) StringErr!void = stringTrim,
-    lower: *const fn (userdata: ?*const anyopaque, s: []const u8, out: *std.array_list.Managed(u8)) StringErr!void = stringLower,
-    upper: *const fn (userdata: ?*const anyopaque, s: []const u8, out: *std.array_list.Managed(u8)) StringErr!void = stringUpper,
-    replace: *const fn (userdata: ?*const anyopaque, s: []const u8, from: []const u8, to: []const u8, out: *std.array_list.Managed(u8)) StringErr!void = stringReplace,
-    repeat: *const fn (userdata: ?*const anyopaque, s: []const u8, count: i32, out: *std.array_list.Managed(u8)) StringErr!void = stringRepeat,
-    to_utf8: *const fn (userdata: ?*const anyopaque, s: []const u8, out: *std.array_list.Managed(u8)) StringErr!void = stringToUtf8,
-    from_utf8: *const fn (userdata: ?*const anyopaque, bytes: []const u8, out: *std.array_list.Managed(u8)) StringErr!void = stringFromUtf8,
-    to_codepoints: *const fn (userdata: ?*const anyopaque, s: []const u8, out: *std.array_list.Managed(u32)) StringErr!void = stringToCodepoints,
-    from_codepoints: *const fn (userdata: ?*const anyopaque, cps: []const u32, out: *std.array_list.Managed(u8)) StringErr!void = stringFromCodepoints,
-};
-
-/// The default `string` implementation (StdLib §5).
-pub const stringHostCall = StringHostCall{};
-
 /// §5: lengths are in code points, never bytes.
-fn stringLen(userdata: ?*const anyopaque, s: []const u8) StringErr!i32 {
-    _ = userdata;
+pub fn stringLen(s: []const u8) StringErr!i32 {
     const n = std.unicode.utf8CountCodepoints(s) catch return error.InvalidUtf8;
     return @intCast(n);
 }
-fn stringIsEmpty(userdata: ?*const anyopaque, s: []const u8) bool {
-    _ = userdata;
+pub fn stringIsEmpty(s: []const u8) bool {
     return s.len == 0;
 }
-fn stringConcat(userdata: ?*const anyopaque, a: []const u8, b: []const u8, out: *std.array_list.Managed(u8)) StringErr!void {
-    _ = userdata;
+pub fn stringConcat(a: []const u8, b: []const u8, out: *std.array_list.Managed(u8)) StringErr!void {
     try out.appendSlice(a);
     try out.appendSlice(b);
 }
-fn stringContains(userdata: ?*const anyopaque, haystack: []const u8, needle: []const u8) bool {
-    _ = userdata;
+pub fn stringContains(haystack: []const u8, needle: []const u8) bool {
     // Both are valid UTF-8, so byte search preserves code-point
     // boundaries; an empty needle matches at index 0.
     return std.mem.indexOf(u8, haystack, needle) != null;
 }
-fn stringStartsWith(userdata: ?*const anyopaque, s: []const u8, prefix: []const u8) bool {
-    _ = userdata;
+pub fn stringStartsWith(s: []const u8, prefix: []const u8) bool {
     return std.mem.startsWith(u8, s, prefix);
 }
-fn stringEndsWith(userdata: ?*const anyopaque, s: []const u8, suffix: []const u8) bool {
-    _ = userdata;
+pub fn stringEndsWith(s: []const u8, suffix: []const u8) bool {
     return std.mem.endsWith(u8, s, suffix);
 }
-fn stringIndexOf(userdata: ?*const anyopaque, haystack: []const u8, needle: []const u8) StringErr!?i32 {
-    _ = userdata;
+pub fn stringIndexOf(haystack: []const u8, needle: []const u8) StringErr!?i32 {
     if (needle.len == 0) return 0; // an empty needle matches at index 0
     const occ = std.mem.indexOf(u8, haystack, needle) orelse return null;
     const n = std.unicode.utf8CountCodepoints(haystack[0..occ]) catch return error.InvalidUtf8;
     return @intCast(n); // code-point index of the first occurrence
 }
-fn stringSubstring(userdata: ?*const anyopaque, s: []const u8, start: i32, end: i32, out: *std.array_list.Managed(u8)) StringErr!void {
-    _ = userdata;
+pub fn stringSubstring(s: []const u8, start: i32, end: i32, out: *std.array_list.Managed(u8)) StringErr!void {
     const n: i32 = @intCast(std.unicode.utf8CountCodepoints(s) catch return error.InvalidUtf8);
     // StdLib §5: negative offset, start > end, or offset beyond len traps.
     if (start < 0 or end < start or start > n or end > n) return error.Range;
@@ -332,8 +135,7 @@ fn stringSubstring(userdata: ?*const anyopaque, s: []const u8, start: i32, end: 
     }
     try out.appendSlice(s[bstart..pos]);
 }
-fn stringSplit(userdata: ?*const anyopaque, s: []const u8, sep: []const u8, out: *std.array_list.Managed([]const u8)) StringErr!void {
-    _ = userdata;
+pub fn stringSplit(s: []const u8, sep: []const u8, out: *std.array_list.Managed([]const u8)) StringErr!void {
     if (s.len == 0) return out.append(""); // an empty s splits to [""]
     if (sep.len == 0) {
         // An empty sep yields single-code-point strings.
@@ -355,8 +157,7 @@ fn stringSplit(userdata: ?*const anyopaque, s: []const u8, sep: []const u8, out:
         pos = occ + sep.len;
     }
 }
-fn stringJoin(userdata: ?*const anyopaque, parts: []const []const u8, sep: []const u8, out: *std.array_list.Managed(u8)) StringErr!void {
-    _ = userdata;
+pub fn stringJoin(parts: []const []const u8, sep: []const u8, out: *std.array_list.Managed(u8)) StringErr!void {
     for (parts, 0..) |p, i| {
         if (i > 0) try out.appendSlice(sep);
         try out.appendSlice(p);
@@ -379,8 +180,7 @@ fn isWhiteSpace(cp: u21) bool {
 }
 
 /// §5: removes leading and trailing Unicode whitespace.
-fn stringTrim(userdata: ?*const anyopaque, s: []const u8, out: *std.array_list.Managed(u8)) StringErr!void {
-    _ = userdata;
+pub fn stringTrim(s: []const u8, out: *std.array_list.Managed(u8)) StringErr!void {
     var first: ?usize = null;
     var last_end: usize = 0;
     var pos: usize = 0;
@@ -433,8 +233,7 @@ fn appendUpper(out: *std.array_list.Managed(u8), cp: u21) StringErr!void {
 /// by a cased character (skipping Case_Ignorable characters going
 /// backward) and not followed by a cased character (skipping
 /// Case_Ignorable characters going forward), evaluated on the input.
-fn stringLower(userdata: ?*const anyopaque, s: []const u8, out: *std.array_list.Managed(u8)) StringErr!void {
-    _ = userdata;
+pub fn stringLower(s: []const u8, out: *std.array_list.Managed(u8)) StringErr!void {
     if (!std.unicode.utf8ValidateSlice(s)) return error.InvalidUtf8;
     var it = std.unicode.Utf8Iterator{ .bytes = s, .i = 0 };
     // Cased-ness of the nearest preceding code point that is not
@@ -462,8 +261,7 @@ fn followedByCased(s: []const u8, i: usize) bool {
     }
     return false;
 }
-fn stringUpper(userdata: ?*const anyopaque, s: []const u8, out: *std.array_list.Managed(u8)) StringErr!void {
-    _ = userdata;
+pub fn stringUpper(s: []const u8, out: *std.array_list.Managed(u8)) StringErr!void {
     if (!std.unicode.utf8ValidateSlice(s)) return error.InvalidUtf8;
     var it = std.unicode.Utf8Iterator{ .bytes = s, .i = 0 };
     while (it.nextCodepoint()) |cp| try appendUpper(out, cp);
@@ -472,8 +270,7 @@ fn stringUpper(userdata: ?*const anyopaque, s: []const u8, out: *std.array_list.
 /// §5: replaces every non-overlapping occurrence of `from` with `to`;
 /// an empty `from` inserts `to` between every code point and at both
 /// ends. Left-to-right so replacements never overlap.
-fn stringReplace(userdata: ?*const anyopaque, s: []const u8, from: []const u8, to: []const u8, out: *std.array_list.Managed(u8)) StringErr!void {
-    _ = userdata;
+pub fn stringReplace(s: []const u8, from: []const u8, to: []const u8, out: *std.array_list.Managed(u8)) StringErr!void {
     if (from.len == 0) {
         try out.appendSlice(to);
         var pos: usize = 0;
@@ -496,32 +293,27 @@ fn stringReplace(userdata: ?*const anyopaque, s: []const u8, from: []const u8, t
         pos = occ + from.len;
     }
 }
-fn stringRepeat(userdata: ?*const anyopaque, s: []const u8, count: i32, out: *std.array_list.Managed(u8)) StringErr!void {
-    _ = userdata;
+pub fn stringRepeat(s: []const u8, count: i32, out: *std.array_list.Managed(u8)) StringErr!void {
     // StdLib §5: a negative count is a deterministic runtime trap.
     if (count < 0) return error.Range;
     var i: i32 = 0;
     while (i < count) : (i += 1) try out.appendSlice(s);
 }
-fn stringToUtf8(userdata: ?*const anyopaque, s: []const u8, out: *std.array_list.Managed(u8)) StringErr!void {
-    _ = userdata;
+pub fn stringToUtf8(s: []const u8, out: *std.array_list.Managed(u8)) StringErr!void {
     // VM strings are stored as UTF-8, so the encoding is the bytes.
     try out.appendSlice(s);
 }
-fn stringFromUtf8(userdata: ?*const anyopaque, bytes: []const u8, out: *std.array_list.Managed(u8)) StringErr!void {
-    _ = userdata;
+pub fn stringFromUtf8(bytes: []const u8, out: *std.array_list.Managed(u8)) StringErr!void {
     // StdLib §5: invalid UTF-8 is a deterministic runtime trap.
     if (!std.unicode.utf8ValidateSlice(bytes)) return error.InvalidUtf8;
     try out.appendSlice(bytes);
 }
-fn stringToCodepoints(userdata: ?*const anyopaque, s: []const u8, out: *std.array_list.Managed(u32)) StringErr!void {
-    _ = userdata;
+pub fn stringToCodepoints(s: []const u8, out: *std.array_list.Managed(u32)) StringErr!void {
     if (!std.unicode.utf8ValidateSlice(s)) return error.InvalidUtf8;
     var it = std.unicode.Utf8Iterator{ .bytes = s, .i = 0 };
     while (it.nextCodepoint()) |cp| try out.append(@intCast(cp));
 }
-fn stringFromCodepoints(userdata: ?*const anyopaque, cps: []const u32, out: *std.array_list.Managed(u8)) StringErr!void {
-    _ = userdata;
+pub fn stringFromCodepoints(cps: []const u32, out: *std.array_list.Managed(u8)) StringErr!void {
     // StdLib §5: surrogates and values above 0x10FFFF trap.
     var buf: [4]u8 = undefined;
     for (cps) |cp| {
@@ -532,36 +324,27 @@ fn stringFromCodepoints(userdata: ?*const anyopaque, cps: []const u32, out: *std
 
 // ---------------------------------------------------------------------------
 // The `list` module (Runtime §4.3–§4.4) — the two host-backed members.
-// `len` is an O(1) read: the adapter hands the head cons node's stored
+// `len` is an O(1) read: the binding hands the head cons node's stored
 // suffix length to the handler. `range` generates the inclusive integer
-// range as plain values; the adapter materializes the `list[int32]`
+// range as plain values; the binding materializes the `list[int32]`
 // cons chain (M2).
 // ---------------------------------------------------------------------------
 
-pub const ListHostCall = struct {
-    /// §4.3: the element count of a borrowed list (the adapter reads the
-    /// head node's stored suffix length).
-    len: *const fn (userdata: ?*const anyopaque, count: i32) i32 = listLen,
-    /// §4.4: the inclusive [start, end] integer range, appended as plain
-    /// values; empty when start > end.
-    range: *const fn (userdata: ?*const anyopaque, start: i32, end: i32, out: *std.array_list.Managed(i32)) anyerror!void = listRange,
-};
-
-/// The default `list` implementation (Runtime §4.3–§4.4).
-pub const listHostCall = ListHostCall{};
-
-fn listLen(userdata: ?*const anyopaque, count: i32) i32 {
-    _ = userdata;
+/// §4.3: the element count of a borrowed list (the binding reads the
+/// head node's stored suffix length).
+pub fn listLen(count: i32) i32 {
     return count;
 }
-fn listRange(userdata: ?*const anyopaque, start: i32, end: i32, out: *std.array_list.Managed(i32)) anyerror!void {
-    _ = userdata;
+
+/// §4.4: the inclusive [start, end] integer range, appended as plain
+/// values; empty when start > end.
+pub fn listRange(start: i32, end: i32, out: *std.array_list.Managed(i32)) anyerror!void {
     var v = start;
     while (v <= end) : (v += 1) try out.append(v);
 }
 
 // M3 opaque host-object storage, one module per file; the flattened
-// re-exports below keep the interpreter adapter's single `host_module`
+// re-exports below keep the interpreter binding's single `host_module`
 // import working.
 pub const array_storage = @import("host_array.zig");
 pub const hashmap_storage = @import("host_hashmap.zig");
