@@ -150,8 +150,8 @@ test "division traps fire before any write" {
     }
     // The 64-bit signed division overflow still traps.
     var l2 = try load(
-        \\fn div(a: i64, b: i64) -> i64 { a / b }
-        \\fn main() -> i64 { div(-9223372036854775808, -1) }
+        \\fn div(a: int64, b: int64) -> int64 { a / b }
+        \\fn main() -> int64 { div(-9223372036854775808, -1) }
     , false);
     defer l2.deinit();
     const entry2 = try l2.fid("main");
@@ -463,12 +463,12 @@ test "stack limit: deep recursion terminates with a deterministic trap" {
 
 test "i64/u64: literals type at target width and round-trip the pipeline" {
     var l = try load(
-        \\fn echo(x: i64) -> i64 { x }
+        \\fn echo(x: int64) -> int64 { x }
         \\fn main() -> int32 {
-        \\    let a: i64 = 9223372036854775807;
-        \\    let b: u64 = 18446744073709551615;
-        \\    let n: i64 = a;
-        \\    let m: u64 = b;
+        \\    let a: int64 = 9223372036854775807;
+        \\    let b: uint64 = 18446744073709551615;
+        \\    let n: int64 = a;
+        \\    let m: uint64 = b;
         \\    let r = echo(n);
         \\    0
         \\}
@@ -487,10 +487,10 @@ test "i64/u64: literals type at target width and round-trip the pipeline" {
 
 test "i64 arithmetic: min/-1 traps; wrapping is modulo 2^64" {
     var l = try load(
-        \\fn d(a: i64, b: i64) -> i64 { a / b }
+        \\fn d(a: int64, b: int64) -> int64 { a / b }
         \\fn main() -> int32 {
-        \\    let lo: i64 = -9223372036854775808;
-        \\    let minus1: i64 = -1;
+        \\    let lo: int64 = -9223372036854775808;
+        \\    let minus1: int64 = -1;
         \\    let q = d(lo, minus1);
         \\    0
         \\}
@@ -506,10 +506,10 @@ test "i64 arithmetic: min/-1 traps; wrapping is modulo 2^64" {
 
 test "u64 shifts: counts are taken modulo 64" {
     var l = try load(
-        \\fn sh(x: u64, k: u64) -> u64 { x << k }
+        \\fn sh(x: uint64, k: uint64) -> uint64 { x << k }
         \\fn main() -> int32 {
-        \\    let one: u64 = 1;
-        \\    let k: u64 = 64;
+        \\    let one: uint64 = 1;
+        \\    let k: uint64 = 64;
         \\    let shifted = sh(one, k);
         \\    0
         \\}
@@ -550,9 +550,9 @@ test "binary format: readers reject pre-phase-4 versions" {
 test "f64: literals type at target width and execute at binary64 precision" {
     var l = try load(
         \\fn main() -> int32 {
-        \\    let pi: f64 = 3.141592653589793;
-        \\    let two: f64 = 2.0;
-        \\    let half: f64 = pi / two;
+        \\    let pi: float64 = 3.141592653589793;
+        \\    let two: float64 = 2.0;
+        \\    let half: float64 = pi / two;
         \\    0
         \\}
     , false);
@@ -598,9 +598,9 @@ test "f64 NaN payload survives a full-width cell round-trip" {
 
 test "f64 signed zero: -0.0 is preserved through arithmetic" {
     var l = try load(
-        \\fn neg(x: f64) -> f64 { -x }
+        \\fn neg(x: float64) -> float64 { -x }
         \\fn main() -> int32 {
-        \\    let z: f64 = 0.0;
+        \\    let z: float64 = 0.0;
         \\    let nz = neg(z);
         \\    0
         \\}
@@ -634,11 +634,11 @@ test "uniform conversion family: the 5×5 cast matrix executes" {
         \\fn main() -> int32 {
         \\    let b: byte = 200 as byte;
         \\    let bu: uint32 = b as uint32;
-        \\    let bf: f64 = b as f64;
+        \\    let bf: float64 = b as float64;
         \\    let u: uint32 = 300 as uint32;
         \\    let uf: float32 = u as float32;
         \\    let fu: uint32 = uf as uint32;
-        \\    let f: f64 = 3.9;
+        \\    let f: float64 = 3.9;
         \\    let fi: int32 = f as int32;
         \\    let fb: byte = f as byte;
         \\    let f32b: byte = uf as byte;
@@ -663,12 +663,12 @@ test "f64 plan selection: same opcode family, binary32 vs binary64 semantics" {
     // 333333344.0, binary64 to 333333333.33… — the truncated int32
     // results differ by 11.
     var l64 = try load(
-        \\fn fdiv(a: f64, b: f64) -> f64 { a / b }
-        \\fn fmul(a: f64, b: f64) -> f64 { a * b }
+        \\fn fdiv(a: float64, b: float64) -> float64 { a / b }
+        \\fn fmul(a: float64, b: float64) -> float64 { a * b }
         \\fn main() -> int32 {
-        \\    let one: f64 = 1.0;
-        \\    let three: f64 = 3.0;
-        \\    let scale: f64 = 1000000000.0;
+        \\    let one: float64 = 1.0;
+        \\    let three: float64 = 3.0;
+        \\    let scale: float64 = 1000000000.0;
         \\    let y = fmul(fdiv(one, three), scale);
         \\    y as int32
         \\}
@@ -709,11 +709,11 @@ test "f64 plan selection: same opcode family, binary32 vs binary64 semantics" {
 
 test "f64 remainder: truncated remainder; zero divisor yields NaN (no trap)" {
     var l = try load(
-        \\fn rem(a: f64, b: f64) -> f64 { a % b }
+        \\fn rem(a: float64, b: float64) -> float64 { a % b }
         \\fn main() -> int32 {
-        \\    let a: f64 = 5.5;
-        \\    let b: f64 = 2.0;
-        \\    let zero: f64 = 0.0;
+        \\    let a: float64 = 5.5;
+        \\    let b: float64 = 2.0;
+        \\    let zero: float64 = 0.0;
         \\    let r = rem(a, b);
         \\    let n = rem(a, zero);
         \\    if (r as int32 == 1 and n as int32 == 0) { 7 } else { 0 }
@@ -733,11 +733,11 @@ test "f64 remainder: truncated remainder; zero divisor yields NaN (no trap)" {
 
 test "f64 NaN comparison: every ordered and equality comparison is false" {
     var l = try load(
-        \\fn lt(a: f64, b: f64) -> bool { a < b }
-        \\fn eq(a: f64, b: f64) -> bool { a == b }
+        \\fn lt(a: float64, b: float64) -> bool { a < b }
+        \\fn eq(a: float64, b: float64) -> bool { a == b }
         \\fn main() -> int32 {
-        \\    let n: f64 = 0.0;
-        \\    let one: f64 = 1.0;
+        \\    let n: float64 = 0.0;
+        \\    let one: float64 = 1.0;
         \\    let nan = n / n;
         \\    if (lt(nan, one)) {
         \\        1
@@ -762,13 +762,13 @@ test "f64 NaN comparison: every ordered and equality comparison is false" {
 
 test "f64 infinities: division by zero yields ±inf; inf >= inf and inf > -inf" {
     var l = try load(
-        \\fn fdiv(a: f64, b: f64) -> f64 { a / b }
-        \\fn lt(a: f64, b: f64) -> bool { a < b }
-        \\fn ge(a: f64, b: f64) -> bool { a >= b }
+        \\fn fdiv(a: float64, b: float64) -> float64 { a / b }
+        \\fn lt(a: float64, b: float64) -> bool { a < b }
+        \\fn ge(a: float64, b: float64) -> bool { a >= b }
         \\fn main() -> int32 {
-        \\    let one: f64 = 1.0;
-        \\    let zero: f64 = 0.0;
-        \\    let mone: f64 = -1.0;
+        \\    let one: float64 = 1.0;
+        \\    let zero: float64 = 0.0;
+        \\    let mone: float64 = -1.0;
         \\    let inf = fdiv(one, zero);
         \\    let ninf = fdiv(mone, zero);
         \\    if (lt(ninf, inf) and ge(inf, inf)) { 1 } else { 0 }
@@ -788,12 +788,12 @@ test "f64 infinities: division by zero yields ±inf; inf >= inf and inf > -inf" 
 
 test "f64 subnormal boundary: the smallest subnormal is positive and below the smallest normal" {
     var l = try load(
-        \\fn lt(a: f64, b: f64) -> bool { a < b }
+        \\fn lt(a: float64, b: float64) -> bool { a < b }
         \\fn main() -> int32 {
-        \\    let s: f64 = 5e-324;
-        \\    let z: f64 = 0.0;
-        \\    let m: f64 = 2.2250738585072014e-308;
-        \\    let t: f64 = 2.225073858507201e-308;
+        \\    let s: float64 = 5e-324;
+        \\    let z: float64 = 0.0;
+        \\    let m: float64 = 2.2250738585072014e-308;
+        \\    let t: float64 = 2.225073858507201e-308;
         \\    if (lt(z, s) and lt(t, m)) { 1 } else { 0 }
         \\}
     , false);
@@ -811,15 +811,15 @@ test "f64 subnormal boundary: the smallest subnormal is positive and below the s
 
 test "f64 rounding edges: 2^53+1 rounds to 2^53; 0.1+0.2 != 0.3" {
     var l = try load(
-        \\fn eq(a: f64, b: f64) -> bool { a == b }
-        \\fn ne(a: f64, b: f64) -> bool { a != b }
-        \\fn fadd(a: f64, b: f64) -> f64 { a + b }
+        \\fn eq(a: float64, b: float64) -> bool { a == b }
+        \\fn ne(a: float64, b: float64) -> bool { a != b }
+        \\fn fadd(a: float64, b: float64) -> float64 { a + b }
         \\fn main() -> int32 {
-        \\    let a: f64 = 9007199254740993.0;
-        \\    let b: f64 = 9007199254740992.0;
-        \\    let x: f64 = 0.1;
-        \\    let y: f64 = 0.2;
-        \\    let c: f64 = 0.3;
+        \\    let a: float64 = 9007199254740993.0;
+        \\    let b: float64 = 9007199254740992.0;
+        \\    let x: float64 = 0.1;
+        \\    let y: float64 = 0.2;
+        \\    let c: float64 = 0.3;
         \\    if (eq(a, b) and ne(fadd(x, y), c)) { 1 } else { 0 }
         \\}
     , false);
@@ -843,19 +843,19 @@ test "64-bit cast matrix executes: widening, narrowing, and reinterpret" {
     // `i64 ↔ u64` reinterprets the full 64-bit cell, and the 64→32
     // forms keep the low 32 bits. None trap.
     var l = try load(
-        \\fn main() -> i64 {
-        \\    let m: i64 = -1;
-        \\    let neg_one = m as u64;        // 0xffff_ffff_ffff_ffff
-        \\    let back = neg_one as i64;     // -1
+        \\fn main() -> int64 {
+        \\    let m: int64 = -1;
+        \\    let neg_one = m as uint64;        // 0xffff_ffff_ffff_ffff
+        \\    let back = neg_one as int64;     // -1
         \\    let s: int32 = -2;
-        \\    let widened = s as i64;        // -2
-        \\    let widen_u = s as u64;        // 0xffff_ffff_ffff_fffe
+        \\    let widened = s as int64;        // -2
+        \\    let widen_u = s as uint64;        // 0xffff_ffff_ffff_fffe
         \\    let u: uint32 = 4294967295;
-        \\    let uz = u as i64;             // 4294967295
-        \\    let zu = u as u64;             // 4294967295
+        \\    let uz = u as int64;             // 4294967295
+        \\    let zu = u as uint64;             // 4294967295
         \\    let b: byte = 200 as byte;
-        \\    let bw = b as u64;             // 200
-        \\    let bi = b as i64;             // 200
+        \\    let bw = b as uint64;             // 200
+        \\    let bi = b as int64;             // 200
         \\    let trunc = m as int32;        // -1
         \\    if (neg_one == 18446744073709551615 and back == -1 and widened == -2
         \\        and widen_u == 18446744073709551614 and uz == 4294967295
@@ -884,34 +884,34 @@ test "64-bit float↔int casts: rounding, truncation, and saturation" {
     // rounding up to 2⁶⁴ recovers u64_max on the way back.
     var l = try load(
         \\fn main() -> int32 {
-        \\    let f: f64 = 3.9;
-        \\    let fi = f as i64;                 // 3
-        \\    let big: f64 = 1e300;
-        \\    let sat = big as i64;              // i64_max
-        \\    let neg: f64 = -1e300;
-        \\    let sneg = neg as i64;             // i64_min
-        \\    let usat = big as u64;             // u64_max
-        \\    let nan: f64 = 0.0;
-        \\    let nz = (nan / nan) as i64;       // NaN → 0
-        \\    let i: i64 = 9007199254740993;     // 2^53 + 1
-        \\    let r = i as f64;                  // rounds to 2^53
-        \\    let rb = r as i64;
-        \\    let u: u64 = 18446744073709551615;
-        \\    let round = (u as f64) as u64;     // 2^64 → u64_max
+        \\    let f: float64 = 3.9;
+        \\    let fi = f as int64;                 // 3
+        \\    let big: float64 = 1e300;
+        \\    let sat = big as int64;              // i64_max
+        \\    let neg: float64 = -1e300;
+        \\    let sneg = neg as int64;             // i64_min
+        \\    let usat = big as uint64;             // u64_max
+        \\    let nan: float64 = 0.0;
+        \\    let nz = (nan / nan) as int64;       // NaN → 0
+        \\    let i: int64 = 9007199254740993;     // 2^53 + 1
+        \\    let r = i as float64;                  // rounds to 2^53
+        \\    let rb = r as int64;
+        \\    let u: uint64 = 18446744073709551615;
+        \\    let round = (u as float64) as uint64;     // 2^64 → u64_max
         \\    let f32v: float32 = 2.5;
-        \\    let f32i = f32v as i64;            // 2
-        \\    let f32u = f32v as u64;            // 2
+        \\    let f32i = f32v as int64;            // 2
+        \\    let f32u = f32v as uint64;            // 2
         \\    let f32neg: float32 = -1e30;
-        \\    let f32sat = f32neg as i64;        // f32 ≤ −2⁶³ → i64_min
-        \\    let i64f32: i64 = 16777217;         // 2^24 + 1
+        \\    let f32sat = f32neg as int64;        // f32 ≤ −2⁶³ → i64_min
+        \\    let i64f32: int64 = 16777217;         // 2^24 + 1
         \\    let f32r = i64f32 as float32;      // rounds to 2^24 at binary32 precision
-        \\    let u64f32: u64 = 4294967296;
+        \\    let u64f32: uint64 = 4294967296;
         \\    let f32w = u64f32 as float32;      // 2^32 exact in binary32
         \\    if (fi == 3 and sat == 9223372036854775807 and sneg == -9223372036854775808
         \\        and usat == 18446744073709551615 and nz == 0 and rb == 9007199254740992
         \\        and round == 18446744073709551615 and f32i == 2 and f32u == 2
-        \\        and f32sat == -9223372036854775808 and f32r as i64 == 16777216
-        \\        and f32w as u64 == 4294967296) {
+        \\        and f32sat == -9223372036854775808 and f32r as int64 == 16777216
+        \\        and f32w as uint64 == 4294967296) {
         \\        7
         \\    } else { 0 }
         \\}

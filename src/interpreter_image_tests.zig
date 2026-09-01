@@ -48,7 +48,7 @@ test "move-wide: all twelve suffixes execute; the mixed sequence builds 0x012345
         llir.instrI(.movwk3, llir.frame_base, 0x0123), // lane 3 = 0x0123
         llir.instrE(.ret, llir.frame_base, 0),
     };
-    const u64_row = [_]llir.TypeDesc{primType(.u64)};
+    const u64_row = [_]llir.TypeDesc{primType(.uint64)};
     try testing.expectEqual(@as(Value, 0x0123_4567_89ab_cdef), try runHand(&seq, &u64_row, 0, &.{}));
 
     // movwn complements the whole 64-bit pattern: movwn0 0x0000 = all
@@ -93,7 +93,7 @@ test "i64 immediate forms sign-extend the 7-bit constant to 64 bits" {
     // subi c=0x80 (= -128 as i8): 10 - (-128) = 138 at 64 bits. A
     // 32-bit sign extension would add 0x00000000ffffff80 instead —
     // a different pattern entirely.
-    const u64_row = [_]llir.TypeDesc{primType(.u64)};
+    const u64_row = [_]llir.TypeDesc{primType(.uint64)};
     const instrs = [_]llir.Instr{
         llir.instrI(.movwz0, llir.frame_base, 0xa), // %0 = 10
         llir.instrR(.subi, llir.frame_base + 1, llir.frame_base, 0x40), // %1 = 10 - (-64) — the v9 i64 imm7 window [-64, 63]
@@ -107,14 +107,14 @@ test "i64 immediate forms sign-extend the 7-bit constant to 64 bits" {
         llir.instrE(.copy, llir.frame_base + 1, llir.cond_reg),
         llir.instrE(.ret, llir.frame_base + 1, 0),
     };
-    const rows = [_]llir.TypeDesc{ primType(.u64), primType(.bool) };
+    const rows = [_]llir.TypeDesc{ primType(.uint64), primType(.bool) };
     try testing.expectEqual(@as(Value, 0), try runHand(&cmp, &rows, 0, &.{}));
 }
 
 test "wide madd/msub wrap at the resolved 64-bit width" {
     // acc = 0xffff_ffff_ffff_ff00; madd acc += 2 * 0x100 — wraps
     // modulo 2^64 to 0x100.
-    const u64_row = [_]llir.TypeDesc{primType(.u64)};
+    const u64_row = [_]llir.TypeDesc{primType(.uint64)};
     const instrs = [_]llir.Instr{
         llir.instrI(.movwz3, llir.frame_base, 0xffff),
         llir.instrI(.movwk2, llir.frame_base, 0xffff),
@@ -139,7 +139,7 @@ test "wide madd/msub wrap at the resolved 64-bit width" {
 }
 
 test "maddi: the 8-bit immediate accumulates at the resolved 64-bit width" {
-    const u64_row = [_]llir.TypeDesc{primType(.u64)};
+    const u64_row = [_]llir.TypeDesc{primType(.uint64)};
 
     // acc 10 + b 7 * imm 3 = 31; the accumulator is read and rewritten.
     const acc = [_]llir.Instr{
@@ -175,7 +175,7 @@ test "maddi: the 8-bit immediate accumulates at the resolved 64-bit width" {
 }
 
 test "minu/maxu at 64-bit width compare the full unsigned cell" {
-    const u64_row = [_]llir.TypeDesc{primType(.u64)};
+    const u64_row = [_]llir.TypeDesc{primType(.uint64)};
     // 2^31 vs 1: the low words are 0 and 1, so a 32-bit-only handler
     // would still pick 1/2^31 — the width itself is what's under test
     // (the 64-bit cases must execute, not hit `unreachable`).
@@ -196,7 +196,7 @@ test "minu/maxu at 64-bit width compare the full unsigned cell" {
 }
 
 test "i64 minInt edges: rem min/-1 is 0; abs(minInt) wraps to the minimum" {
-    const rows = [_]llir.TypeDesc{ primType(.int32), primType(.i64) };
+    const rows = [_]llir.TypeDesc{ primType(.int32), primType(.int64) };
     const constants = [_]llir.ConstRecord{
         .{ .kind = .int, .type_ = 1, .a = 0, .b = 0x8000_0000 }, // i64 minInt
         .{ .kind = .int, .type_ = 1, .a = 0xffff_ffff, .b = 0xffff_ffff }, // i64 -1
@@ -222,7 +222,7 @@ test "64-bit ordered branches compare the full cell, not the low word" {
     // a = 2^32, b = 5: `a < b` is false at 64 bits, but the low-word
     // compare (0 < 5) would take the branch. The fall-through must run
     // (r2 = 7), not the branch arm (r2 = 99).
-    const u64_row = [_]llir.TypeDesc{primType(.u64)};
+    const u64_row = [_]llir.TypeDesc{primType(.uint64)};
     const blocks = [_]llir.BlockDesc{
         .{ .start_pc = 0, .end_pc = 3 },
         .{ .start_pc = 3, .end_pc = 5 },
@@ -241,7 +241,7 @@ test "64-bit ordered branches compare the full cell, not the low word" {
 
     // The signed form needs i64-typed operands; `movwz*` defines plain
     // u64, so the constants carry the i64 type records.
-    const rows = [_]llir.TypeDesc{ primType(.int32), primType(.i64) };
+    const rows = [_]llir.TypeDesc{ primType(.int32), primType(.int64) };
     const constants = [_]llir.ConstRecord{
         .{ .kind = .int, .type_ = 1, .a = 0, .b = 1 }, // i64 2^32
         .{ .kind = .int, .type_ = 1, .a = 5, .b = 0 }, // i64 5
@@ -262,14 +262,14 @@ test "64-bit ordered branches compare the full cell, not the low word" {
 
 test "f64 arithmetic: IEEE division, remainder, NaN equality — no traps" {
     var l = try load(
-        \\fn half(x: f64) -> f64 { x / 2.0 }
-        \\fn inv(x: f64) -> f64 { 0.0 / x }
+        \\fn half(x: float64) -> float64 { x / 2.0 }
+        \\fn inv(x: float64) -> float64 { 0.0 / x }
         \\fn main() -> int32 {
-        \\    let q: f64 = half(7.5);      // 3.75
-        \\    let seven: f64 = 7.5;
-        \\    let r: f64 = seven - q;      // 3.75
-        \\    let s: f64 = q + r;          // 7.5
-        \\    let n: f64 = inv(0.0);       // 0/0 = NaN — division by zero never traps
+        \\    let q: float64 = half(7.5);      // 3.75
+        \\    let seven: float64 = 7.5;
+        \\    let r: float64 = seven - q;      // 3.75
+        \\    let s: float64 = q + r;          // 7.5
+        \\    let n: float64 = inv(0.0);       // 0/0 = NaN — division by zero never traps
         \\    let eq_res: bool = n == n;   // NaN compares unequal to itself
         \\    if (eq_res) { 0 } else { (s as int32) }
         \\}
@@ -409,7 +409,7 @@ test "integer C-Type comparisons write cond (signed/unsigned, 32/64-bit)" {
     const neg: Value = 0xffff_ffff_8000_0000; // sign-extended INT_MIN
     try testing.expectEqual(@as(Value, 1), try runIntCmp(.slt, neg, 0, &i32_rows));
 
-    const i64_rows = [_]llir.TypeDesc{ primType(.i64), primType(.i64), primType(.bool) };
+    const i64_rows = [_]llir.TypeDesc{ primType(.int64), primType(.int64), primType(.bool) };
     // 1 << 63 is i64 min (signed) → less than 0; as unsigned it is huge.
     const min64: Value = 0x8000_0000_0000_0000;
     try testing.expectEqual(@as(Value, 1), try runIntCmp(.slt, min64, 0, &i64_rows));
@@ -470,7 +470,7 @@ test "float C-Type comparisons write cond; NaN is ordered-false, ne-true" {
     const f64_nan: Value = 0x7ff8_0000_0000_0001;
     const f64_one: Value = vm_types.ValueCodec.encodeFloat64(1.0);
     const f64_two: Value = vm_types.ValueCodec.encodeFloat64(2.0);
-    const f64_rows = [_]llir.TypeDesc{ primType(.f64), primType(.f64), primType(.bool) };
+    const f64_rows = [_]llir.TypeDesc{ primType(.float64), primType(.float64), primType(.bool) };
     try testing.expectEqual(@as(Value, 0), try runIntCmp(.slt_f64, f64_nan, f64_one, &f64_rows));
     try testing.expectEqual(@as(Value, 0), try runIntCmp(.sle_f64, f64_nan, f64_one, &f64_rows));
     try testing.expectEqual(@as(Value, 0), try runIntCmp(.seq_f64, f64_nan, f64_nan, &f64_rows));
@@ -500,7 +500,7 @@ test "take: register transfer clears its source; O aliases resolve through the w
         .x_count = 1,
         .window_count = 7,
     };
-    const u64_row = [_]llir.TypeDesc{primType(.u64)};
+    const u64_row = [_]llir.TypeDesc{primType(.uint64)};
     const constants = [_]llir.ConstRecord{
         .{ .kind = .int, .type_ = 0, .a = 42, .b = 0 },
     };

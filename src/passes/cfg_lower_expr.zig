@@ -65,9 +65,9 @@ pub fn lowerExprInner(self: *Lowerer, fs: *FuncState, e: *const ast.Expr) LowerE
             var ty: cfg.Type = .{ .primitive = .float32 };
             var v: f64 = lit.value;
             if (self.ann) |a| {
-                if (a.float_widths.get(lit) != null) ty = .{ .primitive = .f64 };
+                if (a.float_widths.get(lit) != null) ty = .{ .primitive = .float64 };
             }
-            if (ty != .primitive or ty.primitive != .f64) v = try float32Literal(self, lit.span, lit.value);
+            if (ty != .primitive or ty.primitive != .float64) v = try float32Literal(self, lit.span, lit.value);
             break :blk try emitConst(self, fs, lit.span, .{ .float = v }, ty);
         },
         .string => |lit| try emitConst(self, fs, lit.span, .{ .string = lit.value }, .{ .primitive = .str }),

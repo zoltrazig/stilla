@@ -64,9 +64,9 @@ test "host: builtin.print and str format every supported scalar" {
 
     var l = try load(
         \\const builtin = import("builtin");
-        \\fn big() -> i64 { 2971215073 }
-        \\fn huge() -> u64 { 18446744073709551615 }
-        \\fn precise() -> f64 { 2.5 }
+        \\fn big() -> int64 { 2971215073 }
+        \\fn huge() -> uint64 { 18446744073709551615 }
+        \\fn precise() -> float64 { 2.5 }
         \\fn main() -> void {
         \\    builtin.print(builtin.str(42));
         \\    builtin.print(builtin.str(-7));
@@ -644,12 +644,12 @@ test "host: same member name dispatches by module specifier (string.len vs list.
 test "any: 32/64-bit dynamic types pack, test, and recover by dynamic TypeId" {
     var l = try load(
         \\fn main() -> int32 {
-        \\    let vi: i64 = 9007199254740993;
+        \\    let vi: int64 = 9007199254740993;
         \\    let a: any = vi;
-        \\    let w = a as i64;
-        \\    let vu: u64 = 18446744073709551615;
+        \\    let w = a as int64;
+        \\    let vu: uint64 = 18446744073709551615;
         \\    let a2: any = vu;
-        \\    let w2 = a2 as u64;
+        \\    let w2 = a2 as uint64;
         \\    if (w == vi and w2 == vu) { 1 } else { 0 }
         \\}
     , false);
@@ -668,9 +668,9 @@ test "any: 32/64-bit dynamic types pack, test, and recover by dynamic TypeId" {
 test "any: a full binary64 cell (NaN payload) survives pack and recovery" {
     var l = try load(
         \\fn main() -> int32 {
-        \\    let n: f64 = 0.0 / 0.0;
+        \\    let n: float64 = 0.0 / 0.0;
         \\    let a: any = n;
-        \\    let w = a as f64;
+        \\    let w = a as float64;
         \\    if (w != w) { 1 } else { 0 }
         \\}
     , false);

@@ -127,9 +127,9 @@ void-literal    = "(" ")"
 ; Reserved words
 ; ----------------------------------------------------------------------------
 ;   The following identifiers are reserved:
-;   and any as bool borrow box byte const drop else f64 false float32 fn
-;   hostdata i64 if import int32 let list match move never opaque or str struct
-;   true tuple type u64 uint32 union using void
+;   and any as bool borrow box byte const drop else float64 false float32 fn
+;   hostdata int64 if import int32 let list match move never opaque or str struct
+;   true tuple type uint64 uint32 union using void
 ; The collection type names "array" and "hashmap" are not reserved words. The module name "builtin" is not a reserved word
 ; either: it is an ordinary importable standard-library module (the Core specification).
 ; The keyword "opaque" (the Core specification, "Host-backed opaque nominal types")
@@ -282,10 +282,10 @@ primitive-type =
     / %s"hostdata"
     / %s"int32"
     / %s"uint32"
-    / %s"i64"
-    / %s"u64"
+    / %s"int64"
+    / %s"uint64"
     / %s"float32"
-    / %s"f64"
+    / %s"float64"
     / %s"bool"
     / %s"str"
     / %s"void"
@@ -789,10 +789,10 @@ type-test-type =
       %s"byte"
     / %s"int32"
     / %s"uint32"
-    / %s"i64"
-    / %s"u64"
+    / %s"int64"
+    / %s"uint64"
     / %s"float32"
-    / %s"f64"
+    / %s"float64"
     / %s"bool"
     / %s"str"
     / list-type

@@ -416,7 +416,7 @@ pub const Op = union(enum) {
     /// the operand type. Unified over int32/uint32.
     popcount: *Value,
     /// The Core §16.3 numeric conversions over the seven conversion types
-    /// {byte, int32, uint32, i64, u64, float32, f64}. Never traps: integer casts are
+    /// {byte, int32, uint32, int64, uint64, float32, float64}. Never traps: integer casts are
     /// bit-pattern operations and float→int truncates toward zero and
     /// saturates, NaN becoming zero (Runtime §7.2).
     num_cast: *Value,

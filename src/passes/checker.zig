@@ -101,7 +101,7 @@ pub const Annotation = struct {
     /// context (Core Types §16.3: typed bindings/returns/fields widen
     /// the literal at its target width; no suffix forms exist).
     int_widths: std.AutoHashMapUnmanaged(*const ast.IntLiteral, ast.PrimitiveKind) = .empty,
-    /// Float literals typed `f64` by their expected-type context.
+    /// Float literals typed `float64` by their expected-type context.
     float_widths: std.AutoHashMapUnmanaged(*const ast.FloatLiteral, void) = .empty,
 
     pub fn deinit(self: *Annotation) void {

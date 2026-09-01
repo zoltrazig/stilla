@@ -281,9 +281,9 @@ test "5.2 LLIR assembly: binary64 constants print at full precision" {
     // narrowed through binary32.
     var c = try compileText("app", &.{.{
         "app",
-        \\fn f(a: f64) -> int32 { a as int32 }
+        \\fn f(a: float64) -> int32 { a as int32 }
         \\fn main() -> int32 {
-        \\    let pi: f64 = 3.141592653589793;
+        \\    let pi: float64 = 3.141592653589793;
         \\    let r = f(pi);
         \\    r
         \\}
@@ -317,20 +317,20 @@ test "5.1 LLIR assembly: i64/u64/f64 ops and conversions print stable serialized
     // payloads.
     var c = try compileText("app", &.{.{
         "app",
-        \\fn mul64(a: i64, b: i64) -> i64 { a * b }
-        \\fn sh64(x: u64, k: u64) -> u64 { x >> k }
-        \\fn lt64(a: u64, b: u64) -> bool { a < b }
-        \\fn fmul(a: f64, b: f64) -> f64 { a * b }
-        \\fn fge(a: f64, b: f64) -> bool { a >= b }
-        \\fn b2f(x: byte) -> f64 { x as f64 }
-        \\fn i2f(x: int32) -> f64 { x as f64 }
-        \\fn u2f(x: uint32) -> f64 { x as f64 }
-        \\fn f2f(x: float32) -> f64 { x as f64 }
-        \\fn f2i(x: f64) -> int32 { x as int32 }
+        \\fn mul64(a: int64, b: int64) -> int64 { a * b }
+        \\fn sh64(x: uint64, k: uint64) -> uint64 { x >> k }
+        \\fn lt64(a: uint64, b: uint64) -> bool { a < b }
+        \\fn fmul(a: float64, b: float64) -> float64 { a * b }
+        \\fn fge(a: float64, b: float64) -> bool { a >= b }
+        \\fn b2f(x: byte) -> float64 { x as float64 }
+        \\fn i2f(x: int32) -> float64 { x as float64 }
+        \\fn u2f(x: uint32) -> float64 { x as float64 }
+        \\fn f2f(x: float32) -> float64 { x as float64 }
+        \\fn f2i(x: float64) -> int32 { x as int32 }
         \\fn main() -> int32 {
-        \\    let a: i64 = 9223372036854775807;
-        \\    let b: u64 = 18446744073709551615;
-        \\    let c: f64 = 3.141592653589793;
+        \\    let a: int64 = 9223372036854775807;
+        \\    let b: uint64 = 18446744073709551615;
+        \\    let c: float64 = 3.141592653589793;
         \\    let d = mul64(a, a);
         \\    let e = sh64(b, b);
         \\    let g = fmul(c, c);
@@ -442,11 +442,11 @@ test "5.2 LLIR assembly: host syscalls and any payload TypeIds project symbolica
     var c = try compileText("app", &.{.{
         "app",
         \\const builtin = import("builtin");
-        \\fn wrap(a: i64) -> any { a }
+        \\fn wrap(a: int64) -> any { a }
         \\fn main() -> void {
-        \\    let v: i64 = 9007199254740993;
+        \\    let v: int64 = 9007199254740993;
         \\    let a = wrap(v);
-        \\    let w = (move a) as i64;
+        \\    let w = (move a) as int64;
         \\    builtin.print(builtin.str(1));
         \\}
     }});
@@ -465,7 +465,7 @@ test "5.2 LLIR assembly: host syscalls and any payload TypeIds project symbolica
     try testing.expect(std.mem.indexOf(u8, asm1, "any_unpack_move") != null);
     // The payload TypeId prints as the type name, and the syscall as
     // its binding.
-    try testing.expect(std.mem.indexOf(u8, asm1, "i64") != null);
+    try testing.expect(std.mem.indexOf(u8, asm1, "int64") != null);
     try testing.expect(std.mem.indexOf(u8, asm1, "@builtin.print") != null);
     try testing.expect(std.mem.indexOf(u8, asm1, "@builtin.str") != null);
 }
@@ -627,15 +627,15 @@ test "3.4 LLIR assembly: comparison swaps and the immediate-compare aliases prin
         \\fn sum(n: int32) -> int32 { if (n <= 0) { 0 } else { n + sum(n - 1) } }
         \\fn gtB(a: int32, b: int32) -> int32 { if (a > b) { 1 } else { 0 } }
         \\fn geUB(a: uint32, b: uint32) -> int32 { if (a >= b) { 1 } else { 0 } }
-        \\fn eqF(a: f64, b: f64) -> int32 { if (a == b) { 1 } else { 0 } }
+        \\fn eqF(a: float64, b: float64) -> int32 { if (a == b) { 1 } else { 0 } }
         \\fn neI(a: int32) -> int32 { if (a != 5) { 1 } else { 0 } }
         \\fn cmp3(k: int32, a: int32) -> bool { k < a }
         \\fn main() -> int32 {
         \\    let s = sum(4);
         \\    let p = gtB(s, 10);
         \\    let q = geUB(3 as uint32, 4 as uint32);
-        \\    let f1: f64 = 1.5;
-        \\    let f2: f64 = -2.5;
+        \\    let f1: float64 = 1.5;
+        \\    let f2: float64 = -2.5;
         \\    let r = eqF(f1, f2);
         \\    let t = neI(7);
         \\    let v = cmp3(2, 9);

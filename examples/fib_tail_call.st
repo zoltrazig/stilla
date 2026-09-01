@@ -13,24 +13,24 @@
 // pass rewrites the self-recursion into a loop (frontend.md Pass 7).
 //
 // The accumulators widen past int32 range at fib(47), so the integer type
-// is i64 (the language's 64-bit signed type; the name is `i64`, not
-// `int64`, per air.md). Literals in i64 operator contexts type at that
-// width (Core Types §16.3), so no `as i64` coercions are needed.
+// is int64 (the language's 64-bit signed type). Literals in int64 operator
+// contexts type at that width (Core Types §16.3), so no `as int64`
+// coercions are needed.
 
 const builtin = import("builtin");
 
 /// fib(n) = fib_go(n, 0, 1)
-fn fib(n: i64) -> i64 {
+fn fib(n: int64) -> int64 {
     go(n, 0, 1)
 }
 
 /// fib_go(n, a, b) = a                      when n == 0
 ///                = fib_go(n - 1, b, a + b) otherwise
-fn go(n: i64, a: i64, b: i64) -> i64 {
+fn go(n: int64, a: int64, b: int64) -> int64 {
     if (n == 0) { a } else { go(n - 1, b, a + b) }
 }
 
-fn print_terms(i: i64, n: i64) -> void {
+fn print_terms(i: int64, n: int64) -> void {
     if (i < n) {
         builtin.print(builtin.str(fib(i)));
         print_terms(i + 1, n);

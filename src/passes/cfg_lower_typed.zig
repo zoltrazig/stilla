@@ -63,10 +63,10 @@ fn repName(t: cfg.Type) ?[]const u8 {
         .primitive => |k| switch (k) {
             .int32 => "i32",
             .uint32 => "u32",
-            .i64 => "i64",
-            .u64 => "u64",
+            .int64 => "i64",
+            .uint64 => "u64",
             .float32 => "f32",
-            .f64 => "f64",
+            .float64 => "f64",
             else => null,
         },
         else => null,
@@ -262,7 +262,7 @@ pub fn immOf(cv: cfg.ConstValue, kind: llir.TypedKind, t: cfg.Type) ?u8 {
     return switch (cv) {
         .int => |i| switch (t) {
             .primitive => |k| switch (k) {
-                .int32, .i64 => blk: {
+                .int32, .int64 => blk: {
                     if (kind == .shl or kind == .shr or kind == .bitand or kind == .bitor or kind == .bitxor) {
                         if (i < 0 or i > 127) break :blk null;
                         break :blk @intCast(i);
@@ -270,7 +270,7 @@ pub fn immOf(cv: cfg.ConstValue, kind: llir.TypedKind, t: cfg.Type) ?u8 {
                     if (i < -64 or i > 63) break :blk null;
                     break :blk @intCast(@as(u8, @bitCast(@as(i8, @intCast(i)))) & 0x7f);
                 },
-                .uint32, .u64, .byte => blk: {
+                .uint32, .uint64, .byte => blk: {
                     if (i < 0 or i > 127) break :blk null;
                     break :blk @intCast(i);
                 },

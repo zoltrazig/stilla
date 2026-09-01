@@ -538,7 +538,7 @@ fn checkInstr(
         // IEEE (clears the sign bit); `uint32` has no abs (the identity)
         // and byte no arithmetic — the lowering only covers int32/f32.
         .abs => |v| {
-            if (v.type_.primitive != .int32 and v.type_.primitive != .i64 and v.type_.primitive != .float32) return typeErr(allocator, f, b, info.text, v.type_);
+            if (v.type_.primitive != .int32 and v.type_.primitive != .int64 and v.type_.primitive != .float32) return typeErr(allocator, f, b, info.text, v.type_);
             if (!cfg.Type.eql(v.type_, instr.results[0].type_)) return typeErr(allocator, f, b, info.text, v.type_);
         },
         // clz/popcount: the 32-bit integer patterns, result the operand
@@ -1239,14 +1239,14 @@ fn defBlock(f: *const cfg.IrFunc, instr: *const cfg.Instr) ?*const cfg.BasicBloc
 }
 
 fn isNumeric(t: cfg.Type) bool {
-    return t == .primitive and (t.primitive == .int32 or t.primitive == .uint32 or t.primitive == .i64 or t.primitive == .u64 or t.primitive == .float32 or t.primitive == .f64);
+    return t == .primitive and (t.primitive == .int32 or t.primitive == .uint32 or t.primitive == .int64 or t.primitive == .uint64 or t.primitive == .float32 or t.primitive == .float64);
 }
 
 /// The shift/bitwise domain (`shl`/`shr`/`bitand`/`bitor`/`bitxor`):
 /// the two integer types — `byte` has no arithmetic and `f32` no bit
 /// pattern to shift.
 fn isInt(t: cfg.Type) bool {
-    return t == .primitive and (t.primitive == .int32 or t.primitive == .uint32 or t.primitive == .i64 or t.primitive == .u64);
+    return t == .primitive and (t.primitive == .int32 or t.primitive == .uint32 or t.primitive == .int64 or t.primitive == .uint64);
 }
 
 /// The type set a `num_cast` may move between (Core §16.3): every
@@ -1254,7 +1254,7 @@ fn isInt(t: cfg.Type) bool {
 /// (`isNumeric`) stays as-is; enabling a cast does not enable
 /// `byte + byte` or `uint32` negation.
 fn isNumCastType(t: cfg.Type) bool {
-    return t == .primitive and (t.primitive == .int32 or t.primitive == .uint32 or t.primitive == .i64 or t.primitive == .u64 or t.primitive == .byte or t.primitive == .float32 or t.primitive == .f64);
+    return t == .primitive and (t.primitive == .int32 or t.primitive == .uint32 or t.primitive == .int64 or t.primitive == .uint64 or t.primitive == .byte or t.primitive == .float32 or t.primitive == .float64);
 }
 
 fn isBool(t: cfg.Type) bool {

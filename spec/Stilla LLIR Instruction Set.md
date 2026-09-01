@@ -1749,7 +1749,7 @@ ModuleSlot     { type_: TypeId }
   program-owned `strings` blob; `void` leaves both zero and its
   destination is `zero`.
 - `TypeDesc`: `primitive` with `a` a `PrimitiveId` (`byte | bool | int32
-  | uint32 | i64 | u64 | float32 | f64 | str | any | hostdata`); `named`
+  | uint32 | int64 | uint64 | float32 | float64 | str | any | hostdata`); `named`
   with `a` a declaration `TypeId` and `{ b, c }` the type-argument range
   into `types`; `list`/`box` with `a` the element `TypeId`; `tuple` with
   `{ a, b }` the element range into `types`; `function` with `a` a

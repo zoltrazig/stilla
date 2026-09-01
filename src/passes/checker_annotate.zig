@@ -609,7 +609,7 @@ fn inferBinaryOperands(frame: *Frame, b: *const ast.Binary) CheckError!?cfg.Type
 /// written with an explicit `as byte`, so it is never a literal context.
 fn isIntWidth(k: ast.PrimitiveKind) bool {
     return switch (k) {
-        .int32, .uint32, .i64, .u64 => true,
+        .int32, .uint32, .int64, .uint64 => true,
         else => false,
     };
 }
@@ -627,8 +627,8 @@ fn inferExprInner(frame: *Frame, e: *const ast.Expr) CheckError!?cfg.Type {
                         .uint32 => if (lit.value > std.math.maxInt(u32)) {
                             return frame.ck.fail(lit.span, "uint32 literal magnitude {d} exceeds 2^32 - 1", .{lit.value});
                         },
-                        .i64 => if (lit.value > (1 << 63)) {
-                            return frame.ck.fail(lit.span, "i64 literal magnitude {d} exceeds 2^63", .{lit.value});
+                        .int64 => if (lit.value > (1 << 63)) {
+                            return frame.ck.fail(lit.span, "int64 literal magnitude {d} exceeds 2^63", .{lit.value});
                         },
                         else => {},
                     }
@@ -640,10 +640,10 @@ fn inferExprInner(frame: *Frame, e: *const ast.Expr) CheckError!?cfg.Type {
         },
         .float => |*lit| {
             // A float literal keeps `float32` unless its uniquely-expected
-            // context is explicitly `f64`, which round-trips binary64.
+            // context is explicitly `float64`, which round-trips binary64.
             if (frame.expect) |t| {
-                if (t == .primitive and (t.primitive == .float32 or t.primitive == .f64)) {
-                    if (t.primitive == .f64) {
+                if (t == .primitive and (t.primitive == .float32 or t.primitive == .float64)) {
+                    if (t.primitive == .float64) {
                         try frame.ck.annotation.float_widths.put(frame.ck.alloc(), lit, {});
                     }
                     return t;

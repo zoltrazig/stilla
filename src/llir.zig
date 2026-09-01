@@ -836,9 +836,9 @@ pub const PrimitiveId = enum(u32) {
     hostdata,
     /// 64-bit widths appended after the v1 set: serialized values of
     /// the existing rows never change.
-    i64,
-    u64,
-    f64,
+    int64,
+    uint64,
+    float64,
 };
 
 /// The kind of one `TypeDesc` row.
@@ -1270,10 +1270,10 @@ fn typeRep(t: cfg.Type) ?Rep {
         .primitive => |k| switch (k) {
             .int32 => .i32,
             .uint32 => .u32,
-            .i64 => .i64,
-            .u64 => .u64,
+            .int64 => .i64,
+            .uint64 => .u64,
             .float32 => .f32,
-            .f64 => .f64,
+            .float64 => .f64,
             else => null,
         },
         else => null,
@@ -1307,8 +1307,8 @@ fn famOp(comptime base: []const u8, rep: ?Rep) ?Opcode {
 fn intOrFloat(comptime int_name: []const u8, comptime float_base: []const u8, t: cfg.Type) ?Opcode {
     return switch (t) {
         .primitive => |k| switch (k) {
-            .int32, .uint32, .i64, .u64 => @field(Opcode, int_name),
-            .float32, .f64 => famOp(float_base, typeRep(t)),
+            .int32, .uint32, .int64, .uint64 => @field(Opcode, int_name),
+            .float32, .float64 => famOp(float_base, typeRep(t)),
             else => null,
         },
         else => null,
@@ -1322,9 +1322,9 @@ fn intOrFloat(comptime int_name: []const u8, comptime float_base: []const u8, t:
 fn signedOrUnsigned(comptime signed_name: []const u8, comptime unsigned_name: []const u8, comptime float_base: []const u8, t: cfg.Type) ?Opcode {
     return switch (t) {
         .primitive => |k| switch (k) {
-            .int32, .i64 => @field(Opcode, signed_name),
-            .uint32, .u64 => @field(Opcode, unsigned_name),
-            .float32, .f64 => famOp(float_base, typeRep(t)),
+            .int32, .int64 => @field(Opcode, signed_name),
+            .uint32, .uint64 => @field(Opcode, unsigned_name),
+            .float32, .float64 => famOp(float_base, typeRep(t)),
             else => null,
         },
         else => null,
@@ -1339,7 +1339,7 @@ fn bitCountOp(comptime base: []const u8, t: cfg.Type) ?Opcode {
     return switch (t) {
         .primitive => |k| switch (k) {
             .int32, .uint32 => @field(Opcode, base ++ "_i32"),
-            .i64, .u64 => @field(Opcode, base ++ "_i64"),
+            .int64, .uint64 => @field(Opcode, base ++ "_i64"),
             else => null,
         },
         else => null,
@@ -1393,11 +1393,11 @@ pub fn typedOpcode(kind: TypedKind, src: cfg.Type, dst: cfg.Type) ?Opcode {
         .ne => cmpFam("sne", src),
         .lt => cmpFam("slt", src),
         .le => switch (src.primitive) {
-            .float32, .f64 => famOp("sle", typeRep(src)),
+            .float32, .float64 => famOp("sle", typeRep(src)),
             else => null,
         },
         .ge => switch (src.primitive) {
-            .float32, .f64 => famOp("sle", typeRep(src)),
+            .float32, .float64 => famOp("sle", typeRep(src)),
             else => null,
         },
         // Operand-swap alias: `a > b` ≡ `slt b, a` (swap preserves the
@@ -1413,9 +1413,9 @@ fn cmpFam(comptime base: []const u8, src: cfg.Type) ?Opcode {
     const ordering = comptime std.mem.eql(u8, base, "slt");
     return switch (src) {
         .primitive => |k| switch (k) {
-            .int32, .i64 => if (std.mem.eql(u8, base, "sle")) null else @field(Opcode, base),
-            .uint32, .u64, .byte => if (std.mem.eql(u8, base, "sle")) null else @field(Opcode, if (ordering) base ++ "u" else base),
-            .float32, .f64 => famOp(base, typeRep(src)),
+            .int32, .int64 => if (std.mem.eql(u8, base, "sle")) null else @field(Opcode, base),
+            .uint32, .uint64, .byte => if (std.mem.eql(u8, base, "sle")) null else @field(Opcode, if (ordering) base ++ "u" else base),
+            .float32, .float64 => famOp(base, typeRep(src)),
             .bool => if (std.mem.eql(u8, base, "seq")) .bool_eq else if (std.mem.eql(u8, base, "sne")) .bool_ne else null,
             .str => if (std.mem.eql(u8, base, "seq")) .str_eq else if (std.mem.eql(u8, base, "sne")) .str_ne else null,
             else => null,
@@ -1435,63 +1435,63 @@ fn castOp(src: cfg.Type, dst: cfg.Type) ?Opcode {
                 .byte => switch (kd) {
                     .int32 => .cvt_b_i32,
                     .uint32 => .cvt_b_u32,
-                    .i64 => .cvt_b_i64,
-                    .u64 => .cvt_b_u64,
+                    .int64 => .cvt_b_i64,
+                    .uint64 => .cvt_b_u64,
                     .float32 => .cvt_b_f32,
-                    .f64 => .cvt_b_f64,
+                    .float64 => .cvt_b_f64,
                     else => null,
                 },
                 .int32 => switch (kd) {
                     .byte => .cvt_i32_b,
                     .uint32 => .cvt_i32_u32,
-                    .i64 => .cvt_i32_i64,
-                    .u64 => .cvt_i32_u64,
+                    .int64 => .cvt_i32_i64,
+                    .uint64 => .cvt_i32_u64,
                     .float32 => .cvt_i32_f32,
-                    .f64 => .cvt_i32_f64,
+                    .float64 => .cvt_i32_f64,
                     else => null,
                 },
                 .uint32 => switch (kd) {
                     .byte => .cvt_u32_b,
                     .int32 => .cvt_u32_i32,
-                    .i64 => .cvt_u32_i64,
-                    .u64 => .cvt_u32_u64,
+                    .int64 => .cvt_u32_i64,
+                    .uint64 => .cvt_u32_u64,
                     .float32 => .cvt_u32_f32,
-                    .f64 => .cvt_u32_f64,
+                    .float64 => .cvt_u32_f64,
                     else => null,
                 },
-                .i64 => switch (kd) {
+                .int64 => switch (kd) {
                     .byte => .cvt_i64_b,
                     .int32 => .cvt_i64_i32,
                     .uint32 => .cvt_i64_u32,
-                    .u64 => .cvt_i64_u64,
+                    .uint64 => .cvt_i64_u64,
                     .float32 => .cvt_i64_f32,
-                    .f64 => .cvt_i64_f64,
+                    .float64 => .cvt_i64_f64,
                     else => null,
                 },
-                .u64 => switch (kd) {
+                .uint64 => switch (kd) {
                     .byte => .cvt_u64_b,
                     .int32 => .cvt_u64_i32,
                     .uint32 => .cvt_u64_u32,
-                    .i64 => .cvt_u64_i64,
+                    .int64 => .cvt_u64_i64,
                     .float32 => .cvt_u64_f32,
-                    .f64 => .cvt_u64_f64,
+                    .float64 => .cvt_u64_f64,
                     else => null,
                 },
                 .float32 => switch (kd) {
                     .byte => .cvt_f32_b,
                     .int32 => .cvt_f32_i32,
                     .uint32 => .cvt_f32_u32,
-                    .i64 => .cvt_f32_i64,
-                    .u64 => .cvt_f32_u64,
-                    .f64 => .cvt_f32_f64,
+                    .int64 => .cvt_f32_i64,
+                    .uint64 => .cvt_f32_u64,
+                    .float64 => .cvt_f32_f64,
                     else => null,
                 },
-                .f64 => switch (kd) {
+                .float64 => switch (kd) {
                     .byte => .cvt_f64_b,
                     .int32 => .cvt_f64_i32,
                     .uint32 => .cvt_f64_u32,
-                    .i64 => .cvt_f64_i64,
-                    .u64 => .cvt_f64_u64,
+                    .int64 => .cvt_f64_i64,
+                    .uint64 => .cvt_f64_u64,
                     .float32 => .cvt_f64_f32,
                     else => null,
                 },
@@ -1510,8 +1510,8 @@ fn castOp(src: cfg.Type, dst: cfg.Type) ?Opcode {
 fn cmpImmOp(comptime base: []const u8, src: cfg.Type) ?Opcode {
     return switch (src) {
         .primitive => |k| switch (k) {
-            .int32, .i64 => @field(Opcode, base),
-            .uint32, .u64, .byte => @field(Opcode, base ++ "u"),
+            .int32, .int64 => @field(Opcode, base),
+            .uint32, .uint64, .byte => @field(Opcode, base ++ "u"),
             else => null,
         },
         else => null,
@@ -1520,7 +1520,7 @@ fn cmpImmOp(comptime base: []const u8, src: cfg.Type) ?Opcode {
 
 fn hasIntComparison(src: cfg.Type) bool {
     return switch (src) {
-        .primitive => |k| k == .int32 or k == .uint32 or k == .i64 or k == .u64 or k == .byte,
+        .primitive => |k| k == .int32 or k == .uint32 or k == .int64 or k == .uint64 or k == .byte,
         else => false,
     };
 }
@@ -1534,8 +1534,8 @@ fn hasIntComparison(src: cfg.Type) bool {
 fn signedOrUnsignedImm(comptime signed_name: []const u8, comptime unsigned_name: []const u8, t: cfg.Type) ?Opcode {
     return switch (t) {
         .primitive => |k| switch (k) {
-            .int32, .i64 => @field(Opcode, signed_name),
-            .uint32, .u64 => @field(Opcode, unsigned_name),
+            .int32, .int64 => @field(Opcode, signed_name),
+            .uint32, .uint64 => @field(Opcode, unsigned_name),
             else => null,
         },
         else => null,
@@ -1547,7 +1547,7 @@ fn signedOrUnsignedImm(comptime signed_name: []const u8, comptime unsigned_name:
 fn intImm(comptime name: []const u8, t: cfg.Type) ?Opcode {
     return switch (t) {
         .primitive => |k| switch (k) {
-            .int32, .uint32, .i64, .u64 => @field(Opcode, name),
+            .int32, .uint32, .int64, .uint64 => @field(Opcode, name),
             else => null,
         },
         else => null,
@@ -1581,8 +1581,8 @@ pub fn typedOpcodeImm(kind: TypedKind, src: cfg.Type) ?Opcode {
 pub fn maddOpcode(src: cfg.Type) ?Opcode {
     return switch (src) {
         .primitive => |k| switch (k) {
-            .int32, .uint32, .i64, .u64 => .madd,
-            .float32, .f64 => famOp("madd", typeRep(src)),
+            .int32, .uint32, .int64, .uint64 => .madd,
+            .float32, .float64 => famOp("madd", typeRep(src)),
             else => null,
         },
         else => null,
@@ -1597,8 +1597,8 @@ pub fn maddOpcode(src: cfg.Type) ?Opcode {
 pub fn maddiOpcode(src: cfg.Type) ?Opcode {
     return switch (src) {
         .primitive => |k| switch (k) {
-            .int32, .i64 => .maddi,
-            .uint32, .u64 => .maddiu,
+            .int32, .int64 => .maddi,
+            .uint32, .uint64 => .maddiu,
             else => null,
         },
         else => null,
@@ -1972,34 +1972,34 @@ test "typed opcodes resolve at every supported width (widthless integer schema)"
     // canonical 64-bit values), rep-suffixed on the floats.
     try std.testing.expectEqual(Opcode.add, typedOpcode(.add, .{ .primitive = .int32 }, undefined).?);
     try std.testing.expectEqual(Opcode.add, typedOpcode(.add, .{ .primitive = .uint32 }, undefined).?);
-    try std.testing.expectEqual(Opcode.add, typedOpcode(.add, .{ .primitive = .i64 }, undefined).?);
-    try std.testing.expectEqual(Opcode.add, typedOpcode(.add, .{ .primitive = .u64 }, undefined).?);
+    try std.testing.expectEqual(Opcode.add, typedOpcode(.add, .{ .primitive = .int64 }, undefined).?);
+    try std.testing.expectEqual(Opcode.add, typedOpcode(.add, .{ .primitive = .uint64 }, undefined).?);
     try std.testing.expectEqual(Opcode.add_f32, typedOpcode(.add, .{ .primitive = .float32 }, undefined).?);
-    try std.testing.expectEqual(Opcode.add_f64, typedOpcode(.add, .{ .primitive = .f64 }, undefined).?);
+    try std.testing.expectEqual(Opcode.add_f64, typedOpcode(.add, .{ .primitive = .float64 }, undefined).?);
     // Signedness rides in the opcode, compare/branch style (no width).
     try std.testing.expectEqual(Opcode.div, typedOpcode(.div, .{ .primitive = .int32 }, undefined).?);
     try std.testing.expectEqual(Opcode.divu, typedOpcode(.div, .{ .primitive = .uint32 }, undefined).?);
     try std.testing.expectEqual(Opcode.div_f32, typedOpcode(.div, .{ .primitive = .float32 }, undefined).?);
-    try std.testing.expectEqual(Opcode.rem_f64, typedOpcode(.rem, .{ .primitive = .f64 }, undefined).?);
-    try std.testing.expectEqual(Opcode.shr, typedOpcode(.shr, .{ .primitive = .i64 }, undefined).?);
+    try std.testing.expectEqual(Opcode.rem_f64, typedOpcode(.rem, .{ .primitive = .float64 }, undefined).?);
+    try std.testing.expectEqual(Opcode.shr, typedOpcode(.shr, .{ .primitive = .int64 }, undefined).?);
     try std.testing.expectEqual(Opcode.shru, typedOpcode(.shr, .{ .primitive = .uint32 }, undefined).?);
     // Shifts/bitwise: widthless on the integer types.
-    try std.testing.expectEqual(Opcode.shl, typedOpcode(.shl, .{ .primitive = .i64 }, undefined).?);
+    try std.testing.expectEqual(Opcode.shl, typedOpcode(.shl, .{ .primitive = .int64 }, undefined).?);
     try std.testing.expectEqual(Opcode.shru, typedOpcode(.shr, .{ .primitive = .uint32 }, undefined).?);
-    try std.testing.expectEqual(Opcode.xor, typedOpcode(.bitxor, .{ .primitive = .u64 }, undefined).?);
+    try std.testing.expectEqual(Opcode.xor, typedOpcode(.bitxor, .{ .primitive = .uint64 }, undefined).?);
     try std.testing.expectEqual(Opcode.and_, typedOpcode(.bitand, .{ .primitive = .int32 }, undefined).?);
-    try std.testing.expectEqual(Opcode.or_, typedOpcode(.bitor, .{ .primitive = .u64 }, undefined).?);
+    try std.testing.expectEqual(Opcode.or_, typedOpcode(.bitor, .{ .primitive = .uint64 }, undefined).?);
     try std.testing.expectEqual(@as(?Opcode, null), typedOpcode(.shl, .{ .primitive = .byte }, undefined));
     // min/max: signed/unsigned pairs plus the float reps.
     try std.testing.expectEqual(Opcode.min_f32, typedOpcode(.min, .{ .primitive = .float32 }, undefined).?);
-    try std.testing.expectEqual(Opcode.maxu, typedOpcode(.max, .{ .primitive = .u64 }, undefined).?);
+    try std.testing.expectEqual(Opcode.maxu, typedOpcode(.max, .{ .primitive = .uint64 }, undefined).?);
     try std.testing.expectEqual(Opcode.minu, typedOpcode(.min, .{ .primitive = .uint32 }, undefined).?);
     try std.testing.expectEqual(Opcode.max, typedOpcode(.max, .{ .primitive = .int32 }, undefined).?);
     // The E-type unaries keep their widthful reps (width-sensitive
     // results); integer neg is widthless (sign-agnostic), the floats
     // keep theirs; abs is i32/i64/f32/f64 only.
     try std.testing.expectEqual(Opcode.neg, typedOpcode(.neg, .{ .primitive = .uint32 }, undefined).?);
-    try std.testing.expectEqual(Opcode.neg_f64, typedOpcode(.neg, .{ .primitive = .f64 }, undefined).?);
+    try std.testing.expectEqual(Opcode.neg_f64, typedOpcode(.neg, .{ .primitive = .float64 }, undefined).?);
     try std.testing.expectEqual(Opcode.abs_i32, typedOpcode(.abs, .{ .primitive = .int32 }, undefined).?);
     try std.testing.expectEqual(Opcode.abs_f32, typedOpcode(.abs, .{ .primitive = .float32 }, undefined).?);
     try std.testing.expectEqual(@as(?Opcode, null), typedOpcode(.abs, .{ .primitive = .uint32 }, undefined));
@@ -2007,15 +2007,15 @@ test "typed opcodes resolve at every supported width (widthless integer schema)"
     // signed member of the same width.
     try std.testing.expectEqual(Opcode.clz_i32, typedOpcode(.clz, .{ .primitive = .uint32 }, undefined).?);
     try std.testing.expectEqual(Opcode.clz_i32, typedOpcode(.clz, .{ .primitive = .int32 }, undefined).?);
-    try std.testing.expectEqual(Opcode.clz_i64, typedOpcode(.clz, .{ .primitive = .u64 }, undefined).?);
-    try std.testing.expectEqual(Opcode.popcount_i64, typedOpcode(.popcount, .{ .primitive = .i64 }, undefined).?);
-    try std.testing.expectEqual(Opcode.popcount_i64, typedOpcode(.popcount, .{ .primitive = .u64 }, undefined).?);
+    try std.testing.expectEqual(Opcode.clz_i64, typedOpcode(.clz, .{ .primitive = .uint64 }, undefined).?);
+    try std.testing.expectEqual(Opcode.popcount_i64, typedOpcode(.popcount, .{ .primitive = .int64 }, undefined).?);
+    try std.testing.expectEqual(Opcode.popcount_i64, typedOpcode(.popcount, .{ .primitive = .uint64 }, undefined).?);
     // Comparisons: the C-Type families with implicit cond.
     try std.testing.expectEqual(Opcode.seq, typedOpcode(.eq, .{ .primitive = .int32 }, undefined).?);
-    try std.testing.expectEqual(Opcode.sne, typedOpcode(.ne, .{ .primitive = .u64 }, undefined).?);
+    try std.testing.expectEqual(Opcode.sne, typedOpcode(.ne, .{ .primitive = .uint64 }, undefined).?);
     try std.testing.expectEqual(Opcode.slt_f32, typedOpcode(.lt, .{ .primitive = .float32 }, undefined).?);
-    try std.testing.expectEqual(@as(?Opcode, null), typedOpcode(.ge, .{ .primitive = .i64 }, undefined));
-    try std.testing.expectEqual(Opcode.sle_f64, typedOpcode(.ge, .{ .primitive = .f64 }, undefined).?);
+    try std.testing.expectEqual(@as(?Opcode, null), typedOpcode(.ge, .{ .primitive = .int64 }, undefined));
+    try std.testing.expectEqual(Opcode.sle_f64, typedOpcode(.ge, .{ .primitive = .float64 }, undefined).?);
     // Byte comparisons lower through the u32 reps.
     try std.testing.expectEqual(Opcode.seq, typedOpcode(.eq, .{ .primitive = .byte }, undefined).?);
     // Bool/str equality.
@@ -2030,13 +2030,13 @@ test "typed opcodes resolve at every supported width (widthless integer schema)"
     // Casts: the 42 explicit cvt.<src>.<dst> spellings over the seven
     // conversion types.
     try std.testing.expectEqual(Opcode.cvt_i32_u32, typedOpcode(.cast, .{ .primitive = .int32 }, .{ .primitive = .uint32 }).?);
-    try std.testing.expectEqual(Opcode.cvt_b_f64, typedOpcode(.cast, .{ .primitive = .byte }, .{ .primitive = .f64 }).?);
-    try std.testing.expectEqual(Opcode.cvt_f64_f32, typedOpcode(.cast, .{ .primitive = .f64 }, .{ .primitive = .float32 }).?);
+    try std.testing.expectEqual(Opcode.cvt_b_f64, typedOpcode(.cast, .{ .primitive = .byte }, .{ .primitive = .float64 }).?);
+    try std.testing.expectEqual(Opcode.cvt_f64_f32, typedOpcode(.cast, .{ .primitive = .float64 }, .{ .primitive = .float32 }).?);
     try std.testing.expectEqual(Opcode.cvt_u32_i32, typedOpcode(.cast, .{ .primitive = .uint32 }, .{ .primitive = .int32 }).?);
-    try std.testing.expectEqual(Opcode.cvt_i32_i64, typedOpcode(.cast, .{ .primitive = .int32 }, .{ .primitive = .i64 }).?);
-    try std.testing.expectEqual(Opcode.cvt_i64_u64, typedOpcode(.cast, .{ .primitive = .i64 }, .{ .primitive = .u64 }).?);
-    try std.testing.expectEqual(Opcode.cvt_u64_f32, typedOpcode(.cast, .{ .primitive = .u64 }, .{ .primitive = .float32 }).?);
-    try std.testing.expectEqual(Opcode.cvt_f64_i64, typedOpcode(.cast, .{ .primitive = .f64 }, .{ .primitive = .i64 }).?);
+    try std.testing.expectEqual(Opcode.cvt_i32_i64, typedOpcode(.cast, .{ .primitive = .int32 }, .{ .primitive = .int64 }).?);
+    try std.testing.expectEqual(Opcode.cvt_i64_u64, typedOpcode(.cast, .{ .primitive = .int64 }, .{ .primitive = .uint64 }).?);
+    try std.testing.expectEqual(Opcode.cvt_u64_f32, typedOpcode(.cast, .{ .primitive = .uint64 }, .{ .primitive = .float32 }).?);
+    try std.testing.expectEqual(Opcode.cvt_f64_i64, typedOpcode(.cast, .{ .primitive = .float64 }, .{ .primitive = .int64 }).?);
     // The full 7 × 7 matrix minus the identity entries: 42 distinct
     // opcodes, one per non-identity pair.
     {
@@ -2044,10 +2044,10 @@ test "typed opcodes resolve at every supported width (widthless integer schema)"
             .{ .primitive = .byte },
             .{ .primitive = .int32 },
             .{ .primitive = .uint32 },
-            .{ .primitive = .i64 },
-            .{ .primitive = .u64 },
+            .{ .primitive = .int64 },
+            .{ .primitive = .uint64 },
             .{ .primitive = .float32 },
-            .{ .primitive = .f64 },
+            .{ .primitive = .float64 },
         };
         var seen = [_]bool{false} ** 256;
         var n: usize = 0;
@@ -2074,19 +2074,19 @@ test "typed immediate opcodes: widthless integer families, no float forms" {
     // form on the unsigned ones.
     try std.testing.expectEqual(Opcode.addi, typedOpcodeImm(.add, .{ .primitive = .int32 }).?);
     try std.testing.expectEqual(Opcode.addiu, typedOpcodeImm(.add, .{ .primitive = .uint32 }).?);
-    try std.testing.expectEqual(Opcode.subi, typedOpcodeImm(.sub, .{ .primitive = .i64 }).?);
-    try std.testing.expectEqual(Opcode.muliu, typedOpcodeImm(.mul, .{ .primitive = .u64 }).?);
+    try std.testing.expectEqual(Opcode.subi, typedOpcodeImm(.sub, .{ .primitive = .int64 }).?);
+    try std.testing.expectEqual(Opcode.muliu, typedOpcodeImm(.mul, .{ .primitive = .uint64 }).?);
     try std.testing.expectEqual(Opcode.divi, typedOpcodeImm(.div, .{ .primitive = .int32 }).?);
     try std.testing.expectEqual(Opcode.remiu, typedOpcodeImm(.rem, .{ .primitive = .uint32 }).?);
-    try std.testing.expectEqual(Opcode.shli, typedOpcodeImm(.shl, .{ .primitive = .u64 }).?);
+    try std.testing.expectEqual(Opcode.shli, typedOpcodeImm(.shl, .{ .primitive = .uint64 }).?);
     try std.testing.expectEqual(Opcode.shri, typedOpcodeImm(.shr, .{ .primitive = .int32 }).?);
     try std.testing.expectEqual(Opcode.shriu, typedOpcodeImm(.shr, .{ .primitive = .uint32 }).?);
     try std.testing.expectEqual(Opcode.andi, typedOpcodeImm(.bitand, .{ .primitive = .uint32 }).?);
-    try std.testing.expectEqual(Opcode.ori, typedOpcodeImm(.bitor, .{ .primitive = .i64 }).?);
-    try std.testing.expectEqual(Opcode.xori, typedOpcodeImm(.bitxor, .{ .primitive = .u64 }).?);
+    try std.testing.expectEqual(Opcode.ori, typedOpcodeImm(.bitor, .{ .primitive = .int64 }).?);
+    try std.testing.expectEqual(Opcode.xori, typedOpcodeImm(.bitxor, .{ .primitive = .uint64 }).?);
     // C-Type integer comparison immediates.
     try std.testing.expectEqual(Opcode.slti, typedOpcodeImm(.lt, .{ .primitive = .int32 }).?);
-    try std.testing.expectEqual(Opcode.seqi, typedOpcodeImm(.eq, .{ .primitive = .u64 }).?);
+    try std.testing.expectEqual(Opcode.seqi, typedOpcodeImm(.eq, .{ .primitive = .uint64 }).?);
     try std.testing.expectEqual(@as(?Opcode, null), typedOpcodeImm(.add, .{ .primitive = .float32 }));
     try std.testing.expectEqual(@as(?Opcode, null), typedOpcodeImm(.le, .{ .primitive = .int32 }));
     try std.testing.expectEqual(@as(?Opcode, null), typedOpcodeImm(.neg, .{ .primitive = .int32 }));

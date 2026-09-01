@@ -7,13 +7,13 @@ fn u32_immediates(a: uint32) -> tuple[uint32, uint32, uint32, uint32, uint32, ui
     (a + k, a - k, a * k, a / k, a % k, a << k, a >> k, a & k, a | k, a ^ k, a < k, a > k, a == k, a != k)
 }
 
-fn i64_immediates(a: i64) -> tuple[i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, bool, bool, bool, bool] {
-    let k: i64 = 3;
+fn i64_immediates(a: int64) -> tuple[int64, int64, int64, int64, int64, int64, int64, int64, int64, int64, bool, bool, bool, bool] {
+    let k: int64 = 3;
     (a + k, a - k, a * k, a / k, a % k, a << k, a >> k, a & k, a | k, a ^ k, a < k, a > k, a == k, a != k)
 }
 
-fn u64_immediates(a: u64) -> tuple[u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, bool, bool, bool, bool] {
-    let k: u64 = 3;
+fn u64_immediates(a: uint64) -> tuple[uint64, uint64, uint64, uint64, uint64, uint64, uint64, uint64, uint64, uint64, bool, bool, bool, bool] {
+    let k: uint64 = 3;
     (a + k, a - k, a * k, a / k, a % k, a << k, a >> k, a & k, a | k, a ^ k, a < k, a > k, a == k, a != k)
 }
 

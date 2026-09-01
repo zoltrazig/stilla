@@ -335,7 +335,7 @@ pub const Parser = struct {
         const tok = self.cur();
         switch (tok.kind) {
             .ident => {},
-            .kw_any, .kw_as, .kw_bool, .kw_borrow, .kw_box, .kw_byte, .kw_const, .kw_drop, .kw_else, .kw_false, .kw_f64, .kw_float32, .kw_fn, .kw_hostdata, .kw_i64, .kw_if, .kw_import, .kw_int32, .kw_let, .kw_list, .kw_match, .kw_move, .kw_never, .kw_str, .kw_struct, .kw_true, .kw_tuple, .kw_type, .kw_u64, .kw_uint32, .kw_union, .kw_using, .kw_void => {},
+            .kw_any, .kw_as, .kw_bool, .kw_borrow, .kw_box, .kw_byte, .kw_const, .kw_drop, .kw_else, .kw_false, .kw_float64, .kw_float32, .kw_fn, .kw_hostdata, .kw_int64, .kw_if, .kw_import, .kw_int32, .kw_let, .kw_list, .kw_match, .kw_move, .kw_never, .kw_str, .kw_struct, .kw_true, .kw_tuple, .kw_type, .kw_uint64, .kw_uint32, .kw_union, .kw_using, .kw_void => {},
             else => return self.fail(tok.span, "expected a path segment, found {s}", .{self.describe(tok)}),
         }
         self.pos += 1;
@@ -534,14 +534,14 @@ fn tokenName(kind: lex.TokenKind) []const u8 {
         .kw_else => "'else'",
         .kw_false => "'false'",
         .kw_float32 => "'float32'",
-        .kw_f64 => "'f64'",
+        .kw_float64 => "'float64'",
         .kw_fn => "'fn'",
         .kw_hostdata => "'hostdata'",
         .kw_if => "'if'",
         .kw_import => "'import'",
         .kw_int32 => "'int32'",
-        .kw_i64 => "'i64'",
-        .kw_u64 => "'u64'",
+        .kw_int64 => "'int64'",
+        .kw_uint64 => "'uint64'",
         .kw_let => "'let'",
         .kw_list => "'list'",
         .kw_match => "'match'",

@@ -5,10 +5,10 @@ frontend compiler (module graph → type-checked CFG AIR → LLIR assembly and
 binary), the interpreter VM that executes it, and the host-embedding surface
 that connects both to a Zig or C host.
 
-> **Status:** the compiler frontend (phases 1–3, the LLIR backend) and the
-> LLIR interpreter VM build, test, and run the examples (`zig build
-> examples`, the `--run` CLI mode). Execution follows the Runtime
-> Specification; the interpreter is the current execution engine.
+> **Status:** WIP
+
+> Caveat: Almost all code in this program is Vibe Coded with DeepSeek V4 Flash.
+> DON'T PANIC.
 
 ## What is Stilla?
 

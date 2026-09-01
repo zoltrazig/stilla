@@ -375,7 +375,7 @@ to or result from a host binding is transferred as that opaque payload.
 
 An **opaque host type** value (Stilla Core Types & Ownership Specification, Host-backed opaque nominal types)
 is a nominal value whose runtime representation the host defines. A conforming runtime
-uses 64-bit value cells: every cell is a raw `u64` holding the complete value — the
+uses 64-bit value cells: every cell is a raw `uint64` holding the complete value — the
 value's type is never stored in the cell. A cell carries no inline `ValueKind`
 representation tag and no fixed-width payload field: the type of a value is determined
 uniquely by the validated program — the opcode, descriptors, signatures, type tables,
@@ -450,10 +450,10 @@ Required supported types:
 byte
 int32
 uint32
-i64
-u64
+int64
+uint64
 float32
-f64
+float64
 bool
 str
 ```
@@ -571,10 +571,10 @@ Required supported key types:
 byte
 int32
 uint32
-i64
-u64
+int64
+uint64
 float32
-f64
+float64
 bool
 str
 ```
@@ -593,7 +593,7 @@ normalization; `!=` is its complement. Distinct string objects with identical
 bytes are equal. Values equal under `==` must produce equal hashes, including
 equal string contents passed to `builtin.hash`.
 
-For `float32`/`f64`, `+0.0 == -0.0`, so both must hash identically. NaN follows IEEE comparison
+For `float32`/`float64`, `+0.0 == -0.0`, so both must hash identically. NaN follows IEEE comparison
 behavior and is not equal to itself; equal-hash requirements therefore do not equate
 distinct NaN payloads.
 
@@ -831,7 +831,7 @@ context immediately under the same rule.
 The typing rules for operators and conversions are defined in Stilla Core Types & Ownership Specification. This
 section defines their runtime behavior.
 
-**Value cell canonical form.** Every cell is one raw `u64`; there is no inline
+**Value cell canonical form.** Every cell is one raw `uint64`; there is no inline
 representation tag and no fixed-width payload field, and the value's type is determined
 by the validated program, never by cell bits (Host integration contract). The canonical
 encoding of each scalar is frozen as follows:
@@ -840,17 +840,17 @@ encoding of each scalar is frozen as follows:
 - `byte` is the low 8 bits, with the high 56 bits zero;
 - `int32` and `uint32` store their raw low 32-bit pattern sign-extended through
   the high 32 bits; this common cell form preserves both signed and unsigned
-  32-bit ordering when the cell is compared as signed or unsigned `u64`;
+  32-bit ordering when the cell is compared as signed or unsigned `uint64`;
 - `float32` is the raw low 32-bit pattern, with the high 32 bits zero;
-- `i64`/`u64` use all 64 bits: `i64` the two's-complement pattern, `u64` the raw
+- `int64`/`uint64` use all 64 bits: `int64` the two's-complement pattern, `uint64` the raw
   unsigned pattern;
-- `f64` uses all 64 bits as the IEEE 754 binary64 bit pattern; NaN payload bits are
+- `float64` uses all 64 bits as the IEEE 754 binary64 bit pattern; NaN payload bits are
   preserved losslessly — a conforming runtime never canonicalizes, quiets, or collapses
   a NaN payload across a value transfer.
 
 All scalar zeros therefore share the single all-zero bit pattern: the canonical zero of
 every scalar type — `bool(false)`, `byte(0)`, `int32(0)`, `uint32(0)`, `float32(+0.0)`,
-`i64(0)`, `u64(0)`, `f64(+0.0)` — is `0x0000_0000_0000_0000`. The `zero` operand
+`int64(0)`, `uint64(0)`, `float64(+0.0)` — is `0x0000_0000_0000_0000`. The `zero` operand
 register produces that all-zero pattern for the scalar type its instruction's resolved
 operand contract requires. Copy, move, borrow, spill, argument, and return transfers
 copy the complete raw cell; no transfer validates, masks, or rewrites payload bits.
@@ -863,19 +863,19 @@ copy the complete raw cell; no transfer validates, masks, or rewrites payload bi
   division at 64 bits and the lowering's `sext32` truncates the exact quotient, so no
   32-bit division overflow exists); `int32` remainder traps on a zero divisor only —
   `int32_min rem -1` is 0 (WebAssembly semantics).
-- `i64`/`u64` arithmetic is performed modulo 2⁶⁴ and never traps on overflow or
-  underflow (WebAssembly semantics extended to 64 bits). `i64` division traps on a zero
-  divisor and on the division-overflow case `i64_min div -1`; `i64` remainder traps on a
-  zero divisor only — `i64_min rem -1` is 0. Unary `-` on `u64` computes the
-  two's-complement negation `0 - x` and never traps; `-` on `i64` wraps on the minimum
-  value (`i64_min` negated is `i64_min`, modulo 2⁶⁴) and never traps.
-- Integer `div`/`rem` by zero traps for `int32`, `uint32`, `i64`, and `u64`; `float32`
-  and `f64` division follow IEEE 754 (`x / 0.0` is ±infinity for `x ≠ 0`, NaN for
+- `int64`/`uint64` arithmetic is performed modulo 2⁶⁴ and never traps on overflow or
+  underflow (WebAssembly semantics extended to 64 bits). `int64` division traps on a zero
+  divisor and on the division-overflow case `int64_min div -1`; `int64` remainder traps on a
+  zero divisor only — `int64_min rem -1` is 0. Unary `-` on `uint64` computes the
+  two's-complement negation `0 - x` and never traps; `-` on `int64` wraps on the minimum
+  value (`int64_min` negated is `int64_min`, modulo 2⁶⁴) and never traps.
+- Integer `div`/`rem` by zero traps for `int32`, `uint32`, `int64`, and `uint64`; `float32`
+  and `float64` division follow IEEE 754 (`x / 0.0` is ±infinity for `x ≠ 0`, NaN for
   `0.0 / 0.0`) and never traps.
 - `float32` remainder is the truncated remainder `a % b = a - trunc(a / b) × b` (C
   `fmod`, Rust `%`), following IEEE 754 binary32 behavior and never trapping: `x % 0.0`
   is NaN for every `x`, `0.0 % x` is `±0.0` (the sign of the dividend), `±inf % x` is
-  NaN for finite `x`, and `x % ±inf` is `x`. `f64` remainder is the same operation in
+  NaN for finite `x`, and `x % ±inf` is `x`. `float64` remainder is the same operation in
   binary64, with the same never-trapping rules and the same result signs.
 - `uint32` arithmetic is performed modulo 2³² and never traps on overflow or underflow;
   unary `-` on `uint32` computes the two's-complement negation and never traps, while
@@ -884,16 +884,16 @@ copy the complete raw cell; no transfer validates, masks, or rewrites payload bi
 - Shifts never trap. For the 32-bit integer types the count is taken modulo 32
   (WebAssembly semantics): only the low five bits of the count participate, so
   `x << 32` is `x`, `x << 33` is `x << 1`, and a negative count shifts by its low five
-  bits (`-1` is 31). For `i64`/`u64` the count is taken modulo 64: only the low six bits
+  bits (`-1` is 31). For `int64`/`uint64` the count is taken modulo 64: only the low six bits
   participate, so `x << 64` is `x`, `x << 65` is `x << 1`, and a negative count shifts
-  by its low six bits (`-1` is 63). `>>` on `int32`/`i64` is the arithmetic shift (the
-  vacated high bits are filled with the sign bit), `>>` on `uint32`/`u64` the logical
+  by its low six bits (`-1` is 63). `>>` on `int32`/`int64` is the arithmetic shift (the
+  vacated high bits are filled with the sign bit), `>>` on `uint32`/`uint64` the logical
   shift (filled with zero); `<<` shifts zeros into the low positions for all four
   types, and bits shifted out of the operand width are discarded (the Core
   specification).
 - Bitwise operations never trap. `&`, `|`, and `^` operate on the raw
   operand-width patterns — `int32`/`uint32` are bit-identical in their
-  32-bit patterns, `i64`/`u64` bit-identical in their 64-bit patterns
+  32-bit patterns, `int64`/`uint64` bit-identical in their 64-bit patterns
   (signedness is irrelevant: masking, setting, or toggling bits never
   interprets the pattern as a number), every bit of the result is
   defined by the operands alone, and the result is the pattern modulo
@@ -914,38 +914,38 @@ copy the complete raw cell; no transfer validates, masks, or rewrites payload bi
 - Numeric conversion never traps: `int32 as byte` / `int32 as uint32` truncate to the
   target width (the value modulo 2⁸ / 2³², low bits in two's complement) and `uint32 as
   int32` reinterprets the low 32 bits (Stilla Core Types & Ownership Specification). The
-  64-bit integer casts widen and narrow the low bits: `int32 as i64` / `int32 as u64`
-  sign-extend the low 32 bits (two's-complement conversion), `uint32 as i64` /
-  `uint32 as u64` zero-extend them, `byte as i64` / `byte as u64` zero-extend the low 8
-  bits, `i64 as u64` / `u64 as i64` reinterpret the full 64-bit cell, and the 64→32/
-  64→8 forms keep the low bits (`i64 as int32` / `u64 as int32` sign-extend the low 32
-  bits, `i64 as uint32` / `u64 as uint32` keep them as the canonical `uint32` cell,
-  `i64 as byte` / `u64 as byte` the low 8 bits).
+  64-bit integer casts widen and narrow the low bits: `int32 as int64` / `int32 as uint64`
+  sign-extend the low 32 bits (two's-complement conversion), `uint32 as int64` /
+  `uint32 as uint64` zero-extend them, `byte as int64` / `byte as uint64` zero-extend the low 8
+  bits, `int64 as uint64` / `uint64 as int64` reinterpret the full 64-bit cell, and the 64→32/
+  64→8 forms keep the low bits (`int64 as int32` / `uint64 as int32` sign-extend the low 32
+  bits, `int64 as uint32` / `uint64 as uint32` keep them as the canonical `uint32` cell,
+  `int64 as byte` / `uint64 as byte` the low 8 bits).
 - Invalid `any` cast traps: recovering an `any` payload under a target type that does not
   match its runtime tag (Stilla Core Types & Ownership Specification).
 - `int32 as float32` uses the IEEE 754 conversion with round-to-nearest,
   ties-to-even; precision may be lost.
 - `float32 as int32` truncates toward zero; a NaN or out-of-range source saturates to the
   `int32` range (NaN becomes zero) and never traps.
-- `f64 as int32`, `f64 as uint32`, and `f64 as byte` truncate toward zero and saturate
+- `float64 as int32`, `float64 as uint32`, and `float64 as byte` truncate toward zero and saturate
   to the target range at binary64 precision (NaN becomes zero) and never trap; the
-  widening casts `byte as f64`, `int32 as f64`, `uint32 as f64`, and `float32 as f64`
+  widening casts `byte as float64`, `int32 as float64`, `uint32 as float64`, and `float32 as float64`
   are exact (Stilla Core Types & Ownership Specification).
-- `float32 as i64` / `float32 as u64` and `f64 as i64` / `f64 as u64` truncate toward
+- `float32 as int64` / `float32 as uint64` and `float64 as int64` / `float64 as uint64` truncate toward
   zero and saturate to the 64-bit range at the source's precision (NaN becomes zero):
-  the signed forms to `[i64_min, i64_max]`, the unsigned forms to `[0, 2⁶⁴)`; they
-  never trap. The reverse casts `i64 as float32` / `i64 as f64` and `u64 as float32` /
-  `u64 as f64` round to nearest, ties-to-even, at the target precision (`i64 as f64` /
-  `u64 as f64` round values beyond 2⁵³, never exactly for every 64-bit value).
-- `float32 as f64` is exact — every binary32 value is representable in
-  binary64 — and `f64 as float32` rounds to nearest, ties-to-even; a
-  finite `f64` whose magnitude exceeds the binary32 range converts to
+  the signed forms to `[int64_min, int64_max]`, the unsigned forms to `[0, 2⁶⁴)`; they
+  never trap. The reverse casts `int64 as float32` / `int64 as float64` and `uint64 as float32` /
+  `uint64 as float64` round to nearest, ties-to-even, at the target precision (`int64 as float64` /
+  `uint64 as float64` round values beyond 2⁵³, never exactly for every 64-bit value).
+- `float32 as float64` is exact — every binary32 value is representable in
+  binary64 — and `float64 as float32` rounds to nearest, ties-to-even; a
+  finite `float64` whose magnitude exceeds the binary32 range converts to
   ±infinity (IEEE overflow), never saturates, and never traps.
 - `byte as int32` is the identity (Stilla Core Types & Ownership Specification).
-- `float32` uses IEEE 754 binary32 representation; `f64` uses IEEE 754 binary64
-  representation. `f64` NaN payload bits round-trip losslessly (Value cell canonical
+- `float32` uses IEEE 754 binary32 representation; `float64` uses IEEE 754 binary64
+  representation. `float64` NaN payload bits round-trip losslessly (Value cell canonical
   form).
-- Other `float32` and `f64` arithmetic follows IEEE 754 behavior for the respective
+- Other `float32` and `float64` arithmetic follows IEEE 754 behavior for the respective
   format. `f32_min`/`f32_max` and `f64_min`/`f64_max` follow IEEE 754 `fmin`/`fmax`:
   a NaN operand makes the result NaN, and the zero tie keeps the sign the
   `fmin`/`fmax` specification gives (`fmin(-0, +0) = -0`, `fmax(-0, +0) = +0`); a

@@ -219,44 +219,44 @@ test "Phase 5 LLIR lowering: 64-bit integer and f64 ops specialize by type" {
     var c = try compileText("app", &.{
         .{
             "app",
-            \\fn iadd(a: i64, b: i64) -> i64 { a + b }
-            \\fn usub(a: u64, b: u64) -> u64 { a - b }
-            \\fn imul(a: i64, b: i64) -> i64 { a * b }
-            \\fn idiv(a: i64, b: i64) -> i64 { a / b }
-            \\fn udiv(a: u64, b: u64) -> u64 { a / b }
-            \\fn irem(a: i64, b: i64) -> i64 { a % b }
-            \\fn urem(a: u64, b: u64) -> u64 { a % b }
-            \\fn ineg(a: i64) -> i64 { -a }
-            \\fn fadd(a: f64, b: f64) -> f64 { a + b }
-            \\fn fsub(a: f64, b: f64) -> f64 { a - b }
-            \\fn fmul(a: f64, b: f64) -> f64 { a * b }
-            \\fn fdiv(a: f64, b: f64) -> f64 { a / b }
-            \\fn frem(a: f64, b: f64) -> f64 { a % b }
-            \\fn fneg(a: f64) -> f64 { -a }
-            \\fn ishl(a: i64, b: i64) -> i64 { a << b }
-            \\fn ushr(a: u64, b: u64) -> u64 { a >> b }
-            \\fn ishr(a: i64, b: i64) -> i64 { a >> b }
-            \\fn iand(a: i64, b: i64) -> i64 { a & b }
-            \\fn uor(a: u64, b: u64) -> u64 { a | b }
-            \\fn uxor(a: u64, b: u64) -> u64 { a ^ b }
-            \\fn ilt(a: i64, b: i64) -> bool { a < b }
-            \\fn ult(a: u64, b: u64) -> bool { a < b }
-            \\fn ule(a: u64, b: u64) -> bool { a <= b }
-            \\fn ige(a: i64, b: i64) -> bool { a >= b }
-            \\fn ugt(a: u64, b: u64) -> bool { a > b }
-            \\fn igt(a: i64, b: i64) -> bool { a > b }
-            \\fn ieq(a: i64, b: i64) -> bool { a == b }
-            \\fn une(a: u64, b: u64) -> bool { a != b }
-            \\fn flt(a: f64, b: f64) -> bool { a < b }
-            \\fn fle(a: f64, b: f64) -> bool { a <= b }
-            \\fn fge(a: f64, b: f64) -> bool { a >= b }
-            \\fn fgt(a: f64, b: f64) -> bool { a > b }
-            \\fn feq(a: f64, b: f64) -> bool { a == b }
-            \\fn fne(a: f64, b: f64) -> bool { a != b }
+            \\fn iadd(a: int64, b: int64) -> int64 { a + b }
+            \\fn usub(a: uint64, b: uint64) -> uint64 { a - b }
+            \\fn imul(a: int64, b: int64) -> int64 { a * b }
+            \\fn idiv(a: int64, b: int64) -> int64 { a / b }
+            \\fn udiv(a: uint64, b: uint64) -> uint64 { a / b }
+            \\fn irem(a: int64, b: int64) -> int64 { a % b }
+            \\fn urem(a: uint64, b: uint64) -> uint64 { a % b }
+            \\fn ineg(a: int64) -> int64 { -a }
+            \\fn fadd(a: float64, b: float64) -> float64 { a + b }
+            \\fn fsub(a: float64, b: float64) -> float64 { a - b }
+            \\fn fmul(a: float64, b: float64) -> float64 { a * b }
+            \\fn fdiv(a: float64, b: float64) -> float64 { a / b }
+            \\fn frem(a: float64, b: float64) -> float64 { a % b }
+            \\fn fneg(a: float64) -> float64 { -a }
+            \\fn ishl(a: int64, b: int64) -> int64 { a << b }
+            \\fn ushr(a: uint64, b: uint64) -> uint64 { a >> b }
+            \\fn ishr(a: int64, b: int64) -> int64 { a >> b }
+            \\fn iand(a: int64, b: int64) -> int64 { a & b }
+            \\fn uor(a: uint64, b: uint64) -> uint64 { a | b }
+            \\fn uxor(a: uint64, b: uint64) -> uint64 { a ^ b }
+            \\fn ilt(a: int64, b: int64) -> bool { a < b }
+            \\fn ult(a: uint64, b: uint64) -> bool { a < b }
+            \\fn ule(a: uint64, b: uint64) -> bool { a <= b }
+            \\fn ige(a: int64, b: int64) -> bool { a >= b }
+            \\fn ugt(a: uint64, b: uint64) -> bool { a > b }
+            \\fn igt(a: int64, b: int64) -> bool { a > b }
+            \\fn ieq(a: int64, b: int64) -> bool { a == b }
+            \\fn une(a: uint64, b: uint64) -> bool { a != b }
+            \\fn flt(a: float64, b: float64) -> bool { a < b }
+            \\fn fle(a: float64, b: float64) -> bool { a <= b }
+            \\fn fge(a: float64, b: float64) -> bool { a >= b }
+            \\fn fgt(a: float64, b: float64) -> bool { a > b }
+            \\fn feq(a: float64, b: float64) -> bool { a == b }
+            \\fn fne(a: float64, b: float64) -> bool { a != b }
             \\fn main() -> void {
-            \\    let a: i64 = 1; let b: i64 = 2;
-            \\    let c: u64 = 1; let d: u64 = 2;
-            \\    let e: f64 = 1.0; let f: f64 = 2.0;
+            \\    let a: int64 = 1; let b: int64 = 2;
+            \\    let c: uint64 = 1; let d: uint64 = 2;
+            \\    let e: float64 = 1.0; let f: float64 = 2.0;
             \\    iadd(a, b); usub(c, d); imul(a, b); idiv(a, b); udiv(c, d); irem(a, b); urem(c, d);
             \\    ineg(a); fadd(e, f); fsub(e, f); fmul(e, f); fdiv(e, f); frem(e, f); fneg(e);
             \\    ishl(a, b); ushr(c, d); ishr(a, b); iand(a, b); uor(c, d); uxor(c, d);
@@ -292,7 +292,7 @@ test "Phase 5 LLIR lowering: 64-bit integer and f64 ops specialize by type" {
                 switch (tag) {
                     .add, .sub, .mul, .div, .rem, .neg => {
                         const want: llir.Opcode = switch (prim) {
-                            .i64 => switch (tag) {
+                            .int64 => switch (tag) {
                                 .add => .add,
                                 .sub => .sub,
                                 .mul => .mul,
@@ -301,7 +301,7 @@ test "Phase 5 LLIR lowering: 64-bit integer and f64 ops specialize by type" {
                                 .neg => .neg,
                                 else => unreachable,
                             },
-                            .u64 => switch (tag) {
+                            .uint64 => switch (tag) {
                                 .add => .add,
                                 .sub => .sub,
                                 .mul => .mul,
@@ -310,7 +310,7 @@ test "Phase 5 LLIR lowering: 64-bit integer and f64 ops specialize by type" {
                                 .neg => .neg,
                                 else => unreachable,
                             },
-                            .f64 => switch (tag) {
+                            .float64 => switch (tag) {
                                 .add => .add_f64,
                                 .sub => .sub_f64,
                                 .mul => .mul_f64,
@@ -327,8 +327,8 @@ test "Phase 5 LLIR lowering: 64-bit integer and f64 ops specialize by type" {
                     },
                     .shl, .shr => {
                         const want: llir.Opcode = switch (prim) {
-                            .i64 => if (tag == .shl) .shl else .shr,
-                            .u64 => if (tag == .shl) .shl else .shru,
+                            .int64 => if (tag == .shl) .shl else .shr,
+                            .uint64 => if (tag == .shl) .shl else .shru,
                             else => unreachable,
                         };
                         const d = llir.decode(image.instructions[pc]).?;
@@ -337,13 +337,13 @@ test "Phase 5 LLIR lowering: 64-bit integer and f64 ops specialize by type" {
                     },
                     .bitand, .bitor, .bitxor => {
                         const want: llir.Opcode = switch (prim) {
-                            .i64 => switch (tag) {
+                            .int64 => switch (tag) {
                                 .bitand => .and_,
                                 .bitor => .or_,
                                 .bitxor => .xor,
                                 else => unreachable,
                             },
-                            .u64 => switch (tag) {
+                            .uint64 => switch (tag) {
                                 .bitand => .and_,
                                 .bitor => .or_,
                                 .bitxor => .xor,
@@ -369,7 +369,7 @@ test "Phase 5 LLIR lowering: 64-bit integer and f64 ops specialize by type" {
                         // the swap preserves every predicate's NaN
                         // behavior).
                         const want: llir.Opcode = switch (oprim) {
-                            .i64 => switch (tag) {
+                            .int64 => switch (tag) {
                                 .eq => .seq,
                                 .ne => .sne,
                                 .lt => .slt,
@@ -378,7 +378,7 @@ test "Phase 5 LLIR lowering: 64-bit integer and f64 ops specialize by type" {
                                 .ge => .slt,
                                 else => unreachable,
                             },
-                            .u64 => switch (tag) {
+                            .uint64 => switch (tag) {
                                 .eq => .seq,
                                 .ne => .sne,
                                 .lt => .sltu,
@@ -387,7 +387,7 @@ test "Phase 5 LLIR lowering: 64-bit integer and f64 ops specialize by type" {
                                 .ge => .sltu,
                                 else => unreachable,
                             },
-                            .f64 => switch (tag) {
+                            .float64 => switch (tag) {
                                 .eq => .seq_f64,
                                 .ne => .sne_f64,
                                 .lt => .slt_f64,
@@ -468,16 +468,16 @@ test "Phase 5 LLIR lowering: f64 conversions carry the explicit cvt opcode" {
     var c = try compileText("app", &.{
         .{
             "app",
-            \\fn f2i(a: f64) -> int32 { a as int32 }
-            \\fn f2u(a: f64) -> uint32 { a as uint32 }
-            \\fn f2b(a: f64) -> byte { a as byte }
-            \\fn f2f(a: f64) -> float32 { a as float32 }
-            \\fn i2f(a: int32) -> f64 { a as f64 }
-            \\fn u2f(a: uint32) -> f64 { a as f64 }
-            \\fn b2f(a: byte) -> f64 { a as f64 }
-            \\fn f2f32(a: float32) -> f64 { a as f64 }
+            \\fn f2i(a: float64) -> int32 { a as int32 }
+            \\fn f2u(a: float64) -> uint32 { a as uint32 }
+            \\fn f2b(a: float64) -> byte { a as byte }
+            \\fn f2f(a: float64) -> float32 { a as float32 }
+            \\fn i2f(a: int32) -> float64 { a as float64 }
+            \\fn u2f(a: uint32) -> float64 { a as float64 }
+            \\fn b2f(a: byte) -> float64 { a as float64 }
+            \\fn f2f32(a: float32) -> float64 { a as float64 }
             \\fn main() -> void {
-            \\    let a: f64 = 1.0;
+            \\    let a: float64 = 1.0;
             \\    f2i(a); f2u(a); f2b(a); f2f(a); i2f(1); u2f(1 as uint32);
             \\    b2f(1 as byte); f2f32(1.0);
             \\}
@@ -493,14 +493,14 @@ test "Phase 5 LLIR lowering: f64 conversions carry the explicit cvt opcode" {
 
     // (src, dst) → expected opcode.
     const cases = [_]struct { src: llir.PrimitiveId, dst: llir.PrimitiveId, want_op: llir.Opcode }{
-        .{ .src = .f64, .dst = .int32, .want_op = .cvt_f64_i32 },
-        .{ .src = .f64, .dst = .uint32, .want_op = .cvt_f64_u32 },
-        .{ .src = .f64, .dst = .float32, .want_op = .cvt_f64_f32 },
-        .{ .src = .f64, .dst = .byte, .want_op = .cvt_f64_b },
-        .{ .src = .int32, .dst = .f64, .want_op = .cvt_i32_f64 },
-        .{ .src = .uint32, .dst = .f64, .want_op = .cvt_u32_f64 },
-        .{ .src = .byte, .dst = .f64, .want_op = .cvt_b_f64 },
-        .{ .src = .float32, .dst = .f64, .want_op = .cvt_f32_f64 },
+        .{ .src = .float64, .dst = .int32, .want_op = .cvt_f64_i32 },
+        .{ .src = .float64, .dst = .uint32, .want_op = .cvt_f64_u32 },
+        .{ .src = .float64, .dst = .float32, .want_op = .cvt_f64_f32 },
+        .{ .src = .float64, .dst = .byte, .want_op = .cvt_f64_b },
+        .{ .src = .int32, .dst = .float64, .want_op = .cvt_i32_f64 },
+        .{ .src = .uint32, .dst = .float64, .want_op = .cvt_u32_f64 },
+        .{ .src = .byte, .dst = .float64, .want_op = .cvt_b_f64 },
+        .{ .src = .float32, .dst = .float64, .want_op = .cvt_f32_f64 },
     };
     // Walk only the eight cast functions (main's argument casts,
     // e.g. `1 as byte`, are the 32-bit pairs, not part of this matrix).
@@ -516,7 +516,7 @@ test "Phase 5 LLIR lowering: f64 conversions carry the explicit cvt opcode" {
                 if (std.meta.activeTag(ins.op) == .phi) continue;
                 if (std.meta.activeTag(ins.op) == .num_cast) {
                     const src: llir.PrimitiveId = switch (ins.op.num_cast.type_.primitive) {
-                        .f64 => .f64,
+                        .float64 => .float64,
                         .int32 => .int32,
                         .uint32 => .uint32,
                         .byte => .byte,
@@ -524,7 +524,7 @@ test "Phase 5 LLIR lowering: f64 conversions carry the explicit cvt opcode" {
                         else => unreachable,
                     };
                     const dst: llir.PrimitiveId = switch (ins.results[0].type_.primitive) {
-                        .f64 => .f64,
+                        .float64 => .float64,
                         .int32 => .int32,
                         .uint32 => .uint32,
                         .byte => .byte,
@@ -563,10 +563,10 @@ test "Phase 5 LLIR lowering: 64-bit comparison branches test the full cell" {
     var c = try compileText("app", &.{
         .{
             "app",
-            \\fn pick(a: u64, b: u64) -> u64 {
+            \\fn pick(a: uint64, b: uint64) -> uint64 {
             \\    if (a < b) { 1 } else { 2 }
             \\}
-            \\fn main() -> u64 { pick(4294967296, 5) }
+            \\fn main() -> uint64 { pick(4294967296, 5) }
             ,
         },
     });
@@ -621,7 +621,7 @@ test "Phase 5: i64/u64 integer casts lower to the 64-bit cvt opcodes" {
     // 64-bit milestone — so `i64 as int32` and `u64 as f64` lower to
     // their explicit `cvt.<src>.<dst>` records and validate.
     var c1 = try compileText("app", &.{
-        .{ "app", "fn main() -> int32 { let x: i64 = 1; x as int32 }" },
+        .{ "app", "fn main() -> int32 { let x: int64 = 1; x as int32 }" },
     });
     defer c1.deinit();
     const program = &c1.program.?;
@@ -636,7 +636,7 @@ test "Phase 5: i64/u64 integer casts lower to the 64-bit cvt opcodes" {
     try testing.expect(std.mem.indexOf(u8, asm1, "cvt.i64.i32") != null);
 
     var c2 = try compileText("app", &.{
-        .{ "app", "fn main() -> f64 { let x: u64 = 1; x as f64 }" },
+        .{ "app", "fn main() -> float64 { let x: uint64 = 1; x as float64 }" },
     });
     defer c2.deinit();
     const program2 = &c2.program.?;
@@ -657,16 +657,16 @@ test "Phase 5 LLIR lowering: u64 constants materialize through move-wide sequenc
     var c = try compileText("app", &.{
         .{
             "app",
-            \\fn zero() -> u64 { 0 }
-            \\fn low() -> u64 { 65535 }
-            \\fn hi() -> u64 { 4294901760 }
-            \\fn max() -> u64 { 18446744073709551615 }
-            \\fn single() -> u64 { 4294967296 }
-            \\fn four() -> u64 { 81985529216486895 }
-            \\fn tie() -> u64 { 18446462603027742720 }
-            \\fn iconst() -> i64 { 9223372036854775807 }
-            \\fn fconst() -> f64 { 1.5 }
-            \\fn main() -> u64 { zero() + low() }
+            \\fn zero() -> uint64 { 0 }
+            \\fn low() -> uint64 { 65535 }
+            \\fn hi() -> uint64 { 4294901760 }
+            \\fn max() -> uint64 { 18446744073709551615 }
+            \\fn single() -> uint64 { 4294967296 }
+            \\fn four() -> uint64 { 81985529216486895 }
+            \\fn tie() -> uint64 { 18446462603027742720 }
+            \\fn iconst() -> int64 { 9223372036854775807 }
+            \\fn fconst() -> float64 { 1.5 }
+            \\fn main() -> uint64 { zero() + low() }
             ,
         },
     });
@@ -791,7 +791,7 @@ test "Phase 5 LLIR lowering: u64 constants materialize through move-wide sequenc
     // typed `const` path — covered by the phase-4 tests).
     var u64_ty: ?u32 = null;
     for (image.types, 0..) |row, i| {
-        if (row.kind == .primitive and row.a == @intFromEnum(llir.PrimitiveId.u64)) u64_ty = @intCast(i);
+        if (row.kind == .primitive and row.a == @intFromEnum(llir.PrimitiveId.uint64)) u64_ty = @intCast(i);
     }
     try testing.expect(u64_ty != null); // the type row exists (signatures)
     for (image.constants) |cr| {
@@ -862,26 +862,26 @@ test "3.1 LLIR lowering: all 20 directed casts carry the explicit cvt opcode" {
             \\fn b_i(a: byte) -> int32 { a as int32 }
             \\fn b_u(a: byte) -> uint32 { a as uint32 }
             \\fn b_f(a: byte) -> float32 { a as float32 }
-            \\fn b_d(a: byte) -> f64 { a as f64 }
+            \\fn b_d(a: byte) -> float64 { a as float64 }
             \\fn i_b(a: int32) -> byte { a as byte }
             \\fn i_u(a: int32) -> uint32 { a as uint32 }
             \\fn i_f(a: int32) -> float32 { a as float32 }
-            \\fn i_d(a: int32) -> f64 { a as f64 }
+            \\fn i_d(a: int32) -> float64 { a as float64 }
             \\fn u_b(a: uint32) -> byte { a as byte }
             \\fn u_i(a: uint32) -> int32 { a as int32 }
             \\fn u_f(a: uint32) -> float32 { a as float32 }
-            \\fn u_d(a: uint32) -> f64 { a as f64 }
+            \\fn u_d(a: uint32) -> float64 { a as float64 }
             \\fn f_b(a: float32) -> byte { a as byte }
             \\fn f_i(a: float32) -> int32 { a as int32 }
             \\fn f_u(a: float32) -> uint32 { a as uint32 }
-            \\fn f_d(a: float32) -> f64 { a as f64 }
-            \\fn d_b(a: f64) -> byte { a as byte }
-            \\fn d_i(a: f64) -> int32 { a as int32 }
-            \\fn d_u(a: f64) -> uint32 { a as uint32 }
-            \\fn d_f(a: f64) -> float32 { a as float32 }
+            \\fn f_d(a: float32) -> float64 { a as float64 }
+            \\fn d_b(a: float64) -> byte { a as byte }
+            \\fn d_i(a: float64) -> int32 { a as int32 }
+            \\fn d_u(a: float64) -> uint32 { a as uint32 }
+            \\fn d_f(a: float64) -> float32 { a as float32 }
             \\fn main() -> void {
             \\    let a: byte = 1 as byte; let b: int32 = 1; let c: uint32 = 1 as uint32;
-            \\    let d: float32 = 1.0; let e: f64 = 1.0;
+            \\    let d: float32 = 1.0; let e: float64 = 1.0;
             \\    b_i(a); b_u(a); b_f(a); b_d(a); i_b(b); i_u(b); i_f(b); i_d(b);
             \\    u_b(c); u_i(c); u_f(c); u_d(c); f_b(d); f_i(d); f_u(d); f_d(d);
             \\    d_b(e); d_i(e); d_u(e); d_f(e);
@@ -963,25 +963,25 @@ test "3.1 LLIR lowering: seq/sne/slt/sle over all six reps write cond, then copy
             \\fn u32ne(a: uint32, b: uint32) -> bool { a != b }
             \\fn u32lt(a: uint32, b: uint32) -> bool { a < b }
             \\fn u32ge(a: uint32, b: uint32) -> bool { a >= b }
-            \\fn i64eq(a: i64, b: i64) -> bool { a == b }
-            \\fn i64ne(a: i64, b: i64) -> bool { a != b }
-            \\fn i64lt(a: i64, b: i64) -> bool { a < b }
-            \\fn i64ge(a: i64, b: i64) -> bool { a >= b }
-            \\fn u64eq(a: u64, b: u64) -> bool { a == b }
-            \\fn u64ne(a: u64, b: u64) -> bool { a != b }
-            \\fn u64lt(a: u64, b: u64) -> bool { a < b }
-            \\fn u64ge(a: u64, b: u64) -> bool { a >= b }
+            \\fn i64eq(a: int64, b: int64) -> bool { a == b }
+            \\fn i64ne(a: int64, b: int64) -> bool { a != b }
+            \\fn i64lt(a: int64, b: int64) -> bool { a < b }
+            \\fn i64ge(a: int64, b: int64) -> bool { a >= b }
+            \\fn u64eq(a: uint64, b: uint64) -> bool { a == b }
+            \\fn u64ne(a: uint64, b: uint64) -> bool { a != b }
+            \\fn u64lt(a: uint64, b: uint64) -> bool { a < b }
+            \\fn u64ge(a: uint64, b: uint64) -> bool { a >= b }
             \\fn f32eq(a: float32, b: float32) -> bool { a == b }
             \\fn f32ne(a: float32, b: float32) -> bool { a != b }
             \\fn f32lt(a: float32, b: float32) -> bool { a < b }
             \\fn f32ge(a: float32, b: float32) -> bool { a >= b }
-            \\fn f64eq(a: f64, b: f64) -> bool { a == b }
-            \\fn f64ne(a: f64, b: f64) -> bool { a != b }
-            \\fn f64lt(a: f64, b: f64) -> bool { a < b }
-            \\fn f64ge(a: f64, b: f64) -> bool { a >= b }
+            \\fn f64eq(a: float64, b: float64) -> bool { a == b }
+            \\fn f64ne(a: float64, b: float64) -> bool { a != b }
+            \\fn f64lt(a: float64, b: float64) -> bool { a < b }
+            \\fn f64ge(a: float64, b: float64) -> bool { a >= b }
             \\fn main() -> void {
-            \\    let a: int32 = 1; let b: uint32 = 1 as uint32; let c: i64 = 1; let d: u64 = 1;
-            \\    let e: float32 = 1.0; let f: f64 = 1.0;
+            \\    let a: int32 = 1; let b: uint32 = 1 as uint32; let c: int64 = 1; let d: uint64 = 1;
+            \\    let e: float32 = 1.0; let f: float64 = 1.0;
             \\    i32eq(a, a); i32ne(a, a); i32lt(a, a); i32ge(a, a);
             \\    u32eq(b, b); u32ne(b, b); u32lt(b, b); u32ge(b, b);
             \\    i64eq(c, c); i64ne(c, c); i64lt(c, c); i64ge(c, c);
@@ -1068,10 +1068,10 @@ test "3.1 LLIR lowering: gt and integer le swap operands; float le is the direct
             "app",
             \\fn i32gt(a: int32, b: int32) -> bool { a > b }
             \\fn i32le(a: int32, b: int32) -> bool { a <= b }
-            \\fn f64gt(a: f64, b: f64) -> bool { a > b }
-            \\fn f64le(a: f64, b: f64) -> bool { a <= b }
+            \\fn f64gt(a: float64, b: float64) -> bool { a > b }
+            \\fn f64le(a: float64, b: float64) -> bool { a <= b }
             \\fn main() -> void {
-            \\    let a: int32 = 1; let e: f64 = 1.0;
+            \\    let a: int32 = 1; let e: float64 = 1.0;
             \\    i32gt(a, a); i32le(a, a); f64gt(e, e); f64le(e, e);
             \\}
         },

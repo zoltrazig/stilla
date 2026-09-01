@@ -56,8 +56,8 @@ fn hostTypeOf(comptime T: type) HostType {
     return switch (T) {
         i32, c_int => .int32,
         u32, c_uint => .uint32,
-        i64 => .i64,
-        u64 => .u64,
+        i64 => .int64,
+        u64 => .uint64,
         f32 => .float32,
         f64 => .float64,
         bool => .bool,

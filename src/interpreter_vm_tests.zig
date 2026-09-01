@@ -130,7 +130,7 @@ test "f64_min/f64_max: IEEE fmin/fmax — NaN propagates, -0 beats +0" {
     }};
     const types = [_]llir.TypeDesc{.{
         .kind = .primitive,
-        .a = @intFromEnum(llir.PrimitiveId.f64),
+        .a = @intFromEnum(llir.PrimitiveId.float64),
         .b = 0,
         .c = 0,
     }};

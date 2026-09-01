@@ -23,9 +23,9 @@ test "host adapter: full-width 64-bit scalars reach the callback; owners transfe
     // namespace, no 48-bit adapter: the member name + signature are the
     // whole contract.
     const types = [_]llir.TypeDesc{
-        .{ .kind = .primitive, .a = @intFromEnum(llir.PrimitiveId.i64), .b = 0, .c = 0 },
-        .{ .kind = .primitive, .a = @intFromEnum(llir.PrimitiveId.u64), .b = 0, .c = 0 },
-        .{ .kind = .primitive, .a = @intFromEnum(llir.PrimitiveId.f64), .b = 0, .c = 0 },
+        .{ .kind = .primitive, .a = @intFromEnum(llir.PrimitiveId.int64), .b = 0, .c = 0 },
+        .{ .kind = .primitive, .a = @intFromEnum(llir.PrimitiveId.uint64), .b = 0, .c = 0 },
+        .{ .kind = .primitive, .a = @intFromEnum(llir.PrimitiveId.float64), .b = 0, .c = 0 },
     };
     const params = [_]llir.ParamDesc{
         .{ .mode = .plain, .type_ = 0 },

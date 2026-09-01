@@ -144,7 +144,7 @@ The `T → any` coercion of a mixed join is **not** implicit at the phi: the low
 
 ## 4.4 Coercions
 
-Conversions are explicit instructions: `num_cast` for every non-identity pair of `{byte, int32, uint32, i64, u64, float32, f64}` defined by the [Core Types & Ownership Specification](Stilla%20Core%20Types%20%26%20Ownership%20Specification.md), and the four `any`-ops (`any_pack_copy` / `any_pack_move` / `any_unpack_copy` / `any_unpack_move`) for the top type. The remaining coercions are implicit and materialized at specific points:
+Conversions are explicit instructions: `num_cast` for every non-identity pair of `{byte, int32, uint32, int64, uint64, float32, float64}` defined by the [Core Types & Ownership Specification](Stilla%20Core%20Types%20%26%20Ownership%20Specification.md), and the four `any`-ops (`any_pack_copy` / `any_pack_move` / `any_unpack_copy` / `any_unpack_move`) for the top type. The remaining coercions are implicit and materialized at specific points:
 
 - **`never` → T** — a call whose result type is `never` is always immediately followed by `trap`; a `trap` block contributes no value to a phi.
 - **T → `any`** — at call boundaries (arguments to `any`-typed parameters, `ret` of an `any`-typed function) and on the predecessor edges of an `any` join. A *Copy* source is `any_pack_copy`'d into the `any` (the source stays owned); a *Unique* source is `any_pack_move`'d (the source is consumed). Both are ordinary instructions emitted by the lowering. `hostdata` is never a source: it does not coerce to `any` (Stilla Core Types & Ownership Specification).
@@ -176,28 +176,28 @@ The optimizer may move or share only pure computations: constant folding, common
 
 ## 5.2 Arithmetic, comparison, logic, and casts
 
-Operand types and trap behavior (divide-by-zero and `i64_min / -1`,
+Operand types and trap behavior (divide-by-zero and `int64_min / -1`,
 invalid `any` recovery) are
-defined by the [Stilla Core Language Specification](Stilla%20Core%20Language%20Specification.md) and the [Stilla Runtime Specification](Stilla%20Runtime%20Specification.md). Integer arithmetic wraps modulo 2³² (32-bit types) or 2⁶⁴ (`i64`/`u64`) and never traps on overflow; `div`/`rem` trap on a zero divisor, and the signed `i64` `div` also traps on `i64_min / -1` — `int32_min / -1` wraps modulo 2³² to `int32_min` and never traps (`int32_min % -1` / `i64_min % -1` is 0 and never traps; the [Runtime Specification](Stilla%20Runtime%20Specification.md), the [LLIR Instruction Set](Stilla%20LLIR%20Instruction%20Set.md)) — the constant folder folds overflow to the wrapped value and leaves the trapping cases unfolded, matching what the runtime executes.
+defined by the [Stilla Core Language Specification](Stilla%20Core%20Language%20Specification.md) and the [Stilla Runtime Specification](Stilla%20Runtime%20Specification.md). Integer arithmetic wraps modulo 2³² (32-bit types) or 2⁶⁴ (`int64`/`uint64`) and never traps on overflow; `div`/`rem` trap on a zero divisor, and the signed `int64` `div` also traps on `int64_min / -1` — `int32_min / -1` wraps modulo 2³² to `int32_min` and never traps (`int32_min % -1` / `int64_min % -1` is 0 and never traps; the [Runtime Specification](Stilla%20Runtime%20Specification.md), the [LLIR Instruction Set](Stilla%20LLIR%20Instruction%20Set.md)) — the constant folder folds overflow to the wrapped value and leaves the trapping cases unfolded, matching what the runtime executes.
 
 | op | form | produces |
 | --- | --- | --- |
-| `neg` | `%d = neg %a` | same numeric type; `int32`/`i64` minimum negation wraps to the minimum itself (modulo 2³² / 2⁶⁴, never traps); `uint32`/`u64` negation is two's-complement and never traps (Stilla Core Types & Ownership Specification) |
+| `neg` | `%d = neg %a` | same numeric type; `int32`/`int64` minimum negation wraps to the minimum itself (modulo 2³² / 2⁶⁴, never traps); `uint32`/`uint64` negation is two's-complement and never traps (Stilla Core Types & Ownership Specification) |
 | `abs` | `%d = abs %a` | same numeric type (`int32`/`float32` — `uint32` has no abs, the identity); `int32` wraps on the minimum (`abs(int32_min)` is `int32_min`, never traps); `float32` is IEEE `fabs` (clears the sign bit — `abs(-0.0) = +0.0`) |
-| `clz` | `%d = clz %a` | same integer type (`int32`/`uint32`/`i64`/`u64`); the count of leading zero bits in the operand-width pattern (`clz(0) = 32` on 32-bit types, `clz(0) = 64` on `i64`/`u64`); total, never traps |
-| `popcount` | `%d = popcount %a` | same integer type (`int32`/`uint32`/`i64`/`u64`); the count of set bits in the operand-width pattern; total, never traps |
+| `clz` | `%d = clz %a` | same integer type (`int32`/`uint32`/`int64`/`uint64`); the count of leading zero bits in the operand-width pattern (`clz(0) = 32` on 32-bit types, `clz(0) = 64` on `int64`/`uint64`); total, never traps |
+| `popcount` | `%d = popcount %a` | same integer type (`int32`/`uint32`/`int64`/`uint64`); the count of set bits in the operand-width pattern; total, never traps |
 | `not` | `%d = not %a` | `bool` (source `!`) |
-| `num_cast` | `%d = num_cast %a` | the target numeric type; every non-identity pair of `{byte, int32, uint32, i64, u64, float32, f64}` is defined, and casts never trap (the Runtime specification): integer narrowing keeps low bits, widening sign- or zero-extends as the rep demands (`i64 ↔ u64` reinterprets the cell), float→int truncates toward zero and saturates on NaN/out-of-range values (NaN becomes zero), int→float uses round-to-nearest ties-to-even, `float32 → f64` is exact, and `f64 → float32` rounds to nearest ties-to-even |
+| `num_cast` | `%d = num_cast %a` | the target numeric type; every non-identity pair of `{byte, int32, uint32, int64, uint64, float32, float64}` is defined, and casts never trap (the Runtime specification): integer narrowing keeps low bits, widening sign- or zero-extends as the rep demands (`int64 ↔ uint64` reinterprets the cell), float→int truncates toward zero and saturates on NaN/out-of-range values (NaN becomes zero), int→float uses round-to-nearest ties-to-even, `float32 → float64` is exact, and `float64 → float32` rounds to nearest ties-to-even |
 | `type_is` | `%d = type_is %a, T` | `bool` — runtime tag test against type `T` (a type-test arm of a `match` over an `any`) |
 | `any_pack_copy` | `%d = any_pack_copy %a` | `any` — `T → any` of a *Copy* source; the source stays owned |
 | `any_pack_move` | `%d = any_pack_move %a` | `any` — `T → any` of a *Unique* source; the source is consumed |
 | `any_unpack_copy` | `%d = any_unpack_copy %a` | `T` — `any as T` for a *Copy* `T`; the `any` stays owned; traps on a tag mismatch |
 | `any_unpack_move` | `%d = any_unpack_move %a` | `T` — `(move any) as T`; the complete `any` is consumed, payload ownership transfers to the result; traps on a tag mismatch |
-| `add sub mul div rem` | `%d = add %a, %b` | same numeric type; integer arithmetic wraps modulo 2³² (32-bit types) or 2⁶⁴ (`i64`/`u64`) (never traps on overflow); `div`/`rem` trap on a zero divisor, and the signed `i64` `div` also traps on `i64_min / -1` — `int32_min / -1` wraps modulo 2³² to `int32_min` |
+| `add sub mul div rem` | `%d = add %a, %b` | same numeric type; integer arithmetic wraps modulo 2³² (32-bit types) or 2⁶⁴ (`int64`/`uint64`) (never traps on overflow); `div`/`rem` trap on a zero divisor, and the signed `int64` `div` also traps on `int64_min / -1` — `int32_min / -1` wraps modulo 2³² to `int32_min` |
 | `min max` | `%d = min %a, %b` | same numeric type; integers compare as signed or unsigned patterns of the operand width (signedness fixed by the opcode), float follows IEEE 754 `fmin`/`fmax` (NaN propagates, `fmin(-0,+0) = -0`); total, never traps |
-| `shl shr` | `%d = shl %a, %b` | same integer type (`int32`/`uint32`/`i64`/`u64` — `byte` has no arithmetic, the float types no bit pattern); never traps — the count is masked mod 32 (32-bit types) or mod 64 (`i64`/`u64`), `shr` is arithmetic on `int32`/`i64` and logical on `uint32`/`u64` |
-| `bitand bitor bitxor` | `%d = bitand %a, %b` | same integer type (`int32`/`uint32`/`i64`/`u64` — `byte` has no arithmetic, the float types no bit pattern); bit-identical on the raw operand-width patterns, never traps |
-| `select` | `%d = select %c, %a, %b` | `%a` when `%c`, else `%b` — the condition is a `bool`, the then/else values share one scalar *Copy* type (int32/uint32/i64/u64/float32/f64/byte/bool), and the result is that type; pure and total, the then/else positions are not interchangeable. The if-conversion replaces a branch diamond whose arms are single pure producers with this one op; the LLIR image is `copy cond_reg, %c` + `cmov dst, %a, %b` |
+| `shl shr` | `%d = shl %a, %b` | same integer type (`int32`/`uint32`/`int64`/`uint64` — `byte` has no arithmetic, the float types no bit pattern); never traps — the count is masked mod 32 (32-bit types) or mod 64 (`int64`/`uint64`), `shr` is arithmetic on `int32`/`int64` and logical on `uint32`/`uint64` |
+| `bitand bitor bitxor` | `%d = bitand %a, %b` | same integer type (`int32`/`uint32`/`int64`/`uint64` — `byte` has no arithmetic, the float types no bit pattern); bit-identical on the raw operand-width patterns, never traps |
+| `select` | `%d = select %c, %a, %b` | `%a` when `%c`, else `%b` — the condition is a `bool`, the then/else values share one scalar *Copy* type (int32/uint32/int64/uint64/float32/float64/byte/bool), and the result is that type; pure and total, the then/else positions are not interchangeable. The if-conversion replaces a branch diamond whose arms are single pure producers with this one op; the LLIR image is `copy cond_reg, %c` + `cmov dst, %a, %b` |
 | `concat` | `%d = concat %a, %b` | `str` (source `str + str`) |
 | `eq ne lt le gt ge` | `%d = lt %a, %b` | `bool` |
 
@@ -473,7 +473,7 @@ The AIR is self-contained: it uses an AIR-native resolved type throughout (the c
 ```text
 Ownership      ::= Copy | Unique                      -- ownership class of a value type
 TypeId         ::= u32                                -- index into the program's type environment
-Type           ::= primitive(PrimitiveKind)           -- int32 | uint32 | i64 | u64 | float32 | f64 | bool | str | byte
+Type           ::= primitive(PrimitiveKind)           -- int32 | uint32 | int64 | uint64 | float32 | float64 | bool | str | byte
                                                       -- | any | hostdata | void | never
                  | named(TypeId)                      -- index into the type environment
                  | module                            -- the type of module_ref values
@@ -638,7 +638,7 @@ terminator ::= "ret" value?                      -- bare "ret" for void
              | "switch" value "{" tag "->" label ("," tag "->" label)* "}"
              | "tailcall" "@" ident ("," value)*   -- frame-reusing direct self-call
              | "trap"
-type    ::= "int32" | "uint32" | "i64" | "u64" | "float32" | "f64" | "bool" | "str" | "byte"
+type    ::= "int32" | "uint32" | "int64" | "uint64" | "float32" | "float64" | "bool" | "str" | "byte"
           | "any" | "hostdata" | "void" | "never"   -- primitives
           | "module"                                -- special type
           | ident                                   -- named type, dotted paths allowed
@@ -752,7 +752,7 @@ These invariants are the contract every producer of the AIR must uphold — the 
 
 **Semantics**
 
-- `div`/`rem` operand types are numeric; `num_cast` operands and result range over every non-identity pair of `{byte, int32, uint32, i64, u64, float32, f64}` (the [Core Types & Ownership Specification](Stilla%20Core%20Types%20%26%20Ownership%20Specification.md));
+- `div`/`rem` operand types are numeric; `num_cast` operands and result range over every non-identity pair of `{byte, int32, uint32, int64, uint64, float32, float64}` (the [Core Types & Ownership Specification](Stilla%20Core%20Types%20%26%20Ownership%20Specification.md));
 - call arguments match the callee's signature in types and modes (direct callee: the function's params; value callee: the function-type signature), and the result is typed as the signature's return; syscall arguments match the syscall's signature (a syscall without a signature — text-form AIR — skips the check): a move-mode parameter consumes its argument, which must be owned and available (never borrowed); a plain/borrow parameter passes a view; the result type matches `sig.ret`;
 - `read_index` bases are lists; `read_tag` bases are unions;
 - no `ret` of a `borrowed` value.

@@ -568,7 +568,7 @@ pub const Builder = struct {
     /// with the budgeting pass's record counts.
     pub fn isInteger(t: cfg.Type) bool {
         return switch (t.primitive) {
-            .int32, .uint32, .byte, .i64, .u64 => true,
+            .int32, .uint32, .byte, .int64, .uint64 => true,
             else => false,
         };
     }

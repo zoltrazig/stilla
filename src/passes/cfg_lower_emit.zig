@@ -644,7 +644,7 @@ fn foldArith(bin: cfg.Bin, op: Arith) ?cfg.ConstValue {
     return switch (kind) {
         .int32 => intArith(i32, a, b, op),
         .uint32 => intArith(u32, a, b, op),
-        .float32, .f64 => floatArith(a, b, op),
+        .float32, .float64 => floatArith(a, b, op),
         else => null,
     };
 }
@@ -872,7 +872,7 @@ fn foldAbs(x: *cfg.Value) ?cfg.ConstValue {
             return .{ .int = if (v < 0) -%v else v };
         },
         .float => |f| {
-            if (kind != .float32 and kind != .f64) return null;
+            if (kind != .float32 and kind != .float64) return null;
             return .{ .float = @abs(f) };
         },
         else => return null,
@@ -904,7 +904,7 @@ fn foldMinMax(bin: cfg.Bin, op: enum { min, max }) ?cfg.ConstValue {
             const y: f64 = floatConst(b) orelse return null;
             return .{ .float = if (op == .min) fminIeee(f32, @floatCast(x), @floatCast(y)) else fmaxIeee(f32, @floatCast(x), @floatCast(y)) };
         },
-        .f64 => {
+        .float64 => {
             const x: f64 = floatConst(a) orelse return null;
             const y: f64 = floatConst(b) orelse return null;
             return .{ .float = if (op == .min) fminIeee(f64, x, y) else fmaxIeee(f64, x, y) };

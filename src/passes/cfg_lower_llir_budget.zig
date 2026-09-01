@@ -393,11 +393,11 @@ pub fn isMoveWideConst(bld: *Builder, ins: *const cfg.Instr) bool {
     // const is `.list`, a folded string const `.str`, …) — only the
     // primitive `u64` type takes the move-wide path.
     if (ins.results[0].type_ != .primitive) return false;
-    if (ins.results[0].type_.primitive != .u64) return false;
+    if (ins.results[0].type_.primitive != .uint64) return false;
     return switch (ins.op) {
         .const_ => |cv| switch (cv) {
             .int => true,
-            else => false, // defensive: a non-int u64 payload keeps the const path
+            else => false, // defensive: a non-int uint64 payload keeps the const path
         },
         else => false,
     };

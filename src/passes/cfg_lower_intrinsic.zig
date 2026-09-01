@@ -202,7 +202,7 @@ fn isConstrainedMember(module_spec: []const u8, member: []const u8) bool {
 fn isSupportedStrHashType(t: cfg.Type) bool {
     return switch (t) {
         .primitive => |k| switch (k) {
-            .byte, .int32, .uint32, .i64, .u64, .float32, .f64, .bool, .str => true,
+            .byte, .int32, .uint32, .int64, .uint64, .float32, .float64, .bool, .str => true,
             else => false,
         },
         else => false,
@@ -222,7 +222,7 @@ fn checkStrHashSignature(self: *Lowerer, span: ast.Span, member: []const u8, ft:
     }
     const t = ft.params[0].type_;
     if (!isSupportedStrHashType(t)) {
-        return self.fail(span, "intrinsic 'builtin.{s}' does not support type '{s}' (supported: byte, int32, uint32, i64, u64, float32, f64, bool, str)", .{ member, try typeName(self, t) });
+        return self.fail(span, "intrinsic 'builtin.{s}' does not support type '{s}' (supported: byte, int32, uint32, int64, uint64, float32, float64, bool, str)", .{ member, try typeName(self, t) });
     }
 }
 

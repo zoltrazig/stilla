@@ -48,7 +48,7 @@ const f = fn(move acc: int32, borrow x: int32) -> int32 { acc + x }
 
 | Kind | Syntax |
 | --- | --- |
-| primitives | `int32` `uint32` `i64` `u64` `float32` `f64` `bool` `str` `byte` |
+| primitives | `int32` `uint32` `int64` `uint64` `float32` `float64` `bool` `str` `byte` |
 | top / bottom | `any` `never`; also `void`, `hostdata`, `module` |
 | nominal | `struct Name { a: T, … }` · `union Name[T] { V(T), … }` · `opaque type Name[params];` |
 | structural | `list[T]` · `box[T]` · `tuple[T, U]` · `fn(T, …) -> T` |
@@ -112,24 +112,24 @@ a or b     // b evaluated only if a is false
 
 | op | notes |
 | --- | --- |
-| `+ - * / %` | int wraps mod 2³² (32-bit) / mod 2⁶⁴ (`i64`/`u64`); never traps on overflow; `div`/`rem` trap on 0; `int32` `div` wraps on `min / -1` (never traps); `i64` `div` traps on `min / -1`; `min % -1 = 0` |
+| `+ - * / %` | int wraps mod 2³² (32-bit) / mod 2⁶⁴ (`int64`/`uint64`); never traps on overflow; `div`/`rem` trap on 0; `int32` `div` wraps on `min / -1` (never traps); `int64` `div` traps on `min / -1`; `min % -1 = 0` |
 | `& \| ^` | bitwise on the raw operand-width pattern (never traps) |
-| `<< >>` | shift count masked mod 32 (32-bit) / mod 64 (`i64`/`u64`); `>>` arithmetic on `int32`/`i64`, logical on `uint32`/`u64` |
+| `<< >>` | shift count masked mod 32 (32-bit) / mod 64 (`int64`/`uint64`); `>>` arithmetic on `int32`/`int64`, logical on `uint32`/`uint64` |
 | `== != < <= > >=` | compare |
 | `and` `or` `not` | `!` is `not` |
 | `math.min` `math.max` | `fmin`/`fmax` over `float32` (NaN propagates; `fmin(-0,+0)=-0`) — standard-library functions, not operators |
 | `math.abs` | `float32` `fabs` (clears the sign bit) — standard-library function, not an operator |
-| `as` | `num_cast`: every non-identity pair of `byte`/`int32`/`uint32`/`i64`/`u64`/`float32`/`f64` (42 casts); never traps (round-nearest-even / truncate; float→int saturates, `i64`/`u64` targets to `[i64_min, i64_max]` / `[0, 2⁶⁴)`); `i64 ↔ u64` reinterprets the cell |
+| `as` | `num_cast`: every non-identity pair of `byte`/`int32`/`uint32`/`int64`/`uint64`/`float32`/`float64` (42 casts); never traps (round-nearest-even / truncate; float→int saturates, `int64`/`uint64` targets to `[int64_min, int64_max]` / `[0, 2⁶⁴)`); `int64 ↔ uint64` reinterprets the cell |
 | `+ (str)` | `str + str` concat (`concat`) |
 
-- `float32` = IEEE 754 binary32; `f64` = IEEE 754 binary64 (NaN payload round-trips losslessly); equality: NaN ≠ everything; `+0.0 == -0.0`.
-- No implicit numeric conversion; explicit `as`. No `byte` literal — write `104 as byte`. Integer literals default `int32`, float literals `float32`; a literal in an explicit integer/float type context — a typed binding, an argument, a return, or the other side of a numeric binary operator — is typed at that type's width (a `u64` literal covers the full range, `-` is unary).
+- `float32` = IEEE 754 binary32; `float64` = IEEE 754 binary64 (NaN payload round-trips losslessly); equality: NaN ≠ everything; `+0.0 == -0.0`.
+- No implicit numeric conversion; explicit `as`. No `byte` literal — write `104 as byte`. Integer literals default `int32`, float literals `float32`; a literal in an explicit integer/float type context — a typed binding, an argument, a return, or the other side of a numeric binary operator — is typed at that type's width (a `uint64` literal covers the full range, `-` is unary).
 
 ## builtin / stdlib
 
 ```stilla
 builtin.print(str)                                  // print
-builtin.str::[T](x)                                 // to string (byte/int32/uint32/i64/u64/float32/f64/bool/str)
+builtin.str::[T](x)                                 // to string (byte/int32/uint32/int64/uint64/float32/float64/bool/str)
 builtin.box::[T](move T) -> box[T]                  // wrap
 builtin.unbox::[T](move box[T]) -> T                // own contained value
 builtin.panic(str) -> never                         // terminate context
@@ -152,7 +152,7 @@ list.range(int32, int32) -> list[int32]             // inclusive [start, end]
 ## Panic & traps
 
 - No exception/destructor unwinding: a `panic` (`never`) or trap terminates the context immediately — no pending drops, no module teardown, control to the host.
-- Traps: `div`/`rem` by 0, `i64_min/-1` division, invalid `any` recover/cast, invalid list element read (short list), invalid UTF-8/Unicode decode. Float→int conversion **never traps** (NaN → 0, saturates). `int32_min/-1` division wraps and never traps.
+- Traps: `div`/`rem` by 0, `int64_min/-1` division, invalid `any` recover/cast, invalid list element read (short list), invalid UTF-8/Unicode decode. Float→int conversion **never traps** (NaN → 0, saturates). `int32_min/-1` division wraps and never traps.
 
 ## Five central rules
 
@@ -173,6 +173,6 @@ list.range(int32, int32) -> list[int32]             // inclusive [start, end]
 
 - **Formats**: `R` (three registers) · `B` (compare/branch) · `I` (register + imm16) · `C`/`E` (two registers) · `U` (register + imm20); typed opcodes carry numeric width and signedness.
 - **Registers**: `F0–F108` (`0x13–0x7f`) frame cells · `zero` (`0x00`) · `cond` (`0x01`) · `ra` (`0x02`, a reserved call-convention hole) · `T0–T15` (`0x03–0x12`) volatile temps. The zero/cond/ra/T encodings index the VM's `[19]` fast bank directly. The top `window_count` encodings are the **window aliases** — the header reserve plus the output aliases `O(0)..O(O-1)` — with the register budget `f_count + window_count ≤ 109`.
-- **Frame**: `[fp-3,fp)` header · `[fp,fp+L)` F cells (`L = f_count ≤ 109`) · `[fp+L,fp+L+X)` X spill cells (`x_count ≤ 65536`, imm16-addressed, never register-addressed) · `[..,+W)` output window, where each call reserves a three-cell `{saved_fp, saved_fn, saved_ra}` header plus `A=max(parameter_count,result_count)` value cells. Cells are raw `u64`; operand types come from typed opcodes and descriptors.
+- **Frame**: `[fp-3,fp)` header · `[fp,fp+L)` F cells (`L = f_count ≤ 109`) · `[fp+L,fp+L+X)` X spill cells (`x_count ≤ 65536`, imm16-addressed, never register-addressed) · `[..,+W)` output window, where each call reserves a three-cell `{saved_fp, saved_fn, saved_ra}` header plus `A=max(parameter_count,result_count)` value cells. Cells are raw `uint64`; operand types come from typed opcodes and descriptors.
 - Callee params alias the caller's output-window cells (`fp=sp-A`); one `slot_*` record per parameter at its absolute window offset (`slot_borrow`/`slot_move`/`slot_retain`/`slot_copy`) — no elision; argument transfer is move-based. The window is register-addressable (v10, Itanium-style overlap): a non-void call's result is published into the caller register `F(L+3+O-A)` and consumed by exactly one `take dst, F(L+3+O-A)` at the fallthrough (a `zero` destination discards; the source register is cleared) — or read in place with no take when the lowering coalesced the result onto the alias (Step 8, direct calls only, result not live across another call).
 - **Lifecycle explicit in the image**: counted owners (`str`/`list[T]`/`box[T]`) `release`/`copy_retain` (fused `replace_copy`/`replace_move`/`release_ret`); residual `drop src, DropDescId` for `any`/`hostdata`/opaque only; spill staging `spill_take`/`spill_put` under F pressure.

@@ -1107,7 +1107,7 @@ test "frontend rejects casts outside the uniform conversion family" {
     try testing.expect(std.mem.indexOf(u8, c1.diag.?.message, "invalid cast") != null);
 
     var c2 = try compileText("app", &.{
-        .{ "app", "fn main() -> void { let x: i64 = 1; let a = x as int32; }" },
+        .{ "app", "fn main() -> void { let x: int64 = 1; let a = x as int32; }" },
     });
     defer c2.deinit();
     try testing.expect(c2.program != null);

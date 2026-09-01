@@ -1683,9 +1683,9 @@ pub inline fn isWidePrim(self: *VmCtx, ty: u32) bool {
     const td = types[ty];
     if (td.kind != .primitive) return false;
     return switch (td.a) {
-        @intFromEnum(llir.PrimitiveId.i64),
-        @intFromEnum(llir.PrimitiveId.u64),
-        @intFromEnum(llir.PrimitiveId.f64),
+        @intFromEnum(llir.PrimitiveId.int64),
+        @intFromEnum(llir.PrimitiveId.uint64),
+        @intFromEnum(llir.PrimitiveId.float64),
         => true,
         else => false,
     };

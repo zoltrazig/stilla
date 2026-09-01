@@ -175,14 +175,14 @@ test "checker rejects a binary operator type mismatch" {
 test "checker widens integer literals to the other binary operand's width" {
     // Core Types §16.3: the other operand of a numeric binary operator is
     // an explicit type context, on either side of the operator — `a - 1`
-    // with `a: i64` types the literal at i64.
+    // with `a: int64` types the literal at int64.
     const t = try checkText(
-        \\fn sub(a: i64) -> i64 { a - 1 }
-        \\fn add(a: i64) -> i64 { 1 + a }
-        \\fn cmp(a: i64) -> bool { a == 0 }
-        \\fn shi(a: u64) -> u64 { a >> 1 }
-        \\fn call() -> i64 { brand(1) }
-        \\fn brand(x: i64) -> i64 { x }
+        \\fn sub(a: int64) -> int64 { a - 1 }
+        \\fn add(a: int64) -> int64 { 1 + a }
+        \\fn cmp(a: int64) -> bool { a == 0 }
+        \\fn shi(a: uint64) -> uint64 { a >> 1 }
+        \\fn call() -> int64 { brand(1) }
+        \\fn brand(x: int64) -> int64 { x }
         \\fn um(a: uint32) -> uint32 { a - 1 }
         \\fn ul(a: uint32) -> uint32 { 1 + a }
         \\fn ucall() -> uint32 { uarg(7) }
@@ -198,14 +198,14 @@ test "checker widens integer literals to the other binary operand's width" {
 test "checker types float literals at the other binary operand's width" {
     // The float mirror of the int rule (Core Types §16.3): a float literal
     // in an explicit float type context types at that width — `a - 1.5`
-    // with `a: f64` types the literal at f64.
+    // with `a: float64` types the literal at float64.
     const t = try checkText(
-        \\fn dsub(a: f64) -> f64 { a - 1.5 }
-        \\fn dadd(a: f64) -> f64 { 1.5 + a }
-        \\fn dcmp(a: f64) -> bool { a >= 2.5 }
+        \\fn dsub(a: float64) -> float64 { a - 1.5 }
+        \\fn dadd(a: float64) -> float64 { 1.5 + a }
+        \\fn dcmp(a: float64) -> bool { a >= 2.5 }
         \\fn fs(a: float32) -> float32 { a + 0.5 }
-        \\fn dcall() -> f64 { rounder(2.5) }
-        \\fn rounder(x: f64) -> f64 { x }
+        \\fn dcall() -> float64 { rounder(2.5) }
+        \\fn rounder(x: float64) -> float64 { x }
     );
     defer t.arena.deinit();
 }

@@ -1345,41 +1345,41 @@ Core arithmetic is defined as follows:
 
 - `int32 + - * / % int32 -> int32`;
 - `uint32 + - * / % uint32 -> uint32`;
-- `i64 + - * / % i64 -> i64`;
-- `u64 + - * / % u64 -> u64`;
+- `int64 + - * / % int64 -> int64`;
+- `uint64 + - * / % uint64 -> uint64`;
 - `float32 + - * / % float32 -> float32`;
-- `f64 + - * / % f64 -> f64`;
+- `float64 + - * / % float64 -> float64`;
 - `int32 & | ^ int32 -> int32`;
 - `uint32 & | ^ uint32 -> uint32`;
-- `i64 & | ^ i64 -> i64`;
-- `u64 & | ^ u64 -> u64`;
+- `int64 & | ^ int64 -> int64`;
+- `uint64 & | ^ uint64 -> uint64`;
 - `int32 << >> int32 -> int32`;
 - `uint32 << >> uint32 -> uint32`;
-- `i64 << >> i64 -> i64`;
-- `u64 << >> u64 -> u64`;
+- `int64 << >> int64 -> int64`;
+- `uint64 << >> uint64 -> uint64`;
 - `str + str -> str`;
-- unary `-` accepts `int32`, `uint32`, `i64`, `u64`, `float32`, or `f64`;
+- unary `-` accepts `int32`, `uint32`, `int64`, `uint64`, `float32`, or `float64`;
 - `!`, `and`, and `or` accept `bool`;
 - `< <= > >=` accept operands of the same numeric type;
-- `== !=` are required for `byte`, `int32`, `uint32`, `i64`, `u64`, `float32`, `f64`, `bool`, and `str`.
+- `== !=` are required for `byte`, `int32`, `uint32`, `int64`, `uint64`, `float32`, `float64`, `bool`, and `str`.
 
 Integer `/` truncates toward zero. Integer `/` and `%` by zero trap
 (the Runtime specification). `int32` and `uint32` arithmetic is performed
 modulo 2³² and never traps on overflow or underflow (WebAssembly semantics,
-the Runtime specification); `i64` and `u64` arithmetic is performed modulo
+the Runtime specification); `int64` and `uint64` arithmetic is performed modulo
 2⁶⁴ and never traps on overflow or underflow (WebAssembly semantics
 extended to 64 bits). `int32` division does not trap on overflow —
 `int32_min / -1` wraps modulo 2³² to `int32_min` (WebAssembly-style
 wrapping), while `int32` remainder never overflows — `int32_min
-% -1` is 0 (WebAssembly semantics); `i64` division traps on
-`i64_min / -1`, while `i64` remainder does not — `i64_min % -1` is 0.
+% -1` is 0 (WebAssembly semantics); `int64` division traps on
+`int64_min / -1`, while `int64` remainder does not — `int64_min % -1` is 0.
 Unary `-` on `int32` wraps on
 the minimum value (`int32_min` negated is `int32_min`, modulo 2³²); on
 `uint32` it computes the two's-complement negation (`0 - x`), which never
-traps; on `i64` it wraps on the minimum value (`i64_min` negated is
-`i64_min`, modulo 2⁶⁴); on `u64` it computes the two's-complement negation
+traps; on `int64` it wraps on the minimum value (`int64_min` negated is
+`int64_min`, modulo 2⁶⁴); on `uint64` it computes the two's-complement negation
 (`0 - x`), which never traps (the Runtime specification). Float arithmetic
-follows IEEE 754 for the respective format, and `float32 %`/`f64 %` are the
+follows IEEE 754 for the respective format, and `float32 %`/`float64 %` are the
 truncated remainder `a - trunc(a / b) × b` (C `fmod`,
 Rust `%`) — they never trap, not even on a zero divisor (the Runtime
 specification).
@@ -1390,13 +1390,13 @@ pattern to shift — Core operator typing and numeric conversion). For the
 32-bit types the shift count is the right operand's value **modulo 32**
 (WebAssembly semantics): only the low five bits of the count participate,
 so shifting by a count ≥ 32 is identical to shifting by `count mod 32`,
-and a negative count shifts by its low five bits (`-1` is 31). For `i64`
-and `u64` the count is taken **modulo 64**: only the low six bits
+and a negative count shifts by its low five bits (`-1` is 31). For `int64`
+and `uint64` the count is taken **modulo 64**: only the low six bits
 participate, so shifting by a count ≥ 64 is identical to shifting by
 `count mod 64`, and a negative count shifts by its low six bits (`-1` is
-63). Shifting never traps. `>>` on `int32`/`i64` is
+63). Shifting never traps. `>>` on `int32`/`int64` is
 the arithmetic shift (the vacated high bits are filled with the sign
-bit); `>>` on `uint32`/`u64` is the logical shift (filled with zero). `<<`
+bit); `>>` on `uint32`/`uint64` is the logical shift (filled with zero). `<<`
 shifts zero bits into the vacated low positions for all four types, and bits
 shifted out of the operand width are discarded (the Runtime
 specification).
@@ -1406,7 +1406,7 @@ the four integer types only (same-type operands, the result is the
 operand type; `byte` has no arithmetic and the float types have no bit
 pattern — Core operator typing and numeric conversion). They operate on the raw
 operand-width patterns: `int32` and `uint32` are bit-identical in their
-32-bit patterns, `i64` and `u64` bit-identical in their 64-bit patterns
+32-bit patterns, `int64` and `uint64` bit-identical in their 64-bit patterns
 (signedness is irrelevant — masking, setting, or toggling bits never
 interprets the pattern as a number), so `x & y` is the same operation for
 both signednesses of a width.
@@ -1420,33 +1420,33 @@ No operator is defined on `hostdata` (The `hostdata` type), and none is defined 
 
 Core `as` conversions are the uniform conversion family: every
 non-identity pair of the seven conversion types `{byte, int32, uint32,
-i64, u64, float32, f64}` is legal:
+int64, uint64, float32, float64}` is legal:
 
 ```text
 byte as int32       int32 as byte
 byte as uint32      int32 as uint32
-byte as i64         int32 as i64
-byte as u64         int32 as u64
+byte as int64         int32 as int64
+byte as uint64         int32 as uint64
 byte as float32     int32 as float32
-byte as f64         int32 as f64
-uint32 as int32     i64 as byte
-uint32 as byte      i64 as int32
-uint32 as i64       i64 as uint32
-uint32 as u64       i64 as u64
-uint32 as float32   i64 as float32
-uint32 as f64       i64 as f64
-float32 as int32    u64 as byte
-float32 as uint32   u64 as int32
-float32 as i64      u64 as uint32
-float32 as u64      u64 as i64
-float32 as byte     u64 as float32
-float32 as f64      u64 as f64
-f64 as int32
-f64 as uint32
-f64 as i64
-f64 as u64
-f64 as float32
-f64 as byte
+byte as float64         int32 as float64
+uint32 as int32     int64 as byte
+uint32 as byte      int64 as int32
+uint32 as int64       int64 as uint32
+uint32 as uint64       int64 as uint64
+uint32 as float32   int64 as float32
+uint32 as float64       int64 as float64
+float32 as int32    uint64 as byte
+float32 as uint32   uint64 as int32
+float32 as int64      uint64 as uint32
+float32 as uint64      uint64 as int64
+float32 as byte     uint64 as float32
+float32 as float64      uint64 as float64
+float64 as int32
+float64 as uint32
+float64 as int64
+float64 as uint64
+float64 as float32
+float64 as byte
 any as T        // T a concrete type, T ≠ any, never, hostdata (the Core specification)
 ```
 
@@ -1464,22 +1464,22 @@ parameter,
 field, element, variant payload, return position, or the other operand of
 a numeric binary operator (`+`, `-`, `*`, `/`, `%`, `<<`, `>>`, `&`, `|`,
 `^`, `==`, `!=`, `<`, `<=`, `>`, `>=`), on either side — an integer literal
-is typed at the expected integer width (`int32`, `uint32`, `i64`, or
-`u64`) and a float literal at the expected float width (`float32` or
-`f64`), and its decimal magnitude is parsed
-directly at the target width. A `u64` literal covers the full range
+is typed at the expected integer width (`int32`, `uint32`, `int64`, or
+`uint64`) and a float literal at the expected float width (`float32` or
+`float64`), and its decimal magnitude is parsed
+directly at the target width. A `uint64` literal covers the full range
 `0..18446744073709551615` (`0xffff_ffff_ffff_ffff`) and is never parsed
 through an intermediate
-`i64`. An `i64` literal covers magnitudes up to and including `2⁶³`
+`int64`. An `int64` literal covers magnitudes up to and including `2⁶³`
 (`9223372036854775808`), one beyond the positive range, so that the unary
-negation of it constructs `i64_min` — `-9223372036854775808` is
-`i64_min`, never a range error. A `uint32` literal covers magnitudes up to
+negation of it constructs `int64_min` — `-9223372036854775808` is
+`int64_min`, never a range error. A `uint32` literal covers magnitudes up to
 `2³² - 1` (`4294967295`). The leading `-` is unary negation
 (Grammar), never part of the
-literal payload: `-1` in a `u64` context is the wrapping negation of
-`u64(1)` (`0xffff_ffff_ffff_ffff`), and a literal whose magnitude fits no
+literal payload: `-1` in a `uint64` context is the wrapping negation of
+`uint64(1)` (`0xffff_ffff_ffff_ffff`), and a literal whose magnitude fits no
 expected type is a compile-time error. A float literal in an explicit
-`f64` context is rounded directly to binary64 at the target width
+`float64` context is rounded directly to binary64 at the target width
 (round-to-nearest, ties-to-even) — it is never rounded to binary32
 first; in an `f32` context and in every context without an explicit
 float type, float literals keep their `float32` default. In every
@@ -1492,24 +1492,24 @@ Conversion is total: numeric casts never
 trap. The integer casts are bit-pattern operations: `int32 as byte`
 and `uint32 as byte` truncate to 8 bits (the value modulo 2⁸, low
 bits); `int32 as uint32` and `uint32 as int32` reinterpret the low
-32 bits; `byte as int32`/`byte as uint32` zero-extend; `i64 as u64`
-and `u64 as i64` reinterpret the full 64-bit cell. The 32↔64 integer
-casts widen and narrow the low bits: `int32 as i64` and
-`int32 as u64` sign-extend the low 32 bits (two's-complement
-conversion — `-1 as u64` is `2⁶⁴ − 1`), `uint32 as i64` and
-`uint32 as u64` zero-extend them, `byte as i64` and `byte as u64`
-zero-extend the low 8 bits, and `i64 as int32` / `i64 as uint32` /
-`u64 as int32` / `u64 as uint32` keep the low 32 bits (`i64 as byte`
-and `u64 as byte` the low 8 bits). The float→int
+32 bits; `byte as int32`/`byte as uint32` zero-extend; `int64 as uint64`
+and `uint64 as int64` reinterpret the full 64-bit cell. The 32↔64 integer
+casts widen and narrow the low bits: `int32 as int64` and
+`int32 as uint64` sign-extend the low 32 bits (two's-complement
+conversion — `-1 as uint64` is `2⁶⁴ − 1`), `uint32 as int64` and
+`uint32 as uint64` zero-extend them, `byte as int64` and `byte as uint64`
+zero-extend the low 8 bits, and `int64 as int32` / `int64 as uint32` /
+`uint64 as int32` / `uint64 as uint32` keep the low 32 bits (`int64 as byte`
+and `uint64 as byte` the low 8 bits). The float→int
 casts truncate toward zero and saturate to the target range on NaN
 or out-of-range values (NaN becomes zero): `float32 as int32`
 saturates to the `int32` range, `float32 as uint32` to `[0, 2³²)`,
-`float32 as i64` to the `i64` range, `float32 as u64` to
-`[0, 2⁶⁴)`, and the byte forms to `[0, 255]`; the `f64` forms follow
+`float32 as int64` to the `int64` range, `float32 as uint64` to
+`[0, 2⁶⁴)`, and the byte forms to `[0, 255]`; the `float64` forms follow
 the same rules at binary64 precision. The int→float casts round to
-nearest, ties-to-even; precision may be lost — `i64 as f64` and
-`u64 as f64` round values beyond 2⁵³. `float32 as f64` is exact —
-every binary32 value is representable in binary64 — and `f64 as
+nearest, ties-to-even; precision may be lost — `int64 as float64` and
+`uint64 as float64` round values beyond 2⁵³. `float32 as float64` is exact —
+every binary32 value is representable in binary64 — and `float64 as
 float32` rounds to nearest, ties-to-even, with a finite source whose
 magnitude exceeds the binary32 range converting to ±infinity (IEEE
 overflow), never saturating and never trapping (the Runtime

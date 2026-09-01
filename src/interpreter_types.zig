@@ -252,8 +252,8 @@ pub const HostType = enum {
     byte,
     int32,
     uint32,
-    i64,
-    u64,
+    int64,
+    uint64,
     float32,
     float64,
     str,
@@ -347,9 +347,9 @@ pub fn resolveHostType(image: *const llir.LlirProgram, type_id: u32) HostType {
             .str => .str,
             .any => .any,
             .hostdata => .hostdata,
-            .i64 => .i64,
-            .u64 => .u64,
-            .f64 => .float64,
+            .int64 => .int64,
+            .uint64 => .uint64,
+            .float64 => .float64,
         },
         .named => blk: {
             if (t.a >= image.type_decls.len) break :blk .composite;

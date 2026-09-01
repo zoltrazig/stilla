@@ -250,7 +250,7 @@ const MiniVm = struct {
 /// validator rejects them).
 fn zeroOf(prim: llir.PrimitiveId) u64 {
     return switch (prim) {
-        .byte, .bool, .int32, .uint32, .i64, .u64, .float32, .f64 => 0,
+        .byte, .bool, .int32, .uint32, .int64, .uint64, .float32, .float64 => 0,
         .str, .any, .hostdata => unreachable,
     };
 }
@@ -1487,11 +1487,11 @@ test "3.2 LLIR normalization: host syscalls and any dynamic types normalize toge
     try expectSourceNormalizes(
         "host_any",
         \\const builtin = import("builtin");
-        \\fn wrap(a: i64) -> any { a }
+        \\fn wrap(a: int64) -> any { a }
         \\fn main() -> void {
-        \\    let v: i64 = 9007199254740993;
+        \\    let v: int64 = 9007199254740993;
         \\    let a = wrap(v);
-        \\    let w = (move a) as i64;
+        \\    let w = (move a) as int64;
         \\    builtin.print(builtin.str(1));
         \\}
     ,

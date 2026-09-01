@@ -576,7 +576,7 @@ test "phase-1 structural: forged unknown PrimitiveId type rows are rejected" {
     // Overwrite the int32 row with a forged id above the frozen ceiling
     // (i64/u64/f64 are appended after the v1 set; the next value is
     // unknown).
-    rows[row] = .{ .kind = .primitive, .a = @intFromEnum(llir.PrimitiveId.f64) + 1, .b = 0, .c = 0 };
+    rows[row] = .{ .kind = .primitive, .a = @intFromEnum(llir.PrimitiveId.float64) + 1, .b = 0, .c = 0 };
     var mutated = li.image;
     mutated.types = rows;
     try expectRejected(&mutated, "invalid primitive id");
@@ -599,9 +599,9 @@ const prim = [_]llir.TypeDesc{
     .{ .kind = .primitive, .a = @intFromEnum(llir.PrimitiveId.int32), .b = 0, .c = 0 },
     .{ .kind = .primitive, .a = @intFromEnum(llir.PrimitiveId.uint32), .b = 0, .c = 0 },
     .{ .kind = .primitive, .a = @intFromEnum(llir.PrimitiveId.float32), .b = 0, .c = 0 },
-    .{ .kind = .primitive, .a = @intFromEnum(llir.PrimitiveId.i64), .b = 0, .c = 0 },
-    .{ .kind = .primitive, .a = @intFromEnum(llir.PrimitiveId.u64), .b = 0, .c = 0 },
-    .{ .kind = .primitive, .a = @intFromEnum(llir.PrimitiveId.f64), .b = 0, .c = 0 },
+    .{ .kind = .primitive, .a = @intFromEnum(llir.PrimitiveId.int64), .b = 0, .c = 0 },
+    .{ .kind = .primitive, .a = @intFromEnum(llir.PrimitiveId.uint64), .b = 0, .c = 0 },
+    .{ .kind = .primitive, .a = @intFromEnum(llir.PrimitiveId.float64), .b = 0, .c = 0 },
 };
 const t_byte: u32 = 0;
 const t_bool: u32 = 1;

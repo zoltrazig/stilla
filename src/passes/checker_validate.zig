@@ -207,7 +207,7 @@ fn validateUnary(frame: *Frame, u: *const ast.Unary) CheckError!void {
     if (isNever(t)) return;
     switch (u.op) {
         .neg => {
-            if (!isNumeric(t)) return frame.ck.fail(u.span, "unary '-' accepts int32, uint32, i64, u64, or float32 (Core §16.3)", .{});
+            if (!isNumeric(t)) return frame.ck.fail(u.span, "unary '-' accepts int32, uint32, int64, uint64, or float32 (Core §16.3)", .{});
         },
         .not => {
             if (!isBool(t)) return frame.ck.fail(u.span, "unary '!' requires a bool operand (Core §16.3)", .{});
@@ -329,13 +329,13 @@ fn validNumCast(src: cfg.Type, dst: cfg.Type) bool {
     // type) is the byte conversion at the LLIR level and is not a
     // language cast.
     return switch (s) {
-        .byte => d == .int32 or d == .uint32 or d == .i64 or d == .u64 or d == .float32 or d == .f64,
-        .int32 => d == .byte or d == .uint32 or d == .i64 or d == .u64 or d == .float32 or d == .f64,
-        .uint32 => d == .byte or d == .int32 or d == .i64 or d == .u64 or d == .float32 or d == .f64,
-        .i64 => d == .byte or d == .int32 or d == .uint32 or d == .u64 or d == .float32 or d == .f64,
-        .u64 => d == .byte or d == .int32 or d == .uint32 or d == .i64 or d == .float32 or d == .f64,
-        .float32 => d == .byte or d == .int32 or d == .uint32 or d == .i64 or d == .u64 or d == .f64,
-        .f64 => d == .byte or d == .int32 or d == .uint32 or d == .i64 or d == .u64 or d == .float32,
+        .byte => d == .int32 or d == .uint32 or d == .int64 or d == .uint64 or d == .float32 or d == .float64,
+        .int32 => d == .byte or d == .uint32 or d == .int64 or d == .uint64 or d == .float32 or d == .float64,
+        .uint32 => d == .byte or d == .int32 or d == .int64 or d == .uint64 or d == .float32 or d == .float64,
+        .int64 => d == .byte or d == .int32 or d == .uint32 or d == .uint64 or d == .float32 or d == .float64,
+        .uint64 => d == .byte or d == .int32 or d == .uint32 or d == .int64 or d == .float32 or d == .float64,
+        .float32 => d == .byte or d == .int32 or d == .uint32 or d == .int64 or d == .uint64 or d == .float64,
+        .float64 => d == .byte or d == .int32 or d == .uint32 or d == .int64 or d == .uint64 or d == .float32,
         else => false,
     };
 }
@@ -1255,7 +1255,7 @@ fn isNever(t: cfg.Type) bool {
 fn isEqScalar(t: cfg.Type) bool {
     if (t != .primitive) return false;
     return switch (t.primitive) {
-        .byte, .int32, .uint32, .i64, .u64, .float32, .f64, .bool, .str => true,
+        .byte, .int32, .uint32, .int64, .uint64, .float32, .float64, .bool, .str => true,
         else => false,
     };
 }
@@ -1263,7 +1263,7 @@ fn isEqScalar(t: cfg.Type) bool {
 /// The ordering domain of Core §16.3 (`< <= > >=`): the numeric types.
 /// `byte` is numeric for ordering but has no arithmetic.
 fn isOrderNumeric(t: cfg.Type) bool {
-    return t == .primitive and (t.primitive == .byte or t.primitive == .int32 or t.primitive == .uint32 or t.primitive == .i64 or t.primitive == .u64 or t.primitive == .float32 or t.primitive == .f64);
+    return t == .primitive and (t.primitive == .byte or t.primitive == .int32 or t.primitive == .uint32 or t.primitive == .int64 or t.primitive == .uint64 or t.primitive == .float32 or t.primitive == .float64);
 }
 
 fn isBool(t: cfg.Type) bool {
@@ -1278,7 +1278,7 @@ fn isNumeric(t: cfg.Type) bool {
     // Core §16.3: arithmetic is defined for `int32`, `uint32`, `i64`,
     // `u64`, and `float32`; `byte` has no arithmetic. Integer
     // arithmetic wraps modulo 2^width and never traps (Runtime §7.2).
-    return t == .primitive and (t.primitive == .int32 or t.primitive == .uint32 or t.primitive == .i64 or t.primitive == .u64 or t.primitive == .float32 or t.primitive == .f64);
+    return t == .primitive and (t.primitive == .int32 or t.primitive == .uint32 or t.primitive == .int64 or t.primitive == .uint64 or t.primitive == .float32 or t.primitive == .float64);
 }
 
 /// The shift/bitwise domain of Core §16.3 (`<<`/`>>`/`&`/`|`/`^`):
@@ -1286,7 +1286,7 @@ fn isNumeric(t: cfg.Type) bool {
 /// defined, but shifting or masking an 8-bit pattern has no bit to
 /// move into) and `float32` has no bit pattern.
 fn isInt(t: cfg.Type) bool {
-    return t == .primitive and (t.primitive == .int32 or t.primitive == .uint32 or t.primitive == .i64 or t.primitive == .u64);
+    return t == .primitive and (t.primitive == .int32 or t.primitive == .uint32 or t.primitive == .int64 or t.primitive == .uint64);
 }
 
 /// A human-readable type name for diagnostics.

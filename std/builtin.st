@@ -30,8 +30,8 @@ union Option[T] {
 // §4.1 Output.
 fn print(message: str) -> void;
 
-// §4.2 Conversion. Supported types: byte, int32, uint32, i64, u64,
-// float32, f64, bool, str (Runtime §4.2).
+// §4.2 Conversion. Supported types: byte, int32, uint32, int64, uint64,
+// float32, float64, bool, str (Runtime §4.2).
 fn str[T](value: T) -> str;
 
 // §4.5 Box: construction is by `move`.
@@ -50,7 +50,7 @@ fn panic(message: str) -> never;
 // §4.8 Assert. The message is evaluated even when the condition is true.
 fn assert(condition: bool, message: str) -> void;
 
-// §4.9 Hash. Supported key types: byte, int32, uint32, i64, u64, float32,
-// f64, bool, str (Runtime §4.9).
+// §4.9 Hash. Supported key types: byte, int32, uint32, int64, uint64, float32,
+// float64, bool, str (Runtime §4.9).
 // Deterministic and equal for values equal under `==` (Runtime §4.9).
 fn hash[T](value: T) -> int32;

@@ -35,7 +35,7 @@ pub fn parsePattern(self: *parser.Parser) ParseError!ast.Pattern {
         // Core §14.7): a concrete type name, optionally followed by a
         // binding identifier. `any`, `never`, and `hostdata` are not
         // test types (Grammar note; Core §11.6, §11.7).
-        .kw_byte, .kw_int32, .kw_uint32, .kw_i64, .kw_u64, .kw_float32, .kw_f64, .kw_bool, .kw_str, .kw_list, .kw_box, .kw_tuple, .kw_fn => parseTypeTestPattern(self),
+        .kw_byte, .kw_int32, .kw_uint32, .kw_int64, .kw_uint64, .kw_float32, .kw_float64, .kw_bool, .kw_str, .kw_list, .kw_box, .kw_tuple, .kw_fn => parseTypeTestPattern(self),
         .ident => parsePathPattern(self),
         else => self.fail(tok.span, "expected a pattern, found {s}", .{self.describe(tok)}),
     };

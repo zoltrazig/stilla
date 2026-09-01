@@ -221,9 +221,9 @@ pub fn fusedBranchOperands(cond: *const cfg.Value) ?FusedBranch {
         // operands, so a further swap recovers the natural polarity
         // — `a <= b` → `ble a, b`, `a >= b` → `ble b, a`
         // There is no `bge` family.
-        op = famOpName(if (bin.a.type_.primitive == .uint32 or bin.a.type_.primitive == .u64 or bin.a.type_.primitive == .byte) "bleu" else "ble", null) orelse unreachable;
+        op = famOpName(if (bin.a.type_.primitive == .uint32 or bin.a.type_.primitive == .uint64 or bin.a.type_.primitive == .byte) "bleu" else "ble", null) orelse unreachable;
         swap = true;
-    } else if ((bin.a.type_.primitive == .float32 or bin.a.type_.primitive == .f64) and (tag == .le or tag == .ge)) {
+    } else if ((bin.a.type_.primitive == .float32 or bin.a.type_.primitive == .float64) and (tag == .le or tag == .ge)) {
         // Float `le`/`ge` share the single `sle` primitive; the
         // fused branch is the non-strict `ble`, the swap for `ge`
         // already baked into cmpSel (`a >= b` ≡ `ble b, a` — the
@@ -263,8 +263,8 @@ fn imm7Of(cv: cfg.ConstValue, type_: cfg.Type) ?u8 {
         else => return null,
     };
     return switch (type_.primitive) {
-        .int32, .i64 => if (i < -64 or i > 63) return null else @intCast(@as(u8, @bitCast(@as(i8, @intCast(i)))) & 0x7f),
-        .uint32, .u64, .byte => if (i < 0 or i > 127) return null else @intCast(i),
+        .int32, .int64 => if (i < -64 or i > 63) return null else @intCast(@as(u8, @bitCast(@as(i8, @intCast(i)))) & 0x7f),
+        .uint32, .uint64, .byte => if (i < 0 or i > 127) return null else @intCast(i),
         else => null,
     };
 }
@@ -294,7 +294,7 @@ fn immBranchOf(tag: cfg.OpTag, value: *const cfg.Value, cv: cfg.ConstValue, cons
         else => null, // le / ge
     };
     const b = base orelse return null;
-    const unsigned = value.type_.primitive == .uint32 or value.type_.primitive == .u64 or value.type_.primitive == .byte;
+    const unsigned = value.type_.primitive == .uint32 or value.type_.primitive == .uint64 or value.type_.primitive == .byte;
     const name = if (std.mem.eql(u8, b, "blti") and unsigned) "bltiu" else b;
     return .{ .imm = .{ .op = famOpName(name, null) orelse return null, .lhs = value, .imm7 = imm7 } };
 }

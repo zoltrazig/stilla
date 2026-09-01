@@ -1003,9 +1003,9 @@ test "2.4 LLIR lowering: constants and ID-operand records are interned integers"
                 // either: intrinsic members occupy no row, air.md §5.6).
                 .bool => continue,
                 .byte => .byte,
-                .i64 => .i64,
-                .u64 => .u64,
-                .f64 => .f64,
+                .int64 => .int64,
+                .uint64 => .uint64,
+                .float64 => .float64,
                 .int32 => .int32,
                 .uint32 => .uint32,
                 .float32 => .float32,

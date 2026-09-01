@@ -45,14 +45,14 @@ pub const TokenKind = enum {
     kw_else,
     kw_false,
     kw_float32,
-    kw_f64,
+    kw_float64,
     kw_fn,
     kw_hostdata,
     kw_if,
     kw_import,
     kw_int32,
-    kw_i64,
-    kw_u64,
+    kw_int64,
+    kw_uint64,
     kw_let,
     kw_list,
     kw_match,
@@ -517,14 +517,14 @@ fn keywordOrIdent(text: []const u8) TokenKind {
         .{ "else", .kw_else },
         .{ "false", .kw_false },
         .{ "float32", .kw_float32 },
-        .{ "f64", .kw_f64 },
+        .{ "float64", .kw_float64 },
         .{ "fn", .kw_fn },
         .{ "hostdata", .kw_hostdata },
         .{ "if", .kw_if },
         .{ "import", .kw_import },
         .{ "int32", .kw_int32 },
-        .{ "i64", .kw_i64 },
-        .{ "u64", .kw_u64 },
+        .{ "int64", .kw_int64 },
+        .{ "uint64", .kw_uint64 },
         .{ "let", .kw_let },
         .{ "list", .kw_list },
         .{ "match", .kw_match },
@@ -746,18 +746,18 @@ test "rejects unexpected characters" {
 test "lexes every reserved word" {
     // Grammar "Reserved words": all are recognized lexically, before
     // syntactic parsing.
-    var t = try tokenizeText("and any as bool borrow box byte const drop else false float32 fn hostdata if import int32 let list match move never or str struct true tuple type uint32 union using void");
+    var t = try tokenizeText("and any as bool borrow box byte const drop else false float32 float64 fn hostdata if import int32 int64 let list match move never or str struct true tuple type uint32 uint64 union using void");
     defer t.arena.deinit();
 
     const kinds = [_]TokenKind{
-        .kw_and,    .kw_any,      .kw_as,    .kw_bool,   .kw_borrow, .kw_box,
-        .kw_byte,   .kw_const,    .kw_drop,  .kw_else,   .kw_false,  .kw_float32,
-        .kw_fn,     .kw_hostdata, .kw_if,    .kw_import, .kw_int32,  .kw_let,
-        .kw_list,   .kw_match,    .kw_move,  .kw_never,  .kw_or,     .kw_str,
-        .kw_struct, .kw_true,     .kw_tuple, .kw_type,   .kw_uint32, .kw_union,
-        .kw_using,  .kw_void,
+        .kw_and,     .kw_any,    .kw_as,       .kw_bool,  .kw_borrow, .kw_box,
+        .kw_byte,    .kw_const,  .kw_drop,     .kw_else,  .kw_false,  .kw_float32,
+        .kw_float64, .kw_fn,     .kw_hostdata, .kw_if,    .kw_import, .kw_int32,
+        .kw_int64,   .kw_let,    .kw_list,     .kw_match, .kw_move,   .kw_never,
+        .kw_or,      .kw_str,    .kw_struct,   .kw_true,  .kw_tuple,  .kw_type,
+        .kw_uint32,  .kw_uint64, .kw_union,    .kw_using, .kw_void,
     };
-    try std.testing.expectEqual(@as(usize, 33), t.tokens.len); // + eof
+    try std.testing.expectEqual(@as(usize, 36), t.tokens.len); // + eof
     for (kinds, 0..) |kind, i| try std.testing.expectEqual(kind, t.tokens[i].kind);
 }
 

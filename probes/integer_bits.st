@@ -6,11 +6,11 @@ fn u32_bits(a: uint32, b: uint32) -> tuple[uint32, uint32, uint32, uint32, uint3
     (a << b, a >> b, a & b, a | b, a ^ b)
 }
 
-fn i64_bits(a: i64, b: i64) -> tuple[i64, i64, i64, i64, i64] {
+fn i64_bits(a: int64, b: int64) -> tuple[int64, int64, int64, int64, int64] {
     (a << b, a >> b, a & b, a | b, a ^ b)
 }
 
-fn u64_bits(a: u64, b: u64) -> tuple[u64, u64, u64, u64, u64] {
+fn u64_bits(a: uint64, b: uint64) -> tuple[uint64, uint64, uint64, uint64, uint64] {
     (a << b, a >> b, a & b, a | b, a ^ b)
 }
 

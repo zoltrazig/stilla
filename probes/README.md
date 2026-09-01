@@ -10,7 +10,7 @@ The detailed probes cover the source-reachable operation/type matrix:
 - `integer_bits.st`: shifts and bitwise operations for all four integer types
 - `immediates.st`: integer immediate arithmetic, shifts, masks, and comparisons
 - `comparisons.st`: value and branch comparisons for numeric, byte, bool, and str
-- `casts.st`: all 20 non-identity casts among byte, int32, uint32, float32, and f64
+- `casts.st`: all 20 non-identity casts among byte, int32, uint32, float32, and float64
 - `fusion.st`: multiply-add fusion for every numeric representation and integer
   immediate forms that are reachable from source
 - `aggregates.st`, `union_match.st`, and `list_match.st`: construction and projection
