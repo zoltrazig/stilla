@@ -292,7 +292,10 @@ fn hSext32(self: *VmCtx, n: u32) void {
 
 fn hZext32(self: *VmCtx, n: u32) void {
     const v = self.loaded.code.items[self.runtime.pc];
-    write(self, v.a, @as(u64, @truncate(read(self, v.b))));
+    // Zero-extend the low 32 bits into the full 64-bit cell (the
+    // unsigned staging form; the canonical i32/u32 cell is
+    // sign-extended, so a plain truncate is not a no-op here).
+    write(self, v.a, @as(u64, @as(u32, @truncate(read(self, v.b)))));
     return fallthrough(self, n);
 }
 

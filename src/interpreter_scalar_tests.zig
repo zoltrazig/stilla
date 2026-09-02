@@ -209,6 +209,28 @@ test "B.0-elided zext32 of a u32 divide still computes the correct quotient" {
     }
 }
 
+test "u32 divide of a high-bit dividend zero-extends its staged dividend" {
+    // The mul result (sext32-canonicalized) has its top bit set, so the
+    // div.u32 sequence stages it through a zext32 before the widthless
+    // divu; a zext32 that fails to clear the high bits makes the unsigned
+    // dividend read as ~2^64 and the quotient comes out garbage.
+    // Regression: stsmith seed 5 (v27: u32, quotient 4107778581 != 3).
+    var l = try load(
+        \\fn g() -> uint32 { 2040345509 }
+        \\fn main() -> uint32 { (67371137 * g()) / 866546848 }
+    , false);
+    defer l.deinit();
+    var term = try interpreter.runWithEntry(testing.allocator, l.image, try l.fid("main"), .{});
+    defer term.deinit(testing.allocator);
+    switch (term) {
+        .normal => |v| try testing.expectEqual(@as(Value, 3), v),
+        .panic => |m| {
+            std.log.err("unexpected panic: {s}", .{m});
+            return error.TestUnexpectedResult;
+        },
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Frame header scenarios (root / normal call / internal continuation)
 // ---------------------------------------------------------------------------

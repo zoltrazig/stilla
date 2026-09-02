@@ -227,6 +227,52 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&embed_run.step);
 
     // ------------------------------------------------------------------
+    // `zig build stsmith`: the randomized Stilla program generator
+    // (tools/stsmith). `zig build stsmith -- --seed 42` prints a generated,
+    // self-checking program; `zig build stsmith-check -- --seed 42` also
+    // runs it under the stilla `--run` interpreter, failing the build when
+    // the program panics or fails to compile (an assert would exit 1).
+    const stsmith_module = b.createModule(.{
+        .root_source_file = b.path("tools/stsmith/main.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    const stsmith_exe = b.addExecutable(.{
+        .name = "stsmith",
+        .root_module = stsmith_module,
+    });
+    b.installArtifact(stsmith_exe);
+
+    const stsmith_run = b.addRunArtifact(stsmith_exe);
+    if (b.args) |args| stsmith_run.addArgs(args);
+    const stsmith_step = b.step("stsmith", "Generate a random self-checking Stilla program (seed-reproducible)");
+    stsmith_step.dependOn(&stsmith_run.step);
+
+    const gen_check = b.addRunArtifact(stsmith_exe);
+    if (b.args) |args| gen_check.addArgs(args) else gen_check.addArgs(&.{ "--seed", "1" });
+    gen_check.addArg("--output");
+    const prog = gen_check.addOutputFileArg("program.st");
+    const run_check = b.addRunArtifact(exe);
+    run_check.addArg("--run");
+    run_check.addFileArg(prog);
+    const stsmith_check_step = b.step("stsmith-check", "Generate a program with stsmith and run it under stilla --run (fails on panic/compile error)");
+    run_check.step.dependOn(&gen_check.step);
+    stsmith_check_step.dependOn(&run_check.step);
+
+    // The generator's unit tests (determinism and self-consistency) run
+    // under `zig build test`.
+    const gen_test_module = b.createModule(.{
+        .root_source_file = b.path("tools/stsmith/gen.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    const gen_tests = b.addTest(.{
+        .root_module = gen_test_module,
+    });
+    const run_gen_tests = b.addRunArtifact(gen_tests);
+    test_step.dependOn(&run_gen_tests.step);
+
+    // ------------------------------------------------------------------
     // `zig build examples`: compile every examples/*.st into three output
     // artifacts — CFG AIR text, LLIR assembly, and LLIR binary — under
     // zig-out/examples/, then print a per-module size summary. The compile
