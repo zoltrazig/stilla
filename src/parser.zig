@@ -1121,7 +1121,7 @@ test "rejects wildcard in expression position" {
 test "rejects comparison chains" {
     var t = try parseError("const a = x < y < z;");
     defer t.tp.deinit();
-    try std.testing.expectEqualStrings("expected ';', found '<'", t.diag.message);
+    try std.testing.expectEqualStrings("comparisons do not chain", t.diag.message);
 }
 
 test "rejects trailing commas in tuples and tuple patterns" {
@@ -1341,10 +1341,11 @@ test "deeply nested expressions fail with a diagnostic, not a crash" {
 }
 
 test "deeply nested unary chains fail with a diagnostic, not a crash" {
-    // Nesting-depth guard: `!!!!…` / `----…` chains recurse through
-    // parseUnary without passing through parseExpression, so they count
-    // against the same shared 512-level cap (see parseUnary). Regression:
-    // a few thousand nested unary operators overflowed the native stack.
+    // Nesting-depth guard: `!!!!…` / `----…` chains recurse through the
+    // prefix nud (parseNud in parse/expr.zig), which re-enters
+    // parseExpressionBp, so they count against the same shared 512-level
+    // cap (see parseExpressionBp). Regression: a few thousand nested
+    // unary operators overflowed the native stack.
     var text = std.ArrayList(u8).empty;
     defer text.deinit(std.testing.allocator);
     try text.appendSlice(std.testing.allocator, "const x = ");

@@ -688,7 +688,7 @@ test "grammar: every binary operator maps to its AST op" {
     }
 }
 
-test "grammar: the precedence ladder and associativity match the Binding Power Table" {
+test "grammar: precedence and associativity match the Binding Power Table" {
     // Binding Power Table notes: `or` loosest, `and` next; comparison is non-associative
     // and looser than the bitwise three (`|` loosest, `&` tightest);
     // shifts sit between `&` and `+`; every left-recursive level
@@ -1511,11 +1511,12 @@ test "grammar rejects: a non-literal import specifier" {
 }
 
 test "grammar rejects: a chained comparison" {
-    // `comparison` parses at most one comparison-op — the production is
-    // non-associative, so the second `<` is a stray token.
+    // Binding Power Table document (parser algorithm, comparison
+    // branch): comparisons are non-associative and non-chaining, so the
+    // second `<` is rejected right after the first comparison is built.
     var t = try parseError("fn f() -> void { a < b < c; }");
     defer t.arena.deinit();
-    try testing.expectEqualStrings("expected ';' or '}' after expression, found '<'", t.diag.message);
+    try testing.expectEqualStrings("comparisons do not chain", t.diag.message);
 }
 
 test "grammar rejects: a field after the drop declaration" {

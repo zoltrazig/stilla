@@ -19,247 +19,129 @@ const ParseError = parser.ParseError;
 // ---------------------------------------------------------------------
 
 pub fn parseExpression(self: *parser.Parser) ParseError!*ast.Expr {
+    return parseExpressionBp(self, 0);
+}
+
+/// One infix row of the binding power table (Stilla Expression Binding
+/// Power Table.md): the AST operator, its left binding power, and
+/// whether it is one of the non-chaining comparison operators. The
+/// right binding power is always `lbp + 1` (left-associativity), so it
+/// is not stored.
+const InfixInfo = struct {
+    op: ast.BinaryOp,
+    lbp: u8,
+    is_comparison: bool = false,
+};
+
+/// The infix levels, loosest to tightest:
+/// `or < and < comparison < | < ^ < & < <<,>> < +,- < *,/,%`
+/// (Binding Power Table document; Core §16). Every infix operator here
+/// is left-associative except the comparisons, which are
+/// non-associative and non-chaining (their right operand parses at
+/// `lbp + 1`, so it stops before another comparison). `as` (power 10)
+/// is not in this table:
+/// its right side is a TYPE, so parseExpressionBp handles it directly.
+fn infixInfo(kind: lex.TokenKind) ?InfixInfo {
+    return switch (kind) {
+        .kw_or => .{ .op = .or_, .lbp = 1 },
+        .kw_and => .{ .op = .and_, .lbp = 2 },
+        .eq_eq => .{ .op = .eq, .lbp = 3, .is_comparison = true },
+        .ne => .{ .op = .ne, .lbp = 3, .is_comparison = true },
+        .lt => .{ .op = .lt, .lbp = 3, .is_comparison = true },
+        .le => .{ .op = .le, .lbp = 3, .is_comparison = true },
+        .gt => .{ .op = .gt, .lbp = 3, .is_comparison = true },
+        .ge => .{ .op = .ge, .lbp = 3, .is_comparison = true },
+        .pipe => .{ .op = .bitor, .lbp = 4 },
+        .caret => .{ .op = .bitxor, .lbp = 5 },
+        .ampersand => .{ .op = .bitand, .lbp = 6 },
+        .shl => .{ .op = .shl, .lbp = 7 },
+        .shr => .{ .op = .shr, .lbp = 7 },
+        .plus => .{ .op = .add, .lbp = 8 },
+        .minus => .{ .op = .sub, .lbp = 8 },
+        .star => .{ .op = .mul, .lbp = 9 },
+        .slash => .{ .op = .div, .lbp = 9 },
+        .percent => .{ .op = .rem, .lbp = 9 },
+        else => null,
+    };
+}
+
+/// The binding-power loop (`parse_expression(min_bp)` in the Binding
+/// Power Table document's normative parser algorithm; top-level calls
+/// use min_bp = 0).
+fn parseExpressionBp(self: *parser.Parser, min_bp: u8) ParseError!*ast.Expr {
     // Nesting-depth guard: deeply nested expressions (e.g. thousands
     // of nested parens) must fail with a normal diagnostic instead of
     // exhausting the native stack. 512 nested frames is far beyond
-    // anything real code writes, and each `parseExpression` frame is
-    // one grammar level (parens, call args, if/match subexpressions,
-    // blocks, ...). The counter tracks the current nesting depth and
+    // anything real code writes, and each parseExpressionBp frame is
+    // one binding-power recursion (parens, call args, if/match
+    // subexpressions, blocks, prefix operands, comparison right
+    // operands, ...). The counter tracks the current nesting depth and
     // resets as the recursion unwinds.
     if (self.depth >= 512) {
         return self.fail(self.cur().span, "expression nesting too deep (more than {d} levels)", .{512});
     }
     self.depth += 1;
     defer self.depth -= 1;
-    return parseLogicOr(
-        self,
-    );
-}
 
-pub fn parseLogicOr(self: *parser.Parser) ParseError!*ast.Expr {
-    var lhs = try parseLogicAnd(
-        self,
-    );
-    while (self.eat(.kw_or)) {
-        const rhs = try parseLogicAnd(
-            self,
-        );
-        lhs = try binary(self, .or_, lhs, rhs);
-    }
-    return lhs;
-}
-
-pub fn parseLogicAnd(self: *parser.Parser) ParseError!*ast.Expr {
-    var lhs = try parseComparison(
-        self,
-    );
-    while (self.eat(.kw_and)) {
-        const rhs = try parseComparison(
-            self,
-        );
-        lhs = try binary(self, .and_, lhs, rhs);
-    }
-    return lhs;
-}
-
-/// `comparison` is non-associative: at most one comparison operator
-/// (Binding Power Table document, comparison level; Core §16).
-pub fn parseComparison(self: *parser.Parser) ParseError!*ast.Expr {
-    const lhs = try parseBitOr(
-        self,
-    );
-    const op: ?ast.BinaryOp = switch (self.cur().kind) {
-        .eq_eq => .eq,
-        .ne => .ne,
-        .lt => .lt,
-        .le => .le,
-        .gt => .gt,
-        .ge => .ge,
-        else => null,
-    };
-    const o = op orelse return lhs;
-    _ = self.advance();
-    const rhs = try parseBitOr(
-        self,
-    );
-    return binary(self, o, lhs, rhs);
-}
-
-/// `bitwise-or` is left-associative and sits between comparison and
-/// `bitwise-xor` in precedence (`a | b ^ c` parses as `a | (b ^ c)`,
-/// like C and Python). `|` is the loosest of the three bitwise
-/// operators, `&` the tightest (Core §16.1).
-pub fn parseBitOr(self: *parser.Parser) ParseError!*ast.Expr {
-    var lhs = try parseBitXor(
-        self,
-    );
+    var left = try parseNud(self);
     while (true) {
-        const op: ?ast.BinaryOp = switch (self.cur().kind) {
-            .pipe => .bitor,
-            else => null,
-        };
-        const o = op orelse break;
+        // `as` sits at power 10 and its right side is a type, not an
+        // expression (Binding Power Table document, `as` row; Core §16),
+        // so it is handled before the infix table. Casts chain left:
+        // `x as a as b` is a cast whose operand is the inner cast.
+        if (self.at(.kw_as)) {
+            if (10 < min_bp) return left;
+            _ = self.advance();
+            const target = try parse_type.parseType(self);
+            left = try self.newExpr(.{ .cast = .{ .span = ast.Span.merge(left.span(), target.span()), .operand = left, .target = target } });
+            continue;
+        }
+        const info = infixInfo(self.cur().kind) orelse return left;
+        if (info.lbp < min_bp) return left;
         _ = self.advance();
-        const rhs = try parseBitXor(
-            self,
-        );
-        lhs = try binary(self, o, lhs, rhs);
+        const rhs = try parseExpressionBp(self, info.lbp + 1);
+        left = try binary(self, info.op, left, rhs);
+        // Comparisons do not chain: `a < b < c` is an error, not
+        // `(a < b) < c` (Binding Power Table document, parser
+        // algorithm's comparison branch).
+        if (info.is_comparison) {
+            if (infixInfo(self.cur().kind)) |next| {
+                if (next.is_comparison) return self.fail(self.cur().span, "comparisons do not chain", .{});
+            }
+        }
     }
-    return lhs;
 }
 
-/// `bitwise-xor` is left-associative and sits between `bitwise-or` and
-/// `bitwise-and` in precedence (Core §16.1).
-pub fn parseBitXor(self: *parser.Parser) ParseError!*ast.Expr {
-    var lhs = try parseBitAnd(
-        self,
-    );
-    while (true) {
-        const op: ?ast.BinaryOp = switch (self.cur().kind) {
-            .caret => .bitxor,
-            else => null,
-        };
-        const o = op orelse break;
-        _ = self.advance();
-        const rhs = try parseBitAnd(
-            self,
-        );
-        lhs = try binary(self, o, lhs, rhs);
-    }
-    return lhs;
-}
-
-/// `bitwise-and` is left-associative and sits between `bitwise-xor`
-/// and `shift` in precedence (`x & y << 2` parses as `x & (y << 2)`,
-/// like C and Python; Core §16.1).
-pub fn parseBitAnd(self: *parser.Parser) ParseError!*ast.Expr {
-    var lhs = try parseShift(
-        self,
-    );
-    while (true) {
-        const op: ?ast.BinaryOp = switch (self.cur().kind) {
-            .ampersand => .bitand,
-            else => null,
-        };
-        const o = op orelse break;
-        _ = self.advance();
-        const rhs = try parseShift(
-            self,
-        );
-        lhs = try binary(self, o, lhs, rhs);
-    }
-    return lhs;
-}
-
-/// `shift` is left-associative and sits between bitwise-and and
-/// additive in precedence (`a + b << c` parses as `(a + b) << c`,
-/// like C and Zig; Core §16.3).
-pub fn parseShift(self: *parser.Parser) ParseError!*ast.Expr {
-    var lhs = try parseAddition(
-        self,
-    );
-    while (true) {
-        const op: ?ast.BinaryOp = switch (self.cur().kind) {
-            .shl => .shl,
-            .shr => .shr,
-            else => null,
-        };
-        const o = op orelse break;
-        _ = self.advance();
-        const rhs = try parseAddition(
-            self,
-        );
-        lhs = try binary(self, o, lhs, rhs);
-    }
-    return lhs;
-}
-
-pub fn parseAddition(self: *parser.Parser) ParseError!*ast.Expr {
-    var lhs = try parseMultiply(
-        self,
-    );
-    while (true) {
-        const op: ?ast.BinaryOp = switch (self.cur().kind) {
-            .plus => .add,
-            .minus => .sub,
-            else => null,
-        };
-        const o = op orelse break;
-        _ = self.advance();
-        const rhs = try parseMultiply(
-            self,
-        );
-        lhs = try binary(self, o, lhs, rhs);
-    }
-    return lhs;
-}
-
-pub fn parseMultiply(self: *parser.Parser) ParseError!*ast.Expr {
-    var lhs = try parseUnary(
-        self,
-    );
-    while (true) {
-        const op: ?ast.BinaryOp = switch (self.cur().kind) {
-            .star => .mul,
-            .slash => .div,
-            .percent => .rem,
-            else => null,
-        };
-        const o = op orelse break;
-        _ = self.advance();
-        const rhs = try parseUnary(
-            self,
-        );
-        lhs = try binary(self, o, lhs, rhs);
-    }
-    return lhs;
-}
-
-pub fn parseUnary(self: *parser.Parser) ParseError!*ast.Expr {
+/// The nud of the parser algorithm: a prefix operator, a `move`, or a
+/// primary form whose own postfix chain (`.name`, call, `::[types]`)
+/// is consumed here (parsePostfix). The chain never re-opens after an
+/// infix operator or a cast — those tokens return to
+/// parseExpressionBp instead.
+fn parseNud(self: *parser.Parser) ParseError!*ast.Expr {
     switch (self.cur().kind) {
         .minus, .bang => {
-            // Nesting-depth guard: a unary chain (`!!!!x`, `---x`)
-            // recurses through parseUnary without passing through
-            // parseExpression, so it counts against the same shared
-            // 512-level cap with the same diagnostic (see
-            // parseExpression); the bound keeps both the parser and the
-            // recursive unary lowering (lowerUnary) off the native-stack
-            // edge for pathological input.
-            if (self.depth >= 512) {
-                return self.fail(self.cur().span, "expression nesting too deep (more than {d} levels)", .{512});
-            }
-            self.depth += 1;
-            defer self.depth -= 1;
+            // Prefix `-`/`!` parse their operand at power 10 (the `as`
+            // level): `-x as int32` is `-(x as int32)` and `-f().x` is
+            // `-(f().x)` (Binding Power Table document, prefix row).
+            // Prefix chains (`!!!!x`) recurse through parseExpressionBp,
+            // so they count against the same shared 512-level cap with
+            // the same diagnostic (see parseExpressionBp); the bound
+            // keeps both the parser and the recursive unary lowering
+            // (lowerUnary) off the native-stack edge.
             const tok = self.advance();
-            const operand = try parseUnary(
-                self,
-            );
+            const operand = try parseExpressionBp(self, 10);
             const op: ast.UnaryOp = if (tok.kind == .minus) .neg else .not;
             return self.newExpr(.{ .unary = .{ .span = ast.Span.merge(tok.span, operand.span()), .op = op, .operand = operand } });
         },
         .kw_move => {
+            // `move` takes a complete binding name, not an expression —
+            // there is no partial move (Core §13.4).
             const tok = self.advance();
             const name = try self.expectIdent();
             return self.newExpr(.{ .move = .{ .span = ast.Span.merge(tok.span, name.span), .name = name } });
         },
-        else => return parseCast(
-            self,
-        ),
+        else => return parsePostfix(self),
     }
-}
-
-/// `postfix ( as type )*` (Binding Power Table document, `as` row; Core §16). Casts chain:
-/// `x as a as b` is a cast whose operand is the inner cast.
-pub fn parseCast(self: *parser.Parser) ParseError!*ast.Expr {
-    var operand = try parsePostfix(
-        self,
-    );
-    while (self.at(.kw_as)) {
-        _ = self.advance();
-        const target = try parse_type.parseType(self);
-        operand = try self.newExpr(.{ .cast = .{ .span = ast.Span.merge(operand.span(), target.span()), .operand = operand, .target = target } });
-    }
-    return operand;
 }
 
 pub fn parsePostfix(self: *parser.Parser) ParseError!*ast.Expr {
