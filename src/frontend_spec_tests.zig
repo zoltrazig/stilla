@@ -341,9 +341,13 @@ test "frontend rejects missing, duplicate, and unknown struct fields" {
 
 test "frontend rejects import outside a module constant initializer" {
     // Core §2.2 / Binding Power Table document, import form: `import(...)` may appear
-    // only as the initializer of a module-level `const` binding.
+    // only as the initializer of a module-level `const` binding. Binding the module
+    // value is rejected by the checker under Core §2.3 (`let m = import("builtin")` —
+    // a module value cannot be bound by a local let); a bare statement position,
+    // whose result the checker discards, reaches the phase-3 backstop
+    // (cfg_lower_expr.zig) tested here.
     var c = try compileText("app", &.{
-        .{ "app", "fn main() -> void { let b = import(\"builtin\"); }" },
+        .{ "app", "fn main() -> void { import(\"builtin\"); }" },
     });
     defer c.deinit();
     try testing.expect(c.program == null);

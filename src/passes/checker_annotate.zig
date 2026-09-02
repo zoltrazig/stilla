@@ -273,6 +273,17 @@ fn checkLet(frame: *Frame, l: *const ast.LetStmt) CheckError!void {
         else => true,
     };
     if (binds) try requireMoveIfOwned(frame, l.init, "binding");
+    // A module value may exist only in a module-level `const` binding
+    // (Core §2.3): binding one by a local `let` would store it outside
+    // module storage, so a binding-producing let of a module type is
+    // rejected. A wildcard discards (no storage), and a block-level
+    // `using` alias to a module is a scoped compile-time binding handled
+    // in `bindUsing` — neither is affected.
+    if (t) |tt| {
+        if (tt == .module) {
+            return frame.ck.fail(l.span, "a module value may not be bound by a local 'let' (Core §2.3)", .{});
+        }
+    }
     if (t) |tt| try inferPattern(frame, &l.pattern, tt, false);
 }
 
@@ -814,8 +825,23 @@ fn inferPath(frame: *Frame, p: *const ast.PathExpr) CheckError!?cfg.Type {
             // Each field slot is an owning location, so a field value may
             // not be a borrowed unique value (Core §10.7), and an existing
             // unique local owner must be moved explicitly (Core §10.4).
+            // Field positions are an explicit type context (Core Types
+            // §16.3), like parameter positions: a literal is typed at the
+            // declared field's width (`Big { v: 1 }` with `v: int64`
+            // types `1` at int64), and a nested construction fills its
+            // unbound type arguments from the field's goal type.
+            const sd = blk: {
+                const cname = type_resolve.joinPath(frame.ck.alloc(), p.path) orelse break :blk null;
+                break :blk moduleinfo.structDecl(frame.resolve, frame.info, cname);
+            };
             for (sc.fields) |*f| {
-                _ = try inferExpr(frame, f.value);
+                var goal: ?cfg.Type = null;
+                if (sd) |s| {
+                    if (moduleinfo.fieldIndex(s, f.name.text)) |idx| {
+                        goal = try frame.ck.resolveTypeOf(frame.ma, frame.info, &s.fields[@intCast(idx)].type_);
+                    }
+                }
+                _ = try inferExprAs(frame, f.value, goal);
                 if (try isBorrowedExpr(frame, f.value)) {
                     return frame.ck.fail(f.value.span(), "cannot store a borrowed value into an owning field (Core §10.7)", .{});
                 }
@@ -835,9 +861,24 @@ fn inferPath(frame: *Frame, p: *const ast.PathExpr) CheckError!?cfg.Type {
             // Union-variant construction: the path is a type name. Payload
             // slots are owning locations (Core §10.7), and an existing
             // unique local owner must be moved explicitly (Core §10.4).
+            // Payload positions are an explicit type context (Core Types
+            // §16.3) like struct fields: a literal payload is typed at the
+            // declared payload's width.
+            const ud = blk: {
+                const uname = type_resolve.joinPath(frame.ck.alloc(), p.path) orelse break :blk null;
+                break :blk moduleinfo.unionDecl(frame.resolve, frame.info, uname);
+            };
+            const payload_types: ?[]const ast.Type = if (ud) |u| blk: {
+                const vi = moduleinfo.variantIndex(u, v.name.text) orelse break :blk null;
+                break :blk u.variants[@intCast(vi)].types;
+            } else null;
             if (v.args) |args| {
-                for (args) |*a| {
-                    _ = try inferExpr(frame, a);
+                for (args, 0..) |*a, i| {
+                    var goal: ?cfg.Type = null;
+                    if (payload_types) |types| {
+                        if (i < types.len) goal = try frame.ck.resolveTypeOf(frame.ma, frame.info, &types[i]);
+                    }
+                    _ = try inferExprAs(frame, a, goal);
                     if (try isBorrowedExpr(frame, a)) {
                         return frame.ck.fail(a.span(), "cannot store a borrowed value into an owning payload (Core §10.7)", .{});
                     }
@@ -1012,7 +1053,16 @@ fn inferConstructArgs(frame: *Frame, id: moduleinfo.TypeId, sc: ?*const ast.Stru
                     break;
                 }
             }
-            at[i] = if (found) |fe| (try inferExpr(frame, fe)) orelse return &.{} else .{ .primitive = .void };
+            if (found) |fe| {
+                // Payload positions are an explicit type context (Core
+                // Types §16.3): infer under the declared field's resolved
+                // type, so a literal payload carries its field's width
+                // into the unification below instead of the int32 default.
+                const ft = try frame.ck.resolveTypeOf(frame.ma, frame.info, &wt[i]);
+                at[i] = (try inferExprAs(frame, fe, ft)) orelse return &.{};
+            } else {
+                at[i] = .{ .primitive = .void };
+            }
             used = used or found != null;
         }
         written = wt;
@@ -1027,7 +1077,12 @@ fn inferConstructArgs(frame: *Frame, id: moduleinfo.TypeId, sc: ?*const ast.Stru
         written = vt;
         const va = vv.args orelse return &.{};
         const at = try alloc.alloc(cfg.Type, va.len);
-        for (va, 0..) |*a, i| at[i] = (try inferExpr(frame, a)) orelse return &.{};
+        for (va, 0..) |*a, i| {
+            // Payload positions are an explicit type context (Core Types
+            // §16.3): infer under the declared payload's resolved type.
+            const pt = if (i < vt.len) (try frame.ck.resolveTypeOf(frame.ma, frame.info, &vt[i])) else null;
+            at[i] = (try inferExprAs(frame, a, pt)) orelse return &.{};
+        }
         args = at;
     } else return &.{};
     var env = std.StringHashMapUnmanaged(cfg.Type).empty;

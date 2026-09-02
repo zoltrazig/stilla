@@ -177,9 +177,15 @@ fn validateExpr(frame: *Frame, e: *const ast.Expr) CheckError!void {
     switch (e.*) {
         .int, .float, .string, .bool, .void, .import => {},
         .path => |*p| switch (p.tail) {
-            .construct => |*sc| for (sc.fields) |*f| try validateExpr(frame, f.value),
-            .variant => |*v| if (v.args) |args| {
-                for (args) |*a| try validateExpr(frame, a);
+            .construct => |*sc| {
+                for (sc.fields) |*f| try validateExpr(frame, f.value);
+                try validateStructConstruct(frame, e, p, sc);
+            },
+            .variant => |*v| {
+                if (v.args) |args| {
+                    for (args) |*a| try validateExpr(frame, a);
+                }
+                try validateVariantConstruct(frame, e, p, v);
             },
             .none => {},
         },
@@ -206,6 +212,67 @@ fn validateExpr(frame: *Frame, e: *const ast.Expr) CheckError!void {
         .member => |*mm| try validateExpr(frame, mm.object),
         .call => |*c| try validateCall(frame, c),
         .specialize => |*s| try validateExpr(frame, s.operand),
+    }
+}
+
+/// Core §8.1: the values written into a struct construction must be
+/// compatible with the declared field types. The declaration's type
+/// parameters substitute under the construction's instantiation — the
+/// construct's own annotated type (`expr_of`) — mirroring how
+/// `inferPattern` types struct patterns. A wildcard instantiation (empty
+/// type args on a generic struct, i.e. no goal constrained it) has no
+/// concrete field types and is skipped, matching the pattern side.
+/// Annotation already typed each value under the field's goal (Core Types
+/// §16.3), so literals arrive at the field's width; this pass rejects
+/// values that no goal can adapt: `S { v: "x" }` into an int32 field,
+/// an `any` field receiving `hostdata` or a module value, a call result
+/// of the wrong type, and so on.
+fn validateStructConstruct(frame: *Frame, e: *const ast.Expr, p: *const ast.PathExpr, sc: *const ast.StructConstruct) CheckError!void {
+    const t = frame.ma.expr_of.get(e) orelse return;
+    if (t != .named) return;
+    const name = type_resolve.joinPath(frame.ck.alloc(), p.path) orelse return;
+    const sd = moduleinfo.structDecl(frame.resolve, frame.info, name) orelse return;
+    if (sd.type_params.len != t.named.args.len) return; // wildcard instantiation
+    for (sc.fields) |*f| {
+        const idx = moduleinfo.fieldIndex(sd, f.name.text) orelse continue;
+        const declared = try frame.ck.resolveTypeOf(frame.ma, frame.info, &sd.fields[@intCast(idx)].type_);
+        const field_t = type_resolve.substParams(frame.ck.alloc(), sd.type_params, t.named.args, declared);
+        const vt = frame.ma.expr_of.get(f.value) orelse continue;
+        if (compatible(field_t, vt)) continue;
+        return frame.ck.fail(f.value.span(), "field type mismatch: expected {s}, found {s} (Core §8.1)", .{
+            try fmtType(frame.ck.alloc(), frame.resolve, field_t),
+            try fmtType(frame.ck.alloc(), frame.resolve, vt),
+        });
+    }
+}
+
+/// Core §11: the values written into a union variant's payload must be
+/// compatible with the variant's declared payload types, with the
+/// declaration's type parameters substituted under the construction's
+/// instantiation. Same substitution shape and wildcard rule as
+/// `validateStructConstruct`; the payload side of `inferPattern`'s
+/// variant patterns is the pattern-side mirror.
+fn validateVariantConstruct(frame: *Frame, e: *const ast.Expr, p: *const ast.PathExpr, ve: *const ast.VariantExpr) CheckError!void {
+    const t = frame.ma.expr_of.get(e) orelse return;
+    if (t != .named) return;
+    const name = type_resolve.joinPath(frame.ck.alloc(), p.path) orelse return;
+    const ud = moduleinfo.unionDecl(frame.resolve, frame.info, name) orelse return;
+    if (ud.type_params.len != t.named.args.len) return; // wildcard instantiation
+    const vi = moduleinfo.variantIndex(ud, ve.name.text) orelse return;
+    const types = ud.variants[@intCast(vi)].types orelse return; // no payload
+    const args = ve.args orelse return;
+    for (args, 0..) |*a, i| {
+        const declared = if (i < types.len)
+            try frame.ck.resolveTypeOf(frame.ma, frame.info, &types[i])
+        else
+            cfg.Type{ .primitive = .any };
+        const payload_t = type_resolve.substParams(frame.ck.alloc(), ud.type_params, t.named.args, declared);
+        const vt = frame.ma.expr_of.get(a) orelse continue;
+        if (compatible(payload_t, vt)) continue;
+        return frame.ck.fail(a.span(), "payload type mismatch: expected {s}, found {s} (Core §11)", .{
+            try fmtType(frame.ck.alloc(), frame.resolve, payload_t),
+            try fmtType(frame.ck.alloc(), frame.resolve, vt),
+        });
     }
 }
 
@@ -1191,9 +1258,12 @@ const InitOrder = struct {
 fn compatible(expected: cfg.Type, actual: cfg.Type) bool {
     // Coercion to the top type `any` is the sole implicit widening
     // (Core §11.6) — except that `hostdata` does not coerce to `any`
-    // (Core §11.6, §11.7): a tagless payload cannot be an `any` value.
+    // (Core §11.6, §11.7: a tagless payload cannot be an `any` value), and
+    // neither does a module value (Core §2.3: a module value exists only
+    // in module storage, so widening it into `any` would store it
+    // outside).
     if (expected == .primitive and expected.primitive == .any)
-        return !(actual == .primitive and actual.primitive == .hostdata);
+        return !(actual == .primitive and actual.primitive == .hostdata) and actual != .module;
     if (actual == .primitive and actual.primitive == .never) return true;
     if (cfg.Type.eql(expected, actual)) return true;
     return compatibleRecur(expected, actual);

@@ -170,7 +170,7 @@ test "frontend AIR round-trips multi-result destructures and zero-arg construct"
             \\const builtin = import("builtin");
             \\union Tree[T] {
             \\    Empty,
-            \\    Node(box[Tree[T]], T, box[Tree[T]])
+            \\    Node(box[T], T, box[T])
             \\}
             \\struct Nothing {}
             \\fn main() -> void {
