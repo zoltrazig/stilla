@@ -1,4 +1,4 @@
-//! Test file: `parser` — the LL(k) parser.
+//! Test file: `parser` — the recursive-descent parser.
 //!
 //! White-box tests of `src/parser.zig`'s own internals stay in that module's
 //! file; this file aggregates them (with the split grammar passes under

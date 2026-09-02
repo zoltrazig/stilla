@@ -22,13 +22,14 @@
 ; Cross-references to the companion documents refer to them as a whole:
 ;   "the Core specification" and "the Runtime specification".
 ;
-; LL(1) parsing notes
-; -------------------
-;   Every syntactic decision point in this grammar is resolvable with a single
-;   token of lookahead over the token stream. Parenthesized forms are
-;   left-factored so that the "(" decision point needs only the token after
-;   "(" (see "paren-or-tuple" and "tuple-pattern"). Four FOLLOW-set overlaps
-;   are resolved by documented parser rules rather than in the BNF itself:
+; Parser lookahead notes
+; ----------------------
+;   This grammar has no productions that require more than one token of
+;   lookahead to resolve. Parenthesized forms are left-factored so that the
+;   "(" decision point needs only the token after "(" (see "paren-or-tuple"
+;   and "tuple-pattern"). Four decision points that a context-free grammar
+;   alone cannot express are resolved by the following documented parser
+;   rules rather than in the BNF itself:
 ;     1. block: after parsing an expression at statement level, a ";" makes it
 ;        an expression statement; a "}" makes it the final expression.
 ;     2. path-tail: a "::" immediately following a type-path always enters the
@@ -299,7 +300,7 @@ named-type =
 ; (lexically pre-identified; see "Reserved words") is also accepted as a
 ; segment after "." and "::", so that members named by reserved words —
 ; e.g. "builtin.str" and "builtin.box" (the Core specification) — parse. This is a
-; documented parser rule (LL(1) parsing note 4): the token after "." or
+; documented parser rule (parser note 4): the token after "." or
 ; "::" is read as a member name whether or not it is reserved. The same
 ; rule applies to the first segment of a "type-path" when the path names
 ; a type member such as "builtin.Option".
@@ -416,7 +417,7 @@ opaque-def =
 ; ----------------------------------------------------------------------------
 ; A final expression is distinguished from an expression statement by the
 ; absence of a trailing semicolon.
-; Parser rule (LL(1) parsing note 1): in the statement loop, parse an
+; Parser rule (parser note 1): in the statement loop, parse an
 ; expression and then expect ";" (expression statement) or "}" (final
 ; expression, terminating the block).
 
@@ -567,7 +568,7 @@ postfix-suffix =
     / specialization-suffix
 
 ; Reserved words are accepted as member names after "." (path-segment
-; rule under "type-path", LL(1) parsing note 4), so "builtin.str" parses.
+; rule under "type-path", parser note 4), so "builtin.str" parses.
 
 member-suffix =
     "."
@@ -578,7 +579,7 @@ call-suffix =
     arg-list
     ")"
 
-; Per the LL(1) parsing note 2, this suffix applies only after primary forms
+; Per the parser note 2, this suffix applies only after primary forms
 ; other than a bare type-path; a "::" immediately after a type-path is
 ; consumed by "path-tail".
 specialization-suffix =
@@ -636,7 +637,7 @@ path-tail =
 ; The empty form "()" is "void-literal". A single-element tuple "(e)" is not
 ; a tuple literal; the parenthesized form "(e)" is a "paren-expression". A
 ; one-element tuple is written "(e,)".
-; Left-factored for LL(1): a "(" is either the void literal (the empty
+; Left-factored: a "(" is either the void literal (the empty
 ; branch, matching the void value) or a parenthesized/tuple expression;
 ; after the first expression, ")" or "," decides.
 
@@ -776,7 +777,7 @@ literal-pattern =
 ; A "type-test-pattern" matches an "any" value by its runtime type tag (the Core specification). It is a concrete type name optionally followed by a
 ; binding identifier. Keyword-led forms are parsed here. An identifier-led
 ; form ("File f", "Option[int32] o") is parsed as a "path-pattern" whose
-; "pattern-tail" is the binding identifier (LL(1) parsing note 3).
+; "pattern-tail" is the binding identifier (parser note 3).
 ; Static semantics reject "any", "never", and "hostdata" as test types: the
 ; test type must be concrete (the Core specification), and no pattern is defined on
 ; "hostdata" (the Core specification).
@@ -804,7 +805,7 @@ type-test-type =
 ; ----------------------------------------------------------------------------
 ; Tuple patterns
 ; ----------------------------------------------------------------------------
-; Left-factored for LL(1): a "(" is either the void literal (the empty
+; Left-factored: a "(" is either the void literal (the empty
 ; tuple, matching the void value) or a non-empty tuple pattern; after the
 ; first pattern, "," and then "]"/")" decide.
 

@@ -308,7 +308,7 @@ test "frontend lowers ownership-transfer destructures" {
             \\    f
             \\}
             \\fn tail(xs: list[int32]) -> list[int32] {
-            \\    let [h ..rest] = xs;
+            \\    let [h, ..rest] = xs;
             \\    rest
             \\}
             \\fn main() -> void { builtin.print("x"); }

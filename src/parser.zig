@@ -1,12 +1,12 @@
-//! LL(k) parser for the Stilla core language (Grammar v1.3 Draft) — turns
-//! a source file's token stream into an `ast.Program`.
+//! Recursive-descent token parser for the Stilla core language (Grammar
+//! v1.3 Draft) — turns a source file's token stream into an `ast.Program`.
 //!
-//! The grammar is designed to be LL(1)-parseable over the lexical token
-//! stream ("LL(1) parsing notes"): every decision point is resolvable with
-//! one token of lookahead, except two documented two-token points —
-//! `path-tail` after `::`, and the block statement loop's `;` / `}` split.
-//! The parser works over a pre-lexed token buffer (`lex.Lexer`), so it
-//! provides arbitrary lookahead; k = 2 suffices for the whole grammar.
+//! The grammar's decision points are resolvable with one token of lookahead,
+//! except two documented points — `path-tail` after `::`, and the block
+//! statement loop's `;` / `}` split — which the parser resolves as described
+//! in the grammar's parser lookahead notes. The parser works over a pre-lexed
+//! token buffer (`lex.Lexer`), so it provides arbitrary lookahead; k = 2
+//! suffices for the whole grammar.
 //!
 //! All AST nodes are allocated in the parser's arena and live until
 //! `deinit`. On `error.Syntax`, `diags` holds every parse error (in
@@ -333,13 +333,22 @@ pub const Parser = struct {
 
     pub fn expectPathSegment(self: *Parser) ParseError!ast.Ident {
         const tok = self.cur();
-        switch (tok.kind) {
-            .ident => {},
-            .kw_any, .kw_as, .kw_bool, .kw_borrow, .kw_box, .kw_byte, .kw_const, .kw_drop, .kw_else, .kw_false, .kw_float64, .kw_float32, .kw_fn, .kw_hostdata, .kw_int64, .kw_if, .kw_import, .kw_int32, .kw_let, .kw_list, .kw_match, .kw_move, .kw_never, .kw_str, .kw_struct, .kw_true, .kw_tuple, .kw_type, .kw_uint64, .kw_uint32, .kw_union, .kw_using, .kw_void => {},
-            else => return self.fail(tok.span, "expected a path segment, found {s}", .{self.describe(tok)}),
+        if (!self.atPathSegment()) {
+            return self.fail(tok.span, "expected a path segment, found {s}", .{self.describe(tok)});
         }
         self.pos += 1;
         return .{ .span = tok.span, .text = tok.text };
+    }
+
+    /// Whether the current token can be a path segment: an identifier, or
+    /// any reserved word read as a member name after `.` / `::` (Grammar
+    /// `type-path` note, parser note 4 — every reserved word is accepted).
+    pub fn atPathSegment(self: *Parser) bool {
+        return switch (self.cur().kind) {
+            .ident => true,
+            .kw_and, .kw_any, .kw_as, .kw_bool, .kw_borrow, .kw_box, .kw_byte, .kw_const, .kw_drop, .kw_else, .kw_false, .kw_float64, .kw_float32, .kw_fn, .kw_hostdata, .kw_int64, .kw_if, .kw_import, .kw_int32, .kw_let, .kw_list, .kw_match, .kw_move, .kw_never, .kw_opaque, .kw_or, .kw_str, .kw_struct, .kw_true, .kw_tuple, .kw_type, .kw_uint64, .kw_uint32, .kw_union, .kw_using, .kw_void => true,
+            else => false,
+        };
     }
 
     // ---------------------------------------------------------------------
@@ -973,7 +982,7 @@ test "parses keyword-led type-test patterns" {
 }
 
 test "parses identifier-led type-test patterns" {
-    // LL(1) note 3: an identifier immediately following the type path
+    // Parser note 3: an identifier immediately following the type path
     // marks a type-test binding (`File f`, `Option[int32] o`). A bare
     // identifier remains an identifier-pattern.
     var t = try parseText("const r = match (a) { File f => 1, builtin.Option[int32] o => 2, x => 3 };");

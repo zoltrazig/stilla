@@ -16,7 +16,7 @@ pub fn parseBlockRef(self: *parser.Parser) ParseError!*ast.Block {
     return self.newBlock(try parseBlock(self));
 }
 
-/// `{ statement* [expression] }` (Grammar `block`). Parser rule (LL(1)
+/// `{ statement* [expression] }` (Grammar `block`). Parser rule (parser
 /// note 1): after an expression, `;` makes it an expression statement;
 /// `}` makes it the final expression, ending the block. A statement that
 /// fails to parse is dropped (its diagnostic recorded) and the block

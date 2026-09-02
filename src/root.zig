@@ -11,7 +11,7 @@
 //!               §3.2, §5.6)
 //! - `ast`     — source spans and AST nodes for diagnostics (compile-time)
 //! - `lex`     — lexer: source text → tokens (compile-time)
-//! - `parser`  — LL(k) parser: token stream → AST (compile-time)
+//! - `parser`  — recursive-descent parser: token stream → AST (compile-time)
 //! - `cfg`     — the AIR (air.md): data structures plus the text-form
 //!               parser and canonical printer (compile-time)
 //! - `checker` — type checker and AST annotator (compile-time). Current
@@ -149,6 +149,9 @@ test {
     _ = @import("ast_tests.zig");
     _ = @import("lex_tests.zig");
     _ = @import("parser_tests.zig");
+    // Grammar->AST conformance over the normative ABNF and the Core
+    // Language Specification's example programs.
+    _ = @import("grammar_spec_tests.zig");
     _ = @import("checker_tests.zig");
     _ = @import("host_tests.zig");
     _ = @import("stdbundle_tests.zig");

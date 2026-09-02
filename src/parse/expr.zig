@@ -269,7 +269,11 @@ pub fn parsePostfix(self: *parser.Parser) ParseError!*ast.Expr {
         switch (self.cur().kind) {
             .dot => {
                 _ = self.advance();
-                const name = try self.expectIdent();
+                // Grammar parser note 4: the token after "." is read as a
+                // member name even when it is a reserved word, so members
+                // such as `f().str` and `(m).box` parse after any primary,
+                // exactly as path segments already do (`builtin.str`).
+                const name = try self.expectPathSegment();
                 expr = try self.newExpr(.{ .member = .{ .span = ast.Span.merge(expr.span(), name.span), .object = expr, .name = name } });
             },
             .lparen => {
@@ -281,7 +285,7 @@ pub fn parsePostfix(self: *parser.Parser) ParseError!*ast.Expr {
             },
             // `:: [types]` after a non-path primary (Grammar
             // `specialization-suffix`); a `::` immediately after a
-            // type-path was consumed by `path-tail` (LL(1) note 2).
+            // type-path was consumed by `path-tail` (parser note 2).
             .dcolon => {
                 _ = self.advance();
                 const type_args = try self.parseTypeArgs();
@@ -377,12 +381,14 @@ pub fn parsePathExpr(self: *parser.Parser) ParseError!*ast.Expr {
             return self.newExpr(.{ .path = .{ .span = self.spanFrom(start), .path = path, .type_args = type_args, .tail = .{ .construct = construct } } });
         },
         .dcolon => {
-            // Parser rule (LL(1) note 2): a `::` immediately following
+            // Parser rule (parser note 2): a `::` immediately following
             // a type-path always enters the `path-tail` branch.
             _ = self.advance();
             const vstart = self.mark();
-            if (self.at(.ident)) {
-                const name = try self.expectIdent();
+            // parser note 4: a variant name after `::` may be a reserved
+            // word, exactly as a member name after `.`.
+            if (self.atPathSegment()) {
+                const name = try self.expectPathSegment();
                 var args: ?[]ast.Expr = null;
                 if (self.eat(.lparen)) args = try parseArgListRest(
                     self,
@@ -491,18 +497,19 @@ pub fn parseMatchExpr(self: *parser.Parser) ParseError!*ast.Expr {
     try self.expectAdvance(.rparen, "')'");
     try self.expectAdvance(.lbrace, "'{'");
     var arms = std.ArrayList(ast.MatchArm).empty;
-    if (!self.at(.rbrace)) {
-        while (true) {
-            const astart = self.mark();
-            const pattern = try parse_pattern.parsePattern(self);
-            try self.expectAdvance(.fat_arrow, "'=>'");
-            const body = try parseExpression(
-                self,
-            );
-            try arms.append(self.arena.allocator(), .{ .span = self.spanFrom(astart), .pattern = pattern, .body = body });
-            if (!self.eat(.comma)) break;
-            if (self.at(.rbrace)) break;
-        }
+    // Grammar `match-expression` requires at least one `match-arm`
+    // (`"{" match-arm *( "," match-arm ) [ "," ] "}"`); the loop below
+    // always parses one before its first comma test.
+    while (true) {
+        const astart = self.mark();
+        const pattern = try parse_pattern.parsePattern(self);
+        try self.expectAdvance(.fat_arrow, "'=>'");
+        const body = try parseExpression(
+            self,
+        );
+        try arms.append(self.arena.allocator(), .{ .span = self.spanFrom(astart), .pattern = pattern, .body = body });
+        if (!self.eat(.comma)) break;
+        if (self.at(.rbrace)) break;
     }
     try self.expectAdvance(.rbrace, "'}'");
     return self.newExpr(.{ .match = .{ .span = self.spanFrom(start), .scrutinee = scrutinee, .arms = try self.arena.allocator().dupe(ast.MatchArm, arms.items) } });

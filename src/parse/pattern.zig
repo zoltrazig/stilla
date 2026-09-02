@@ -103,7 +103,8 @@ pub fn parseTuplePattern(self: *parser.Parser) ParseError!ast.Pattern {
 }
 
 /// `[ pattern, ... [..rest] ]` or `[..rest]` (Grammar `list-pattern`,
-/// `list-pattern-items`, `list-rest`).
+/// `list-pattern-items`, `list-rest`). The `..rest` either stands alone
+/// or follows a comma — `list-pattern-items` has no comma-free form.
 pub fn parseListPattern(self: *parser.Parser) ParseError!ast.Pattern {
     const start = self.mark();
     _ = self.advance(); // '['
@@ -120,11 +121,6 @@ pub fn parseListPattern(self: *parser.Parser) ParseError!ast.Pattern {
                 break;
             }
             try items.append(self.arena.allocator(), try parsePattern(self));
-        }
-        // `[a ..r]` — the comma before `..rest` is optional.
-        if (self.at(.ellipsis)) {
-            _ = self.advance(); // '..'
-            rest = try self.expectIdent();
         }
     }
     try self.expectAdvance(.rbracket, "']'");
@@ -161,7 +157,9 @@ pub fn parsePathPattern(self: *parser.Parser) ParseError!ast.Pattern {
         },
         .dcolon => {
             _ = self.advance();
-            const name = try self.expectIdent();
+            // parser note 4: the token after `::` is read as a name even
+            // when it is a reserved word (variant names such as `R::str`).
+            const name = try self.expectPathSegment();
             var args: ?[]ast.Pattern = null;
             if (self.eat(.lparen)) {
                 // At least one pattern; no trailing comma.
@@ -174,7 +172,7 @@ pub fn parsePathPattern(self: *parser.Parser) ParseError!ast.Pattern {
             const vp = ast.VariantPattern{ .span = self.spanFrom(start), .name = name, .args = args };
             return .{ .path = .{ .span = self.spanFrom(start), .path = path, .type_args = type_args, .tail = .{ .variant = vp } } };
         },
-        // Parser rule (LL(1) note 3): an identifier immediately
+        // Parser rule (parser note 3): an identifier immediately
         // following the type path (with optional type arguments) marks
         // a type-test pattern binding (`File f`, `Option[int32] o`,
         // Core §14.7). An identifier alone is an identifier-pattern.
