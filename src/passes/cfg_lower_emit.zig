@@ -296,13 +296,29 @@ pub fn bindLocal(self: *lower.Lowerer, fs: *lower.FuncState, name: []const u8, v
     const local = try self.arena.create(lower.Local);
     local.* = .{ .name = name, .value = value, .owns_unique = owns_unique };
     try fs.scopes.items[fs.scopes.items.len - 1].locals.append(self.arena, local);
-    try fs.symbols.put(self.arena, name, local);
     try fs.local_values.put(self.arena, value, {});
     if (owns_unique) try fs.value_locals.put(self.arena, value, local);
 }
 
+/// Resolve a name to its innermost live binding by walking the scope
+/// stack outward (a shadowed outer binding is found again once the
+/// shadowing scope pops). A flat symbol map is wrong here: `bindLocal`
+/// would permanently clobber the enclosing binding (a match-arm pattern
+/// or nested-block `let` shadowing an outer local broke every later
+/// lookup — `drop t` resolved to the arm's dead binding and the compiler
+/// emitted an undominated use).
 pub fn lookupLocal(fs: *lower.FuncState, name: []const u8) ?*lower.Local {
-    return fs.symbols.get(name);
+    var i = fs.scopes.items.len;
+    while (i > 0) {
+        i -= 1;
+        const locals = fs.scopes.items[i].locals.items;
+        var j = locals.len;
+        while (j > 0) {
+            j -= 1;
+            if (std.mem.eql(u8, locals[j].name, name)) return locals[j];
+        }
+    }
+    return null;
 }
 
 /// Scope end: drop every live unique-owned local in reverse creation

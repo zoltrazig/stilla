@@ -143,7 +143,11 @@ lowering length-guards the arm first (the `list#len` syscall, Runtime
 *Unique* element); the literal-item equality tests reuse the same
 `read_index` at the literal's index. A consuming `match (move xs)` uses
 the atomic `split_list` destructure instead (air.md §5.3), which traps on
-a short list (Runtime §7.2).
+a short list (Runtime §7.2). A consuming pattern that binds **no item
+values** — `[]` or `[..rest]` — does not split at all: `[]`'s base is
+always the empty list (the null value, which `split_list` refuses to
+dereference), and `[..rest]` binds the base itself as the owned rest, so
+there is nothing to split into.
 
 ### Calls
 

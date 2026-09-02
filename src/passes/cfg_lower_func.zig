@@ -123,7 +123,6 @@ pub fn newFuncState(
         .values = .empty,
         .blocks = .empty,
         .block_instrs = .empty,
-        .symbols = .empty,
         .scopes = .empty,
         .local_values = .empty,
         .consumed = .empty,

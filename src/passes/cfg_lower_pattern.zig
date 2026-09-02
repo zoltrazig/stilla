@@ -198,6 +198,31 @@ pub fn destructureList(self: *Lowerer, fs: *FuncState, lp: *const ast.ListPatter
         // base as a whole and defines the item values, then the owned
         // rest. An exact pattern (`[a, b]`, no rest) drops the remainder
         // immediately — the whole list is still consumed.
+        if (lp.items.len == 0) {
+            // `[]` and `[..rest]` bind no item values, so there is
+            // nothing to split: the base itself is the whole owner and
+            // is transferred as-is (Core §14.6). A `split_list` here
+            // would be impossible to execute anyway — the `[]` arm's
+            // base is always the empty list, which is the null value
+            // the VM refuses to touch ("illegal null"), and a
+            // rest-only split has no head slot for the VM's handler
+            // ("split_list descriptor too small").
+            if (lp.rest) |rest| {
+                // `[..rest]` binds the whole list as the owned rest:
+                // the binding takes the base's ownership, so it must
+                // NOT be marked consumed here (a consumed base would
+                // skip the `rest` drop at arm scope end — a leak).
+                // The arm's scope-end cleanup consumes it, which is
+                // what the conditional-release merge observes.
+                try cfg_lower_emit.bindLocal(self, fs, rest.text, base, base.ownership == .unique and base.state == .owned);
+            } else {
+                // `[]` binds nothing: the whole (empty) list is
+                // consumed by the construct and needs no destruction.
+                cfg_lower_emit.markConsumed(self, fs, base);
+                try cfg_lower_emit.cleanupDisable(self, fs, base.span, base);
+            }
+            return;
+        }
         var types = std.ArrayList(cfg.Type).empty;
         try types.appendNTimes(self.arena, elem_type, lp.items.len);
         const tail_type = try self.arena.create(cfg.Type);

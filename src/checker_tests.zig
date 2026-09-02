@@ -636,14 +636,16 @@ test "checker rejects moving a value into a borrow parameter" {
 test "checker borrows an unique payload of a non-consuming match" {
     // Core §13.4: matching an unique owner through an ordinary expression
     // borrows it, so the payload binding is a borrow and cannot be moved.
+    // (The arm's bindings are arm-scoped, so the move must be written
+    // inside the arm — a post-match reference would be an unknown
+    // binding, which the lowering reports.)
     try expectDiag(
         \\union U { Some(File), None }
         \\struct File { fd: int32; drop(file) {} }
         \\fn consume(move f: File) -> void {}
         \\fn main() -> void {
         \\    let u = U::Some(File{ fd: 1 });
-        \\    match (u) { U::Some(f) => 0, U::None => 0 };
-        \\    consume(move f);
+        \\    match (u) { U::Some(f) => consume(move f), U::None => 0 };
         \\}
     , "cannot move borrowed binding");
 }

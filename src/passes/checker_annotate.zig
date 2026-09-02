@@ -747,6 +747,14 @@ fn inferExprInner(frame: *Frame, e: *const ast.Expr) CheckError!?cfg.Type {
             var result: ?cfg.Type = null;
             const paths = try alloc.alloc(ownership.Path, m.arms.len);
             for (m.arms, 0..) |*arm, ai| {
+                // Each arm's pattern bindings live in their own scope
+                // (Core §13.2): they must not leak into the enclosing
+                // scope (shadowing an outer local of the same name after
+                // the match) or into the next arm. The lowering already
+                // scopes arms; this keeps the checker's binding table
+                // consistent with it.
+                _ = try pushScope(frame, false);
+                defer popScope(frame);
                 _ = try inferPattern(frame, &arm.pattern, scrut_t, !consuming);
                 const at = (try inferExprAs(frame, arm.body, frame.expect)) orelse cfg.Type{ .primitive = .void };
                 result = if (result) |r| try joinBranches(frame, m.span, r, at) else at;

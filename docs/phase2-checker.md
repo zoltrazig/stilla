@@ -124,6 +124,10 @@ Ownership annotation drives the transfer checks:
 - each local binding carries its ownership state:
   - `is_borrow` — non-owning view: a `borrow` parameter, or an unique
     binding produced by a non-consuming `match` (Core §13.4);
+  - a `match` arm's pattern bindings are **arm-scoped** (Core §13.2):
+    they live only for the arm's body, so an arm binding reusing an
+    enclosing local's name shadows it inside the arm and leaves the
+    outer binding untouched after the match;
   - `consumed` — ownership transferred by `move`, or destroyed by `drop`;
   - `released` — **definitely released**, the state of an enclosing
     binding after a conditional construct released it on every path

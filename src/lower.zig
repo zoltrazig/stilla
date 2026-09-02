@@ -86,7 +86,8 @@ pub const FuncState = struct {
     blocks: std.ArrayList(*cfg.BasicBlock) = .empty,
     block_instrs: std.ArrayList(std.ArrayList(*cfg.Instr)) = .empty,
     cur: ?*cfg.BasicBlock = null,
-    symbols: std.StringHashMapUnmanaged(*Local) = .{},
+    /// Per-function scope stack; each scope's `locals` list is the
+    /// binding table (innermost scope wins in `lookupLocal`).
     scopes: std.ArrayList(Scope) = .empty,
     /// Values that are bound to a local (for move-at-call decisions).
     local_values: std.AutoHashMapUnmanaged(*cfg.Value, void) = .empty,

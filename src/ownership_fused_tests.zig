@@ -573,3 +573,103 @@ test "fused oracle: self-loop back edge — recursion becomes a loop that still 
     // (d) no leak, correct result.
     try testing.expectEqual(@as(Value, 6), try t.runExpectClean());
 }
+
+test "fused oracle: match arm bindings are arm-scoped — they cannot shadow an outer unique" {
+    // A match arm pattern that reuses an enclosing local's name must not
+    // clobber it: the arm's binding dies with the arm, so a `drop t`
+    // after the match destroys the *outer* owner (once). Regression: the
+    // flat lowerer symbol map and the checker's missing per-arm scope let
+    // the arm binding permanently shadow the outer `t` — `drop t` then
+    // resolved to the arm's dead Copy payload and the outer owner's
+    // destruction was silently skipped (or, with a unique shadowing
+    // unique, the compiler emitted an undominated use).
+    var t = try Fused.init(testing.allocator,
+        \\const builtin = import("builtin");
+        \\union U { a(int32), b(int32) }
+        \\struct Token { id: int32; drop(tok) { builtin.print(builtin.str(tok.id)); } }
+        \\fn make(id: int32) -> Token { Token { id: id } }
+        \\fn main() -> int32 {
+        \\    let t = make(7);
+        \\    let s = U::a(1);
+        \\    match (s) { U::a(t) => {}, U::b(w) => {} };
+        \\    drop t;
+        \\    0
+        \\}
+    , true);
+    defer t.deinit();
+    // (d) the outer owner is destroyed exactly once, by the explicit
+    // `drop t` (id 7), not leaked and not double-dropped.
+    {
+        var rec = PrintRecorder{};
+        _ = try t.runExpectCleanHost(.{ .userdata = &rec, .invoke = PrintRecorder.invoke });
+        try testing.expectEqualStrings("7", rec.buffer[0..rec.len]);
+    }
+}
+
+test "fused oracle: match arm bindings are arm-scoped — shadowing an outer copy" {
+    // The Copy-value variant: after the match, `r` resolves to the outer
+    // binding (42), not to the arm's payload.
+    var t = try Fused.init(testing.allocator,
+        \\union U { a(int32), b(int32) }
+        \\fn main() -> int32 {
+        \\    let s = U::a(1);
+        \\    let r = 42;
+        \\    match (s) { U::a(r) => {}, U::b(w) => {} };
+        \\    r
+        \\}
+    , true);
+    defer t.deinit();
+    try testing.expectEqual(@as(Value, 42), try t.runExpectClean());
+}
+
+test "fused oracle: consuming list match — the [] arm on an empty list destroys nothing" {
+    // `match (move xs) { [] => ..., [h, ..t] => ... }`: the [] arm's
+    // scrutinee is always the empty list — the null value — and there is
+    // nothing to split or destroy. Regression: the arm emitted
+    // `split_list` of null and the VM trapped ("illegal null (null is
+    // only the empty list)").
+    var t = try Fused.init(testing.allocator,
+        \\fn sum(move xs: list[int32], acc: int32) -> int32 {
+        \\    match (move xs) {
+        \\        [h, ..t] => sum(move t, acc + h),
+        \\        [] => acc,
+        \\    }
+        \\}
+        \\fn main() -> int32 { sum([1, 2, 3], 0) }
+    , true);
+    defer t.deinit();
+    try testing.expectEqual(@as(Value, 6), try t.runExpectClean());
+}
+
+test "fused oracle: consuming list match — [..rest] binds the whole list without a split" {
+    // A rest-only consuming pattern binds the base itself; there is no
+    // head slot to split into. Regression: the arm emitted a
+    // one-dst `split_list`, which the VM rejects ("split_list descriptor
+    // too small") — and on an empty (null) list it trapped as an
+    // illegal null dereference.
+    var t = try Fused.init(testing.allocator,
+        \\const builtin = import("builtin");
+        \\struct Token { id: int32; drop(tok) { builtin.print(builtin.str(tok.id)); } }
+        \\fn size(move xs: list[Token]) -> int32 {
+        \\    match (move xs) {
+        \\        [h, ..t] => { drop h; 1 + size(move t) },
+        \\        [..rest] => { drop rest; 0 },
+        \\    }
+        \\}
+        \\fn main() -> int32 { size([Token{id:1}, Token{id:2}, Token{id:3}]) }
+    , false);
+    defer t.deinit();
+    // (b) no one-destination `split_list` survives: the rest-only arm
+    // binds the base itself instead of splitting.
+    for (t.program.funcs) |f| for (f.blocks) |b| for (b.instrs) |instr| {
+        if (instr.op == .split_list) try testing.expect(instr.results.len >= 2);
+    };
+    // (d) the recursion reaches the `[..rest]` fallthrough on the empty
+    // (null) list, destroys exactly the three head tokens (one drop hook
+    // run each), and returns the count.
+    {
+        var rec = PrintRecorder{};
+        try testing.expectEqual(@as(Value, 3), try t.runExpectCleanHost(.{ .userdata = &rec, .invoke = PrintRecorder.invoke }));
+        try testing.expectEqualStrings("123", rec.buffer[0..rec.len]);
+    }
+}
