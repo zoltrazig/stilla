@@ -187,17 +187,15 @@ fn checkFuncBody(frame: *Frame, f: *const ast.FuncDef, body: *const ast.Block) C
         _ = try bindLocal(frame, p.name.text, t, p.mode == .borrow);
     }
     // Resolve the declared return type so the validate pass can check the
-    // body's result against it; unreachable when the body has no result.
-    // The resolved return type is the body's goal (Core §11), so a
-    // construction whose type arguments are under-determined by its payloads
-    // fills the unbound ones from it.
+    // body's result against it. The resolved return type is the body's goal
+    // (Core §11), so a construction whose type arguments are under-determined
+    // by its payloads fills the unbound ones from it.
     const old_expect = frame.expect;
-    if (f.ret != null) {
-        frame.expect = try frame.ck.resolveTypeOf(frame.ma, frame.info, &f.ret.?);
-        if (findStrayParam(frame.expect.?, f.type_params)) |name| {
-            return frame.ck.fail(f.ret.?.span(), "cannot resolve type '{s}': not a declared type parameter of this function", .{name});
-        }
+    const declared = try frame.ck.resolveTypeOf(frame.ma, frame.info, &f.ret);
+    if (findStrayParam(declared, f.type_params)) |name| {
+        return frame.ck.fail(f.ret.span(), "cannot resolve type '{s}': not a declared type parameter of this function", .{name});
     }
+    frame.expect = declared;
     defer frame.expect = old_expect;
 
     _ = try checkBlock(frame, body);
@@ -695,22 +693,21 @@ fn inferExprInner(frame: *Frame, e: *const ast.Expr) CheckError!?cfg.Type {
                 _ = try bindLocal(frame, p.name.text, t, p.mode == .borrow);
             }
             const old = frame.expect;
-            // A lambda's body has its own goal: the enclosing context's
-            // expected type must not leak into the lambda (the lambda is
-            // a value, not the enclosing expression's result). But a
-            // lambda that declares a return type — `fn(...) -> Result[S,
-            // R] { ... }` — uses that type as the body's goal (Core §11),
-            // so a construction in the body fills its unbound type
-            // arguments from it (`Result::Break(r)` takes `S` from the
-            // declared ret instead of collapsing to a wildcard).
-            frame.expect = if (lam.ret) |*rt|
-                try frame.ck.resolveTypeOf(frame.ma, frame.info, rt)
-            else
-                null;
+            // A lambda declares its return type (Core §6.3, §6.4): the
+            // declared type is the lambda's signature and the body's goal
+            // (Core §11), so a construction in the body fills its unbound
+            // type arguments from it (`Result::Break(r)` takes `S` from the
+            // declared ret instead of collapsing to a wildcard). The
+            // enclosing context's expected type must not leak into the
+            // lambda — the lambda is a value, not the enclosing expression's
+            // result — so expect is the declared ret, never the enclosing
+            // goal.
+            const declared = try frame.ck.resolveTypeOf(frame.ma, frame.info, &lam.ret);
+            frame.expect = declared;
             defer frame.expect = old;
-            const ret = try checkBlock(frame, lam.body);
+            _ = try checkBlock(frame, lam.body);
             const ret_ptr = try alloc.create(cfg.Type);
-            ret_ptr.* = ret;
+            ret_ptr.* = declared;
             return cfg.Type{ .function = .{ .params = params, .ret = ret_ptr } };
         },
         .if_ => |*i| {

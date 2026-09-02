@@ -162,7 +162,7 @@ pub const FuncDef = struct {
     name: Ident,
     type_params: []Ident,
     params: []Param,
-    ret: ?Type,
+    ret: Type,
     body: ?*Block,
 };
 
@@ -480,7 +480,8 @@ pub const VoidLiteral = struct {
     span: Span,
 };
 
-/// An identifier-leading expression (Grammar `path-expression`): a dotted
+/// An identifier-leading expression (Binding Power Table document,
+/// path-expression nud): a dotted
 /// path with optional type arguments, followed by one of the `path-tail`
 /// forms — a struct construction brace, a union variant `:: name`, or
 /// nothing (an ordinary value expression).
@@ -491,16 +492,17 @@ pub const PathExpr = struct {
     tail: PathTail,
 };
 
-/// The `path-tail` production (Grammar). `.none` is the empty alternative:
-/// the path is an ordinary value expression.
+/// The `path-tail` branch alternatives (Binding Power Table document,
+/// path-expression nud). `.none` is the empty alternative: the path is an
+/// ordinary value expression.
 pub const PathTail = union(enum) {
     construct: StructConstruct,
     variant: VariantExpr,
     none: void,
 };
 
-/// `{ field: expression, ... }` after a type path (Grammar
-/// `struct-field-init`; Core §8.1).
+/// `{ field: expression, ... }` after a type path (Binding Power Table
+/// document, struct-construction branch; Core §8.1).
 pub const StructConstruct = struct {
     span: Span,
     fields: []StructFieldInit,
@@ -512,44 +514,48 @@ pub const StructFieldInit = struct {
     value: *Expr,
 };
 
-/// `:: name [( args )]` — construction of a named union variant (Grammar
-/// `path-tail`; Core §11). `args` is null when the parens are absent.
+/// `:: name [( args )]` — construction of a named union variant (Binding
+/// Power Table document, path-expression nud; Core §11). `args` is null
+/// when the parens are absent.
 pub const VariantExpr = struct {
     span: Span,
     name: Ident,
     args: ?[]Expr,
 };
 
-/// `( expression )` — parenthesized expression (Grammar `paren-or-tuple`).
+/// `( expression )` — parenthesized expression (Binding Power Table
+/// document, paren/tuple form).
 pub const ParenExpr = struct {
     span: Span,
     inner: *Expr,
 };
 
 /// `( e, ... )` — a tuple literal with two or more elements, or one element
-/// written with a trailing comma (Grammar `paren-or-tuple`).
+/// written with a trailing comma (Binding Power Table document, paren/tuple
+/// form).
 pub const TupleExpr = struct {
     span: Span,
     elems: []Expr,
 };
 
-/// `[ e, ... ]` (Grammar `list-literal`).
+/// `[ e, ... ]` (Binding Power Table document, list-literal form).
 pub const ListExpr = struct {
     span: Span,
     elems: []Expr,
 };
 
-/// `fn (params) [-> type] block` in expression position (Grammar `lambda`,
-/// Core §6.3). Lambdas take no generic parameters.
+/// `fn (params) -> type block` in expression position (Binding Power
+/// Table document, lambda form; Core §6.3). The return type is required,
+/// as for a named function. Lambdas take no generic parameters.
 pub const Lambda = struct {
     span: Span,
     params: []Param,
-    ret: ?Type,
+    ret: Type,
     body: *Block,
 };
 
-/// `if (cond) then [else (block | if)]` (Grammar `if-expression`, Core
-/// §13.1). `else_` is null when there is no `else` branch.
+/// `if (cond) then [else (block | if)]` (Binding Power Table document,
+/// if form; Core §13.1). `else_` is null when there is no `else` branch.
 pub const IfExpr = struct {
     span: Span,
     cond: *Expr,
@@ -557,8 +563,8 @@ pub const IfExpr = struct {
     else_: ?*Expr,
 };
 
-/// `match (scrutinee) { pattern => expression, ... }` (Grammar
-/// `match-expression`, Core §13.2).
+/// `match (scrutinee) { pattern => expression, ... }` (Binding Power
+/// Table document, match form; Core §13.2).
 pub const MatchExpr = struct {
     span: Span,
     scrutinee: *Expr,
@@ -571,7 +577,8 @@ pub const MatchArm = struct {
     body: *Expr,
 };
 
-/// `import ( "module" )` (Grammar `import-expression`, Core §2.2). The
+/// `import ( "module" )` (Binding Power Table document, import form; Core
+/// §2.2). The
 /// string must be a literal token; static semantics restrict this form to
 /// module-constant initializers.
 pub const ImportExpr = struct {
@@ -579,13 +586,15 @@ pub const ImportExpr = struct {
     module: []const u8,
 };
 
-/// A block in expression position (Grammar `primary` → `block`).
+/// A block in expression position (Binding Power Table document, block
+/// form).
 pub const BlockExpr = struct {
     span: Span,
     block: *Block,
 };
 
-/// `-operand` or `!operand` (Grammar `unary`, Core §16).
+/// `-operand` or `!operand` (Binding Power Table document, prefix
+/// operators; Core §16).
 pub const UnaryOp = enum {
     neg,
     not,
@@ -597,10 +606,9 @@ pub const Unary = struct {
     operand: *Expr,
 };
 
-/// Binary operators by precedence level (Grammar `logic-or`, `logic-and`,
-/// `comparison`, `bitwise-or`/`bitwise-xor`/`bitwise-and`, `shift`,
-/// `addition`, `multiply`; Core §16). Comparison operators
-/// are non-associative: `comparison` parses at most one comparison-op.
+/// Binary operators by precedence level (Binding Power Table document,
+/// binding power table; Core §16). Comparison operators are
+/// non-associative: at most one comparison operator per expression.
 pub const BinaryOp = enum {
     or_,
     and_,
@@ -629,28 +637,30 @@ pub const Binary = struct {
     rhs: *Expr,
 };
 
-/// `move name` — names a complete local binding to move (Grammar
-/// `move-expression`, Core §10.3). There is no general borrow expression.
+/// `move name` — names a complete local binding to move (Binding Power
+/// Table document, prefix operators; Core §10.3). There is no general
+/// borrow expression.
 pub const MoveExpr = struct {
     span: Span,
     name: Ident,
 };
 
-/// `operand as type`, chained for repeated casts (Grammar `cast`, Core §16).
+/// `operand as type`, chained for repeated casts (Binding Power Table
+/// document, `as` row; Core §16).
 pub const Cast = struct {
     span: Span,
     operand: *Expr,
     target: Type,
 };
 
-/// `object.name` (Grammar `member-suffix`, Core §15).
+/// `object.name` (Binding Power Table document, postfix chain; Core §15).
 pub const Member = struct {
     span: Span,
     object: *Expr,
     name: Ident,
 };
 
-/// `callee(args)` (Grammar `call-suffix`).
+/// `callee(args)` (Binding Power Table document, postfix chain).
 pub const Call = struct {
     span: Span,
     callee: *Expr,
@@ -659,8 +669,8 @@ pub const Call = struct {
 
 /// `operand::[types]` — generic specialization, accepted syntactically as
 /// postfix syntax but eliminated during compile-time specialization
-/// (Grammar `specialization-suffix` and the `path-tail` `:: type-args`
-/// branch; Core §12).
+/// (Binding Power Table document, postfix chain and path-expression nud;
+/// Core §12).
 pub const Specialize = struct {
     span: Span,
     operand: *Expr,

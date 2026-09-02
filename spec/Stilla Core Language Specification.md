@@ -723,6 +723,8 @@ let double =
 
 Lambdas obey the same non-capture rule.
 
+A lambda, like a named function, declares its return type (Return values).
+
 ## 6.4 Return values
 
 A function returns the value of its body block's final expression.
@@ -741,15 +743,14 @@ A block with no final expression has type:
 void
 ```
 
-If a function return type is omitted, it is inferred from the body.
-
-A recursive function must explicitly declare its return type.
+The return type is required: every function and lambda declares it. A
+function that returns nothing declares `-> void`; a function that never
+returns normally declares `-> never`. There is no implicit or inferred
+return type.
 
 ## 6.5 Order and recursion
 
-Functions and lambdas are **order-independent** within the module in which they are declared: a function body may reference any module-level function, including functions declared later in the same source file. Direct and **mutual recursion** are permitted. Because functions are non-capturing (Non-capturing functions) and are represented as monomorphic code references, a function reference does not depend on module-constant initialization order (Module Constants).
-
-Every function participating in a recursion cycle — direct or mutual — must declare its return type explicitly (Return values).
+Functions and lambdas are **order-independent** within the module in which they are declared: a function body may reference any module-level function, including functions declared later in the same source file. Direct and **mutual recursion** are permitted. Because every function declares its return type (Return values), a recursion cycle needs no inference: each member's signature is stated up front. And because functions are non-capturing (Non-capturing functions) and are represented as monomorphic code references, a function reference does not depend on module-constant initialization order (Module Constants).
 
 A function type is a finite code-reference type. A struct or union may contain a function field whose type mentions the enclosing type; the function type breaks the storage cycle (Recursive types) and does not make the enclosing type *Unique* on that account (Composite ownership).
 

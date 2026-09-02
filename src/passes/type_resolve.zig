@@ -134,10 +134,7 @@ pub fn funcSignature(resolve: Resolve, info: *ModuleInfo, f: *const ast.FuncDef)
             .type_ = t,
         });
     }
-    const ret = if (f.ret) |r|
-        resolveType(resolve, info, &r) orelse cfg.Type{ .primitive = .any }
-    else
-        cfg.Type{ .primitive = .void };
+    const ret = resolveType(resolve, info, &f.ret) orelse cfg.Type{ .primitive = .any };
     const ret_ptr = try resolve.arena.create(cfg.Type);
     ret_ptr.* = ret;
     return .{ .function = .{ .params = try resolve.arena.dupe(cfg.Param, params.items), .ret = ret_ptr } };

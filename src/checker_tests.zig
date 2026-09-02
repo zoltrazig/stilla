@@ -166,6 +166,26 @@ test "checker rejects a return type mismatch" {
     , "return type mismatch");
 }
 
+test "checker rejects a non-void declaration whose body has no final expression" {
+    // Core §6.4: a body with no final expression has type void, so a
+    // declaration like `-> int32 {}` is a mismatch, not a silently
+    // defaulted return.
+    try expectDiag(
+        \\fn empty() -> int32 { let x = 1; }
+    , "return type mismatch");
+}
+
+test "checker accepts an explicitly void or never declaration" {
+    // Core §6.4: `-> void` and `-> never` are stated explicitly.
+    const t = try checkText(
+        \\fn nothing() -> void {}
+        \\fn diverge() -> never { diverge() }
+        \\fn ok() -> void { let x: int32 = 1; }
+    );
+    defer t.arena.deinit();
+    _ = t.ann;
+}
+
 test "checker rejects a binary operator type mismatch" {
     try expectDiag(
         \\fn add(a: int32, b: str) -> int32 { a + b }

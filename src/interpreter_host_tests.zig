@@ -261,7 +261,7 @@ test "host: a Copy box survives a non-consuming unbox (Runtime §4.6)" {
 test "host: builtin.panic terminates with the message; assert(false) panics" {
     var l = try load(
         \\const builtin = import("builtin");
-        \\fn main() -> int32 {
+        \\fn main() -> void {
         \\    builtin.panic("boom");
         \\}
     , false);

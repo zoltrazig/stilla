@@ -122,7 +122,7 @@ test "frontend collects every independent error in one compile, in order" {
             .{
                 "a",
                 \\const first = ;
-                \\fn f() { let a = ; let b = 1 +; }
+                \\fn f() -> void { let a = ; let b = 1 +; }
                 \\const last = ;
             },
         });

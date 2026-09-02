@@ -11,6 +11,7 @@
 ## Quick reference
 
 - [Stilla v1.3 Cheat Sheet](cheatsheet.md) — a fast-reference companion covering the whole language, runtime, AIR, and LLIR surface.
+- [Stilla Grammar Diagrams](Stilla%20Grammar%20Diagrams.md) — railroad-style Mermaid views of the statement-level grammar (Stilla Core Grammar Draft.abnf). Non-normative.
 
 ## The pipeline at a glance
 
@@ -49,7 +50,8 @@ flowchart TD
 | [Stilla Core Language Specification](Stilla%20Core%20Language%20Specification.md) | Language structure: files & modules, the `builtin` module, bindings, module constants, functions, control flow | Phases 1–2 (checks) and the source contract |
 | [Stilla Core Types & Ownership Specification](Stilla%20Core%20Types%20%26%20Ownership%20Specification.md) | Values and ownership: structs, construction, destruction, ownership, algebraic data types, generics, patterns, member access, operators | Phase 2 (type & ownership checks) |
 | [Stilla Core Static Semantics](Stilla%20Core%20Static%20Semantics.md) | The normative formal static semantics | Phase 2 (static validation) |
-| [Stilla Core Grammar Draft.abnf](Stilla%20Core%20Grammar%20Draft.abnf) | Normative lexical and syntactic grammar (ABNF) | lexer / parser |
+| [Stilla Core Grammar Draft.abnf](Stilla%20Core%20Grammar%20Draft.abnf) | Normative lexical and syntactic grammar (ABNF), defined down to the statement level; expressions are specified in the companion Expression Binding Power Table | lexer / parser |
+| [Stilla Expression Binding Power Table](Stilla%20Expression%20Binding%20Power%20Table.md) | Expression grammar in Pratt-parser form: binding powers, associativity, prefix/postfix/primary forms, and the expression-level parser decisions | lexer / parser (expressions) |
 | [Stilla Runtime Specification](Stilla%20Runtime%20Specification.md) | Execution model, module instantiation, evaluation order, cleanup, panic, host contract | Runtime / VM |
 | [Stilla AIR Specification](air.md) | The canonical SSA control-flow-graph IR: values, instructions, ownership, module storage, text form | Phase 3 output |
 | [Stilla LLIR Specification](Stilla%20LLIR%20Specification.md) | The fixed-width LLIR projection: program image, registers, frames, call/return contract | AIR → LLIR |
@@ -62,6 +64,8 @@ flowchart TD
 ```mermaid
 flowchart LR
     Core["Core Language Spec"] --> Grammar["Grammar ABNF"]
+    Grammar --> Expr["Expression Binding Power Table"]
+    Core --> Expr
     Core --> Air["AIR spec"]
     Air --> Llir["LLIR Spec"]
     Air --> ISet["LLIR Instruction Set"]

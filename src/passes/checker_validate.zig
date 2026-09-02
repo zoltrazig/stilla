@@ -111,20 +111,27 @@ fn validateConst(frame: *Frame, c: *const ast.ConstDef) CheckError!void {
     });
 }
 
-fn validateFunc(frame: *Frame, f: *const ast.FuncDef, body: *const ast.Block) CheckError!void {
-    if (body.result) |*r| {
-        const actual = frame.ma.expr_of.get(r) orelse return;
-        const expected = if (f.ret != null)
-            frame.ma.type_of.get(&f.ret.?) orelse return
-        else
-            cfg.Type{ .primitive = .void };
-        if (!compatible(expected, actual)) {
-            return frame.ck.fail(f.span, "return type mismatch: expected {s}, found {s}", .{
-                try fmtType(frame.ck.alloc(), frame.resolve, expected),
-                try fmtType(frame.ck.alloc(), frame.resolve, actual),
-            });
-        }
+/// Check a function or lambda body's result against its declared return
+/// type. A body with no final expression has type `void` (Core §6.4), so a
+/// declaration like `fn f() -> int32 {}` is a mismatch, not a silently
+/// defaulted return. `never` and `any` coercion follow the existing
+/// `compatible` rule.
+fn validateReturn(frame: *Frame, span: ast.Span, declared: *const ast.Type, body: *const ast.Block) CheckError!void {
+    const expected = frame.ma.type_of.get(declared) orelse return;
+    const actual = if (body.result) |*r|
+        frame.ma.expr_of.get(r) orelse return
+    else
+        cfg.Type{ .primitive = .void };
+    if (!compatible(expected, actual)) {
+        return frame.ck.fail(span, "return type mismatch: expected {s}, found {s}", .{
+            try fmtType(frame.ck.alloc(), frame.resolve, expected),
+            try fmtType(frame.ck.alloc(), frame.resolve, actual),
+        });
     }
+}
+
+fn validateFunc(frame: *Frame, f: *const ast.FuncDef, body: *const ast.Block) CheckError!void {
+    try validateReturn(frame, f.span, &f.ret, body);
     try validateBlock(frame, body);
 }
 
@@ -180,8 +187,10 @@ fn validateExpr(frame: *Frame, e: *const ast.Expr) CheckError!void {
         .tuple => |*t| for (t.elems) |*el| try validateExpr(frame, el),
         .list => |*l| for (l.elems) |*el| try validateExpr(frame, el),
         .lambda => |*lam| {
-            // Lambdas are annotated but get no argument checks today.
-            _ = lam;
+            // A lambda declares its return type (Core §6.3): enforce it
+            // exactly as for a named function, and validate the body.
+            try validateReturn(frame, lam.span, &lam.ret, lam.body);
+            try validateBlock(frame, lam.body);
         },
         .if_ => |*i| {
             try validateExpr(frame, i.cond);

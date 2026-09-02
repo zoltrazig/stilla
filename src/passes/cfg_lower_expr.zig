@@ -384,11 +384,11 @@ fn lowerLambda(self: *Lowerer, fs: *FuncState, lam: *const ast.Lambda) LowerErro
         const t = try self.resolveType(fs, &p.type_);
         try params.append(self.arena, .{ .span = p.span, .name = p.name, .mode = p.mode, .type_ = t });
     }
-    // The lambda's return type is inferred from its body when not
-    // written (Grammar `lambda`: `[ "->" type ]`); the declared type is
-    // the seed and the body's actual result type wins (phase 2 already
-    // validated the two agree).
-    var ret: cfg.Type = if (lam.ret) |*rt| try self.resolveType(fs, rt) else .{ .primitive = .void };
+    // The lambda's return type is declared (Core §6.3): it is the
+    // signature, and the body's result is coerced to it on return (a
+    // `T → any` return coercion for an `any` ret). Phase 2 already
+    // validated the body's result against it.
+    const ret: cfg.Type = try self.resolveType(fs, &lam.ret);
     const qname = try std.fmt.allocPrint(self.arena, "{s}.lambda{d}", .{ fs.name.text, self.next_lambda_id });
     self.next_lambda_id += 1;
     var lfs = try cfg_lower_func.newFuncState(self, fs.module, .{ .span = lam.span, .text = qname }, params.items, ret);
@@ -402,7 +402,6 @@ fn lowerLambda(self: *Lowerer, fs: *FuncState, lam: *const ast.Lambda) LowerErro
     const result = try cfg_lower_func.lowerBlock(self, &lfs, lam.body);
     try cfg_lower_emit.exitScope(self, &lfs, result);
     if (result) |r| {
-        ret = r.type_;
         if (cfg_lower_emit.isVoid(r.type_)) {
             try cfg_lower_emit.setTerminator(self, &lfs, .{ .ret = null });
         } else {

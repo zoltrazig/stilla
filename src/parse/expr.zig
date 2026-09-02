@@ -1,6 +1,7 @@
-//! Pass: expression parsing (Grammar `expression`, `path-expression`,
-//! `paren-or-tuple`, `list-literal`, `lambda`, `if-expression`,
-//! `match-expression`, `import-expression`, `arg-list`).
+//! Pass: expression parsing — the expression grammar of the Binding Power
+//! Table document (Stilla Expression Binding Power Table.md): `expression`,
+//! `path-expression`, `paren-or-tuple`, `list-literal`, `lambda`,
+//! `if-expression`, `match-expression`, `import-expression`, `arg-list`.
 //! In:  `*Parser` over a token stream.
 //! Out: `ast.Expr` nodes.
 
@@ -62,7 +63,7 @@ pub fn parseLogicAnd(self: *parser.Parser) ParseError!*ast.Expr {
 }
 
 /// `comparison` is non-associative: at most one comparison operator
-/// (Grammar `comparison`, Core §16).
+/// (Binding Power Table document, comparison level; Core §16).
 pub fn parseComparison(self: *parser.Parser) ParseError!*ast.Expr {
     const lhs = try parseBitOr(
         self,
@@ -247,7 +248,7 @@ pub fn parseUnary(self: *parser.Parser) ParseError!*ast.Expr {
     }
 }
 
-/// `postfix ( as type )*` (Grammar `cast`, Core §16). Casts chain:
+/// `postfix ( as type )*` (Binding Power Table document, `as` row; Core §16). Casts chain:
 /// `x as a as b` is a cast whose operand is the inner cast.
 pub fn parseCast(self: *parser.Parser) ParseError!*ast.Expr {
     var operand = try parsePostfix(
@@ -269,8 +270,8 @@ pub fn parsePostfix(self: *parser.Parser) ParseError!*ast.Expr {
         switch (self.cur().kind) {
             .dot => {
                 _ = self.advance();
-                // Grammar parser note 4: the token after "." is read as a
-                // member name even when it is a reserved word, so members
+                // The postfix chain (Binding Power Table document): the token after
+                // "." is read as a member name even when it is a reserved word, so members
                 // such as `f().str` and `(m).box` parse after any primary,
                 // exactly as path segments already do (`builtin.str`).
                 const name = try self.expectPathSegment();
@@ -283,9 +284,10 @@ pub fn parsePostfix(self: *parser.Parser) ParseError!*ast.Expr {
                 );
                 expr = try self.newExpr(.{ .call = .{ .span = ast.Span.merge(expr.span(), self.prev().span), .callee = expr, .args = args } });
             },
-            // `:: [types]` after a non-path primary (Grammar
-            // `specialization-suffix`); a `::` immediately after a
-            // type-path was consumed by `path-tail` (parser note 2).
+            // `:: [types]` after a non-path primary is the postfix
+            // specialization suffix (Binding Power Table document); a `::`
+            // immediately after a type-path was already consumed by the
+            // path-expression nud.
             .dcolon => {
                 _ = self.advance();
                 const type_args = try self.parseTypeArgs();
@@ -351,8 +353,9 @@ pub fn parsePrimary(self: *parser.Parser) ParseError!*ast.Expr {
     };
 }
 
-/// An identifier-leading expression (Grammar `path-expression`): the
-/// path, optional type arguments, then one of the `path-tail` forms.
+/// An identifier-leading expression (Binding Power Table document,
+/// path-expression nud): the path, optional type arguments, then one of
+/// the `path-tail` forms.
 pub fn parsePathExpr(self: *parser.Parser) ParseError!*ast.Expr {
     const start = self.mark();
     const path = try parse_type.parseTypePath(self);
@@ -381,12 +384,14 @@ pub fn parsePathExpr(self: *parser.Parser) ParseError!*ast.Expr {
             return self.newExpr(.{ .path = .{ .span = self.spanFrom(start), .path = path, .type_args = type_args, .tail = .{ .construct = construct } } });
         },
         .dcolon => {
-            // Parser rule (parser note 2): a `::` immediately following
-            // a type-path always enters the `path-tail` branch.
+            // Binding Power Table document (path-expression nud): a `::`
+            // immediately following a type-path always enters the
+            // `path-tail` branch.
             _ = self.advance();
             const vstart = self.mark();
-            // parser note 4: a variant name after `::` may be a reserved
-            // word, exactly as a member name after `.`.
+            // A variant name after `::` may be a reserved word, exactly
+            // as a member name after `.` (Binding Power Table document,
+            // postfix chain).
             if (self.atPathSegment()) {
                 const name = try self.expectPathSegment();
                 var args: ?[]ast.Expr = null;
@@ -407,7 +412,8 @@ pub fn parsePathExpr(self: *parser.Parser) ParseError!*ast.Expr {
     }
 }
 
-/// `( )`, `( e )`, `( e, ... )`, `( e, )` (Grammar `paren-or-tuple`).
+/// `( )`, `( e )`, `( e, ... )`, `( e, )` (Binding Power Table document,
+/// paren/tuple form).
 /// A single-element tuple is written `(e,)`; `(e)` is a parenthesized
 /// expression.
 pub fn parseParenOrTuple(self: *parser.Parser) ParseError!*ast.Expr {
@@ -433,7 +439,8 @@ pub fn parseParenOrTuple(self: *parser.Parser) ParseError!*ast.Expr {
     return self.newExpr(.{ .tuple = .{ .span = self.spanFrom(start), .elems = try self.arena.allocator().dupe(ast.Expr, elems.items) } });
 }
 
-/// `[ e, ... ]` with optional trailing comma (Grammar `list-literal`).
+/// `[ e, ... ]` with optional trailing comma (Binding Power Table
+/// document, list-literal form).
 pub fn parseListLiteral(self: *parser.Parser) ParseError!*ast.Expr {
     const start = self.mark();
     _ = self.advance(); // '['
@@ -456,8 +463,12 @@ pub fn parseLambda(self: *parser.Parser) ParseError!*ast.Expr {
     _ = self.advance(); // kw_fn
     try self.expectAdvance(.lparen, "'('");
     const params = try self.parseParamList();
-    var ret: ?ast.Type = null;
-    if (self.eat(.arrow)) ret = try parse_type.parseType(self);
+    // The return type is required (Core §6.3, §6.4), as for a named
+    // function; a lambda with no value declares `-> void`.
+    if (!self.eat(.arrow)) {
+        return self.fail(self.cur().span, "a lambda must declare its return type ('-> T'); write '-> void' when it returns nothing", .{});
+    }
+    const ret = try parse_type.parseType(self);
     const body = try parse_stmt.parseBlockRef(self);
     return self.newExpr(.{ .lambda = .{ .span = self.spanFrom(start), .params = params, .ret = ret, .body = body } });
 }
@@ -497,8 +508,8 @@ pub fn parseMatchExpr(self: *parser.Parser) ParseError!*ast.Expr {
     try self.expectAdvance(.rparen, "')'");
     try self.expectAdvance(.lbrace, "'{'");
     var arms = std.ArrayList(ast.MatchArm).empty;
-    // Grammar `match-expression` requires at least one `match-arm`
-    // (`"{" match-arm *( "," match-arm ) [ "," ] "}"`); the loop below
+    // The `match` form (Binding Power Table document) requires at least
+    // one arm (`match-arm *( "," match-arm ) [ "," ]`); the loop below
     // always parses one before its first comma test.
     while (true) {
         const astart = self.mark();
@@ -527,7 +538,7 @@ pub fn parseImportExpr(self: *parser.Parser) ParseError!*ast.Expr {
 }
 
 /// `[ expression, ... ]` with the `(` already consumed; no trailing
-/// comma (Grammar `arg-list`).
+/// comma (Binding Power Table document, call suffix).
 pub fn parseArgListRest(self: *parser.Parser) ![]ast.Expr {
     var args = std.ArrayList(ast.Expr).empty;
     if (!self.at(.rparen)) {

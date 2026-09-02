@@ -1,7 +1,9 @@
 //! Test file: `grammar_spec_tests` — black-box grammar→AST conformance.
 //!
-//! Walks the normative grammar (`Stilla Core Grammar Draft.abnf`) and the
-//! example programs of the Core Language Specification production by
+//! Walks the normative grammar — `Stilla Core Grammar Draft.abnf` (down to
+//! the statement level) and `Stilla Expression Binding Power Table.md` for
+//! expressions — and the example programs of the Core Language
+//! Specification production by
 //! production, asserting the AST each produces through the public `Parser`
 //! API. Parser-internals tests stay in `parser.zig`'s own test blocks and
 //! whole-file API basics in `parser_tests.zig`; this suite holds the
@@ -12,8 +14,8 @@
 //!   module-item    all seven kinds; `builtin`/`array`/`hashmap` bindable,
 //!                  `list` reserved
 //!   const-def      init-only, type+init, host constant (§2.6)
-//!   func-def       generics, param modes, omitted return, host binding
-//!   lambda         modes, omitted return, immediate call, zero params
+//!   func-def       generics, param modes, required return, host binding
+//!   lambda         modes, required return, immediate call, zero params
 //!   empty forms    empty struct/union, parameterless opaque, drop-only
 //!                  struct
 //!   types          all thirteen primitives; named/list/box/tuple/function
@@ -22,9 +24,10 @@
 //!   using-decl     module + block scope, `as`, reserved-word segments
 //!   block/stmt     all statement kinds; the `;`/`}` split (parser note 1)
 //!   expressions    every `Expr` variant; binary-operator sweep; the full
-//!                  precedence/associativity ladder; unary and cast chains;
-//!                  `move` in every unary position; postfix suffixes after
-//!                  construction and variant primaries; parser notes 2 and 4
+//!                  precedence/associativity ladder of the Binding Power
+//!                  Table document; unary and cast chains; `move` in every
+//!                  unary position; postfix suffixes after construction and
+//!                  variant primaries (expression parser decisions)
 //!   patterns       every `Pattern` variant; type-test sweep (note 3);
 //!                  list patterns with and without `..rest`
 //!   spans          node spans slice the exact source text (expressions,
@@ -157,7 +160,7 @@ test "grammar: unicode identifiers and raw unicode string content" {
 test "grammar: all seven module-item kinds parse in order" {
     const text =
         \\const v: int32 = 1;
-        \\fn f() {}
+        \\fn f() -> void {}
         \\type T = int32;
         \\struct S { x: int32; }
         \\union U { A, B(int32) }
@@ -189,10 +192,10 @@ test "grammar: const-def's three forms" {
     try testing.expect(c.init == null);
 }
 
-test "grammar: func-def — generics, param modes, omitted return, host binding" {
+test "grammar: func-def — generics, param modes, required return, host binding" {
     var t = try parseText(
         \\fn one[T](borrow t: T, move u: T) -> T { t }
-        \\fn inferred(x: int32) { x }
+        \\fn two(x: int32) -> int32 { x }
         \\fn host[T](v: T) -> str;
     );
     defer t.arena.deinit();
@@ -201,19 +204,33 @@ test "grammar: func-def — generics, param modes, omitted return, host binding"
     try testing.expectEqualStrings("T", one.type_params[0].text);
     try testing.expectEqual(ast.ParamMode.borrow, one.params[0].mode);
     try testing.expectEqual(ast.ParamMode.move, one.params[1].mode);
-    try testing.expectEqualStrings("T", one.ret.?.named.path[0].text);
+    try testing.expectEqualStrings("T", one.ret.named.path[0].text);
     try testing.expect(one.body != null);
-    const inferred = t.program.items[1].func_def;
-    try testing.expect(inferred.ret == null);
+    const two = t.program.items[1].func_def;
+    try testing.expectEqual(ast.PrimitiveKind.int32, two.ret.primitive.kind);
+    try testing.expect(two.body != null);
     const host = t.program.items[2].func_def;
     try testing.expect(host.body == null);
     try testing.expectEqualStrings("T", host.type_params[0].text);
+    try testing.expectEqual(ast.PrimitiveKind.str, host.ret.primitive.kind);
 }
 
-test "grammar: lambda — modes, omitted return, immediate call" {
+test "grammar: func-def — a missing return type is a parse error" {
+    // Core §6.4: the arrow is required in the body form and the host-binding
+    // form alike.
+    var t = try parseError("fn f(x: int32) { x }");
+    defer t.arena.deinit();
+    try testing.expect(std.mem.indexOf(u8, t.diag.message, "must declare its return type") != null);
+
+    var t2 = try parseError("fn g(x: int32);");
+    defer t2.arena.deinit();
+    try testing.expect(std.mem.indexOf(u8, t2.diag.message, "must declare its return type") != null);
+}
+
+test "grammar: lambda — modes, required return, immediate call" {
     var t = try parseText(
         \\fn f() -> int32 {
-        \\    let g = fn(borrow x: int32) { x };
+        \\    let g = fn(borrow x: int32) -> int32 { x };
         \\    fn(x: int32) -> int32 { x }(7)
         \\}
     );
@@ -222,11 +239,18 @@ test "grammar: lambda — modes, omitted return, immediate call" {
     const body = t.program.items[0].func_def.body.?;
     const g = body.stmts[0].let.init.lambda;
     try testing.expectEqual(ast.ParamMode.borrow, g.params[0].mode);
-    try testing.expect(g.ret == null);
+    try testing.expectEqual(ast.PrimitiveKind.int32, g.ret.primitive.kind);
     // A lambda is a primary, so a call suffix applies directly to it.
     const call = body.result.?.call;
     try testing.expect(call.callee.* == .lambda);
     try testing.expectEqual(@as(u64, 7), call.args[0].int.value);
+}
+
+test "grammar: lambda — a missing return type is a parse error" {
+    // Core §6.3: a lambda declares its return type like a named function.
+    var bad = try parseError("fn f() -> void { let g = fn(x: int32) { x }; }");
+    defer bad.arena.deinit();
+    try testing.expect(std.mem.indexOf(u8, bad.diag.message, "must declare its return type") != null);
 }
 
 test "grammar: a zero-parameter lambda is immediately callable" {
@@ -395,7 +419,7 @@ test "grammar: using-decl — module and block scope, `as`, reserved-word segmen
     // (`builtin.str`), and the alias is scoped to the module or block.
     var t = try parseText(
         \\using builtin.str as s;
-        \\fn f() {
+        \\fn f() -> void {
         \\    using m.Option;
         \\    s
         \\}
@@ -415,7 +439,7 @@ test "grammar: using-decl — module and block scope, `as`, reserved-word segmen
 // ---------------------------------------------------------------------------
 
 test "grammar: let takes a pattern with an optional type annotation" {
-    var t = try parseText("fn f(p: Point) { let x: int32 = 1; let (a, b) = p; }");
+    var t = try parseText("fn f(p: Point) -> void { let x: int32 = 1; let (a, b) = p; }");
     defer t.arena.deinit();
 
     const stmts = t.program.items[0].func_def.body.?.stmts;
@@ -514,7 +538,7 @@ test "grammar: union variant expressions — no args, one, many, dotted path" {
     try testing.expectEqualStrings("Ok", d.tail.variant.name.text);
 }
 
-test "grammar: specialization — the two `::` disambiguations (parser note 2)" {
+test "grammar: specialization — the two `::` disambiguations (Binding Power Table document)" {
     // After a bare type-path, `::` enters the path-tail branch (variant or
     // type-args); after any other postfix form it is the specialization
     // suffix.
@@ -570,7 +594,7 @@ test "grammar: if — without else, with else block, with else-if chain" {
 
 test "grammar: match — arms, block-body arm, trailing comma" {
     // Because a block is itself an expression, a match arm may use a block
-    // body (ABNF `match-expression` note).
+    // body (Binding Power Table document, match form).
     var t = try parseText("const r = match (x) { 0 => { 1 }, n => { let y = n; y }, _ => 2, };");
     defer t.arena.deinit();
 
@@ -621,7 +645,7 @@ test "grammar: unary binds looser than postfix" {
 }
 
 test "grammar: cast binds tighter than arithmetic and chains right" {
-    // `cast = postfix *( as type )` sits between unary and multiply:
+    // `as` binds tighter than `+` and the other arithmetic operators:
     // `n as int32 + 1` is `(n as int32) + 1`, and repeated `as` nest.
     var t = try parseText("const a = n as int32 + 1;");
     defer t.arena.deinit();
@@ -664,8 +688,8 @@ test "grammar: every binary operator maps to its AST op" {
     }
 }
 
-test "grammar: the precedence ladder and associativity match the ABNF" {
-    // ABNF notes: `or` loosest, `and` next; comparison is non-associative
+test "grammar: the precedence ladder and associativity match the Binding Power Table" {
+    // Binding Power Table notes: `or` loosest, `and` next; comparison is non-associative
     // and looser than the bitwise three (`|` loosest, `&` tightest);
     // shifts sit between `&` and `+`; every left-recursive level
     // (`or`, `and`, `|`, `^`, `&`, shifts, `+ -`, `* / %`) associates left.
@@ -738,7 +762,7 @@ test "grammar: unary chains nest and cast binds tighter than unary" {
     const b = initOf(t.program.items[1]).unary;
     try testing.expectEqual(ast.UnaryOp.not, b.op);
     try testing.expectEqual(ast.UnaryOp.not, b.operand.unary.op);
-    // `cast` is a unary alternative's operand: `-x as int32` is
+    // `as` binds tighter than the prefix operators: `-x as int32` is
     // -(x as int32), the cast inside the negation.
     const c = initOf(t.program.items[2]).unary;
     try testing.expectEqual(ast.UnaryOp.neg, c.op);
@@ -916,7 +940,7 @@ test "grammar: identifier-led type-test patterns (parser note 3)" {
 }
 
 test "grammar: tuple patterns — one element, many, nested" {
-    var t = try parseText("fn f() { let (a,) = p; let (a, b) = q; let ((a, b), c) = r; }");
+    var t = try parseText("fn f() -> void { let (a,) = p; let (a, b) = q; let ((a, b), c) = r; }");
     defer t.arena.deinit();
 
     const stmts = t.program.items[0].func_def.body.?.stmts;
@@ -929,7 +953,7 @@ test "grammar: tuple patterns — one element, many, nested" {
 
 test "grammar: path patterns — identifier, struct, variant" {
     var t = try parseText(
-        \\fn f(x: X) {
+        \\fn f(x: X) -> void {
         \\    match (x) {
         \\        plain => 0,
         \\        P{ x, y: 0, } => 1,
@@ -961,7 +985,7 @@ test "grammar: path patterns — identifier, struct, variant" {
 
 test "grammar: list patterns — empty, rest-only, items, items-with-rest" {
     var t = try parseText(
-        \\fn f(xs: list[int32]) {
+        \\fn f(xs: list[int32]) -> void {
         \\    match (xs) {
         \\        [] => 0,
         \\        [..all] => 1,
@@ -995,7 +1019,7 @@ test "grammar: list patterns — empty, rest-only, items, items-with-rest" {
 // ---------------------------------------------------------------------------
 
 test "grammar: spans cover statements, arms, and control flow" {
-    var t = try parseText("fn f(x: int32) { let y = x; match (y) { 0 => 1, _ => 2 } }");
+    var t = try parseText("fn f(x: int32) -> void { let y = x; match (y) { 0 => 1, _ => 2 } }");
     defer t.arena.deinit();
     const text = t.source.text;
 
@@ -1207,7 +1231,7 @@ test "spec §4: shadowing rebinds and assignment has no grammar" {
 
     // Bindings are immutable — there is no assignment operator, so
     // `x = 30;` is not a statement the grammar can produce (§4).
-    var bad = try parseError("fn g() { x = 30; }");
+    var bad = try parseError("fn g() -> void { x = 30; }");
     defer bad.arena.deinit();
     try testing.expectEqualStrings("expected ';' or '}' after expression, found '='", bad.diag.message);
 }
@@ -1339,7 +1363,7 @@ test "spec §17: the resource module and its consumer parse verbatim" {
     try testing.expectEqualStrings("close", close.callee.path.path[1].text);
     try testing.expectEqualStrings("fd", close.args[0].path.path[1].text);
     const open = f.program.items[3].func_def;
-    try testing.expectEqualStrings("File", open.ret.?.named.path[0].text);
+    try testing.expectEqualStrings("File", open.ret.named.path[0].text);
     const opened = open.body.?.result.?.path.tail.construct;
     try testing.expectEqualStrings("fd", opened.fields[0].name.text);
     try testing.expectEqualStrings("os.open(path)", f.source.text[opened.fields[0].value.span().start..opened.fields[0].value.span().end]);
@@ -1418,13 +1442,14 @@ test "grammar rejects: an unparenthesized if condition" {
 }
 
 test "grammar rejects: else without a block or if" {
-    var t = try parseError("fn f(c: bool) { if (c) { 1; } else 2; }");
+    var t = try parseError("fn f(c: bool) -> void { if (c) { 1; } else 2; }");
     defer t.arena.deinit();
     try testing.expectEqualStrings("expected 'if' or a block after 'else', found 2", t.diag.message);
 }
 
 test "grammar rejects: generic parameters on a lambda" {
-    // ABNF `lambda` has no type-params; only named `func-def` does.
+    // The lambda form (Binding Power Table document) has no type-params;
+    // only named `func-def` does.
     var t = try parseError("const f = fn[T](x: T) { x };");
     defer t.arena.deinit();
     try testing.expectEqualStrings("expected '(', found '['", t.diag.message);
@@ -1441,7 +1466,7 @@ test "grammar rejects: a trailing comma in a param list" {
 test "grammar rejects: an expression statement without its terminator" {
     // parser note 1's failure mode: after an expression at statement level
     // only `;` or `}` may follow.
-    var t = try parseError("fn f() { 1 2 }");
+    var t = try parseError("fn f() -> void { 1 2 }");
     defer t.arena.deinit();
     try testing.expectEqualStrings("expected ';' or '}' after expression, found 2", t.diag.message);
 }
@@ -1450,7 +1475,7 @@ test "grammar rejects: a list rest without its preceding comma" {
     // `list-pattern-items = pattern *( "," pattern ) [ "," list-rest ] / list-rest`:
     // `..rest` either stands alone or follows a comma — `[a ..r]` is not
     // grammatical.
-    var t = try parseError("fn f(xs: list[int32]) { let [a ..r] = xs; }");
+    var t = try parseError("fn f(xs: list[int32]) -> void { let [a ..r] = xs; }");
     defer t.arena.deinit();
     try testing.expectEqualStrings("expected ']', found '..'", t.diag.message);
 }
@@ -1488,7 +1513,7 @@ test "grammar rejects: a non-literal import specifier" {
 test "grammar rejects: a chained comparison" {
     // `comparison` parses at most one comparison-op — the production is
     // non-associative, so the second `<` is a stray token.
-    var t = try parseError("fn f() { a < b < c; }");
+    var t = try parseError("fn f() -> void { a < b < c; }");
     defer t.arena.deinit();
     try testing.expectEqualStrings("expected ';' or '}' after expression, found '<'", t.diag.message);
 }
@@ -1526,7 +1551,7 @@ test "grammar rejects: an `if` body that is not a block" {
 test "grammar rejects: move of anything but a complete binding name" {
     // `move-expression = %s"move" identifier` — no field, call, or
     // path operands (there is no partial move, Core §13.4).
-    var t = try parseError("fn f() { let y = move x.p; }");
+    var t = try parseError("fn f() -> void { let y = move x.p; }");
     defer t.arena.deinit();
     try testing.expectEqualStrings("expected ';', found '.'", t.diag.message);
 }

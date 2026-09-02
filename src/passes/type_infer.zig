@@ -158,10 +158,9 @@ fn lambdaType(resolve: Resolve, from: *ModuleInfo, lam: *const ast.Lambda) ?cfg.
             .type_ = t,
         }) catch return null;
     }
-    const ret = if (lam.ret) |r|
-        type_resolve.resolveType(resolve, from, &r) orelse return null
-    else
-        inferBlockType(resolve, from, lam.body) orelse return null;
+    // A lambda declares its return type (Core §6.3): it is resolved, never
+    // inferred from the body.
+    const ret = type_resolve.resolveType(resolve, from, &lam.ret) orelse return null;
     const ret_ptr = resolve.arena.create(cfg.Type) catch return null;
     ret_ptr.* = ret;
     return .{ .function = .{

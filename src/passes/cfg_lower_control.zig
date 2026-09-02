@@ -1,5 +1,6 @@
-//! Pass: control-flow lowering — `if-expression`, `match-expression`,
-//! and short-circuit `and`/`or` (Core §10, §11, §13; air.md §14.2–§14.3).
+//! Pass: control-flow lowering — the `if`, `match`, and lambda expression
+//! forms (Binding Power Table document) and short-circuit `and`/`or` (Core
+//! §10, §11, §13; air.md §14.2–§14.3).
 //! In: Lowerer + FuncState + AST control-flow nodes, module graph. Out:
 //! CFG blocks, `br`/`switch`/`branch` terminators, and join phis.
 

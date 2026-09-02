@@ -43,10 +43,9 @@ pub fn monomorphizeFunc(arena: std.mem.Allocator, resolve: moduleinfo.Resolve, d
         .name = decl.name,
         .type_params = &.{},
         .params = try cloneParams(arena, sub, decl.params),
-        .ret = null,
+        .ret = try cloneType(arena, sub, &decl.ret),
         .body = null,
     };
-    if (decl.ret) |r| out.ret = try cloneType(arena, sub, &r);
     if (decl.body) |b| out.body = try cloneBlockPtr(arena, sub, b);
     return out;
 }
@@ -147,7 +146,7 @@ fn cloneExpr(arena: std.mem.Allocator, sub: Substitution, e: *const ast.Expr) er
         .lambda => |lam| .{ .lambda = .{
             .span = lam.span,
             .params = try cloneParams(arena, sub, lam.params),
-            .ret = if (lam.ret) |r| try cloneType(arena, sub, &r) else null,
+            .ret = try cloneType(arena, sub, &lam.ret),
             .body = try cloneBlockPtr(arena, sub, lam.body),
         } },
         .if_ => |i| .{ .if_ = .{

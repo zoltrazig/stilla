@@ -20,21 +20,27 @@
 ;   before syntactic parsing.
 ;
 ; Cross-references to the companion documents refer to them as a whole:
-;   "the Core specification" and "the Runtime specification".
+;   "the Core specification", "the Runtime specification", and "the Binding
+;   Power Table document" ("Stilla Expression Binding Power Table.md").
 ;
 ; Parser lookahead notes
 ; ----------------------
 ;   This grammar has no productions that require more than one token of
 ;   lookahead to resolve. Parenthesized forms are left-factored so that the
-;   "(" decision point needs only the token after "(" (see "paren-or-tuple"
-;   and "tuple-pattern"). Four decision points that a context-free grammar
-;   alone cannot express are resolved by the following documented parser
-;   rules rather than in the BNF itself:
+;   "(" decision point needs only the token after "(" (see "tuple-pattern";
+;   the expression half, "paren-or-tuple", is specified in the Binding Power
+;   Table document). Decision points that a context-free grammar alone
+;   cannot express are resolved by the following documented parser rules
+;   rather than in the BNF itself:
 ;     1. block: after parsing an expression at statement level, a ";" makes it
 ;        an expression statement; a "}" makes it the final expression.
-;     2. path-tail: a "::" immediately following a type-path always enters the
-;        path-tail "::" branch (variant or specialization); the postfix
-;        "specialization-suffix" applies only after other primary forms.
+;     2. expressions: all expression-level decisions — the "path-tail"
+;        branches after a type path, the "::" rule (a "::" immediately
+;        following a type-path always enters the variant or specialization
+;        branch; the postfix "specialization-suffix" applies only after
+;        other primary forms), reserved-word member names, and the
+;        precedence and associativity of every operator — are specified in
+;        the Binding Power Table document.
 ;     3. pattern: an identifier at pattern start is parsed as a type-path; an
 ;        identifier immediately following that type-path (with optional
 ;        type-args) marks a type-test pattern binding (the Core specification), and a
@@ -44,7 +50,9 @@
 ;        even when it is a reserved word (lexically pre-identified), so
 ;        members named by reserved words such as "builtin.str" parse; the
 ;        reserved-word spelling is only recognized as a keyword at a
-;        decision point, not after a member-access dot.
+;        decision point, not after a member-access dot. The same rule
+;        governs the member suffix in expressions (the Binding Power Table
+;        document).
 ;   Lexical productions note the short extra-character scans they require
 ;   (see "wildcard-token", "integer" / "float").
 ; ============================================================================
@@ -105,8 +113,9 @@ bool-literal    = %s"true"
                 / %s"false"
 
 ; The empty tuple "()" is the unique value of type "void". In expression
-; position it is the empty branch of "paren-or-tuple"; in pattern position it
-; is the empty branch of "tuple-pattern".
+; position it is the empty branch of the parenthesized/tuple form (the
+; Binding Power Table document); in pattern position it is the empty branch
+; of "tuple-pattern".
 
 void-literal    = "(" ")"
 
@@ -200,30 +209,32 @@ const-def =
 ; A "borrow" parameter is non-owning. A "move" parameter is owning.
 ; Function types are monomorphic. Generic parameters are permitted on named
 ; function declarations but not on lambdas or function types.
-; The second form — "fn ... ;" — is a host binding (the Core specification): a
-; declaration without a Stilla body whose implementation the host
-; provides; calls to it lower to runtime system calls and its body is
-; never lowered.
+; The return type is required in both forms: a function with no value to
+; return declares "-> void", and one that never returns normally declares
+; "-> never". The "fn ... ;" form is a host binding (the Core
+; specification): a declaration without a Stilla body whose implementation
+; the host provides; calls to it lower to runtime system calls and its body
+; is never lowered.
 
 func-def =
       %s"fn"
       identifier
       [ type-params ]
       "(" param-list ")"
-      [ "->" type ]
+      "->" type
       block
     / %s"fn"
       identifier
       [ type-params ]
       "(" param-list ")"
-      [ "->" type ]
+      "->" type
       ";"
 
-lambda =
-    %s"fn"
-    "(" param-list ")"
-    [ "->" type ]
-    block
+; The expression-position lambda ( "fn ( param-list ) "->" type block" )
+; is an expression primary form; it is specified in the Binding Power Table
+; document (primary forms), not here. It takes no type parameters (see the
+; note above), uses "param-list" below, and (like a named function)
+; requires its return type.
 
 param-list =
     [ param *( "," param ) ]
@@ -464,275 +475,19 @@ empty-stmt =
 ; ----------------------------------------------------------------------------
 ; Expressions
 ; ----------------------------------------------------------------------------
-; "move" syntactically names a complete local binding. There is no general
-; "borrow" expression; borrowing is introduced by borrow parameters and
-; defined borrowing operations.
-
-expression =
-    logic-or
-
-logic-or =
-    logic-and
-    *( "or" logic-and )
-
-logic-and =
-    comparison
-    *( "and" comparison )
-
-comparison =
-    bitwise-or
-    [ comparison-op bitwise-or ]
-
-comparison-op =
-      "=="
-    / "!="
-    / "<"
-    / "<="
-    / ">"
-    / ">="
-
-; Bitwise ops sit between comparison and shift (Core §16.1): the three
-; levels differ like C/Python — `|` loosest, `&` tightest. All three are
-; left-associative: `a | b ^ c` parses as `a | (b ^ c)` and
-; `a & b | c` as `(a & b) | c`; all bind tighter than comparisons
-; (`a & b == c` is `(a & b) == c`) and looser than shifts
-; (`a & b << c` is `a & (b << c)`).
-bitwise-or =
-    bitwise-xor
-    *( "|" bitwise-xor )
-
-bitwise-xor =
-    bitwise-and
-    *( "^" bitwise-and )
-
-bitwise-and =
-    shift
-    *( "&" shift )
-
-; Shifts sit between bitwise-and and additive (Core §16.3):
-; `a + b << c` parses as `(a + b) << c`, like C and Zig.
-shift =
-    addition
-    *( shift-op addition )
-
-shift-op =
-      "<<"
-    / ">>"
-
-addition =
-    multiply
-    *( add-op multiply )
-
-add-op =
-      "+"
-    / "-"
-
-multiply =
-    unary
-    *( multiply-op unary )
-
-multiply-op =
-      "*"
-    / "/"
-    / "%"
-
-unary =
-      "-" unary
-    / "!" unary
-    / move-expression
-    / cast
-
-move-expression =
-    %s"move"
-    identifier
-
-cast =
-    postfix
-    *( %s"as" type )
-
-
-; ----------------------------------------------------------------------------
-; Postfix expressions
-; ----------------------------------------------------------------------------
-; "specialization-suffix" is accepted syntactically as postfix syntax but is
-; eliminated during compile-time generic specialization. It cannot survive
-; into runtime evaluation.
-
-postfix =
-    primary
-    *postfix-suffix
-
-postfix-suffix =
-      member-suffix
-    / call-suffix
-    / specialization-suffix
-
-; Reserved words are accepted as member names after "." (path-segment
-; rule under "type-path", parser note 4), so "builtin.str" parses.
-
-member-suffix =
-    "."
-    identifier
-
-call-suffix =
-    "("
-    arg-list
-    ")"
-
-; Per the parser note 2, this suffix applies only after primary forms
-; other than a bare type-path; a "::" immediately after a type-path is
-; consumed by "path-tail".
-specialization-suffix =
-    "::"
-    type-args
-
-arg-list =
-    [ expression *( "," expression ) ]
-
-
-; ----------------------------------------------------------------------------
-; Primary expressions
-; ----------------------------------------------------------------------------
-; An identifier leading a primary is parsed uniformly as "path-expression"
-; (see below): a path followed by a construction brace is "struct-construct";
-; a path followed by ":: identifier" is a union variant expression; a path
-; followed by ":: [ ... ]" is a generic specialization; otherwise the path
-; begins an ordinary value expression. "[" after a path is always type
-; arguments (there is no index suffix).
-
-primary =
-      literal
-    / path-expression
-    / paren-or-tuple
-    / list-literal
-    / lambda
-    / if-expression
-    / match-expression
-    / import-expression
-    / block
-
-
-; ----------------------------------------------------------------------------
-; Path expressions
-; ----------------------------------------------------------------------------
-
-path-expression =
-    type-path
-    [ type-args ]
-    path-tail
-
-path-tail =
-      "{" [ struct-field-init
-            *( "," struct-field-init )
-            [ "," ] ]
-        "}"
-    / "::" ( identifier [ "(" arg-list ")" ]
-           / type-args )
-    / "" ; empty -- ordinary value expression
-
-
-; ----------------------------------------------------------------------------
-; Parenthesized and tuple expressions
-; ----------------------------------------------------------------------------
-; The empty form "()" is "void-literal". A single-element tuple "(e)" is not
-; a tuple literal; the parenthesized form "(e)" is a "paren-expression". A
-; one-element tuple is written "(e,)".
-; Left-factored: a "(" is either the void literal (the empty
-; branch, matching the void value) or a parenthesized/tuple expression;
-; after the first expression, ")" or "," decides.
-
-paren-or-tuple =
-      void-literal
-    / "(" expression
-      ( ")"                     ; parenthesized expression
-      / "," [ expression *( "," expression ) ] ")" )   ; tuple literal
-
-
-; ----------------------------------------------------------------------------
-; Imports
-; ----------------------------------------------------------------------------
-; The string must be a literal token.
-; Static semantics permit this production only as the initializer of a
-; module-level "const" binding.
-
-import-expression =
-    %s"import"
-    "("
-    string
-    ")"
-
-
-; ----------------------------------------------------------------------------
-; Struct construction
-; ----------------------------------------------------------------------------
-; All fields must be supplied exactly once.
-; Field initializers are evaluated in written source order. Field order does
-; not affect the struct's destruction order (the Runtime specification).
-; Syntactically this is the "{" alternative of "path-tail" following a
-; type-path with optional type arguments.
-
-struct-field-init =
-    identifier
-    ":"
-    expression
-
-
-; ----------------------------------------------------------------------------
-; Union variant expressions
-; ----------------------------------------------------------------------------
-; Static semantics require the type path to denote a named union type and the
-; identifier to name one of its variants.
-; This production does not define arbitrary associated functions.
-; Syntactically this is the ":: identifier" alternative of "path-tail"
-; following a type-path with optional type arguments.
-
-
-; ----------------------------------------------------------------------------
-; List literals
-; ----------------------------------------------------------------------------
-
-list-literal =
-    "["
-    [ expression *( "," expression ) [ "," ] ]
-    "]"
-
-
-; ----------------------------------------------------------------------------
-; "if"
-; ----------------------------------------------------------------------------
-
-if-expression =
-    %s"if"
-    "("
-    expression
-    ")"
-    block
-    [ %s"else"
-      ( block / if-expression ) ]
-
-
-; ----------------------------------------------------------------------------
-; "match"
-; ----------------------------------------------------------------------------
-; Because a block is itself an expression, a match arm may use a block
-; without a separate grammar production.
-
-match-expression =
-    %s"match"
-    "("
-    expression
-    ")"
-    "{"
-    match-arm
-    *( "," match-arm )
-    [ "," ]
-    "}"
-
-match-arm =
-    pattern
-    "=>"
-    expression
-
+; The full expression grammar — primary forms, prefix operators, postfix
+; suffixes, infix operators, and their precedence and associativity — is
+; defined normatively in the companion document "Stilla Expression Binding
+; Power Table.md" (the Binding Power Table document), in Pratt-parser form
+; (binding powers, associativity, and the expression-level parser decisions:
+; the path-tail branches, the "::" rule, and reserved-word member names).
+; This grammar consequently defines no layered expression productions; the
+; single production below is the statement-level point of contact, expanded
+; by the Binding Power Table document. "move" syntactically names a complete
+; local binding, and there is no general "borrow" expression (borrowing is
+; introduced by borrow parameters and defined borrowing operations).
+;
+expression = <defined normatively in "Stilla Expression Binding Power Table.md">
 
 ; ----------------------------------------------------------------------------
 ; Patterns
@@ -866,12 +621,3 @@ list-rest =
     identifier
 
 
-; ----------------------------------------------------------------------------
-; Literals
-; ----------------------------------------------------------------------------
-
-literal =
-      integer
-    / float
-    / string
-    / bool-literal

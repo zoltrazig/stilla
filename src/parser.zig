@@ -2,7 +2,8 @@
 //! v1.3 Draft) — turns a source file's token stream into an `ast.Program`.
 //!
 //! The grammar's decision points are resolvable with one token of lookahead,
-//! except two documented points — `path-tail` after `::`, and the block
+//! except the documented points — the expression decisions (path-expression
+//! nuds, the postfix chain; the Binding Power Table document) and the block
 //! statement loop's `;` / `}` split — which the parser resolves as described
 //! in the grammar's parser lookahead notes. The parser works over a pre-lexed
 //! token buffer (`lex.Lexer`), so it provides arbitrary lookahead; k = 2
@@ -203,8 +204,13 @@ pub const Parser = struct {
         const type_params = try self.parseOptionalTypeParams();
         try self.expectAdvance(.lparen, "'('");
         const params = try self.parseParamList();
-        var ret: ?ast.Type = null;
-        if (self.eat(.arrow)) ret = try parse_type.parseType(self);
+        // The return type is required (Grammar `func-def`; Core §6.4):
+        // a function with no value declares `-> void`, one that never
+        // returns normally declares `-> never`.
+        if (!self.eat(.arrow)) {
+            return self.fail(self.cur().span, "a function declaration must declare its return type ('-> T'); write '-> void' when it returns nothing", .{});
+        }
+        const ret = try parse_type.parseType(self);
         // Declaration-only (host binding — phase3-cfg-lowering.md, System calls for host bindings): `fn name(...) -> type;`
         // has no body — calls lower to system calls.
         if (self.eat(.semicolon)) {
@@ -683,10 +689,10 @@ test "parses hostdata as a primitive type" {
     const c = t.program.items[0].const_def;
     try std.testing.expectEqual(ast.PrimitiveKind.hostdata, c.type_.?.primitive.kind);
     const f = t.program.items[1].func_def;
-    try std.testing.expectEqual(ast.PrimitiveKind.hostdata, f.ret.?.primitive.kind);
+    try std.testing.expectEqual(ast.PrimitiveKind.hostdata, f.ret.primitive.kind);
     const g = t.program.items[2].func_def;
     try std.testing.expectEqual(ast.PrimitiveKind.hostdata, g.params[0].type_.primitive.kind);
-    try std.testing.expectEqual(ast.PrimitiveKind.hostdata, g.ret.?.primitive.kind);
+    try std.testing.expectEqual(ast.PrimitiveKind.hostdata, g.ret.primitive.kind);
     const td = t.program.items[3].type_def;
     try std.testing.expectEqual(ast.PrimitiveKind.hostdata, td.target.primitive.kind);
 }
@@ -710,7 +716,7 @@ test "parses any in host-binding declarations" {
     try std.testing.expect(c.init == null);
     const f = t.program.items[1].func_def;
     try std.testing.expectEqual(ast.PrimitiveKind.any, f.params[0].type_.primitive.kind);
-    try std.testing.expectEqual(ast.PrimitiveKind.any, f.ret.?.primitive.kind);
+    try std.testing.expectEqual(ast.PrimitiveKind.any, f.ret.primitive.kind);
     try std.testing.expect(f.body == null);
 }
 
@@ -725,13 +731,13 @@ test "parses function definitions" {
     try std.testing.expectEqual(@as(usize, 1), f.params.len);
     try std.testing.expectEqual(ast.ParamMode.plain, f.params[0].mode);
     try std.testing.expectEqualStrings("x", f.params[0].name.text);
-    try std.testing.expectEqualStrings("T", f.ret.?.named.path[0].text);
+    try std.testing.expectEqualStrings("T", f.ret.named.path[0].text);
     try std.testing.expectEqual(@as(usize, 0), f.body.?.stmts.len);
     try std.testing.expectEqualStrings("x", f.body.?.result.?.path.path[0].text);
 }
 
 test "parses borrow and move parameters" {
-    var t = try parseText("fn f(borrow a: int32, move b: str) {}");
+    var t = try parseText("fn f(borrow a: int32, move b: str) -> void {}");
     defer t.tp.deinit();
 
     const f = t.program.items[0].func_def;
@@ -812,7 +818,7 @@ test "parses builtin as an ordinary imported module" {
     var t = try parseText(
         \\const builtin = import("builtin");
         \\using builtin.print as p;
-        \\fn main() { p("hi"); builtin.str(1) }
+        \\fn main() -> void { p("hi"); builtin.str(1) }
     );
     defer t.tp.deinit();
 
@@ -830,7 +836,7 @@ test "parses builtin as an ordinary imported module" {
 }
 
 test "parses using declarations inside blocks" {
-    var t = try parseText("fn f() { using string.upper as up; up(\"x\") }");
+    var t = try parseText("fn f() -> void { using string.upper as up; up(\"x\") }");
     defer t.tp.deinit();
 
     const body = t.program.items[0].func_def.body.?;
@@ -1020,7 +1026,7 @@ test "parses lambdas" {
 
     const f = t.program.items[0].const_def.init.?;
     try std.testing.expectEqual(@as(usize, 1), f.lambda.params.len);
-    try std.testing.expectEqual(ast.PrimitiveKind.int32, f.lambda.ret.?.primitive.kind);
+    try std.testing.expectEqual(ast.PrimitiveKind.int32, f.lambda.ret.primitive.kind);
     try std.testing.expectEqualStrings("x", f.lambda.body.result.?.path.path[0].text);
 }
 
@@ -1048,7 +1054,7 @@ test "parses list literals and blocks" {
 }
 
 test "parses patterns in let statements" {
-    var t = try parseText("fn f(xs: list[int32]) { let (a, b) = p; let [head, ..tail] = xs; let Point { x, y: 0 } = q; let U::V(a, b) = w; }");
+    var t = try parseText("fn f(xs: list[int32]) -> void { let (a, b) = p; let [head, ..tail] = xs; let Point { x, y: 0 } = q; let U::V(a, b) = w; }");
     defer t.tp.deinit();
 
     const body = t.program.items[0].func_def.body.?;
@@ -1078,7 +1084,7 @@ test "parses imports and decodes strings" {
 }
 
 test "parses empty statements and empty blocks" {
-    var t = try parseText("fn f() { ;; {}; }");
+    var t = try parseText("fn f() -> void { ;; {}; }");
     defer t.tp.deinit();
 
     const body = t.program.items[0].func_def.body.?;
@@ -1123,13 +1129,13 @@ test "rejects trailing commas in tuples and tuple patterns" {
     defer t.tp.deinit();
     try std.testing.expectEqualStrings("expected an expression, found ')'", t.diag.message);
 
-    var t2 = try parseError("fn f() { let (a, b,) = p; }");
+    var t2 = try parseError("fn f() -> void { let (a, b,) = p; }");
     defer t2.tp.deinit();
     try std.testing.expectEqualStrings("expected a pattern, found ')'", t2.diag.message);
 }
 
 test "rejects a bare pattern in parens" {
-    var t = try parseError("fn f() { let (p) = q; }");
+    var t = try parseError("fn f() -> void { let (p) = q; }");
     defer t.tp.deinit();
     try std.testing.expectEqualStrings("expected ',', found ')'", t.diag.message);
 }
@@ -1217,7 +1223,7 @@ test "parses never as a primitive type" {
     defer t.tp.deinit();
 
     const f = t.program.items[0].func_def;
-    try std.testing.expectEqual(ast.PrimitiveKind.never, f.ret.?.primitive.kind);
+    try std.testing.expectEqual(ast.PrimitiveKind.never, f.ret.primitive.kind);
 }
 
 test "parses empty structs and empty unions" {
@@ -1260,15 +1266,22 @@ test "parses function types in struct fields and parameters" {
     try std.testing.expectEqual(ast.ParamMode.move, f.params[0].type_.function.params[0].mode);
 }
 
-test "parses void-returning and inferred-return functions" {
-    var t = try parseText("fn f() {} fn g() -> void {} fn h() { 1 }");
+test "rejects a function without a return type" {
+    // Core §6.4: the return type is required. The arrow cannot be omitted
+    // in a body form, a host-binding form, or a lambda.
+    var t = try parseError("fn f() {}");
+    defer t.tp.deinit();
+    try std.testing.expect(std.mem.indexOf(u8, t.diag.message, "must declare its return type") != null);
+}
+
+test "parses void-returning functions" {
+    var t = try parseText("fn f() -> void {} fn g() -> void {} fn h() -> int32 { 1 }");
     defer t.tp.deinit();
 
     try std.testing.expectEqual(@as(usize, 3), t.program.items.len);
-    try std.testing.expect(t.program.items[0].func_def.ret == null);
-    try std.testing.expectEqual(ast.PrimitiveKind.void, t.program.items[1].func_def.ret.?.primitive.kind);
-    // `h` omits the return type: inferred from the body (Core §6.4).
-    try std.testing.expect(t.program.items[2].func_def.ret == null);
+    try std.testing.expectEqual(ast.PrimitiveKind.void, t.program.items[0].func_def.ret.primitive.kind);
+    try std.testing.expectEqual(ast.PrimitiveKind.void, t.program.items[1].func_def.ret.primitive.kind);
+    try std.testing.expectEqual(ast.PrimitiveKind.int32, t.program.items[2].func_def.ret.primitive.kind);
 }
 
 test "rejects a second drop declaration" {

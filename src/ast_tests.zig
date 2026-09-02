@@ -79,7 +79,7 @@ test "ast node spans slice the original source text (expr, type, pattern)" {
         else => return error.TestUnexpectedResult,
     };
     try testing.expectEqualStrings("describe", text[func.name.span.start..func.name.span.end]);
-    const ret = func.ret.?;
+    const ret = func.ret;
     try testing.expectEqualStrings("str", text[ret.span().start..ret.span().end]);
 
     // The body's result is the match expression; its span covers the whole

@@ -728,7 +728,7 @@ Literal:
 A tuple type has **at least one element**: `tuple[]` is not a type — the
 empty tuple `()` is the sole `void` value. A single-element tuple type
 `tuple[int32]` is valid and distinct from `int32`; its literal is written
-`(42,)` (Grammar `paren-or-tuple`).
+`(42,)` (the Binding Power Table document, `paren-or-tuple`).
 
 ## 11.5 List
 
@@ -1333,6 +1333,10 @@ Write:
 a < b and b < c
 ```
 
+The precedence list above is fixed syntactically by the Binding Power Table
+document (Stilla Expression Binding Power Table.md), which defines the
+binding powers, associativity, and parse rules of every operator.
+
 ## 16.2 Evaluation order
 
 Stilla uses a single deterministic evaluation-order rule; it is defined in the Runtime specification:
@@ -1475,7 +1479,7 @@ through an intermediate
 negation of it constructs `int64_min` — `-9223372036854775808` is
 `int64_min`, never a range error. A `uint32` literal covers magnitudes up to
 `2³² - 1` (`4294967295`). The leading `-` is unary negation
-(Grammar), never part of the
+(the Binding Power Table document, prefix operators), never part of the
 literal payload: `-1` in a `uint64` context is the wrapping negation of
 `uint64(1)` (`0xffff_ffff_ffff_ffff`), and a literal whose magnitude fits no
 expected type is a compile-time error. A float literal in an explicit

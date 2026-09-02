@@ -42,7 +42,7 @@ const f = fn(move acc: int32, borrow x: int32) -> int32 { acc + x }
 
 - Monomorphic, **non-capturing** (no closures). **No implicit receiver**, no methods, no associated functions.
 - First-class monomorphic values; generics are compile-time templates.
-- Order-independent within a module; recursion allowed, but a recursive function must declare its return type.
+- Order-independent within a module; recursion allowed. Every function and lambda **declares its return type** (`-> void` when it returns nothing, `-> never` when it never returns normally); there is no inference.
 
 ## Types
 

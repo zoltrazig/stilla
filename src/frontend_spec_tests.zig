@@ -340,7 +340,7 @@ test "frontend rejects missing, duplicate, and unknown struct fields" {
 }
 
 test "frontend rejects import outside a module constant initializer" {
-    // Core §2.2 / Grammar `import-expression`: `import(...)` may appear
+    // Core §2.2 / Binding Power Table document, import form: `import(...)` may appear
     // only as the initializer of a module-level `const` binding.
     var c = try compileText("app", &.{
         .{ "app", "fn main() -> void { let b = import(\"builtin\"); }" },

@@ -50,7 +50,7 @@ A function or lambda may not reference local bindings belonging to an enclosing 
 
 ## Functions
 
-Functions are order-independent within a module; direct and mutual recursion are permitted (Order and recursion). Every function in a recursion cycle declares its return type explicitly. Module constant initialization must not transitively read a later-declared module constant (Module Constants).
+Functions are order-independent within a module; direct and mutual recursion are permitted (Order and recursion). Every function declares its return type explicitly — including `-> void` when it returns nothing and `-> never` when it never returns normally (Return values). Module constant initialization must not transitively read a later-declared module constant (Module Constants).
 
 ## Path aliases
 

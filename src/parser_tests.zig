@@ -151,7 +151,7 @@ test "parser black-box: recovery does not unbalance the enclosing block" {
         arena.allocator(),
         "test.st",
         0,
-        \\fn f() {
+        \\fn f() -> void {
         \\    let a = { let b = ; };
         \\    let c = 1;
         \\}

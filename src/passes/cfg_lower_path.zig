@@ -1,4 +1,5 @@
-//! Pass: path expression lowering — `path-expression` (Core §2.5, §2.7).
+//! Pass: path expression lowering — the path-expression nud and member
+//! forms (Binding Power Table document; Core §2.5, §2.7).
 //! In: Lowerer + FuncState + ast.PathExpr / Member / Index, module graph.
 //! Out: CFG value for the resolved path (local, module ref, or member loads).
 const std = @import("std");
