@@ -149,7 +149,23 @@ fn scanUses(ctx: *FnCtx) error{OutOfMemory}!void {
         var defined = std.DynamicBitSet.initEmpty(arena, ctx.n) catch unreachable;
         defer defined.deinit();
         for (blk.instrs) |ins| {
-            if (std.meta.activeTag(ins.op) == .phi) continue; // read on pred edges
+            if (std.meta.activeTag(ins.op) == .phi) {
+                // A phi result is DEFINED in this block: a use after the
+                // block-head phis is never upward-exposed, so the result
+                // must enter `def_in`/`defined` exactly like any other
+                // def. Without this the phi-input pass below cannot see
+                // that an incoming was defined in its predecessor block
+                // and marks it `use_in` there; liveness then propagates
+                // the value up the CFG (past its real death point), and
+                // the edge releases fire on unrelated edges — releasing
+                // whatever lives in the slot then, e.g. a plain bool,
+                // which the VM traps on (forged-pointer check).
+                for (ins.results) |r| {
+                    mark(ctx, &ctx.def_in[bi], r);
+                    if (ctx.idx.get(r)) |ui| defined.set(ui);
+                }
+                continue; // operands are read on pred edges
+            }
             try operandsOf(ctx.bld, ins, &ops);
             for (ops.items) |v| {
                 if (ctx.idx.get(v)) |ui| {
@@ -346,8 +362,10 @@ fn placeReleases(ctx: *FnCtx) error{OutOfMemory}!void {
             while (eit.next()) |i| {
                 if (ctx.live_in[si].isSet(i)) continue;
                 const v = valueAt(ctx, i) orelse continue;
-                // A phi move on this edge consumes unique-counted sources.
+                // A phi move on this edge consumes unique-counted sources;
+                // an identity phi copy transfers by slot, not by release.
                 if (edgeConsumes(blk, s, v)) continue;
+                if (edgePhiIsSelfLoop(bld, blk, s, v)) continue;
                 const gop = try bld.release_edges.getOrPut(arena, .{ .pred = blk, .succ = s });
                 if (!gop.found_existing) gop.value_ptr.* = .empty;
                 try gop.value_ptr.append(arena, .{ .op = .release, .a = fitSlot(bld, v) });
@@ -361,6 +379,7 @@ fn placeReleases(ctx: *FnCtx) error{OutOfMemory}!void {
                 if (ctx.live_in[si].isSet(i)) continue; // survives into s
                 const v = valueAt(ctx, i) orelse continue;
                 if (edgeConsumes(blk, s, v)) continue;
+                if (edgePhiIsSelfLoop(bld, blk, s, v)) continue;
                 const gop = try bld.release_edges.getOrPut(arena, .{ .pred = blk, .succ = s });
                 if (!gop.found_existing) gop.value_ptr.* = .empty;
                 try gop.value_ptr.append(arena, .{ .op = .release, .a = fitSlot(bld, v) });
@@ -495,6 +514,25 @@ fn edgeConsumes(pred: *const cfg.BasicBlock, succ: *const cfg.BasicBlock, v: *co
         .phi => |p| for (p.incoming) |inc| {
             if (inc.pred == pred and inc.value == v) {
                 return v.state != .borrowed and v.ownership == .unique;
+            }
+        },
+        else => {},
+    };
+    return false;
+}
+
+/// Whether `v`'s phi copy on edge `pred → succ` is an identity — the
+/// phi result shares `v`'s slot, so the edge copy is elided and the
+/// value flows through unchanged. Such a value must NOT be released on
+/// the edge: the elided copy is the transfer, and releasing the slot
+/// would destroy the reference the phi result owns (the unique path
+/// skips through `edgeConsumes`; a counted self-loop flows through the
+/// same way — `copy_retain` + release is only the non-identity form).
+fn edgePhiIsSelfLoop(bld: *Builder, pred: *const cfg.BasicBlock, succ: *const cfg.BasicBlock, v: *const cfg.Value) bool {
+    for (succ.instrs) |ins| switch (ins.op) {
+        .phi => |p| for (p.incoming) |inc| {
+            if (inc.pred == pred and inc.value == v) {
+                return bld.slotOf(ins.results[0]) == bld.slotOf(v);
             }
         },
         else => {},

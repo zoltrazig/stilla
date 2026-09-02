@@ -393,6 +393,63 @@ test "stage 7.2: counted value released on one outgoing edge stays live on its s
     try testing.expectEqual(@as(u8, 1), v_then);
 }
 
+test "chained if-else str merges: an else arm returning the previous value" {
+    // `let b = if (hp) { join2(a, ...) } else { a }` — the else arm
+    // returns the existing `a` while the then arm produces a fresh str.
+    // The merge phi's result shares `a`'s slot, so the edge copy is an
+    // elided identity and the value flows through; the lifecycle pass
+    // must NOT release it on that edge (it would destroy the reference
+    // the phi result owns, and a second release down the chain traps on
+    // the freed pointer). Regression: the whole chain traps in the VM's
+    // forged-pointer check.
+    const Sink = struct {
+        fn invoke(vm: *interpreter.VmCtx, userdata: ?*const anyopaque, module_symbol: []const u8, member: []const u8, sig: interpreter.HostSignature, args: []const vm_types.Value) interpreter.HostResult {
+            if (std.mem.eql(u8, member, "print")) return .{ .value = 0 };
+            return interpreter.defaultHostCall(vm, userdata, module_symbol, member, sig, args);
+        }
+    };
+    var l = try load(
+        \\fn join2(a: str, b: str) -> str {
+        \\    if (a == "") { b } else { a + ", " + b }
+        \\}
+        \\fn main() -> int32 {
+        \\    let hc = true;
+        \\    let hp = true;
+        \\    let hk = false;
+        \\    let hs = false;
+        \\    let a = if (hc) { "chest" } else { "" };
+        \\    let b = if (hp) { join2(a, "potion") } else { a };
+        \\    let c = if (hk) { join2(b, "key") } else { b };
+        \\    let d = if (hs) { join2(c, "strange") } else { c };
+        \\    let items = if (d == "") { "nothing" } else { d };
+        \\    if (items == "chest, potion") { 1 } else { 0 }
+        \\}
+    , true);
+    defer l.deinit();
+    var vm = interpreter.VmCtx.init(testing.allocator);
+    defer vm.deinit();
+    vm.host = .{ .invoke = Sink.invoke };
+    try vm.setupRootArtifact(l.image, try l.fid("main"));
+    var result: ?Value = null;
+    while (!vm.runtime.terminated) {
+        if (try vm_dispatch.step(&vm)) |t| {
+            switch (t) {
+                .normal => |v| result = v,
+                .panic => |m| {
+                    std.log.err("chain panic: {s}", .{m});
+                    testing.allocator.free(m);
+                    return error.TestUnexpectedResult;
+                },
+            }
+            break;
+        }
+        try vm.drainDestroyWork();
+    }
+    vm.finishCleanup();
+    try testing.expectEqual(@as(usize, 0), vm.runtime.heap.registry.count()); // no leak, no double release
+    try testing.expectEqual(@as(Value, 1), result orelse return error.TestUnexpectedResult);
+}
+
 test "stage 7.1: a switch executes only the selected arm's effects" {
     // A `match` lowers to a `switch` whose arms carry distinct effects.
     // Stage-7 edge blocks route each arm through its own LLIR-only block,

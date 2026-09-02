@@ -686,6 +686,68 @@ test "any: a full binary64 cell (NaN payload) survives pack and recovery" {
     }
 }
 
+test "any: match over a returned conditional whose payload mix includes bool" {
+    // A function-returned `any` from a conditional whose payload set
+    // mixes `bool` with `str`/`int32`, recovered by a consuming `match`
+    // with a `bool` arm containing a nested `if`. Regression: the nested
+    // arm's join phi fed the outer match join, and the lifecycle pass
+    // (phi results were never marked as defs) released the phi's slot on
+    // unrelated branch edges — releasing the plain `bool` `type_is`
+    // results and trapping in the VM's forged-pointer check.
+    const Capture = struct {
+        buffer: [256]u8 = undefined,
+        len: usize = 0,
+    };
+    var state = Capture{};
+    const Hook = struct {
+        fn invoke(userdata: ?*anyopaque, bytes: []const u8) void {
+            const c: *Capture = @ptrCast(@alignCast(userdata.?));
+            @memcpy(c.buffer[c.len..][0..bytes.len], bytes);
+            c.len += bytes.len;
+            c.buffer[c.len] = '\n';
+            c.len += 1;
+        }
+    };
+    var l = try load(
+        \\const builtin = import("builtin");
+        \\fn loot(gold: int32) -> any {
+        \\    if (gold >= 100) { "a blessing" } else if (gold >= 50) { 10 } else { true }
+        \\}
+        \\fn describe(move x: any) -> str {
+        \\    match (x) {
+        \\        int32 coins => builtin.str(coins) + " gold",
+        \\        str thing => thing,
+        \\        bool blessed => if (blessed) { "good luck" } else { "bad luck" },
+        \\        _ => "mystery",
+        \\    }
+        \\}
+        \\fn main() -> void {
+        \\    let a = loot(220);
+        \\    builtin.print(describe(move a));
+        \\    let b = loot(50);
+        \\    builtin.print(describe(move b));
+        \\    let c = loot(10);
+        \\    builtin.print(describe(move c));
+        \\}
+    , false);
+    defer l.deinit();
+    var term = try interpreter.runWithEntry(
+        testing.allocator,
+        l.image,
+        try l.fid("main"),
+        .{ .print = .{ .userdata = &state, .invoke = Hook.invoke } },
+    );
+    defer term.deinit(testing.allocator);
+    switch (term) {
+        .normal => {},
+        .panic => |m| {
+            std.log.err("unexpected panic: {s}", .{m});
+            return error.TestUnexpectedResult;
+        },
+    }
+    try testing.expectEqualStrings("a blessing\n10 gold\ngood luck\n", state.buffer[0..state.len]);
+}
+
 test "any: wrong-type recovery traps (dynamic TypeId mismatch)" {
     var l = try load(
         \\fn main() -> int32 {
