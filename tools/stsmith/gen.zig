@@ -134,6 +134,12 @@ const Flav = enum {
     union_stmt,
     any_stmt,
     print_stmt,
+    std_str,
+    std_slice,
+    std_pair,
+    std_list,
+    std_search,
+    std_fold,
 };
 
 /// every flavor runs once (in this order), then random draws take over
@@ -141,6 +147,8 @@ const PRELUDE = [_]Flav{
     .check_int,  .bind_int,    .check_bool,  .call_fn,  .rec_count,
     .bind_bool,  .rec_list,    .float_exact, .str_stmt, .list_proj,
     .tuple_stmt, .struct_stmt, .union_stmt,  .any_stmt, .print_stmt,
+    .std_str,    .std_slice,   .std_pair,    .std_list, .std_search,
+    .std_fold,
 };
 
 const FLAV_WEIGHTS = [_]struct { f: Flav, w: u32 }{
@@ -159,6 +167,12 @@ const FLAV_WEIGHTS = [_]struct { f: Flav, w: u32 }{
     .{ .f = .union_stmt, .w = 1 },
     .{ .f = .any_stmt, .w = 2 },
     .{ .f = .print_stmt, .w = 1 },
+    .{ .f = .std_str, .w = 2 },
+    .{ .f = .std_slice, .w = 2 },
+    .{ .f = .std_pair, .w = 2 },
+    .{ .f = .std_list, .w = 2 },
+    .{ .f = .std_search, .w = 2 },
+    .{ .f = .std_fold, .w = 1 },
 };
 
 const Gen = struct {
@@ -194,7 +208,16 @@ const Gen = struct {
     classify_c: IntVal = undefined,
     classify_d: IntVal = undefined,
 
-    const FIXED_STRS = [_][]const u8{ "stilla", "hello", "world", "abc", "zz", "q", "seed" };
+    // ASCII only (letters, digits, space, punctuation): the stdlib string
+    // operations the generator models (case conversion, code-point indexing,
+    // whitespace trimming, repeat) are all byte-exact on ASCII, so the model
+    // stays honest for every constant emitted here. No `"` or `\` ever, so
+    // values print raw inside string literals.
+    const FIXED_STRS = [_][]const u8{
+        "stilla", "hello",    "world", "abc",   "zz",       "q",       "seed",
+        "Hello",  "hi there", "ok!",   "x y z", "  padded", "trail  ", "123",
+        "A1b2",
+    };
     const MSG_STRS = [_][]const u8{ "ok", "gen", "check", "prog", "step", "run", "calc", "verify", "scan", "dot" };
 
     const SEED_COUNT: usize = 8;
@@ -217,7 +240,11 @@ const Gen = struct {
             "// stsmith -- randomized Stilla program\n" ++
                 "// seed={d} statements={d} funcs={d} max-depth={d}\n" ++
                 "// Same seed + same options reproduce this file byte-for-byte.\n\n" ++
-                "const builtin = import(\"builtin\");\n\n",
+                "const builtin = import(\"builtin\");\n" ++
+                "const string = import(\"string\");\n" ++
+                "const lists = import(\"list\");\n" ++
+                "const iter = import(\"iter\");\n" ++
+                "using builtin.Option;\n\n",
             .{ self.opts.seed, self.opts.statements, self.opts.funcs, self.opts.max_depth },
         ) catch unreachable;
         try self.out.appendSlice(s);
@@ -1024,6 +1051,12 @@ const Gen = struct {
                 .union_stmt => try self.sUnion(),
                 .any_stmt => try self.sAny(),
                 .print_stmt => try self.sPrint(),
+                .std_str => try self.sStdStr(),
+                .std_slice => try self.sStdSlice(),
+                .std_pair => try self.sStdPair(),
+                .std_list => try self.sStdList(),
+                .std_search => try self.sStdSearch(),
+                .std_fold => try self.sStdFold(),
             }
         }
         try self.raw("}\n");
@@ -1476,6 +1509,228 @@ const Gen = struct {
         if (loc == null) return;
         try self.line("builtin.print(builtin.str({s}));", .{loc.?.name});
     }
+
+    // ============ stdlib string/list/iter statements ============
+    //
+    // These exercise the derived standard-library modules (string.st,
+    // list.st, iter.st) the way the integer statements exercise the core
+    // language: only calls whose results the generator can model exactly are
+    // emitted, and each result is asserted. The generator only emits ASCII
+    // strings, so the stdlib's Unicode operations (code-point indexing, case
+    // conversion, whitespace trimming) reduce to byte operations in the
+    // model. Lists are built with `lists.range` and fully consumed within
+    // one statement, so no list value needs to be carried in the model.
+
+    fn strEqAssert(self: *Gen, nm: []const u8, v: []const u8, m: []const u8) !void {
+        try self.line("builtin.assert({s} == \"{s}\", \"{s}\");", .{ nm, v, m });
+    }
+
+    /// ASCII case conversion; byte-exact for the ASCII strings emitted.
+    fn asciiMap(self: *Gen, s: []const u8, to_upper: bool) []const u8 {
+        const out = self.alloc.dupe(u8, s) catch unreachable;
+        for (out) |*c| {
+            if (to_upper) {
+                if (c.* >= 'a' and c.* <= 'z') c.* -= 32;
+            } else {
+                if (c.* >= 'A' and c.* <= 'Z') c.* += 32;
+            }
+        }
+        return out;
+    }
+
+    /// Byte index of the first occurrence of `needle`, or null. An empty
+    /// needle matches at index 0, mirroring string.st's documented behavior.
+    fn strFind(_: *Gen, haystack: []const u8, needle: []const u8) ?usize {
+        return std.mem.indexOf(u8, haystack, needle);
+    }
+
+    fn asciiTrim(s: []const u8) []const u8 {
+        var start: usize = 0;
+        while (start < s.len and isAsciiSpace(s[start])) start += 1;
+        var end = s.len;
+        while (end > start and isAsciiSpace(s[end - 1])) end -= 1;
+        return s[start..end];
+    }
+
+    fn isAsciiSpace(c: u8) bool {
+        return c == ' ' or c == '\t' or c == '\n' or c == '\r';
+    }
+
+    fn strRepeat(self: *Gen, s: []const u8, n: usize) []const u8 {
+        const out = self.alloc.alloc(u8, s.len * n) catch unreachable;
+        var k: usize = 0;
+        while (k < n) : (k += 1) {
+            @memcpy(out[k * s.len ..][0..s.len], s);
+        }
+        return out;
+    }
+
+    /// string.len / upper / lower / is_empty on a str local.
+    fn sStdStr(self: *Gen) !void {
+        const s = self.pickStrName();
+        const sv = self.lookStr(&.{}, s).?;
+        const r = self.rng.below(10);
+        if (r < 3) {
+            const e = std.fmt.allocPrint(self.alloc, "string.len({s})", .{s}) catch unreachable;
+            try self.intEqAssert(e, IntVal.mk(.i32, @intCast(sv.len)), self.msg());
+        } else if (r < 6) {
+            const w = self.newVar();
+            const up = self.asciiMap(sv, true);
+            try self.line("let {s} = string.upper({s});", .{ w, s });
+            self.pushLocal(w, .{ .str = up });
+            try self.strEqAssert(w, up, self.msg());
+        } else if (r < 9) {
+            const w = self.newVar();
+            const lo = self.asciiMap(sv, false);
+            try self.line("let {s} = string.lower({s});", .{ w, s });
+            self.pushLocal(w, .{ .str = lo });
+            try self.strEqAssert(w, lo, self.msg());
+        } else {
+            const e = std.fmt.allocPrint(self.alloc, "string.is_empty({s})", .{s}) catch unreachable;
+            try self.line("builtin.assert(({s}) == {s}, \"{s}\");", .{ e, if (sv.len == 0) "true" else "false", self.msg() });
+        }
+    }
+
+    /// string.substring / repeat / trim, each bound and asserted against the
+    /// byte-exact ASCII model.
+    fn sStdSlice(self: *Gen) !void {
+        const s = self.pickStrName();
+        const sv = self.lookStr(&.{}, s).?;
+        const r = self.rng.below(10);
+        if (r < 4) {
+            const n: i64 = @intCast(sv.len);
+            const i = self.rng.range(0, n); // inclusive: 0..n
+            const j = self.rng.range(i, n);
+            const w = self.newVar();
+            const sub = sv[@intCast(i)..@intCast(j)];
+            try self.line("let {s} = string.substring({s}, {d}, {d});", .{ w, s, i, j });
+            self.pushLocal(w, .{ .str = sub });
+            try self.strEqAssert(w, sub, self.msg());
+        } else if (r < 7) {
+            const k = self.rng.range(0, 3); // 0..3 repeats
+            const w = self.newVar();
+            const rep = self.strRepeat(sv, @intCast(k));
+            try self.line("let {s} = string.repeat({s}, {d});", .{ w, s, k });
+            self.pushLocal(w, .{ .str = rep });
+            try self.strEqAssert(w, rep, self.msg());
+        } else {
+            const w = self.newVar();
+            const tr = asciiTrim(sv);
+            try self.line("let {s} = string.trim({s});", .{ w, s });
+            self.pushLocal(w, .{ .str = tr });
+            try self.strEqAssert(w, tr, self.msg());
+        }
+    }
+
+    /// Two-string predicates: string.contains / starts_with / ends_with /
+    /// index_of over a haystack local and a needle (a second str local, a
+    /// literal, or the empty string literal).
+    fn sStdPair(self: *Gen) !void {
+        const a = self.pickStrName();
+        const av = self.lookStr(&.{}, a).?;
+        const needle_is_local = self.countStrVars() >= 2 and self.rng.chance(50);
+        const b_local: ?[]const u8 = if (needle_is_local) self.pickStrNameOther(a) else null;
+        const b_val: []const u8 = if (needle_is_local)
+            self.lookStr(&.{}, b_local.?).?
+        else if (self.rng.chance(15))
+            ""
+        else
+            self.pickStr();
+        const b_arg: []const u8 = if (needle_is_local)
+            b_local.?
+        else
+            std.fmt.allocPrint(self.alloc, "\"{s}\"", .{b_val}) catch unreachable;
+
+        const r = self.rng.below(11);
+        if (r < 3) {
+            const found = self.strFind(av, b_val) != null;
+            try self.line("builtin.assert(string.contains({s}, {s}) == {s}, \"{s}\");", .{ a, b_arg, if (found) "true" else "false", self.msg() });
+        } else if (r < 5) {
+            const pre = std.mem.startsWith(u8, av, b_val);
+            try self.line("builtin.assert(string.starts_with({s}, {s}) == {s}, \"{s}\");", .{ a, b_arg, if (pre) "true" else "false", self.msg() });
+        } else if (r < 7) {
+            const suf = std.mem.endsWith(u8, av, b_val);
+            try self.line("builtin.assert(string.ends_with({s}, {s}) == {s}, \"{s}\");", .{ a, b_arg, if (suf) "true" else "false", self.msg() });
+        } else {
+            const io = self.newVar();
+            try self.line("let {s} = string.index_of({s}, {s});", .{ io, a, b_arg });
+            if (self.strFind(av, b_val)) |k| {
+                try self.line("builtin.assert(match ({s}) {{ Option::Some(v) => v == {d}, Option::None => false }}, \"{s}\");", .{ io, k, self.msg() });
+            } else {
+                try self.line("builtin.assert(match ({s}) {{ Option::Some(v) => v == 0, Option::None => true }}, \"{s}\");", .{ io, self.msg() });
+            }
+        }
+    }
+
+    /// list.range binding with len and head self-checks. The range is
+    /// inclusive [a, b] (len = b - a + 1); empty when a > b.
+    fn sStdList(self: *Gen) !void {
+        const a = self.rng.range(-8, 8);
+        const empty = self.rng.chance(25);
+        const b: i64 = if (empty) a - self.rng.range(1, 3) else self.rng.range(a, a + 9);
+        const l = self.newVar();
+        try self.line("let {s}: list[int32] = lists.range({d}, {d});", .{ l, a, b });
+        const len: i64 = if (empty) 0 else b - a + 1;
+        const len_e = std.fmt.allocPrint(self.alloc, "lists.len({s})", .{l}) catch unreachable;
+        try self.intEqAssert(len_e, IntVal.mk(.i32, @intCast(len)), self.msg());
+        // head consumes the list, so this must come after the len assert.
+        if (!empty) {
+            try self.line("builtin.assert(match (lists.head({s})) {{ Option::Some(v) => v == {d}, Option::None => false }}, \"{s}\");", .{ l, a, self.msg() });
+        } else {
+            try self.line("builtin.assert(match (lists.head({s})) {{ Option::Some(v) => v == 0, Option::None => true }}, \"{s}\");", .{ l, self.msg() });
+        }
+    }
+
+    /// list.contains / count / index_of with an equality lambda over a fresh
+    /// list.range list. The needle is drawn from inside the range (70%) or
+    /// strictly below it, so found/not-found outcomes are model-exact.
+    fn sStdSearch(self: *Gen) !void {
+        const a = self.rng.range(-8, 8);
+        const empty = self.rng.chance(25);
+        const b: i64 = if (empty) a - self.rng.range(1, 3) else self.rng.range(a, a + 9);
+        const l = self.newVar();
+        try self.line("let {s}: list[int32] = lists.range({d}, {d});", .{ l, a, b });
+        const found = !empty and self.rng.chance(70);
+        const needle: i64 = if (found) self.rng.range(a, b) else self.rng.range(a - 4, a - 1);
+        const eq = "fn(borrow a: int32, borrow b: int32) -> bool { a == b }";
+        const op = self.rng.below(10);
+        if (op < 4) {
+            const res = self.newVar();
+            try self.line("let {s} = lists.contains({s}, {d}, {s});", .{ res, l, needle, eq });
+            try self.line("builtin.assert({s} == {s}, \"{s}\");", .{ res, if (found) "true" else "false", self.msg() });
+        } else if (op < 5) {
+            const res = self.newVar();
+            try self.line("let {s} = lists.count({s}, {d}, {s});", .{ res, l, needle, eq });
+            try self.intEqAssert(res, IntVal.mk(.i32, if (found) 1 else 0), self.msg());
+        } else {
+            const res = self.newVar();
+            try self.line("let {s} = lists.index_of({s}, {d}, {s});", .{ res, l, needle, eq });
+            if (found) {
+                try self.line("builtin.assert(match ({s}) {{ Option::Some(v) => v == {d}, Option::None => false }}, \"{s}\");", .{ res, needle - a, self.msg() });
+            } else {
+                try self.line("builtin.assert(match ({s}) {{ Option::Some(v) => v == 0, Option::None => true }}, \"{s}\");", .{ res, self.msg() });
+            }
+        }
+    }
+
+    /// iter.fold with the addition step over a fresh list.range: the model is
+    /// init + the sum of the inclusive range elements, wrapping like the
+    /// runtime.
+    fn sStdFold(self: *Gen) !void {
+        const a = self.rng.range(-8, 8);
+        const empty = self.rng.chance(25);
+        const b: i64 = if (empty) a - self.rng.range(1, 3) else self.rng.range(a, a + 9);
+        const init = self.rng.range(-2000, 2000);
+        var acc = IntVal.mk(.i32, @intCast(init));
+        var i: i64 = a;
+        while (i <= b) : (i += 1) {
+            acc = IntVal.add(acc, IntVal.mk(.i32, @intCast(i)));
+        }
+        const step = "fn(move acc: int32, borrow x: int32) -> int32 { acc + x }";
+        const res = self.newVar();
+        try self.line("let {s} = iter.fold(lists.range({d}, {d}), {d}, {s});", .{ res, a, b, init, step });
+        try self.intEqAssert(res, acc, self.msg());
+    }
 };
 
 test "same seed reproduces identical output" {
@@ -1497,4 +1752,7 @@ test "generated program parses basic shape" {
     defer alloc.free(src);
     try std.testing.expect(std.mem.indexOf(u8, src, "fn main() -> void {") != null);
     try std.testing.expect(std.mem.indexOf(u8, src, "const builtin = import(\"builtin\");") != null);
+    try std.testing.expect(std.mem.indexOf(u8, src, "const lists = import(\"list\");") != null);
+    try std.testing.expect(std.mem.indexOf(u8, src, "const string = import(\"string\");") != null);
+    try std.testing.expect(std.mem.indexOf(u8, src, "const iter = import(\"iter\");") != null);
 }

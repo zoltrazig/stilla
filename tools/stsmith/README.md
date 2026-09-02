@@ -54,6 +54,29 @@ behavior the generator can model exactly (no UB in the generator's model):
   patterns, and `any` payloads recovered through type-test `match` and `as`
 - `str` constants, concatenation, and `builtin.str`/`builtin.print`
 
+Every generated program additionally imports the derived standard-library
+modules (`string`, `list`, `iter` — ordinary Stilla source the frontend
+compiles like user code, unlike the host-bound `builtin` members) and
+weaves a modeled subset of each into the statement stream:
+
+- `string`: `len`/`is_empty`, `upper`/`lower`, `contains`,
+  `starts_with`/`ends_with`, `index_of` (asserted through an `Option`
+  match), `substring`, `repeat`, `trim`
+- `list`: `lists.range` lists checked with `len` and `head` (including
+  empty ranges), plus `contains`/`count`/`index_of` driven through an
+  equality lambda
+- `iter`: `fold` with an addition lambda; the model result is the init
+  plus the wrapping sum of the range elements
+
+The generator emits only ASCII strings, so the stdlib's Unicode operations
+(code-point indexing, case conversion, whitespace trimming) are byte-exact
+in the generator's model; the needle for a search is a second str local, a
+literal, or the empty string. Range lists are built fresh inside one
+statement and fully consumed there (borrow-then-`head`), so no list value
+needs to be tracked across statements. Importing these modules also puts
+the stdlib's own recursive/generic bodies (`list.contains`-family,
+`iter.fold_with`) through the frontend on every run.
+
 The self-checks compare only integers, so no float round-trip text is ever
 needed: floats are introduced as `(int_expr as float32|float64)`, combined
 with `+ - * /` only when the generator's own IEEE model confirms the result
