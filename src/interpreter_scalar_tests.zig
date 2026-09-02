@@ -161,10 +161,10 @@ test "division traps fire before any write" {
         .normal => return error.TestUnexpectedResult,
         .panic => |m| try testing.expect(std.mem.indexOf(u8, m, "overflow") != null),
     }
-    // The widthless `int32` division carries no 32-bit overflow trap:
-    // `int32_min / -1` computes at 64 bits (+2³¹) and the lowering's
-    // `sext32` wraps the result to `int32_min` (Instruction Set §4 —
-    // the widthless trade-off; WebAssembly *unchecked* semantics).
+    // The typed `div.i32` division carries no 32-bit overflow trap:
+    // `int32_min / -1` computes at 64 bits (+2³¹) and the opcode
+    // self-canonicalizes its result cell, wrapping to `int32_min`
+    // (Instruction Set §4 — WebAssembly *unchecked* semantics).
     var l2b = try load(
         \\fn div(a: int32, b: int32) -> int32 { a / b }
         \\fn main() -> int32 { div(-2147483648, -1) }
@@ -190,10 +190,10 @@ test "division traps fire before any write" {
     }
 }
 
-test "B.0-elided zext32 of a u32 divide still computes the correct quotient" {
-    // `300 as uint32` is a zero-extended dividend, so the div.u32 lowering
-    // drops the dividend's staging zext32 (B.0) and fuses the constant
-    // divisor into `diviu`; the interpreter must still return 42.
+test "div.u32 by a fused const still computes the correct quotient" {
+    // `300 as uint32` is a canonical u32 dividend, so pass 2b fuses the
+    // constant divisor into `divi.u32` reading the dividend's own
+    // canonical cell; the interpreter must still return 42.
     var l = try load(
         \\fn main() -> uint32 { (300 as uint32) / 7 }
     , false);
@@ -209,11 +209,14 @@ test "B.0-elided zext32 of a u32 divide still computes the correct quotient" {
     }
 }
 
-test "u32 divide of a high-bit dividend zero-extends its staged dividend" {
-    // The mul result (sext32-canonicalized) has its top bit set, so the
-    // div.u32 sequence stages it through a zext32 before the widthless
-    // divu; a zext32 that fails to clear the high bits makes the unsigned
-    // dividend read as ~2^64 and the quotient comes out garbage.
+test "div.u32 divides a high-bit canonical dividend exactly" {
+    // The `mul.u32` product has bit 31 set, and its canonical cell is
+    // the *zero-extended* 32-bit product — guaranteed structurally by
+    // the opcode's own canonicalization (Instruction Set §4), with no
+    // staging record in between. Unsigned 64-bit division on that cell
+    // is therefore the exact 32-bit unsigned quotient; an implementation
+    // that left the cell sign-extended would read ~2^64 and divide
+    // garbage.
     // Regression: stsmith seed 5 (v27: u32, quotient 4107778581 != 3).
     var l = try load(
         \\fn g() -> uint32 { 2040345509 }

@@ -87,7 +87,7 @@ comparisons write and `cmov` reads implicitly.
 
 The frontend has already proved SSA dominance, ownership, borrow provenance,
 and cleanup correctness. LLIR validation checks only LLIR-level invariants
-(§8); it does not repeat those analyses. **v10 derives no execution plan**:
+(§8); it does not repeat those analyses. **No execution plan is derived**:
 the opcodes are typed at lowering time, so a validated image decodes 1:1
 into the interpreter's fixed-size `VmInstr` image at load (one decoded
 instruction per record, order-preserving — `vm_pc = module.code_base +
@@ -101,13 +101,13 @@ instruction array plus typed, read-only side tables. There is no
 program-global `ModuleId`, `MemberId`, or `HostBindingId` linking and no
 whole-program flattened module table — cross-module identity rides only on
 canonical module and member **symbols** (byte-exact strings). Every
-instruction is exactly 4 bytes (the six-format v10 encoding); the encoding,
+instruction is exactly 4 bytes (the six-format encoding); the encoding,
 sentinel constants, and operand-field rules are defined in the [Stilla LLIR
 Instruction Set](Stilla%20LLIR%20Instruction%20Set.md).
 
 ```text
 LlirProgram                                      // one module artifact
-  instructions: []Instr                       // [4]u8 records, v10 encoding
+  instructions: []Instr                       // [4]u8 records
   functions: []FunctionDesc              blocks: []BlockDesc   // module-local
   self_symbol: u32                       // SymbolId of this module
   init: u32                              // local FunctionId or no_index
@@ -161,12 +161,11 @@ lookups of symbols absent from the table, are resolution errors.
   Set](Stilla%20LLIR%20Instruction%20Set.md) §3.1.1).
 - Trap behavior is fixed by the opcode ([Instruction
   Set](Stilla%20LLIR%20Instruction%20Set.md), [Runtime
-  Specification](Stilla%20Runtime%20Specification.md)): the widthless
-  integer opcodes wrap modulo 2⁶⁴ and never trap on overflow, a 32-bit
-  operation's modulo-2³² result is made explicit by the `sext32`/
-  `zext32` records of its lowering sequence, and the only integer traps
-  are division by zero and the signed division-overflow case
-  `i64_min / -1` — a 32-bit `int32_min / -1` wraps modulo 2³² to
+  Specification](Stilla%20Runtime%20Specification.md)): the typed
+  integer opcodes wrap at their named width (modulo 2³² or 2⁶⁴) and
+  never trap on overflow, and the only integer traps are division by
+  zero and the signed division-overflow case `i64_min / -1` at the
+  64-bit rep — a 32-bit `int32_min / -1` wraps modulo 2³² to
   `int32_min` instead. There is no program arithmetic mode.
 - Every ID space is dense and **artifact-local** — `FunctionId`, `BlockId`,
   `TypeId`, `SignatureId`, `ConstId`, `SymbolId`, and each descriptor ID —
@@ -267,7 +266,7 @@ recovers a unique function by its containing code range.
 A register operand is a frame register `F0–F108`, a global volatile
 temporary `T0–T15`, or one of the three specials `zero`, `ra`, and `cond`.
 The full rules — the frame-count bound (`frame_count_max` = 109), the
-specials' encodings `0x00`/`0x01`/`0x12`, zero-reading and write-discard on
+specials' encodings `0x00`/`0x01`/`0x02`, zero-reading and write-discard on
 `zero`, `ra`'s link-only placement, the condition register's read-write
 permissions, the T bank's caller-saved semantics, and where each may be
 named — are defined in the [Instruction
@@ -414,7 +413,7 @@ window's top `A` cells, `[callBase + W - A, callBase + W)` — holds the
 call's arguments, with slot `k` at the **absolute output-window offset**
 `W - A + k`; the three cells below the value area hold the call's return
 header (§4.3). **A non-void call's result reuses the top value-area cell**
-(`slot O-1` — the argument-0 position): v10's `result_count` is only ever 0
+(`slot O-1` — the argument-0 position): `result_count` is only ever 0
 or 1, so the callee publishes its single result into `F0` (= `O[O-A]`)
 at `ret`, and the caller reads that same register with a generic `take`
 (§5.4). A non-void zero-parameter call still reserves one value-area cell.
@@ -459,7 +458,7 @@ stack range                callee view                     caller view
 **Callee parameters alias caller window cells.** At a call,
 `fp_callee = sp - A` (§5.3 step 4): the callee's parameter registers
 `F0..F(P-1)` *are* the caller's window cells that the `slot_*` records
-wrote — in v10 these are the caller's O aliases `O[O-A]..O[O-1]`,
+wrote — these are the caller's O aliases `O[O-A]..O[O-1]`,
 register-addressable by construction. The callee reads its parameters in
 place — no copy or shuffle happens at the call:
 
@@ -494,8 +493,8 @@ Two rules follow from the alias:
   one call.
 
 **Result overlap.** The callee publishes its result into `F0` at `ret`,
-which is the caller's register `F(L+3+O-A)` — a *caller register*, unlike
-v9's imm16 window slot. The lowering must ensure argument 0's ownership is
+which is the caller's register `F(L+3+O-A)` — a *caller register*, not an
+imm16 window slot. The lowering must ensure argument 0's ownership is
 consumed or released before it is overwritten by the result; the caller
 reads that register with exactly one `take` immediately after the call
 (§5.2–§5.4). The frontend guarantees the discipline; the black-box tests
@@ -570,7 +569,7 @@ beyond the header.
   opcode; the callee's signature comes from
   `functions[FunctionId].signature_id` (the static target's `FunctionId`).
 - **Indirect call** — `jalr ra, base, offs16` with the function value in
-  `base + signExtend16(offs16)`. **In v10 the function value is an
+  `base + signExtend16(offs16)`. **The function value is an
   executable entry PC**, not a `FunctionId`: module/function-reference
   lowering, constant materialization, and indirect-call tests all use entry
   PCs. `FunctionId` may still exist in metadata/headers, but it is never a
@@ -700,8 +699,7 @@ Set](Stilla%20LLIR%20Instruction%20Set.md) §8) executes immediately after
 the call's fallthrough, before anything may overwrite the result register:
 it transfers the source register's ownership to `dst` and clears the
 source cell — no retain. Its source is the result alias `F(L+3+O-A)`, a
-plain register operand — this replaces v9's `result_take dst, W-A`
-imm16 window addressing. The ownership moves exactly once: a non-void
+plain register operand. The ownership moves exactly once: a non-void
 callee's result is published to `F(L+3+O-A)` by `ret` and consumed by
 exactly one `take` — unless the lowering coalesced the result onto the
 alias (Step 8, direct calls only, result not live across another call),
@@ -754,11 +752,10 @@ Set](Stilla%20LLIR%20Instruction%20Set.md). This specification references
 it for the instruction-level definitions: the encoding, the operand and
 special-register rules, the format classes (R/B/I/C/E/U), the opcode
 tables, the descriptor records, and the side-table records. The complete
-set is **234 logical opcodes**: R-type 71, B-type 20, I-type 31, C-type
-64, E-type 44, U-type 4 (v10: `result_take` is deleted; the generic
-`take` sits at the end of the E-type, and the I-type keeps its former
-`result_take` selector 10 reserved — the `slot_*` encodings are unchanged; the
-C-type grows the full 64-bit integer cast matrix, §7).
+set is **273 logical opcodes**: R-type 116, B-type 20, I-type 31, C-type
+64, E-type 38, U-type 4 (the generic `take` sits at the end of the E-type,
+the I-type keeps selector 10 reserved so the `slot_*` encodings are
+unchanged, and the C-type carries the full 64-bit integer cast matrix, §7).
 
 # 7. Control flow, effects, and traps
 
@@ -837,7 +834,7 @@ execute another Stilla instruction using that context.
 
 ## 8.1 Trust boundary
 
-LLIR v10 is **semantically trusted, structurally validated**: the frontend
+LLIR is **semantically trusted, structurally validated**: the frontend
 guarantees static types, ownership, lifecycle ordering, and call-argument
 discipline, and the loader does not re-prove those properties. **This is
 not a security boundary for arbitrary external LLIR**: type mismatches,
@@ -845,7 +842,7 @@ unconsumed owners, owners left in T across a call, or illegal argument
 ownership sequences can produce double releases or use-after-free, so only
 images produced by the current frontend in the same trust domain may be
 executed. External LLIR must not be executed until it has provenance/
-authentication or a separately implemented full semantic verifier; v10
+authentication or a separately implemented full semantic verifier; LLIR
 implements no such verifier.
 
 The following inputs remain **untrusted and must be checked before
@@ -888,7 +885,7 @@ bounds; SSA dominance and ownership dataflow are proven by the frontend and
 are not re-analyzed.
 
 **There is no typed dataflow analysis, no execution plan, and no typed
-instruction stream in v10.** The opcodes carry their reps and the
+instruction stream.** The opcodes carry their reps and the
 descriptor-carried types carry the rest — every operand's type is fixed by
 the decoded opcode and the records it references, with nothing derived at
 load time. `validate(image)` checks the artifact in place and returns; the
@@ -922,28 +919,15 @@ canonical bytes; little-endian word assembly happens only inside
 representation of Zig `extern struct`s or any Zig ABI layout directly.
 
 **The version number is the format boundary: the binary format version is
-16.** Version 11 added the module specifier to `ModuleDesc`; version 12
-added the entry `FunctionId`; version 14 re-encoded the operand registers
-(the zero/cond/ra/T fast bank at `0x00–0x12`, frames at `0x13–0x7f`,
-Instruction Set §3). **Version 15 makes each artifact module-local**: the
-whole-program `modules`/`module_members`/`host_bindings` tables are
-replaced by the module header (`self_symbol`, `init`, `entry_member`), the
-`SymbolId` table, and the sorted `imports`/`exports` tables; the header's
-entry `FunctionId` becomes the symbolic entry member; `FunctionDesc`
-drops `module_id`; `TypeDeclDesc` gains the imported-hook field; and
-`HostTypeDesc.host_module` becomes a symbol string. **Version 16 grows
-the call header to three cells (`saved_fn`)**: `window_count` semantics
-become `3 + A` (§4.1).
-Every earlier image is
-rejected on the version alone. Every other aspect of the stream is
-unchanged from v10, which ties the bit layouts, the typed opcode
-assignment, the register model (`frame_count_max` = 109, the fast bank,
-the specials), the immediate ranges, and the call convention of §4–§5
-together; any change to the opcode assignment, the ranges, or any table's
-row layout is a new version. The built-in reader rejects any version other
-than 16 on its magic/version alone, **before the header symbols or a
-single table count is decoded** — and no two readers disagree about a
-version's table set.
+16**, and every earlier image is rejected on the version alone. The
+instruction stream is the Instruction Set's v10 encoding: the bit layouts,
+the typed opcode assignment, the register model (`frame_count_max` = 109,
+the fast bank, the specials), the immediate ranges, and the call
+convention of §4–§5; any change to the opcode assignment, the ranges, or
+any table's row layout is a new version. The built-in reader rejects any
+version other than 16 on its magic/version alone, **before the header
+symbols or a single table count is decoded** — and no two readers
+disagree about a version's table set.
 
 # 9. Non-goals
 
@@ -952,7 +936,7 @@ representation, module-instantiation lifecycle, host vtables, GC, concurrency,
 JIT compilation, source maps, debug information, or a stable file format. The
 opcode set and its schemas are fixed by [Stilla LLIR Instruction
 Set](Stilla%20LLIR%20Instruction%20Set.md); adding an opcode is a specification
-change. v10 is not a security boundary for external LLIR (§8.1), and it
+change. It is not a security boundary for external LLIR (§8.1), and it
 implements no semantic verifier and no development-time semantic audit API
 (a standalone plan would be required for either).
 

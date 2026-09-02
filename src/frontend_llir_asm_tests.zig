@@ -352,8 +352,8 @@ test "5.1 LLIR assembly: i64/u64/f64 ops and conversions print stable serialized
 
     // The 64-bit families print their typed rep suffixes — the width is
     // serialized in the opcode itself.
-    try testing.expect(std.mem.indexOf(u8, asm1, "\n    mul r19, r19, r20") != null);
-    try testing.expect(std.mem.indexOf(u8, asm1, "\n    shru r19, r19, r20") != null);
+    try testing.expect(std.mem.indexOf(u8, asm1, "\n    mul.i64 r19, r19, r20") != null);
+    try testing.expect(std.mem.indexOf(u8, asm1, "\n    shr.u64 r19, r19, r20") != null);
     try testing.expect(std.mem.indexOf(u8, asm1, "\n    sltu r19, r20") != null);
     try testing.expect(std.mem.indexOf(u8, asm1, "\n    mul.f64 r19, r19, r20") != null);
     try testing.expect(std.mem.indexOf(u8, asm1, "\n    sle.f64 r20, r19") != null); // `a >= b` ≡ `sle b, a`
@@ -495,8 +495,8 @@ test "3.4 LLIR assembly: all seven formats print mnemonic, operands, and negativ
     const lowered = try b.lowerLlir();
 
     const rows = [_]llir.Instr{
-        llir.instrR(.add, llir.frame_base + 3, llir.frame_base + 1, llir.frame_base + 2),
-        llir.instrE(.neg, llir.frame_base + 1, llir.frame_base),
+        llir.instrR(.add_i32, llir.frame_base + 3, llir.frame_base + 1, llir.frame_base + 2),
+        llir.instrE(.neg_i32, llir.frame_base + 1, llir.frame_base),
         llir.instrC(.cvt_i32_u32, llir.frame_base + 1, llir.frame_base),
         llir.instrC(.slti, llir.frame_base + 1, 63),
         llir.instrI(.jr, llir.frame_base + 5, 0xfff0), // -16
@@ -526,8 +526,8 @@ test "3.4 LLIR assembly: all seven formats print mnemonic, operands, and negativ
     // Each frozen row prints exactly — name, operand order as encoded,
     // signed immediates, and label targets resolved from negative offsets.
     const expected_rows = [_][]const u8{
-        "\n    add r22, r20, r21\n",
-        "\n    neg r20, r19\n",
+        "\n    add.i32 r22, r20, r21\n",
+        "\n    neg.i32 r20, r19\n",
         "\n    cvt.i32.u32 r20, r19\n",
         "\n    slti r20, 63\n",
         "\n    jr r24 -16\n",

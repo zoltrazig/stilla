@@ -106,11 +106,11 @@ test "A2 LLIR lowering: long-branch expansion — inverted branch + j, iterated 
     // boundary, so round 1 expands only `br2` — the inserted `j`
     // shifts `t1` one record further, pushing `br1` out of reach and
     // expanding it in round 2; round 3 converges with no expansions
-    // left. (Each 32-bit `add` is two records — opcode + `sext32` —
-    // so m1's 254 adds span exactly 508 records.)
+    // left. (Each typed `add` is exactly one record — §4 —
+    // so m1's 508 adds span exactly 508 records.)
     //
     // Block order (cfg.BlockOrder, ascending minimum def id): entry,
-    // m1 (%3..%256 + copy %257), t1 (%258), m2 (%259..), t2 (def-less,
+    // m1 (%3..%510 + copy %511), t1 (%512), m2 (%513..), t2 (def-less,
     // last). Round 1 layout: br1 at pc 0, t1 at pc 511 (in reach);
     // br2 at pc 510, t2 at pc 1531 (distance 1021 — far).
     var src = std.ArrayList(u8).empty;
@@ -123,21 +123,21 @@ test "A2 LLIR lowering: long-branch expansion — inverted branch + j, iterated 
         \\    m1:
         \\
     );
-    for (3..257) |i| {
+    for (3..511) |i| {
         const line = try std.fmt.allocPrint(testing.allocator, "        %{d}: int32 = add %2, %2\n", .{i});
         defer testing.allocator.free(line);
         try src.appendSlice(testing.allocator, line);
     }
     try src.appendSlice(testing.allocator,
-        \\        %257: bool = copy %1
-        \\        br %257 ? t2 : m2
+        \\        %511: bool = copy %1
+        \\        br %511 ? t2 : m2
         \\    t1:
-        \\        %258: int32 = add %2, %2
-        \\        ret %258
+        \\        %512: int32 = add %2, %2
+        \\        ret %512
         \\    m2:
         \\
     );
-    for (259..767) |i| {
+    for (513..1021) |i| {
         const line = try std.fmt.allocPrint(testing.allocator, "        %{d}: int32 = add %2, %2\n", .{i});
         defer testing.allocator.free(line);
         try src.appendSlice(testing.allocator, line);
@@ -291,46 +291,13 @@ test "Phase 5 LLIR lowering: 64-bit integer and f64 ops specialize by type" {
                 const tag = std.meta.activeTag(ins.op);
                 switch (tag) {
                     .add, .sub, .mul, .div, .rem, .neg => {
-                        const want: llir.Opcode = switch (prim) {
-                            .int64 => switch (tag) {
-                                .add => .add,
-                                .sub => .sub,
-                                .mul => .mul,
-                                .div => .div,
-                                .rem => .rem,
-                                .neg => .neg,
-                                else => unreachable,
-                            },
-                            .uint64 => switch (tag) {
-                                .add => .add,
-                                .sub => .sub,
-                                .mul => .mul,
-                                .div => .divu,
-                                .rem => .remu,
-                                .neg => .neg,
-                                else => unreachable,
-                            },
-                            .float64 => switch (tag) {
-                                .add => .add_f64,
-                                .sub => .sub_f64,
-                                .mul => .mul_f64,
-                                .div => .div_f64,
-                                .rem => .rem_f64,
-                                .neg => .neg_f64,
-                                else => unreachable,
-                            },
-                            else => unreachable,
-                        };
+                        const want: llir.Opcode = llir.typedOpcode(llir.lower(tag).typed, ins.results[0].type_, undefined) orelse unreachable;
                         const d = llir.decode(image.instructions[pc]).?;
                         try testing.expectEqual(want, d.op);
                         seen.set(@intFromEnum(want));
                     },
                     .shl, .shr => {
-                        const want: llir.Opcode = switch (prim) {
-                            .int64 => if (tag == .shl) .shl else .shr,
-                            .uint64 => if (tag == .shl) .shl else .shru,
-                            else => unreachable,
-                        };
+                        const want: llir.Opcode = llir.typedOpcode(llir.lower(tag).typed, ins.results[0].type_, undefined) orelse unreachable;
                         const d = llir.decode(image.instructions[pc]).?;
                         try testing.expectEqual(want, d.op);
                         seen.set(@intFromEnum(want));
@@ -420,24 +387,29 @@ test "Phase 5 LLIR lowering: 64-bit integer and f64 ops specialize by type" {
     // Every distinct opcode of the phase-5 matrix was selected at
     // least once (the count varies with inlining, so coverage is the
     // assertion, not the total).
-    // The exact set the phase-5 source emits: `iadd` is i64, `usub`
-    // u64, `imul` i64 (no u64 mul), `ineg` i64 (no u64 neg), `ishl`
-    // i64 (no u64 shl), `iand` i64 (no u64 and), `uor`/`uxor` u64
-    // (no i64 or/xor), `ieq` i64 (no u64 eq), `une` u64 (no i64 ne).
+    // The exact set the phase-5 source emits: the typed members carry
+    // the operand rep — `iadd` is `add.i64`, `usub` `sub.u64`, `udiv`
+    // `div.u64`, `ineg` `neg.i64`, `ishl` `shl.i64`, `ushr` `shr.u64`
+    // — the bitwise ops stay widthless, and every comparison is a
+    // C-Type family member (integer `le`/`ge` synthesize `not(slt)`).
     const want_seen = [_]llir.Opcode{
+        .add_i64,
+        .sub_u64,
+        .mul_i64,
+        .div_i64,
+        .div_u64,
+        .rem_i64,
+        .rem_u64,
+        .neg_i64,
         .add_f64,
         .sub_f64,
         .mul_f64,
-        .divu,
         .div_f64,
-        .rem,
-        .remu,
         .rem_f64,
-        .neg,
         .neg_f64,
-        .shl,
-        .shr,
-        .shru,
+        .shl_i64,
+        .shr_i64,
+        .shr_u64,
         .and_,
         .or_,
         .xor,
@@ -448,8 +420,6 @@ test "Phase 5 LLIR lowering: 64-bit integer and f64 ops specialize by type" {
         .slt,
         .sltu,
         .slt_f64,
-        .slt,
-        .sltu,
         .sle_f64,
         .copy,
     };

@@ -239,24 +239,23 @@ rewrites).
 
 #### The typed lowering boundary (forward-compatible)
 
-The arithmetic / comparison / cast choices that today land directly as
+The arithmetic / comparison / cast choices that land directly as
 opcode records are modeled on a typed layer ([`llir-typed.md`](llir-typed.md),
-`src/passes/cfg_lower_typed.zig`): a value carries its `cfg.Type` plus a
-**value-form** (the top-bits state of its 64-bit canonical cell), and a
-logical op (`add.i32`, `div.u32`, `cvt.i32.f32`) stays one typed SSA node
-instead of a pre-expanded record sequence. The value-form lattice is the
-single source of truth for the widening elimination the expander runs as
-a residual step during expansion. The arithmetic emitter now routes
-each op through this typed layer: `emitArith` builds a `TypedOp` and
-the §4 expander (`emitBinArith`, B.1) writes the record sequence, and
-`cfg_lower_llir_budget.arithSeqCount` derives its count from
-`typed.arithSeqLen` rather than a hard-coded constant. The emitted image
-matches the spec's canonical sequences minus the intentionally elided
-staging records (the leading `zext32` of an already-zero-extended
-operand, and a fused constant's `zext32`/`andi`). The lattice is verified
-against known producers in
-`src/frontend_llir_typed_tests.zig` and the module's own test block; the
-typed-assembly printer (`printTyped`) renders what Layer A sees.
+`src/passes/cfg_lower_typed.zig`): a logical op (`add.i32`, `div.u32`,
+`cvt.i32.f32`) is one typed SSA node and lowers to exactly one record —
+the typed opcode carries the full rep, computes at that width, and
+self-canonicalizes its result cell (Instruction Set §4). There are no
+canonicalization records, no staging register, and no value-form
+lattice: every producer (typed opcode, cast, `const`) leaves its cell
+canonical by construction, so the canonical-cell contract needs no
+bookkeeping to stay sound. The arithmetic emitter routes each op
+through this typed layer: `emitArith` builds a `TypedOp` and the
+emitter writes the single record directly; a constant right operand
+inside the rep's immediate window folds into the immediate form
+(`addi.i32`, `divi.u64`) instead of a `const` slot read. The typed-assembly
+printer (`printTyped`) renders what Layer A sees, and
+`src/frontend_llir_typed_tests.zig` verifies the one-record shape
+against the module's own test block.
 
 ## 5. Relationship to existing code
 

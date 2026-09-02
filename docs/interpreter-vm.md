@@ -32,14 +32,14 @@ The first design should stay deliberately small:
 Three v10 properties are decisive before implementation:
 
 1. **The opcodes carry their numeric semantics.** The integer arithmetic
-   families are widthless (`add`, `div`/`divu`, `shri`/`shriu`, …) — they
-   compute on the full 64-bit cell, splitting only by signedness where the
-   operation differs; a 32-bit type's modulo-2³² semantics are explicit in
-   the lowering's `sext32`/`zext32` sequences around the widthless opcode.
-   The float families carry the width in the opcode (`add.f64`,
-   `seq.f32`); integer comparisons and branches carry only signedness
-   because 32-bit integer cells are already canonicalized. The interpreter
-   reads signedness and immediate interpretation straight from the decoded
+   families are typed (`add.i32`/`add.u32`/`add.i64`/`add.u64`, …) — the
+   opcode carries the full rep, computes at that width on canonical
+   cells, and self-canonicalizes its result cell (Instruction Set §4);
+   there are no canonicalization records around an opcode. The float
+   families carry the width in the opcode (`add.f64`, `seq.f32`);
+   integer comparisons and branches carry only signedness because
+   canonical cells make width immaterial to ordering. The interpreter
+   reads the rep and immediate interpretation straight from the decoded
    opcode. There is **no load-time typed dataflow analysis and no execution
    plan**: loading decodes the wire records once into the VM's own
    fixed-size instruction image (§7, §11), and the dispatch reads the
@@ -281,10 +281,10 @@ distinguishing bit pattern; the type of a zero is supplied by the opcode's
 rep, never by the value.
 
 **Type provenance.** An operand's numeric representation is part of its
-opcode. `add` computes on the full 64-bit cell (a 32-bit result is
-canonicalized by the explicit `sext32` in its sequence), `add.f64` on the
-IEEE binary64 pattern, `divu` on the unsigned 64-bit pattern — there is
-nothing to resolve at load time. The expected `TypeId`
+opcode. `add.i32` computes on the sign-extended 32-bit cell and
+re-canonicalizes its result, `add.f64` on the IEEE binary64 pattern,
+`div.u64` on the unsigned 64-bit pattern — there is nothing to resolve
+at load time. The expected `TypeId`
 of every dereferenced or destroyed value comes from the object header and
 the descriptor tables. Object headers carry the concrete `TypeId` of heap
 values; dereference validates the header kind against the operation (§5.1).
@@ -904,7 +904,6 @@ always identifies the corresponding instruction and every pc stays stable
 for the run. `step` indexes `VmInstr` directly and never re-decodes the
 wire format. The decoded image is append-only: loaded modules are cached
 and never relocated or unloaded, so existing pcs and frames remain valid.
-The in-place interpretation contract of earlier versions is retired.
 
 The minimal library surface is:
 

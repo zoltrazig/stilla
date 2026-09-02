@@ -1280,9 +1280,12 @@ fn typeRep(t: cfg.Type) ?Rep {
     };
 }
 
-/// The typed family member `<base>.<rep>` — comptime name lookup over
-/// the canonical table, or null when the family has no such rep (e.g.
-/// `abs.u32`, the unsigned identity, or any float immediate family).
+/// The typed family member `<base>.<rep>` for the operand type: the
+/// integer arithmetic families carry the full rep (`add.i32` on `int32`,
+/// `add.u64` on `uint64`, …), so one lookup serves every numeric type.
+/// Null when the family has no such member (e.g. `abs.u32`, the
+/// unsigned identity, a float immediate family, or a non-arithmetic
+/// type).
 fn famOp(comptime base: []const u8, rep: ?Rep) ?Opcode {
     const r = rep orelse return null;
     inline for (std.meta.tags(Opcode)) |op| {
@@ -1297,34 +1300,12 @@ fn famOp(comptime base: []const u8, rep: ?Rep) ?Opcode {
     return null;
 }
 
-/// The widthless integer op or the float rep member for a family: the
-/// integer-4 members collapsed to one opcode (`add` for every integer
-/// type — the operand cells are canonical 64-bit values, so the width
-/// no longer rides in the opcode); the float members keep their
-/// `f32`/`f64` reps. `int_name` is the enum spelling (trailing
-/// underscore for the keyword escapes `and_`/`or_`), `float_base` the
-/// dotted family base (`add`), null for non-arithmetic types.
-fn intOrFloat(comptime int_name: []const u8, comptime float_base: []const u8, t: cfg.Type) ?Opcode {
+/// The widthless bitwise op: rep-agnostic on canonical cells (§4), one
+/// opcode serves every integer type. Null for non-integer types.
+fn bitwiseOp(comptime name: []const u8, t: cfg.Type) ?Opcode {
     return switch (t) {
         .primitive => |k| switch (k) {
-            .int32, .uint32, .int64, .uint64 => @field(Opcode, int_name),
-            .float32, .float64 => famOp(float_base, typeRep(t)),
-            else => null,
-        },
-        else => null,
-    };
-}
-
-/// The signed/unsigned widthless pair of a family (compare/branch
-/// style): the plain opcode on the signed types, the `u` form on the
-/// unsigned ones, the float rep member for floats. `div`/`divu`,
-/// `rem`/`remu`, `min`/`minu`, `max`/`maxu`, `shr`/`shru`.
-fn signedOrUnsigned(comptime signed_name: []const u8, comptime unsigned_name: []const u8, comptime float_base: []const u8, t: cfg.Type) ?Opcode {
-    return switch (t) {
-        .primitive => |k| switch (k) {
-            .int32, .int64 => @field(Opcode, signed_name),
-            .uint32, .uint64 => @field(Opcode, unsigned_name),
-            .float32, .float64 => famOp(float_base, typeRep(t)),
+            .int32, .uint32, .int64, .uint64 => @field(Opcode, name),
             else => null,
         },
         else => null,
@@ -1350,41 +1331,34 @@ fn bitCountOp(comptime base: []const u8, t: cfg.Type) ?Opcode {
 /// null when the type has no such operation (e.g. `byte` arithmetic, or
 /// `float32` `%`). `src` is the operand type; `dst` is used only for
 /// `cast`, where it is the result type (the CFG's `num_cast` target).
-/// Integer arithmetic is **widthless**: every integer type resolves to
-/// the same opcode (`add` on `int32`/`uint32`/`i64`/`u64` alike — the
-/// cells are canonical 64-bit values, so the operation is computed at
-/// 64 bits and the lowering inserts the 32-bit canonicalization
-/// (`sext32`/`zext32`) where the type demands it). The result-bits
-/// families that distinguish signedness keep a compare/branch-style
-/// pair: `div`/`divu`, `rem`/`remu`, `min`/`minu`, `max`/`maxu`,
-/// `shr`/`shru`. Float width stays explicit in the rep suffix. The
-/// E-type unary families (`neg`/`abs`/`clz`/`popcount`) keep their
-/// full integer-4 + float-2 reps — they are width-sensitive for the
-/// result (`clz(0)` is 32 on `i32` vs 64 on `i64`, `popcount` counts
-/// the extension bits, `neg`/`abs` wrap on the minimum).
-/// Comparisons resolve to the C-Type `seq`/`sne`/`slt`/`sle` families
-/// (the destination is the implicit `cond`); `sle` is the one float
-/// non-strict ordering primitive (`a <= b` ≡ `sle a, b`, `a >= b` ≡
-/// `sle b, a` — the swap preserves the NaN behavior), `sgt lhs, rhs` ≡
-/// `slt rhs, lhs` is the strict swap alias, and integer `le`/`ge` are
+/// Integer arithmetic is **typed**: the opcode carries the full rep
+/// (`add.i32` on `int32`, `mul.u64` on `uint64`, …), computes at that
+/// width, and self-canonicalizes its result cell (§4) — no
+/// canonicalization records exist. The bitwise ops stay widthless
+/// (rep-agnostic on canonical cells). Float width stays explicit in the
+/// rep suffix. Comparisons resolve to the C-Type `seq`/`sne`/`slt`/`sle`
+/// families (the destination is the implicit `cond`); `sle` is the one
+/// float non-strict ordering primitive (`a <= b` ≡ `sle a, b`, `a >= b`
+/// ≡ `sle b, a` — the swap preserves the NaN behavior), `sgt lhs, rhs`
+/// ≡ `slt rhs, lhs` is the strict swap alias, and integer `le`/`ge` are
 /// synthesized as `not(slt)` by the lowering — so `typedOpcode(.gt, _)`
 /// is null, and `typedOpcode(.le, _)`/`typedOpcode(.ge, _)` are null on
 /// the integer reps.
 pub fn typedOpcode(kind: TypedKind, src: cfg.Type, dst: cfg.Type) ?Opcode {
     return switch (kind) {
-        .add => intOrFloat("add", "add", src),
-        .sub => intOrFloat("sub", "sub", src),
-        .mul => intOrFloat("mul", "mul", src),
-        .div => signedOrUnsigned("div", "divu", "div", src),
-        .rem => signedOrUnsigned("rem", "remu", "rem", src),
-        .shl => intOrFloat("shl", "shl", src),
-        .shr => signedOrUnsigned("shr", "shru", "shr", src),
-        .bitand => intOrFloat("and_", "and", src),
-        .bitor => intOrFloat("or_", "or", src),
-        .bitxor => intOrFloat("xor", "xor", src),
-        .min => signedOrUnsigned("min", "minu", "min", src),
-        .max => signedOrUnsigned("max", "maxu", "max", src),
-        .neg => intOrFloat("neg", "neg", src),
+        .add => famOp("add", typeRep(src)),
+        .sub => famOp("sub", typeRep(src)),
+        .mul => famOp("mul", typeRep(src)),
+        .div => famOp("div", typeRep(src)),
+        .rem => famOp("rem", typeRep(src)),
+        .shl => famOp("shl", typeRep(src)),
+        .shr => famOp("shr", typeRep(src)),
+        .bitand => bitwiseOp("and_", src),
+        .bitor => bitwiseOp("or_", src),
+        .bitxor => bitwiseOp("xor", src),
+        .min => famOp("min", typeRep(src)),
+        .max => famOp("max", typeRep(src)),
+        .neg => famOp("neg", typeRep(src)),
         .abs => famOp("abs", typeRep(src)),
         .clz => bitCountOp("clz", src),
         .popcount => bitCountOp("popcount", src),
@@ -1525,23 +1499,6 @@ fn hasIntComparison(src: cfg.Type) bool {
     };
 }
 
-/// The immediate variant of a widthless integer family: the `u` form
-/// (zero-extended imm7, window `[0, 127]`) on the unsigned types, the
-/// plain form (sign-extended imm7, window `[-64, 63]`) on the signed
-/// ones — compare/branch style (`slti`/`sltiu`, `blti`/`bltiu`).
-/// `addi`/`addiu`, `subi`/`subiu`, `muli`/`muliu`, `divi`/`diviu`,
-/// `remi`/`remiu`, `shri`/`shriu`. Floats have no immediate forms.
-fn signedOrUnsignedImm(comptime signed_name: []const u8, comptime unsigned_name: []const u8, t: cfg.Type) ?Opcode {
-    return switch (t) {
-        .primitive => |k| switch (k) {
-            .int32, .int64 => @field(Opcode, signed_name),
-            .uint32, .uint64 => @field(Opcode, unsigned_name),
-            else => null,
-        },
-        else => null,
-    };
-}
-
 /// The integer-only immediate form with a uniform zero-extended
 /// immediate (shift counts and bitwise masks — a single opcode).
 fn intImm(comptime name: []const u8, t: cfg.Type) ?Opcode {
@@ -1556,13 +1513,13 @@ fn intImm(comptime name: []const u8, t: cfg.Type) ?Opcode {
 
 pub fn typedOpcodeImm(kind: TypedKind, src: cfg.Type) ?Opcode {
     return switch (kind) {
-        .add => signedOrUnsignedImm("addi", "addiu", src),
-        .sub => signedOrUnsignedImm("subi", "subiu", src),
-        .mul => signedOrUnsignedImm("muli", "muliu", src),
-        .div => signedOrUnsignedImm("divi", "diviu", src),
-        .rem => signedOrUnsignedImm("remi", "remiu", src),
-        .shl => intImm("shli", src),
-        .shr => signedOrUnsignedImm("shri", "shriu", src),
+        .add => famOp("addi", typeRep(src)),
+        .sub => famOp("subi", typeRep(src)),
+        .mul => famOp("muli", typeRep(src)),
+        .div => famOp("divi", typeRep(src)),
+        .rem => famOp("remi", typeRep(src)),
+        .shl => famOp("shli", typeRep(src)),
+        .shr => famOp("shri", typeRep(src)),
         .bitand => intImm("andi", src),
         .bitor => intImm("ori", src),
         .bitxor => intImm("xori", src),
@@ -1576,29 +1533,21 @@ pub fn typedOpcodeImm(kind: TypedKind, src: cfg.Type) ?Opcode {
 }
 
 /// The fused multiply-accumulate opcode for a type (`dst = dst + b *
-/// c`): the widthless `madd` on the integer types, the float rep
-/// member for floats; null for non-numeric types.
+/// c`): the typed integer rep member (`madd.i32` on `int32`, …), the
+/// float rep member for floats; null for non-numeric types.
 pub fn maddOpcode(src: cfg.Type) ?Opcode {
-    return switch (src) {
-        .primitive => |k| switch (k) {
-            .int32, .uint32, .int64, .uint64 => .madd,
-            .float32, .float64 => famOp("madd", typeRep(src)),
-            else => null,
-        },
-        else => null,
-    };
+    return famOp("madd", typeRep(src));
 }
 
 /// The fused multiply-accumulate-immediate opcode (`dst = dst + b *
 /// imm`), or null for non-numeric types. The imm7 interpretation
-/// follows the type's signedness (`maddi` sign-extends on the signed
-/// types, `maddiu` zero-extends on the unsigned ones). No float form —
-/// the float immediate variants do not exist.
+/// follows the rep (`maddi.i32`/`maddi.i64` sign-extend,
+/// `maddi.u32`/`maddi.u64` zero-extend). No float form — the float
+/// immediate variants do not exist.
 pub fn maddiOpcode(src: cfg.Type) ?Opcode {
     return switch (src) {
         .primitive => |k| switch (k) {
-            .int32, .int64 => .maddi,
-            .uint32, .uint64 => .maddiu,
+            .int32, .uint32, .int64, .uint64 => famOp("maddi", typeRep(src)),
             else => null,
         },
         else => null,
@@ -1652,36 +1601,35 @@ test "codec: every assigned opcode round-trips through encode/decode" {
     }
 }
 
-test "codec: format counts match the frozen distribution (71/20/42/37/31/4)" {
+test "codec: format counts match the frozen distribution (116/20/64/38/31/4)" {
     var counts = [_]u32{0} ** 6;
     for (std.meta.tags(Opcode)) |op| counts[@intFromEnum(formatOf(op))] += 1;
-    try std.testing.expectEqual(@as(u32, 71), counts[@intFromEnum(Format.r)]);
+    try std.testing.expectEqual(@as(u32, 116), counts[@intFromEnum(Format.r)]);
     try std.testing.expectEqual(@as(u32, 20), counts[@intFromEnum(Format.b)]);
     try std.testing.expectEqual(@as(u32, 64), counts[@intFromEnum(Format.c)]);
-    try std.testing.expectEqual(@as(u32, 37), counts[@intFromEnum(Format.e)]);
+    try std.testing.expectEqual(@as(u32, 38), counts[@intFromEnum(Format.e)]);
     try std.testing.expectEqual(@as(u32, 31), counts[@intFromEnum(Format.i)]);
     try std.testing.expectEqual(@as(u32, 4), counts[@intFromEnum(Format.u)]);
-    // v10: `result_take` is deleted and the generic `take` closes the
-    // E-type run, the integer `neg` collapsed to one widthless opcode,
-    // and `clz`/`popcount` dropped their unsigned members — plus the
-    // C-type 64-bit integer cast matrix — 227 logical
-    // opcodes, values 1–234 (E slots 157–159 and 169/171/173/175 retired
-    // unused).
-    try std.testing.expectEqual(@as(usize, 227), std.meta.tags(Opcode).len);
+    // v10: the integer arithmetic families carry the full rep (§4), the
+    // `sext32`/`zext32` canonicalization pair is gone, `neg` fills its
+    // family's codes 0–3, and `clz`/`popcount` keep only the signed
+    // width selectors — 273 logical opcodes, values 1–273 with no
+    // retired logical holes.
+    try std.testing.expectEqual(@as(usize, 273), std.meta.tags(Opcode).len);
 }
 
 test "codec: reserved class, reserved codes, reserved fields, and holes are rejected" {
     // The `10` reserved class.
     try std.testing.expectEqual(@as(?Decoded, null), decode(.{ 0, 0, 0, 0x80 }));
-    // R-type codes 0–70 are all assigned; 71+ are reserved.
-    try std.testing.expectEqual(@as(?Decoded, null), decode(bytesOf(@as(u32, 71) << 21)));
+    // R-type codes 0–115 are all assigned; 116+ are reserved.
+    try std.testing.expectEqual(@as(?Decoded, null), decode(bytesOf(@as(u32, 116) << 21)));
     try std.testing.expectEqual(@as(?Decoded, null), decode(bytesOf(@as(u32, 149) << 21)));
     try std.testing.expectEqual(@as(?Decoded, null), decode(bytesOf(@as(u32, 154) << 21)));
     try std.testing.expectEqual(@as(?Decoded, null), decode(bytesOf((0b01 << 30) | (50 << 24))));
-    // E-type codes 6/7 are the 32-bit canonicalization pair
-    // (sext32/zext32); 43 is the generic `take`.
-    try std.testing.expectEqual(Opcode.sext32, decode(bytesOf((0b111001 << 26) | (6 << 20))).?.op);
-    try std.testing.expectEqual(Opcode.zext32, decode(bytesOf((0b111001 << 26) | (7 << 20))).?.op);
+    // E-type codes 6/7 (the former `sext32`/`zext32` slots) are
+    // reserved in v10 — decode rejects them; 43 is the generic `take`.
+    try std.testing.expectEqual(@as(?Decoded, null), decode(bytesOf((0b111001 << 26) | (6 << 20))));
+    try std.testing.expectEqual(@as(?Decoded, null), decode(bytesOf((0b111001 << 26) | (7 << 20))));
     try std.testing.expectEqual(Opcode.take, decode(bytesOf((0b111001 << 26) | (43 << 20))).?.op);
     // clz/popcount keep the signed width selectors 12/14/16/18; the
     // retired unsigned codes 13/15/17/19 are rejected as holes.
@@ -1714,14 +1662,14 @@ test "codec: reserved class, reserved codes, reserved fields, and holes are reje
     // Unassigned `11` prefixes.
     try std.testing.expectEqual(@as(?Decoded, null), decode(bytesOf((0b100 << 29))));
     try std.testing.expectEqual(@as(?Decoded, null), decode(bytesOf((0b101 << 29))));
-    // Families are contiguous runs in table order: `add` = 1,
-    // `add.f64` = 3, `sub` = 4 — the logical values 1–234 carry a
-    // member at every index except the retired E-type slots 157–159 and
-    // 169/171/173/175, and decode works through the dense code space.
-    try std.testing.expectEqual(@as(u8, 1), @intFromEnum(Opcode.add));
-    try std.testing.expectEqual(@as(u8, 3), @intFromEnum(Opcode.add_f64));
-    try std.testing.expectEqual(@as(u8, 4), @intFromEnum(Opcode.sub));
-    try std.testing.expectEqual(@as(usize, 227), std.meta.tags(Opcode).len);
+    // Families are contiguous runs in table order: `add.i32` = 1,
+    // `add.f64` = 6, `sub.i32` = 7 — the logical values 1–273 carry a
+    // member at every index (no retired holes), and decode works through
+    // the dense code space.
+    try std.testing.expectEqual(@as(u16, 1), @intFromEnum(Opcode.add_i32));
+    try std.testing.expectEqual(@as(u16, 6), @intFromEnum(Opcode.add_f64));
+    try std.testing.expectEqual(@as(u16, 7), @intFromEnum(Opcode.sub_i32));
+    try std.testing.expectEqual(@as(usize, 273), std.meta.tags(Opcode).len);
 }
 
 test "codec: removed B-type codes are reserved; ble/bleu decode" {
@@ -1747,7 +1695,7 @@ test "codec: golden words from Instruction Set §16" {
             return .{ @truncate(w), @truncate(w >> 8), @truncate(w >> 16), @truncate(w >> 24) };
         }
     };
-    try std.testing.expectEqualSlices(u8, &G.bytes(0x00050a96), &instrR(.add, frame_base + 1, frame_base + 2, frame_base + 3));
+    try std.testing.expectEqualSlices(u8, &G.bytes(0x00050a96), &instrR(.add_i32, frame_base + 1, frame_base + 2, frame_base + 3));
     try std.testing.expectEqualSlices(u8, &G.bytes(0xe10009ff), &instrC(.slti, frame_base, 0x7f));
     try std.testing.expectEqualSlices(u8, &G.bytes(0x522617ff), &instrB(.tbz, frame_base, 5, -1));
     try std.testing.expectEqualSlices(u8, &G.bytes(0x402857fe), &instrB(.beq, frame_base + 1, frame_base + 2, -2));
@@ -1758,12 +1706,12 @@ test "codec: golden words from Instruction Set §16" {
     try std.testing.expectEqualSlices(u8, &G.bytes(0xc583ffff), &instrI(.jalr, temp_base, 0xffff));
     try std.testing.expectEqualSlices(u8, &G.bytes(0xe1b00994), &instrC(.cvt_i32_u32, frame_base, frame_base + 1));
     try std.testing.expectEqualSlices(u8, &G.bytes(0xe0000a15), &instrC(.seq, frame_base + 1, frame_base + 2));
-    try std.testing.expectEqualSlices(u8, &G.bytes(0xe4000994), &instrE(.neg, frame_base, frame_base + 1));
+    try std.testing.expectEqualSlices(u8, &G.bytes(0xe4000994), &instrE(.neg_i32, frame_base, frame_base + 1));
     try std.testing.expectEqualSlices(u8, &G.bytes(0xe6800000), &instrE(.ret, 0, 0));
     try std.testing.expectEqualSlices(u8, &G.bytes(0xf9300001), &instrU(.lui, frame_base, 1));
     try std.testing.expectEqualSlices(u8, &G.bytes(0xf13fffff), &instrU(.auipc, frame_base, -1));
     // And decode the golden words back to the named opcodes.
-    try std.testing.expectEqual(Opcode.add, decode(instrR(.add, frame_base + 1, frame_base + 2, frame_base + 3)).?.op);
+    try std.testing.expectEqual(Opcode.add_i32, decode(instrR(.add_i32, frame_base + 1, frame_base + 2, frame_base + 3)).?.op);
     try std.testing.expectEqual(Opcode.tbz, decode(instrB(.tbz, frame_base, 5, -1)).?.op);
     try std.testing.expectEqual(@as(i16, -1), decode(instrB(.tbz, frame_base, 5, -1)).?.offs10);
     try std.testing.expectEqual(Opcode.j, decode(instrJ(-4)).?.op);
@@ -1904,13 +1852,13 @@ test "alias arithmetic: O count, register count, outReg, and frameCell" {
 
 test "checkInstr: field-level register/special/none validation" {
     // A valid R add: dst F0, src F1, src zero.
-    try std.testing.expectEqual(@as(?Issue, null), checkInstr(instrR(.add, frame_base, frame_base + 1, zero_reg), 4));
+    try std.testing.expectEqual(@as(?Issue, null), checkInstr(instrR(.add_i32, frame_base, frame_base + 1, zero_reg), 4));
     // Out-of-frame register (logical index 5 beyond the 4-slot frame).
-    try std.testing.expectEqual(Issue.bad_register, checkInstr(instrR(.add, frame_base, frame_base + 1, @intCast(frameReg(5))), 4));
+    try std.testing.expectEqual(Issue.bad_register, checkInstr(instrR(.add_i32, frame_base, frame_base + 1, @intCast(frameReg(5))), 4));
     // ra in a source position is rejected.
-    try std.testing.expectEqual(Issue.bad_register, checkInstr(instrR(.add, frame_base, ra_reg, frame_base + 1), 4));
+    try std.testing.expectEqual(Issue.bad_register, checkInstr(instrR(.add_i32, frame_base, ra_reg, frame_base + 1), 4));
     // cond outside its schema positions.
-    try std.testing.expectEqual(Issue.bad_register, checkInstr(instrR(.add, cond_reg, frame_base, frame_base + 1), 4));
+    try std.testing.expectEqual(Issue.bad_register, checkInstr(instrR(.add_i32, cond_reg, frame_base, frame_base + 1), 4));
     // borow/move require real slots.
     try std.testing.expectEqual(Issue.bad_register, checkInstr(instrE(.borrow, frame_base, zero_reg), 4));
     // ret's result source may be zero; its b must be zero.
@@ -1954,51 +1902,52 @@ test "checkInstr: the O window aliases are legal register operands" {
     // header reserve F6-F7, and O0..O4 (F8..F12) as output aliases.
     const reg_count: u32 = 13;
     // An add may read an O alias as a source/dst operand.
-    try std.testing.expectEqual(@as(?Issue, null), checkInstr(instrR(.add, frame_base, aliasEncoding(0), aliasEncoding(4)), reg_count));
+    try std.testing.expectEqual(@as(?Issue, null), checkInstr(instrR(.add_i64, frame_base, aliasEncoding(0), aliasEncoding(4)), reg_count));
     // move/borrow (dst_real/src_real) may name O aliases too.
     try std.testing.expectEqual(@as(?Issue, null), checkInstr(instrE(.move, aliasEncoding(0), frame_base), reg_count));
     try std.testing.expectEqual(@as(?Issue, null), checkInstr(instrE(.borrow, aliasEncoding(4), aliasEncoding(1)), reg_count));
     // A register at exactly reg_count (its encoding) is still out of range.
-    try std.testing.expectEqual(Issue.bad_register, checkInstr(instrR(.add, frame_base, frame_base + 1, @intCast(frameReg(reg_count))), reg_count));
+    try std.testing.expectEqual(Issue.bad_register, checkInstr(instrR(.add_i64, frame_base, frame_base + 1, @intCast(frameReg(reg_count))), reg_count));
     // Narrowing: with reg_count = 6 (a leaf), O aliases are rejected.
-    try std.testing.expectEqual(Issue.bad_register, checkInstr(instrR(.add, frame_base, frame_base + 1, aliasEncoding(0)), 6));
+    try std.testing.expectEqual(Issue.bad_register, checkInstr(instrR(.add_i64, frame_base, frame_base + 1, aliasEncoding(0)), 6));
 }
 
 fn aliasEncoding(i: u32) u8 {
     return @intCast(frameReg(8 + i)); // O(i) for the test's L=6, W=7 caller
 }
-test "typed opcodes resolve at every supported width (widthless integer schema)" {
-    // Arithmetic: widthless on the integer types (the cells are
-    // canonical 64-bit values), rep-suffixed on the floats.
-    try std.testing.expectEqual(Opcode.add, typedOpcode(.add, .{ .primitive = .int32 }, undefined).?);
-    try std.testing.expectEqual(Opcode.add, typedOpcode(.add, .{ .primitive = .uint32 }, undefined).?);
-    try std.testing.expectEqual(Opcode.add, typedOpcode(.add, .{ .primitive = .int64 }, undefined).?);
-    try std.testing.expectEqual(Opcode.add, typedOpcode(.add, .{ .primitive = .uint64 }, undefined).?);
+test "typed opcodes resolve at every supported rep (typed integer schema)" {
+    // Arithmetic: the opcode carries the full rep — one member per
+    // integer type, computing at that width (§4).
+    try std.testing.expectEqual(Opcode.add_i32, typedOpcode(.add, .{ .primitive = .int32 }, undefined).?);
+    try std.testing.expectEqual(Opcode.add_u32, typedOpcode(.add, .{ .primitive = .uint32 }, undefined).?);
+    try std.testing.expectEqual(Opcode.add_i64, typedOpcode(.add, .{ .primitive = .int64 }, undefined).?);
+    try std.testing.expectEqual(Opcode.add_u64, typedOpcode(.add, .{ .primitive = .uint64 }, undefined).?);
     try std.testing.expectEqual(Opcode.add_f32, typedOpcode(.add, .{ .primitive = .float32 }, undefined).?);
     try std.testing.expectEqual(Opcode.add_f64, typedOpcode(.add, .{ .primitive = .float64 }, undefined).?);
-    // Signedness rides in the opcode, compare/branch style (no width).
-    try std.testing.expectEqual(Opcode.div, typedOpcode(.div, .{ .primitive = .int32 }, undefined).?);
-    try std.testing.expectEqual(Opcode.divu, typedOpcode(.div, .{ .primitive = .uint32 }, undefined).?);
+    // Signedness rides in the rep suffix too.
+    try std.testing.expectEqual(Opcode.div_i32, typedOpcode(.div, .{ .primitive = .int32 }, undefined).?);
+    try std.testing.expectEqual(Opcode.div_u32, typedOpcode(.div, .{ .primitive = .uint32 }, undefined).?);
     try std.testing.expectEqual(Opcode.div_f32, typedOpcode(.div, .{ .primitive = .float32 }, undefined).?);
     try std.testing.expectEqual(Opcode.rem_f64, typedOpcode(.rem, .{ .primitive = .float64 }, undefined).?);
-    try std.testing.expectEqual(Opcode.shr, typedOpcode(.shr, .{ .primitive = .int64 }, undefined).?);
-    try std.testing.expectEqual(Opcode.shru, typedOpcode(.shr, .{ .primitive = .uint32 }, undefined).?);
-    // Shifts/bitwise: widthless on the integer types.
-    try std.testing.expectEqual(Opcode.shl, typedOpcode(.shl, .{ .primitive = .int64 }, undefined).?);
-    try std.testing.expectEqual(Opcode.shru, typedOpcode(.shr, .{ .primitive = .uint32 }, undefined).?);
+    try std.testing.expectEqual(Opcode.shr_i64, typedOpcode(.shr, .{ .primitive = .int64 }, undefined).?);
+    try std.testing.expectEqual(Opcode.shr_u32, typedOpcode(.shr, .{ .primitive = .uint32 }, undefined).?);
+    // Shifts carry the rep (the opcode masks the count at the width);
+    // bitwise ops stay widthless (rep-agnostic on canonical cells).
+    try std.testing.expectEqual(Opcode.shl_i64, typedOpcode(.shl, .{ .primitive = .int64 }, undefined).?);
+    try std.testing.expectEqual(Opcode.shl_u32, typedOpcode(.shl, .{ .primitive = .uint32 }, undefined).?);
     try std.testing.expectEqual(Opcode.xor, typedOpcode(.bitxor, .{ .primitive = .uint64 }, undefined).?);
     try std.testing.expectEqual(Opcode.and_, typedOpcode(.bitand, .{ .primitive = .int32 }, undefined).?);
     try std.testing.expectEqual(Opcode.or_, typedOpcode(.bitor, .{ .primitive = .uint64 }, undefined).?);
     try std.testing.expectEqual(@as(?Opcode, null), typedOpcode(.shl, .{ .primitive = .byte }, undefined));
-    // min/max: signed/unsigned pairs plus the float reps.
+    // min/max: signed/unsigned reps plus the float members.
     try std.testing.expectEqual(Opcode.min_f32, typedOpcode(.min, .{ .primitive = .float32 }, undefined).?);
-    try std.testing.expectEqual(Opcode.maxu, typedOpcode(.max, .{ .primitive = .uint64 }, undefined).?);
-    try std.testing.expectEqual(Opcode.minu, typedOpcode(.min, .{ .primitive = .uint32 }, undefined).?);
-    try std.testing.expectEqual(Opcode.max, typedOpcode(.max, .{ .primitive = .int32 }, undefined).?);
-    // The E-type unaries keep their widthful reps (width-sensitive
-    // results); integer neg is widthless (sign-agnostic), the floats
-    // keep theirs; abs is i32/i64/f32/f64 only.
-    try std.testing.expectEqual(Opcode.neg, typedOpcode(.neg, .{ .primitive = .uint32 }, undefined).?);
+    try std.testing.expectEqual(Opcode.max_u64, typedOpcode(.max, .{ .primitive = .uint64 }, undefined).?);
+    try std.testing.expectEqual(Opcode.min_u32, typedOpcode(.min, .{ .primitive = .uint32 }, undefined).?);
+    try std.testing.expectEqual(Opcode.max_i32, typedOpcode(.max, .{ .primitive = .int32 }, undefined).?);
+    // The E-type unaries: neg is the typed integer-4 family plus its
+    // float members; abs is i32/i64/f32/f64 only (unsigned abs is the
+    // identity).
+    try std.testing.expectEqual(Opcode.neg_u32, typedOpcode(.neg, .{ .primitive = .uint32 }, undefined).?);
     try std.testing.expectEqual(Opcode.neg_f64, typedOpcode(.neg, .{ .primitive = .float64 }, undefined).?);
     try std.testing.expectEqual(Opcode.abs_i32, typedOpcode(.abs, .{ .primitive = .int32 }, undefined).?);
     try std.testing.expectEqual(Opcode.abs_f32, typedOpcode(.abs, .{ .primitive = .float32 }, undefined).?);
@@ -2068,19 +2017,18 @@ test "typed opcodes resolve at every supported width (widthless integer schema)"
     }
 }
 
-test "typed immediate opcodes: widthless integer families, no float forms" {
-    // The imm7 interpretation follows the type's signedness: the plain
-    // (sign-extended) form on the signed types, the `u` (zero-extended)
-    // form on the unsigned ones.
-    try std.testing.expectEqual(Opcode.addi, typedOpcodeImm(.add, .{ .primitive = .int32 }).?);
-    try std.testing.expectEqual(Opcode.addiu, typedOpcodeImm(.add, .{ .primitive = .uint32 }).?);
-    try std.testing.expectEqual(Opcode.subi, typedOpcodeImm(.sub, .{ .primitive = .int64 }).?);
-    try std.testing.expectEqual(Opcode.muliu, typedOpcodeImm(.mul, .{ .primitive = .uint64 }).?);
-    try std.testing.expectEqual(Opcode.divi, typedOpcodeImm(.div, .{ .primitive = .int32 }).?);
-    try std.testing.expectEqual(Opcode.remiu, typedOpcodeImm(.rem, .{ .primitive = .uint32 }).?);
-    try std.testing.expectEqual(Opcode.shli, typedOpcodeImm(.shl, .{ .primitive = .uint64 }).?);
-    try std.testing.expectEqual(Opcode.shri, typedOpcodeImm(.shr, .{ .primitive = .int32 }).?);
-    try std.testing.expectEqual(Opcode.shriu, typedOpcodeImm(.shr, .{ .primitive = .uint32 }).?);
+test "typed immediate opcodes: rep-suffixed integer families, no float forms" {
+    // The rep suffix carries the imm7 interpretation: the `.i*` members
+    // sign-extend, the `.u*` members zero-extend.
+    try std.testing.expectEqual(Opcode.addi_i32, typedOpcodeImm(.add, .{ .primitive = .int32 }).?);
+    try std.testing.expectEqual(Opcode.addi_u32, typedOpcodeImm(.add, .{ .primitive = .uint32 }).?);
+    try std.testing.expectEqual(Opcode.subi_i64, typedOpcodeImm(.sub, .{ .primitive = .int64 }).?);
+    try std.testing.expectEqual(Opcode.muli_u64, typedOpcodeImm(.mul, .{ .primitive = .uint64 }).?);
+    try std.testing.expectEqual(Opcode.divi_i32, typedOpcodeImm(.div, .{ .primitive = .int32 }).?);
+    try std.testing.expectEqual(Opcode.remi_u32, typedOpcodeImm(.rem, .{ .primitive = .uint32 }).?);
+    try std.testing.expectEqual(Opcode.shli_u64, typedOpcodeImm(.shl, .{ .primitive = .uint64 }).?);
+    try std.testing.expectEqual(Opcode.shri_i32, typedOpcodeImm(.shr, .{ .primitive = .int32 }).?);
+    try std.testing.expectEqual(Opcode.shri_u32, typedOpcodeImm(.shr, .{ .primitive = .uint32 }).?);
     try std.testing.expectEqual(Opcode.andi, typedOpcodeImm(.bitand, .{ .primitive = .uint32 }).?);
     try std.testing.expectEqual(Opcode.ori, typedOpcodeImm(.bitor, .{ .primitive = .int64 }).?);
     try std.testing.expectEqual(Opcode.xori, typedOpcodeImm(.bitxor, .{ .primitive = .uint64 }).?);
@@ -2091,80 +2039,76 @@ test "typed immediate opcodes: widthless integer families, no float forms" {
     try std.testing.expectEqual(@as(?Opcode, null), typedOpcodeImm(.le, .{ .primitive = .int32 }));
     try std.testing.expectEqual(@as(?Opcode, null), typedOpcodeImm(.neg, .{ .primitive = .int32 }));
     try std.testing.expectEqual(Opcode.madd_f32, maddOpcode(.{ .primitive = .float32 }).?);
-    try std.testing.expectEqual(Opcode.madd, maddOpcode(.{ .primitive = .int32 }).?);
-    try std.testing.expectEqual(Opcode.maddi, maddiOpcode(.{ .primitive = .int32 }).?);
-    try std.testing.expectEqual(Opcode.maddiu, maddiOpcode(.{ .primitive = .uint32 }).?);
+    try std.testing.expectEqual(Opcode.madd_i32, maddOpcode(.{ .primitive = .int32 }).?);
+    try std.testing.expectEqual(Opcode.maddi_i32, maddiOpcode(.{ .primitive = .int32 }).?);
+    try std.testing.expectEqual(Opcode.maddi_u32, maddiOpcode(.{ .primitive = .uint32 }).?);
     try std.testing.expectEqual(@as(?Opcode, null), maddiOpcode(.{ .primitive = .float32 }));
 }
 
 test "repOf decodes the rep of every typed family member" {
-    // The widthless integer arithmetic ops carry no rep — signedness
-    // rides in the opcode (compare/branch style), never in a width.
-    try std.testing.expectEqual(@as(?Rep, null), repOf(.add));
-    try std.testing.expectEqual(@as(?Rep, null), repOf(.divu));
-    try std.testing.expectEqual(@as(?Rep, null), repOf(.shru));
-    try std.testing.expectEqual(@as(?Rep, null), repOf(.minu));
-    try std.testing.expectEqual(@as(?Rep, null), repOf(.addiu));
+    // The typed integer arithmetic members carry their full rep.
+    try std.testing.expectEqual(Rep.i32, repOf(.add_i32).?);
+    try std.testing.expectEqual(Rep.u32, repOf(.div_u32).?);
+    try std.testing.expectEqual(Rep.i64, repOf(.shr_i64).?);
+    try std.testing.expectEqual(Rep.u64, repOf(.maddi_u64).?);
+    try std.testing.expectEqual(Rep.i32, repOf(.neg_i32).?);
+    // The widthless bitwise ops and the branches carry no rep —
+    // signedness rides in the mnemonic (compare/branch style).
     try std.testing.expectEqual(@as(?Rep, null), repOf(.and_));
-    try std.testing.expectEqual(@as(?Rep, null), repOf(.madd));
+    try std.testing.expectEqual(@as(?Rep, null), repOf(.andi));
+    try std.testing.expectEqual(@as(?Rep, null), repOf(.blt));
+    try std.testing.expectEqual(@as(?Rep, null), repOf(.seq));
     // The float members keep their explicit reps.
     try std.testing.expectEqual(Rep.f32, repOf(.add_f32).?);
     try std.testing.expectEqual(Rep.f64, repOf(.add_f64).?);
     try std.testing.expectEqual(Rep.f32, repOf(.beq_f32).?);
-    try std.testing.expectEqual(@as(?Rep, null), repOf(.blt));
-    try std.testing.expectEqual(@as(?Rep, null), repOf(.seq));
     try std.testing.expectEqual(Rep.f64, repOf(.sle_f64).?);
-    // The E-type unaries keep their widthful reps except the widthless
-    // neg (two's complement is sign-agnostic); clz/popcount keep only
-    // the signed width selectors i32/i64 (counts are sign-agnostic),
-    // abs wraps on the minimum.
-    try std.testing.expectEqual(@as(?Rep, null), repOf(.neg));
-    try std.testing.expectEqual(Rep.i32, repOf(.clz_i32).?);
-    try std.testing.expectEqual(Rep.i64, repOf(.clz_i64).?);
-    try std.testing.expectEqual(Rep.i32, repOf(.popcount_i32).?);
+    // clz/popcount keep the signed width selectors i32/i64 (counts are
+    // sign-agnostic); abs wraps on the minimum.
     // The declared abs order: i32, i64, f32, f64.
     try std.testing.expectEqual(Rep.i64, repOf(.abs_i64).?);
     try std.testing.expectEqual(Rep.f32, repOf(.abs_f32).?);
     // Untyped opcodes have no rep.
     try std.testing.expectEqual(@as(?Rep, null), repOf(.ret));
     try std.testing.expectEqual(@as(?Rep, null), repOf(.cmov));
-    try std.testing.expectEqual(@as(?Rep, null), repOf(.sext32));
-    try std.testing.expectEqual(@as(?Rep, null), repOf(.zext32));
+    try std.testing.expectEqual(@as(?Rep, null), repOf(.and_));
     try std.testing.expectEqual(@as(?Rep, null), repOf(.jal));
 }
 
-test "widthless families: integer ops carry no rep, floats keep theirs" {
-    // Every widthless integer arithmetic op (register and immediate
-    // forms, signed/unsigned pairs) has a null rep — the width was
-    // removed from the opcode. The float members of the same families
-    // keep their `f32`/`f64` reps.
-    const int_ops = [_]Opcode{ .add, .sub, .mul, .div, .divu, .rem, .remu, .min, .minu, .max, .maxu, .shl, .shr, .shru, .and_, .or_, .xor, .madd, .msub, .neg, .addi, .addiu, .subi, .subiu, .muli, .muliu, .divi, .diviu, .remi, .remiu, .shli, .shri, .shriu, .andi, .ori, .xori, .maddi, .maddiu };
-    inline for (int_ops) |op| try std.testing.expectEqual(@as(?Rep, null), repOf(op));
-    const float_members = [_]Opcode{ .add_f32, .add_f64, .sub_f32, .sub_f64, .mul_f32, .mul_f64, .div_f32, .div_f64, .rem_f32, .rem_f64, .min_f32, .min_f64, .max_f32, .max_f64, .madd_f32, .madd_f64, .msub_f32, .msub_f64 };
+test "typed families: integer arithmetic carries the full rep, bitwise stays widthless" {
+    // Every typed integer arithmetic member (register and immediate
+    // forms) has a rep; the bitwise ops and their immediate forms are
+    // the one widthless integer exception (rep-agnostic on canonical
+    // cells, §4).
+    const untyped_ops = [_]Opcode{ .and_, .or_, .xor, .andi, .ori, .xori };
+    inline for (untyped_ops) |op| try std.testing.expectEqual(@as(?Rep, null), repOf(op));
+    const typed_members = [_]Opcode{ .add_i32, .add_u64, .sub_i64, .mul_u32, .div_i32, .div_u64, .rem_i32, .rem_u64, .min_i32, .max_u64, .shl_i32, .shr_u64, .addi_i32, .addi_u64, .subi_i64, .muli_u32, .divi_i32, .remi_u64, .shli_i32, .shri_u64, .madd_i32, .msub_u64, .maddi_i32, .neg_i32, .neg_u64 };
+    inline for (typed_members) |op| try std.testing.expect(repOf(op) != null);
+    const float_members = [_]Opcode{ .add_f32, .add_f64, .sub_f32, .sub_f64, .mul_f32, .mul_f64, .div_f32, .div_f64, .rem_f32, .rem_f64, .min_f32, .min_f64, .max_f32, .max_f64, .madd_f32, .madd_f64, .msub_f32, .msub_f64, .neg_f32, .neg_f64 };
     inline for (float_members) |op| try std.testing.expect(repOf(op) != null);
 }
 
 test "family layout: families are contiguous runs in table order" {
-    // The v9 renumber made every family a contiguous run — no alignment
-    // holes, no inherited width slots. The integer `neg` collapsed to a
-    // single widthless opcode at 156; the `neg.f32`/`neg.f64` float
-    // members sit at 160/161, the 32-bit canonicalization pair at
-    // 162/163, the integer unary families follow, and `abs` keeps its
-    // declared-order exception (i32, i64, f32, f64 — no unsigned
-    // members). The retired integer-neg slots 157–159 and the retired
-    // unsigned clz/popcount slots 169/171/173/175 stay unused.
-    try std.testing.expectEqual(@as(u8, 156), @intFromEnum(Opcode.neg));
-    try std.testing.expectEqual(@as(?Rep, null), repOf(.neg));
-    try std.testing.expectEqual(@as(u8, 160), @intFromEnum(Opcode.neg_f32));
-    try std.testing.expectEqual(@as(u8, 161), @intFromEnum(Opcode.neg_f64));
-    // clz/popcount keep only the signed width selectors: `clz.i32` = 168,
-    // `clz.i64` = 170, `popcount.i32` = 172, `popcount.i64` = 174 — the
-    // unsigned slots 169/171/173/175 are retired (counts are
-    // sign-agnostic, so the unsigned types alias the signed member).
-    try std.testing.expectEqual(@as(u8, 168), @intFromEnum(Opcode.clz_i32));
-    try std.testing.expectEqual(@as(u8, 170), @intFromEnum(Opcode.clz_i64));
-    try std.testing.expectEqual(@as(u8, 172), @intFromEnum(Opcode.popcount_i32));
-    try std.testing.expectEqual(@as(u8, 174), @intFromEnum(Opcode.popcount_i64));
+    // The v10 renumber made every family a contiguous run — no
+    // alignment holes in the logical values. The typed `neg` family
+    // opens the E-type run at 201 (codes 0–3 — the slots its retired
+    // widthless predecessors vacated), the float members follow at
+    // 205/206, and codes 6–7 (the former `sext32`/`zext32` slots) are
+    // reserved. `abs` keeps its declared-order exception (i32, i64,
+    // f32, f64 — no unsigned members) at 207..210 (codes 8–11).
+    try std.testing.expectEqual(@as(u16, 201), @intFromEnum(Opcode.neg_i32));
+    try std.testing.expectEqual(Rep.i32, repOf(.neg_i32).?);
+    try std.testing.expectEqual(@as(u16, 205), @intFromEnum(Opcode.neg_f32));
+    try std.testing.expectEqual(@as(u16, 206), @intFromEnum(Opcode.neg_f64));
+    // clz/popcount keep only the signed width selectors: `clz.i32` = 211
+    // (code 12), `clz.i64` = 212 (code 14), `popcount.i32` = 213 (code
+    // 16), `popcount.i64` = 214 (code 18) — the unsigned code slots
+    // 13/15/17/19 stay retired (counts are sign-agnostic, so the
+    // unsigned types alias the signed member).
+    try std.testing.expectEqual(@as(u16, 211), @intFromEnum(Opcode.clz_i32));
+    try std.testing.expectEqual(@as(u16, 212), @intFromEnum(Opcode.clz_i64));
+    try std.testing.expectEqual(@as(u16, 213), @intFromEnum(Opcode.popcount_i32));
+    try std.testing.expectEqual(@as(u16, 214), @intFromEnum(Opcode.popcount_i64));
     try std.testing.expectEqual(Rep.i32, repOf(.clz_i32).?);
     try std.testing.expectEqual(Rep.i64, repOf(.clz_i64).?);
     try std.testing.expectEqual(Rep.i32, repOf(.popcount_i32).?);
@@ -2174,30 +2118,31 @@ test "family layout: families are contiguous runs in table order" {
     inline for (two) |fam| {
         const op32 = @field(Opcode, fam ++ "_f32");
         const op64 = @field(Opcode, fam ++ "_f64");
-        try std.testing.expectEqual(@as(u8, @intFromEnum(op32) + 1), @intFromEnum(op64));
+        try std.testing.expectEqual(@as(u16, @intFromEnum(op32) + 1), @intFromEnum(op64));
         try std.testing.expectEqual(Rep.f32, repOf(op32).?);
         try std.testing.expectEqual(Rep.f64, repOf(op64).?);
     }
-    // `abs` — the declared-order exception (Instruction Set §7): the
-    // members are contiguous 164..167 but carry i32, i64, f32, f64,
+    // `abs` — the declared-order exception (Instruction Set §8): the
+    // members are contiguous 207..210 but carry i32, i64, f32, f64,
     // so the rep is NOT the member offset.
-    try std.testing.expectEqual(@as(u8, 164), @intFromEnum(Opcode.abs_i32));
-    try std.testing.expectEqual(@as(u8, 165), @intFromEnum(Opcode.abs_i64));
-    try std.testing.expectEqual(@as(u8, 166), @intFromEnum(Opcode.abs_f32));
-    try std.testing.expectEqual(@as(u8, 167), @intFromEnum(Opcode.abs_f64));
+    try std.testing.expectEqual(@as(u16, 207), @intFromEnum(Opcode.abs_i32));
+    try std.testing.expectEqual(@as(u16, 208), @intFromEnum(Opcode.abs_i64));
+    try std.testing.expectEqual(@as(u16, 209), @intFromEnum(Opcode.abs_f32));
+    try std.testing.expectEqual(@as(u16, 210), @intFromEnum(Opcode.abs_f64));
     try std.testing.expectEqual(Rep.i32, repOf(.abs_i32).?);
     try std.testing.expectEqual(Rep.i64, repOf(.abs_i64).?);
     try std.testing.expectEqual(Rep.f32, repOf(.abs_f32).?);
     try std.testing.expectEqual(Rep.f64, repOf(.abs_f64).?);
     // The widthless integer families are single members in the run;
-    // signed/unsigned pairs are consecutive (signed first): `add` = 1,
-    // `sub` = 4, `div` = 10 / `divu` = 11, `shr` = 37 / `shru` = 38,
-    // `maddi` = 54 / `maddiu` = 55.
-    try std.testing.expectEqual(@as(u8, 1), @intFromEnum(Opcode.add));
-    try std.testing.expectEqual(@as(u8, 4), @intFromEnum(Opcode.sub));
-    try std.testing.expectEqual(@as(u8, 11), @intFromEnum(Opcode.divu));
-    try std.testing.expectEqual(@as(u8, 38), @intFromEnum(Opcode.shru));
-    try std.testing.expectEqual(@as(u8, 55), @intFromEnum(Opcode.maddiu));
+    // typed families are six-member runs (integer-4 then float-2):
+    // `add.i32` = 1 / `add.f64` = 6, `sub.i32` = 7, `div.i64` = 21,
+    // `shr.u64` = 70, `maddi.u64` = 100.
+    try std.testing.expectEqual(@as(u16, 1), @intFromEnum(Opcode.add_i32));
+    try std.testing.expectEqual(@as(u16, 6), @intFromEnum(Opcode.add_f64));
+    try std.testing.expectEqual(@as(u16, 7), @intFromEnum(Opcode.sub_i32));
+    try std.testing.expectEqual(@as(u16, 21), @intFromEnum(Opcode.div_i64));
+    try std.testing.expectEqual(@as(u16, 70), @intFromEnum(Opcode.shr_u64));
+    try std.testing.expectEqual(@as(u16, 100), @intFromEnum(Opcode.maddi_u64));
 }
 
 test "move-wide lane arithmetic" {

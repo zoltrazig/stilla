@@ -49,8 +49,8 @@ const f = fn(move acc: int32, borrow x: int32) -> int32 { acc + x }
 | Kind | Syntax |
 | --- | --- |
 | primitives | `int32` `uint32` `int64` `uint64` `float32` `float64` `bool` `str` `byte` |
-| top / bottom | `any` `never`; also `void`, `hostdata`, `module` |
-| nominal | `struct Name { a: T, … }` · `union Name[T] { V(T), … }` · `opaque type Name[params];` |
+| top / bottom | `any` `never`; also `void`, `hostdata` |
+| nominal | `struct Name { a: T; … }` · `union Name[T] { V(T), … }` · `opaque type Name[params];` |
 | structural | `list[T]` · `box[T]` · `tuple[T, U]` · `fn(T, …) -> T` |
 
 - `opaque type` is declared only in stdlib / host module interfaces; *Unique* by declaration.
@@ -72,10 +72,10 @@ let c = builtin.box(move b);      // existing owner needs move
 
 | op | effect |
 | --- | --- |
-| `borrow x` | non-owning view; ownership unchanged |
-| `move x` | ownership transfer; source dead |
-| `copy x` | copy—only for *Copy* values |
-| `drop x;` | deterministic destruction at this point |
+| `move x` | ownership transfer of a *Unique* owner; source dead (`move` of a *Copy* value is a no-op) |
+| `drop x;` | explicit destruction at this point |
+
+(Borrowing is not a source operator — it happens through `borrow` parameters and non-consuming matches; copying is implicit for *Copy* values.)
 
 - **Parameter modes**: `T` (plain, *Copy* by value) · `borrow T` (non-owning) · `move T` (ownership-taking).
 
@@ -99,9 +99,9 @@ a or b     // b evaluated only if a is false
 | `name` | binds value (identifier) |
 | `(a, b)` | tuple |
 | `Name{ field: p }` | struct |
-| `Variant(p)` / `Variant` | union |
+| `Type::Variant(p)` / `Type::Variant` | union (payload / tag-only) |
 | `[a, b]` / `[head, ..tail]` | list (exact / with rest) |
-| `x as T` (type-test) | `any` tag test |
+| `<Type> [name]` (type-test) | `any` payload of that concrete type; binds `name` if matched |
 | `_` | wildcard (required for open tag spaces) |
 
 ## Member access / generics
@@ -116,7 +116,7 @@ a or b     // b evaluated only if a is false
 | `& \| ^` | bitwise on the raw operand-width pattern (never traps) |
 | `<< >>` | shift count masked mod 32 (32-bit) / mod 64 (`int64`/`uint64`); `>>` arithmetic on `int32`/`int64`, logical on `uint32`/`uint64` |
 | `== != < <= > >=` | compare |
-| `and` `or` `not` | `!` is `not` |
+| `and` `or` `!` | boolean ops; `!` is prefix negation (no `not` keyword) |
 | `math.min` `math.max` | `fmin`/`fmax` over `float32` (NaN propagates; `fmin(-0,+0)=-0`) — standard-library functions, not operators |
 | `math.abs` | `float32` `fabs` (clears the sign bit) — standard-library function, not an operator |
 | `as` | `num_cast`: every non-identity pair of `byte`/`int32`/`uint32`/`int64`/`uint64`/`float32`/`float64` (42 casts); never traps (round-nearest-even / truncate; float→int saturates, `int64`/`uint64` targets to `[int64_min, int64_max]` / `[0, 2⁶⁴)`); `int64 ↔ uint64` reinterprets the cell |
@@ -174,5 +174,5 @@ list.range(int32, int32) -> list[int32]             // inclusive [start, end]
 - **Formats**: `R` (three registers) · `B` (compare/branch) · `I` (register + imm16) · `C`/`E` (two registers) · `U` (register + imm20); typed opcodes carry numeric width and signedness.
 - **Registers**: `F0–F108` (`0x13–0x7f`) frame cells · `zero` (`0x00`) · `cond` (`0x01`) · `ra` (`0x02`, a reserved call-convention hole) · `T0–T15` (`0x03–0x12`) volatile temps. The zero/cond/ra/T encodings index the VM's `[19]` fast bank directly. The top `window_count` encodings are the **window aliases** — the header reserve plus the output aliases `O(0)..O(O-1)` — with the register budget `f_count + window_count ≤ 109`.
 - **Frame**: `[fp-3,fp)` header · `[fp,fp+L)` F cells (`L = f_count ≤ 109`) · `[fp+L,fp+L+X)` X spill cells (`x_count ≤ 65536`, imm16-addressed, never register-addressed) · `[..,+W)` output window, where each call reserves a three-cell `{saved_fp, saved_fn, saved_ra}` header plus `A=max(parameter_count,result_count)` value cells. Cells are raw `uint64`; operand types come from typed opcodes and descriptors.
-- Callee params alias the caller's output-window cells (`fp=sp-A`); one `slot_*` record per parameter at its absolute window offset (`slot_borrow`/`slot_move`/`slot_retain`/`slot_copy`) — no elision; argument transfer is move-based. The window is register-addressable (v10, Itanium-style overlap): a non-void call's result is published into the caller register `F(L+3+O-A)` and consumed by exactly one `take dst, F(L+3+O-A)` at the fallthrough (a `zero` destination discards; the source register is cleared) — or read in place with no take when the lowering coalesced the result onto the alias (Step 8, direct calls only, result not live across another call).
+- Callee params alias the caller's output-window cells (`fp=sp-A`); one `slot_*` record per parameter at its absolute window offset (`slot_borrow`/`slot_move`/`slot_retain`/`slot_copy`) — no elision; argument transfer is move-based. The window is register-addressable (Itanium-style overlap): a non-void call's result is published into the caller register `F(L+3+O-A)` and consumed by exactly one `take dst, F(L+3+O-A)` at the fallthrough (a `zero` destination discards; the source register is cleared) — or read in place with no take when the lowering coalesced the result onto the alias (Step 8, direct calls only, result not live across another call).
 - **Lifecycle explicit in the image**: counted owners (`str`/`list[T]`/`box[T]`) `release`/`copy_retain` (fused `replace_copy`/`replace_move`/`release_ret`); residual `drop src, DropDescId` for `any`/`hostdata`/opaque only; spill staging `spill_take`/`spill_put` under F pressure.

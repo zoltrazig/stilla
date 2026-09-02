@@ -350,10 +350,10 @@ test "3.2 LLIR normalization matrix: every record family normalizes to a valid 8
         \\fn main() -> int32 { m(10, 2) }
     ,
         &.{
-            .{ .op = .add, .min = 1 },
-            .{ .op = .muli, .min = 1 },
-            .{ .op = .sub, .min = 1 },
-            .{ .op = .div, .min = 1 },
+            .{ .op = .add_i32, .min = 1 },
+            .{ .op = .muli_i32, .min = 1 },
+            .{ .op = .sub_i32, .min = 1 },
+            .{ .op = .div_i32, .min = 1 },
         },
     );
 
@@ -587,8 +587,8 @@ test "3.2 special-register contract: zero reads, zero writes, traps and side eff
     // U-type `jal ra` with pc-relative imm20 targets.
     const image = llir.LlirProgram{
         .instructions = &.{
-            llir.instrR(.div, llir.zero_reg, llir.frame_base + 1, llir.frame_base + 2),
-            llir.instrR(.div, llir.zero_reg, llir.frame_base + 1, llir.zero_reg),
+            llir.instrR(.div_i32, llir.zero_reg, llir.frame_base + 1, llir.frame_base + 2),
+            llir.instrR(.div_i32, llir.zero_reg, llir.frame_base + 1, llir.zero_reg),
             llir.instrI(.syscall, llir.zero_reg, 0),
             llir.instrU(.jal, llir.ra_reg, 7), // → 10 (f1)
             llir.instrE(.take, llir.zero_reg, llir.frame_base + 7), // F(L+3+O-A) = F(4+5-2) = F7

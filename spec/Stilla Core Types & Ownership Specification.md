@@ -864,7 +864,7 @@ Stilla defines no construction or inspection operation on an opaque value:
 - **member access** does not apply — an opaque type has no fields, so `a.length` is a compile-time error;
 - **destructuring** does not apply — an opaque value is not matchable by struct pattern and has no payload to unpack.
 
-In every other value position an opaque value behaves like any other nominal value: it may be a plain, `borrow`, or `move` parameter; a return value; an element of `list`, `box`, or `tuple`; and a payload of the top type `any` (The top type `any`) — an opaque value coerces to `any` like any other tagged value type, carrying its nominal type identity in the tag, and is recovered with the ordinary `as` / `match` recovery operations. `move`, `borrow`, and `drop` of an opaque value are ordinary.
+In every other value position an opaque value behaves like any other nominal value: it may be a `borrow` or `move` parameter (never plain — a plain parameter accepts only *Copy* argument types, and an opaque type is *Unique*); a return value; an element of `list`, `box`, or `tuple`; and a payload of the top type `any` (The top type `any`) — an opaque value coerces to `any` like any other tagged value type, carrying its nominal type identity in the tag, and is recovered with the ordinary `as` / `match` recovery operations. `move`, `borrow`, and `drop` of an opaque value are ordinary.
 
 Destruction of an opaque value — automatic, explicit `drop`, or container destruction — dispatches to the **host type's destructor** (the Runtime specification): the runtime calls the host-side destruction routine named by the type's host identity, which releases the backing resources. This is host cleanup, not execution of a Stilla `drop` hook (the Runtime specification).
 
@@ -1373,8 +1373,7 @@ modulo 2³² and never traps on overflow or underflow (WebAssembly semantics,
 the Runtime specification); `int64` and `uint64` arithmetic is performed modulo
 2⁶⁴ and never traps on overflow or underflow (WebAssembly semantics
 extended to 64 bits). `int32` division does not trap on overflow —
-`int32_min / -1` wraps modulo 2³² to `int32_min` (WebAssembly-style
-wrapping), while `int32` remainder never overflows — `int32_min
+`int32_min / -1` wraps modulo 2³² to `int32_min` (modulo-2³² wrapping; unlike WebAssembly, whose `i32.div_s` traps on this case), while `int32` remainder never overflows — `int32_min
 % -1` is 0 (WebAssembly semantics); `int64` division traps on
 `int64_min / -1`, while `int64` remainder does not — `int64_min % -1` is 0.
 Unary `-` on `int32` wraps on

@@ -69,10 +69,12 @@ implementation must ensure that:
 - `array.clone` / `hashmap.clone` duplicate the buffer into a fresh opaque
   object, giving the result independent storage;
 - the buffer's lifetime is **bound to the execution context**: the runtime
-  stores each live opaque value as a row of the context's opaque object
-  table, and context cleanup — normal teardown or panic — disposes of every
-  remaining row via the host type's destructor (the Runtime specification,
-  *Host integration contract*, *Opaque type destruction*). Destruction on
+  tracks each live opaque value in the context's live-resource inventory —
+  cells hold the host pointer directly, with no handle table (the Runtime
+  specification, *Host integration contract*) — and context cleanup —
+  normal teardown or panic — disposes of every pointer still in that
+  inventory via the host type's destructor (the Runtime specification,
+  *Opaque type destruction*). Destruction on
   normal control flow is the ordinary `drop` of a *Unique* value: it
   dispatches to the host type's destructor, never to a Stilla `drop` hook.
 

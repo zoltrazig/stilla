@@ -7,17 +7,19 @@
 //! executable image; wire decoding stays in `llir.zig`.
 //!
 //! Layout: `op` is `VmOpcode` — the canonical `llir.Opcode` list with an
-//! `u8` tag (234 logical opcodes, largest value 234; the 21 free values
-//! above it are the expansion headroom, and a future tag bump is caught
-//! by the comptime size assert below). The operand is a mandatory
+//! `u16` tag (273 logical opcodes; the headroom above is the expansion
+//! headroom, and a future tag bump is caught by the comptime size assert
+//! below). The operand is a mandatory
 //! `u32`: it holds the format-specific immediate, offset, or
 //! side-table handle — relocated absolute pcs and `imm20` immediates
-//! need the width, which a 16-bit field cannot express. There is
-//! deliberately no `reserved` byte: an 8-byte instruction packs eight
-//! per 64-byte cache line (five at 12 bytes), and the opcode alone
-//! determines how `a`, `b`, `c`, and `operand` are interpreted — no
-//! runtime format tag. Instructions never embed pointers or slices;
-//! metadata and resolved members ride integer handles.
+//! need the width, which a 16-bit field cannot express. The 12-byte
+//! instruction carries the `u16` opcode tag plus the three 7-bit
+//! register fields (three bytes of alignment padding separate them
+//! from the operand); five instructions fit a 64-byte cache line, and
+//! the opcode alone determines how `a`, `b`, `c`, and `operand` are
+//! interpreted — no runtime format tag. Instructions never embed
+//! pointers or slices; metadata and resolved members ride integer
+//! handles.
 
 const std = @import("std");
 const llir = @import("llir.zig");
@@ -27,7 +29,8 @@ const llir = @import("llir.zig");
 /// handwritten table.
 pub const VmOpcode = llir.Opcode;
 
-/// One decoded VM instruction: exactly 8 bytes, align 4, zero padding.
+/// One decoded VM instruction: exactly 12 bytes, align 4. The `u16`
+/// opcode tag leaves three alignment bytes before the `u32` operand.
 pub const VmInstr = extern struct {
     op: VmOpcode,
     a: u8,
@@ -48,22 +51,22 @@ pub const VmInstr = extern struct {
 };
 
 comptime {
-    if (@sizeOf(VmInstr) != 8) {
-        @compileError("VmInstr must be exactly 8 bytes");
+    if (@sizeOf(VmInstr) != 12) {
+        @compileError("VmInstr must be exactly 12 bytes");
     }
     if (@alignOf(VmInstr) != 4) {
         @compileError("VmInstr must be 4-byte aligned");
     }
-    if (@sizeOf(VmOpcode) != 1) {
-        @compileError("VmOpcode must have an u8 tag");
+    if (@sizeOf(VmOpcode) != 2) {
+        @compileError("VmOpcode must have an u16 tag");
     }
-    // A 64-byte cache line holds eight instructions.
-    if (@sizeOf(VmInstr) != 64 / 8) {
-        @compileError("VmInstr must pack eight per cache line");
+    // Five 12-byte instructions fit a 64-byte cache line.
+    if (@sizeOf(VmInstr) * 5 > 64) {
+        @compileError("VmInstr must pack five per cache line");
     }
-    // The logical values must fit the u8 tag.
-    if (@intFromEnum(VmOpcode.j) > std.math.maxInt(u8)) {
-        @compileError("the largest opcode value must fit u8");
+    // The logical values must fit the u16 tag.
+    if (@intFromEnum(VmOpcode.j) > std.math.maxInt(u16)) {
+        @compileError("the largest opcode value must fit u16");
     }
 }
 
@@ -131,11 +134,11 @@ pub inline fn offs16Signed(v: VmInstr) i16 {
 
 const testing = std.testing;
 
-test "VmInstr is exactly 8 bytes, align 4, no padding" {
-    try testing.expectEqual(@as(usize, 8), @sizeOf(VmInstr));
+test "VmInstr is exactly 12 bytes, align 4" {
+    try testing.expectEqual(@as(usize, 12), @sizeOf(VmInstr));
     try testing.expectEqual(@as(usize, 4), @alignOf(VmInstr));
-    // The extern layout has no holes: op(1) + a(1) + b(1) + c(1) + operand(4).
-    try testing.expectEqual(@as(usize, 8), @sizeOf(VmOpcode) + 3 + 4);
+    // The extern layout: op(2) + a/b/c(3) + 3 padding + operand(4).
+    try testing.expectEqual(@as(usize, 12), @sizeOf(VmOpcode) + 3 + 4 + 3);
 }
 
 test "decodeInstr maps every opcode of every format 1:1" {
@@ -175,7 +178,7 @@ test "decodeInstr rejects reserved words before execution" {
     // The `10` reserved class, an unassigned code, and an unclean
     // `11101` register field all fail the load, never reach the image.
     try testing.expectError(error.ReservedWord, decodeInstr(.{ 0, 0, 0, 0x80 }));
-    try testing.expectError(error.ReservedWord, decodeInstr(llir.bytesOf(@as(u32, 71) << 21)));
+    try testing.expectError(error.ReservedWord, decodeInstr(llir.bytesOf(@as(u32, 116) << 21)));
     try testing.expectError(error.ReservedWord, decodeInstr(llir.bytesOf((0b11101 << 27) | (@as(u32, llir.cond_reg) << 20))));
     try testing.expectError(error.ReservedWord, decodeInstr(llir.bytesOf((0b111001 << 26) | (1 << 14))));
 }
@@ -194,10 +197,10 @@ test "signed immediates and pc helpers" {
     try testing.expectEqual(@as(i16, -1), offs16Signed(jr));
 }
 
-test "all 234 logical opcodes fit u8 with headroom" {
-    try testing.expectEqual(@as(usize, 227), std.meta.tags(VmOpcode).len);
+test "all 273 logical opcodes fit u16 with headroom" {
+    try testing.expectEqual(@as(usize, 273), std.meta.tags(VmOpcode).len);
     var max: u32 = 0;
     for (std.meta.tags(VmOpcode)) |op| max = @max(max, @intFromEnum(op));
-    try testing.expect(max <= std.math.maxInt(u8));
-    try testing.expect(max < 256 - 16); // expansion headroom above 234
+    try testing.expectEqual(@as(u32, 273), max);
+    try testing.expect(max < 65536 - 256); // expansion headroom
 }

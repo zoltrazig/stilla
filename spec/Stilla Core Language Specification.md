@@ -25,9 +25,9 @@ Runtime specification governs.
 
 ---
 
-## 1. Introduction
+# 1. Introduction
 
-### 1.1 What Stilla is
+## 1.1 What Stilla is
 
 **Stilla** is a small, statically typed language designed for:
 
@@ -51,7 +51,7 @@ program transitions from a static artifact into a running execution context.
 
 The body of the specification explains the model; the normative requirement is the **formal static semantics** of [Stilla Core Static Semantics](Stilla%20Core%20Static%20Semantics.md). The normative lexical and syntactic grammar is defined in the standalone [`Stilla Core Grammar Draft.abnf`](Stilla%20Core%20Grammar%20Draft.abnf).
 
-### 1.2 Design principles
+## 1.2 Design principles
 
 The design principles below give the character of the language. They fall into five groups.
 
@@ -88,7 +88,7 @@ The design principles below give the character of the language. They fall into f
 - modules restricted to module-scope bindings;
 - static module resolution through `import`.
 
-### 1.3 Central rules
+## 1.3 Central rules
 
 The language rests on a small number of central rules. They are stated here once and expanded in the sections that follow.
 
@@ -104,7 +104,7 @@ The language rests on a small number of central rules. They are stated here once
 
 The runtime consequences of the termination rule are defined in the Runtime specification.
 
-### 1.4 Deliberate omissions
+## 1.4 Deliberate omissions
 
 Stilla deliberately omits the following mechanisms:
 
@@ -117,7 +117,7 @@ Stilla deliberately omits the following mechanisms:
 
 A panic or runtime trap is therefore not normal control flow. It terminates the current Stilla execution context without language-level unwinding; control of cleanup then belongs to the embedding host.
 
-### 1.5 Key terminology
+## 1.5 Key terminology
 
 These terms are used throughout the core-language suite.
 
@@ -125,7 +125,7 @@ These terms are used throughout the core-language suite.
 - **module value / module-resident** — a value of a compiler-generated module type; it may appear only in module-level `const` bindings (Stilla Core Language Specification).
 - **binding** — a name bound to an immutable value. `let` creates local bindings (Stilla Core Language Specification); `const` creates module constants (Stilla Core Language Specification).
 - **Copy** — a capability held by some types: a *Copy* value may be implicitly copied, such as `int32` or `str`; dropping a *Copy* value does nothing (Stilla Core Types & Ownership Specification).
-- **unique** — a value without the *Copy* capability: it may be used at most once and must be destroyed exactly once; it is not implicitly copyable (Stilla Core Types & Ownership Specification).
+- **Unique** — a value without the *Copy* capability: it may be used at most once and must be destroyed exactly once; it is not implicitly copyable (Stilla Core Types & Ownership Specification).
 - **owner** — a binding or location that holds a value; every value has ownership (Stilla Core Types & Ownership Specification).
 - **maybe-unique** — a *Unique* binding released on some but not all normal paths through a conditional construct; it is unusable after the join, and the compiler destroys it on every non-consuming edge before the join (Stilla Core Types & Ownership Specification).
 - **borrow** — a non-owning, read-only view of a value; it never transfers ownership (Stilla Core Types & Ownership Specification).
@@ -149,7 +149,7 @@ These terms are used throughout the core-language suite.
 
 Runtime-side terms (execution context, module storage, teardown, host) are defined in the Runtime specification.
 
-### 1.6 How the suite is organized
+## 1.6 How the suite is organized
 
 The core language is split into three companion files:
 
@@ -294,7 +294,7 @@ The compiler or runtime resolves the specifier to exactly one of:
 
 Resolution is implementation-defined, but a specifier must resolve unambiguously before execution.
 
-Import cycles are rejected in Stilla v1.3.
+Import cycles among source modules are rejected at compile time in Stilla v1.3 (the Runtime specification covers initialization cycles that arise at load among independently produced artifacts).
 
 The standard library is specified separately.
 
@@ -476,6 +476,8 @@ builtin.panic
 builtin.assert
 builtin.hash
 ```
+
+The `builtin` module also exposes one **type member**, `builtin.Option` — the standard-library option type returned by lookups that can fail (`hashmap.get`, `string.index_of`, `list.index_of`, `list.head`); its formal definition is in the [Stilla Standard Library](Stilla%20Standard%20Library.md).
 
 (The `list` module — not `builtin` — provides `list.len` and
 `list.range`; their signatures are defined in the Runtime specification.)

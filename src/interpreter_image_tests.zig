@@ -96,7 +96,7 @@ test "i64 immediate forms sign-extend the 7-bit constant to 64 bits" {
     const u64_row = [_]llir.TypeDesc{primType(.uint64)};
     const instrs = [_]llir.Instr{
         llir.instrI(.movwz0, llir.frame_base, 0xa), // %0 = 10
-        llir.instrR(.subi, llir.frame_base + 1, llir.frame_base, 0x40), // %1 = 10 - (-64) — the v9 i64 imm7 window [-64, 63]
+        llir.instrR(.subi_i32, llir.frame_base + 1, llir.frame_base, 0x40), // %1 = 10 - (-64) — the v9 i64 imm7 window [-64, 63]
         llir.instrE(.ret, llir.frame_base + 1, 0),
     };
     try testing.expectEqual(@as(Value, 74), try runHand(&instrs, &u64_row, 0, &.{}));
@@ -122,7 +122,7 @@ test "wide madd/msub wrap at the resolved 64-bit width" {
         llir.instrI(.movwk0, llir.frame_base, 0xff00), // %0 = 0xffff_ffff_ffff_ff00
         llir.instrI(.movwz0, llir.frame_base + 1, 0x2), // %1 = 2
         llir.instrI(.movwz0, llir.frame_base + 2, 0x100), // %2 = 0x100
-        llir.instrR(.madd, llir.frame_base, llir.frame_base + 1, llir.frame_base + 2),
+        llir.instrR(.madd_i32, llir.frame_base, llir.frame_base + 1, llir.frame_base + 2),
         llir.instrE(.ret, llir.frame_base, 0),
     };
     try testing.expectEqual(@as(Value, 0x100), try runHand(&instrs, &u64_row, 0, &.{}));
@@ -132,7 +132,7 @@ test "wide madd/msub wrap at the resolved 64-bit width" {
         llir.instrI(.movwz0, llir.frame_base, 0x100), // %0 = 0x100
         llir.instrI(.movwz0, llir.frame_base + 1, 0x2), // %1 = 2
         llir.instrI(.movwz0, llir.frame_base + 2, 0x100), // %2 = 0x100
-        llir.instrR(.msub, llir.frame_base, llir.frame_base + 1, llir.frame_base + 2),
+        llir.instrR(.msub_i32, llir.frame_base, llir.frame_base + 1, llir.frame_base + 2),
         llir.instrE(.ret, llir.frame_base, 0),
     };
     try testing.expectEqual(@as(Value, 0xffff_ffff_ffff_ff00), try runHand(&msub, &u64_row, 0, &.{}));
@@ -146,7 +146,7 @@ test "maddi: the 8-bit immediate accumulates at the resolved 64-bit width" {
         llir.instrI(.movwz0, llir.frame_base, 0xa), // %0 = 10
         llir.instrI(.movwz0, llir.frame_base + 1, 0x7), // %1 = 7
         llir.instrI(.movwz0, llir.frame_base + 2, 0xa), // %2 = 10
-        llir.instrR(.maddiu, llir.frame_base + 2, llir.frame_base + 1, 3),
+        llir.instrR(.maddi_u32, llir.frame_base + 2, llir.frame_base + 1, 3),
         llir.instrE(.ret, llir.frame_base + 2, 0),
     };
     try testing.expectEqual(@as(Value, 31), try runHand(&acc, &u64_row, 0, &.{}));
@@ -158,7 +158,7 @@ test "maddi: the 8-bit immediate accumulates at the resolved 64-bit width" {
         llir.instrI(.movwk1, llir.frame_base, 0xffff),
         llir.instrI(.movwk0, llir.frame_base, 0xffff), // %0 = max u64
         llir.instrI(.movwz0, llir.frame_base + 1, 0x2), // %1 = 2
-        llir.instrR(.maddiu, llir.frame_base, llir.frame_base + 1, 1),
+        llir.instrR(.maddi_u32, llir.frame_base, llir.frame_base + 1, 1),
         llir.instrE(.ret, llir.frame_base, 0),
     };
     try testing.expectEqual(@as(Value, 1), try runHand(&wrap, &u64_row, 0, &.{}));
@@ -168,7 +168,7 @@ test "maddi: the 8-bit immediate accumulates at the resolved 64-bit width" {
     const sext = [_]llir.Instr{
         llir.instrI(.movwz0, llir.frame_base, 0xa), // %0 = 10
         llir.instrI(.movwz0, llir.frame_base + 1, 0x1), // %1 = 1
-        llir.instrR(.maddi, llir.frame_base + 2, llir.frame_base + 1, 0x40), // %2 = 0 + 1 * (-64) — the v9 i64 imm7 window
+        llir.instrR(.maddi_i32, llir.frame_base + 2, llir.frame_base + 1, 0x40), // %2 = 0 + 1 * (-64) — the v9 i64 imm7 window
         llir.instrE(.ret, llir.frame_base + 2, 0),
     };
     try testing.expectEqual(@as(Value, 0xffff_ffff_ffff_ffc0), try runHand(&sext, &u64_row, 0, &.{}));
@@ -182,14 +182,14 @@ test "minu/maxu at 64-bit width compare the full unsigned cell" {
     const mn = [_]llir.Instr{
         llir.instrI(.movwz1, llir.frame_base, 0x8000), // %0 = 0x8000_0000
         llir.instrI(.movwz0, llir.frame_base + 1, 0x1), // %1 = 1
-        llir.instrR(.minu, llir.frame_base + 2, llir.frame_base, llir.frame_base + 1),
+        llir.instrR(.min_u32, llir.frame_base + 2, llir.frame_base, llir.frame_base + 1),
         llir.instrE(.ret, llir.frame_base + 2, 0),
     };
     try testing.expectEqual(@as(Value, 1), try runHand(&mn, &u64_row, 0, &.{}));
     const mx = [_]llir.Instr{
         llir.instrI(.movwz1, llir.frame_base, 0x8000),
         llir.instrI(.movwz0, llir.frame_base + 1, 0x1),
-        llir.instrR(.maxu, llir.frame_base + 2, llir.frame_base, llir.frame_base + 1),
+        llir.instrR(.max_u32, llir.frame_base + 2, llir.frame_base, llir.frame_base + 1),
         llir.instrE(.ret, llir.frame_base + 2, 0),
     };
     try testing.expectEqual(@as(Value, 0x8000_0000), try runHand(&mx, &u64_row, 0, &.{}));
@@ -205,7 +205,7 @@ test "i64 minInt edges: rem min/-1 is 0; abs(minInt) wraps to the minimum" {
     const rem = [_]llir.Instr{
         llir.instrI(.const_, llir.frame_base, 0x0),
         llir.instrI(.const_, llir.frame_base + 1, 0x1),
-        llir.instrR(.rem, llir.frame_base + 2, llir.frame_base, llir.frame_base + 1),
+        llir.instrR(.rem_i32, llir.frame_base + 2, llir.frame_base, llir.frame_base + 1),
         llir.instrE(.ret, llir.frame_base + 2, 0),
     };
     try testing.expectEqual(@as(Value, 0), try runHand(&rem, &rows, 1, &constants));
@@ -514,7 +514,7 @@ test "take: register transfer clears its source; O aliases resolve through the w
         llir.instrE(.take, llir.frame_base + 1, llir.frame_base + 10), // F1 = F10; F10 cleared
         llir.instrE(.take, llir.zero_reg, llir.frame_base + 10), // zero dst discards; F10 stays cleared
         llir.instrE(.take, llir.frame_base + 2, llir.frame_base + 10), // F2 = 0 — the source was cleared
-        llir.instrR(.add, llir.frame_base + 3, llir.frame_base + 1, llir.frame_base + 2),
+        llir.instrR(.add_i32, llir.frame_base + 3, llir.frame_base + 1, llir.frame_base + 2),
         llir.instrE(.ret, llir.frame_base + 3, 0),
     };
     const v = try runHandImage(&seq, &u64_row, 0, &constants, &.{.{

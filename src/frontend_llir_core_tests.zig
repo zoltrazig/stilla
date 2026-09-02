@@ -58,12 +58,12 @@ test "LLIR model: nested call/ret frame contract over a toy image" {
     const functions = [_]llir.FunctionDesc{ caller, callee };
     const program = llir.LlirProgram{
         .instructions = &.{
-            llir.instrR(.add, llir.frame_base + 2, llir.frame_base + 0, llir.frame_base + 1),
+            llir.instrR(.add_i32, llir.frame_base + 2, llir.frame_base + 0, llir.frame_base + 1),
             llir.instrI(.const_, llir.frame_base + 3, 1), // direct-call fallthrough: slot-0 result materialized
             llir.instrE(.ret, llir.frame_base + 3, 0),
-            llir.instrR(.add, llir.frame_base + 0, llir.frame_base + 0, llir.frame_base + 1),
+            llir.instrR(.add_i32, llir.frame_base + 0, llir.frame_base + 0, llir.frame_base + 1),
             llir.instrE(.ret, llir.frame_base + 0, 0),
-            llir.instrR(.madd, llir.frame_base + 3, llir.frame_base + 0, llir.frame_base + 0),
+            llir.instrR(.madd_i32, llir.frame_base + 3, llir.frame_base + 0, llir.frame_base + 0),
             llir.instrE(.trap, 0, 0),
             llir.instrE(.trap, 0, 0),
             llir.instrE(.ret, 0, 0),
@@ -1375,55 +1375,52 @@ test "2.5 LLIR lowering: generic arithmetic specializes by concrete type" {
                 if (std.meta.activeTag(ins.op) == .phi) continue;
                 switch (ins.op) {
                     .add, .sub, .mul, .div, .rem, .neg => {
+                        // The typed opcode is the whole operation: one
+                        // record, chosen by the result type (Instruction
+                        // Set §4).
                         const want: llir.Opcode = switch (ins.op) {
                             .add => switch (ins.results[0].type_.primitive) {
-                                .int32 => .add,
-                                .uint32 => .add,
+                                .int32 => .add_i32,
+                                .uint32 => .add_u32,
                                 .float32 => .add_f32,
                                 else => unreachable,
                             },
                             .sub => switch (ins.results[0].type_.primitive) {
-                                .int32 => .sub,
-                                .uint32 => .sub,
+                                .int32 => .sub_i32,
+                                .uint32 => .sub_u32,
                                 .float32 => .sub_f32,
                                 else => unreachable,
                             },
                             .mul => switch (ins.results[0].type_.primitive) {
-                                .int32 => .mul,
-                                .uint32 => .mul,
+                                .int32 => .mul_i32,
+                                .uint32 => .mul_u32,
                                 .float32 => .mul_f32,
                                 else => unreachable,
                             },
                             .div => switch (ins.results[0].type_.primitive) {
-                                .int32 => .div,
-                                .uint32 => .divu,
+                                .int32 => .div_i32,
+                                .uint32 => .div_u32,
                                 .float32 => .div_f32,
                                 else => unreachable,
                             },
                             .rem => switch (ins.results[0].type_.primitive) {
-                                .int32 => .rem,
-                                .uint32 => .remu,
+                                .int32 => .rem_i32,
+                                .uint32 => .rem_u32,
                                 .float32 => unreachable,
                                 else => unreachable,
                             },
                             .neg => switch (ins.results[0].type_.primitive) {
-                                .int32 => .neg,
-                                .uint32 => .neg,
+                                .int32 => .neg_i32,
+                                .uint32 => .neg_u32,
                                 .float32 => .neg_f32,
                                 else => unreachable,
                             },
                             else => unreachable,
                         };
-                        const recs = image.instructions[pc .. pc + try b.recordCount(blk, ins)];
-                        // Locate the primary record — staged 32-bit
-                        // sequences carry `zext32`/`sext32` around it.
-                        var primary: ?llir.Decoded = null;
-                        for (recs) |rec| {
-                            const d = llir.decode(rec).?;
-                            if (d.op == want) primary = d;
-                        }
-                        try testing.expect(primary != null);
-                        try testing.expectEqual(b.slotOf(ins.results[0]), primary.?.a);
+                        const rec = image.instructions[pc];
+                        const d = llir.decode(rec).?;
+                        try testing.expectEqual(want, d.op);
+                        try testing.expectEqual(b.slotOf(ins.results[0]), d.a);
                         n_arith += 1;
                     },
                     .not_ => {
@@ -1449,7 +1446,7 @@ test "2.5 LLIR lowering: generic arithmetic specializes by concrete type" {
     // The typed families carry the numeric regime in the opcode: the
     // signed/unsigned/i32/f32 `add` differ by rep suffix — one dispatch
     // table, no result-type reads.
-    try testing.expect(@intFromEnum(llir.Opcode.add) != @intFromEnum(llir.Opcode.add_f32));
+    try testing.expect(@intFromEnum(llir.Opcode.add_i32) != @intFromEnum(llir.Opcode.add_f32));
 }
 
 test "2.5 LLIR lowering: hand-written arithmetic records carry dst/src slots and the full opcode table" {
@@ -1506,20 +1503,15 @@ test "2.5 LLIR lowering: hand-written arithmetic records carry dst/src slots and
     const image = try b.lowerLlir();
 
     const want = [_]llir.Opcode{
-        .add,     .sub,     .mul,     .div,     .rem,     .neg,
-        .add,     .sub,     .mul,     .divu,    .remu,    .neg,
+        .add_i32, .sub_i32, .mul_i32, .div_i32, .rem_i32, .neg_i32,
+        .add_u32, .sub_u32, .mul_u32, .div_u32, .rem_u32, .neg_u32,
         .add_f32, .sub_f32, .mul_f32, .div_f32, .rem_f32, .neg_f32,
         .not,     .concat,
     };
     // Re-derive each expected record from the CFG (a = dst slot, b = a,
-    // c = b — or 0 for the unary neg/not) and assert the primary
-    // opcode is the exact specialized one; also assert every table
-    // opcode is exercised exactly once. The widthless 32-bit ops emit
-    // canonicalization staging around the primary record (Instruction
-    // Set §4): `mul`/`div`/`rem` on int32/uint32 truncate the 64-bit
-    // result (`sext32 dst, dst`), and the u32 `div`/`rem` zero-extend
-    // both operands first (`zext32` staging on T15 and the result
-    // slot).
+    // c = b — or 0 for the unary neg/not) and assert the record is the
+    // exact typed opcode — one record per arithmetic instruction (§4).
+    // Also assert every table opcode is exercised exactly once.
     var seen = std.StaticBitSet(0x10000).initEmpty(); // full u16 opcode space
     var count: usize = 0;
     for (program.funcs, 0..) |_, fi| {
@@ -1531,31 +1523,11 @@ test "2.5 LLIR lowering: hand-written arithmetic records carry dst/src slots and
                 if (std.meta.activeTag(ins.op) == .phi) continue;
                 switch (ins.op) {
                     .add, .sub, .mul, .div, .rem, .neg, .not_, .concat => {
-                        const n = try b.recordCount(blk, ins);
-                        const recs = image.instructions[pc .. pc + n];
-                        // The widthless 32-bit ops emit staging around
-                        // the primary record: `mul`/`div`/`rem` on
-                        // int32/uint32 truncate the 64-bit result
-                        // (`sext32 dst, dst`), and the u32 `div`/`rem`
-                        // zero-extend both operands first (`zext32` on
-                        // the T15 staging slot and the result slot).
                         try testing.expect(count < want.len);
-                        var found_want = false;
-                        for (recs) |rec| {
-                            const d = llir.decode(rec).?;
-                            if (d.op == want[count]) found_want = true;
-                            switch (d.op) {
-                                .sext32 => {
-                                    try testing.expectEqual(b.slotOf(ins.results[0]), d.a);
-                                    try testing.expectEqual(b.slotOf(ins.results[0]), d.b);
-                                },
-                                .zext32 => try testing.expect(
-                                    d.a == llir.temp_base + 15 or d.a == b.slotOf(ins.results[0]),
-                                ),
-                                else => {},
-                            }
-                        }
-                        try testing.expect(found_want);
+                        // One record per instruction; it is the typed
+                        // opcode itself.
+                        const rec = image.instructions[pc];
+                        try testing.expectEqual(want[count], llir.decode(rec).?.op);
                         seen.set(@intFromEnum(want[count]));
                         count += 1;
                     },
@@ -1615,14 +1587,15 @@ test "2.5 LLIR lowering: abs/min/max/clz/popcount specialize by type and carry d
     const image = try b.lowerLlir();
 
     const want = [_]llir.Opcode{
-        .abs_i32, .min,     .max,     .clz_i32,      .popcount_i32,
-        .minu,    .maxu,    .clz_i32, .popcount_i32, .abs_f32,
+        .abs_i32, .min_i32, .max_i32, .clz_i32,      .popcount_i32,
+        .min_u32, .max_u32, .clz_i32, .popcount_i32, .abs_f32,
         .min_f32, .max_f32,
     };
     // Re-derive each expected record from the CFG (a = dst slot, b = a,
     // c = b — or 0 for the unary abs/clz/popcount) and assert the
     // opcode is the exact specialized one; every table opcode is
-    // exercised exactly once.
+    // exercised exactly once. Every unary/binary row is one record (§4)
+    // — the u32 min/max no longer stage operands.
     var count: usize = 0;
     for (program.funcs, 0..) |_, fi| {
         const range = b.block_ranges.items[fi];
@@ -1633,17 +1606,8 @@ test "2.5 LLIR lowering: abs/min/max/clz/popcount specialize by type and carry d
                 if (std.meta.activeTag(ins.op) == .phi) continue;
                 switch (ins.op) {
                     .abs, .min, .max, .clz, .popcount => {
-                        const recs = image.instructions[pc .. pc + try b.recordCount(blk, ins)];
                         try testing.expect(count < want.len);
-                        // Locate the primary record — the u32 min/max
-                        // stage both operands (`zext32`) before it.
-                        var primary: ?llir.Decoded = null;
-                        for (recs) |rec| {
-                            const d = llir.decode(rec).?;
-                            if (d.op == want[count]) primary = d;
-                        }
-                        try testing.expect(primary != null);
-                        const d = primary.?;
+                        const d = llir.decode(image.instructions[pc]).?;
                         try testing.expectEqual(b.slotOf(ins.results[0]), d.a);
                         switch (ins.op) {
                             .abs, .clz, .popcount => |v| {
@@ -1652,17 +1616,8 @@ test "2.5 LLIR lowering: abs/min/max/clz/popcount specialize by type and carry d
                                 try testing.expectEqual(@as(u32, 0), d.c);
                             },
                             .min, .max => |bin| {
-                                if (ins.results[0].type_ == .primitive and ins.results[0].type_.primitive == .uint32) {
-                                    // Full-cell unsigned compare over the
-                                    // zero-extended operands: b = the T15
-                                    // staging slot, c = the zero-extended
-                                    // second operand (the result slot).
-                                    try testing.expectEqual(llir.temp_base + 15, d.b);
-                                    try testing.expectEqual(b.slotOf(ins.results[0]), d.c);
-                                } else {
-                                    try testing.expectEqual(b.slotOf(bin.a), d.b);
-                                    try testing.expectEqual(b.slotOf(bin.b), d.c);
-                                }
+                                try testing.expectEqual(b.slotOf(bin.a), d.b);
+                                try testing.expectEqual(b.slotOf(bin.b), d.c);
                             },
                             else => unreachable,
                         }

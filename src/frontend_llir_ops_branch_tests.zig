@@ -157,14 +157,14 @@ test "3.3 LLIR lowering: fused arithmetic immediates pin the signed/unsigned win
     for (image.instructions) |rec| {
         const d = llir.decode(rec).?;
         switch (d.op) {
-            .addi => {
+            .addi_i32 => {
                 n += 1;
                 try testing.expect(d.c == 0x40 or d.c == 63); // -64 and 63
             },
-            // `add` is widthless: the out-of-window constants (-65, 64,
-            // 128) all stay the register form.
-            .add => n_reg += 1,
-            .addiu => {
+            // Out-of-window constants (-65, 64, 128) stay the register
+            // form, typed by their reps: `add.i32` in @s, `add.u32` in @u.
+            .add_i32, .add_u32 => n_reg += 1,
+            .addi_u32 => {
                 n_u += 1;
                 try testing.expectEqual(@as(u8, 127), d.c);
             },
@@ -796,8 +796,8 @@ test "3.3 LLIR lowering: offs10 and imm20 signed windows at the codec boundary" 
         \\        br %2 ? t : m
         \\    m:
     );
-    // ~150 filler adds in `m` (two records each — opcode + `sext32`)
-    // push `t` ~302 records past the branch.
+    // ~150 filler adds in `m` (one record each — the typed `add.i32`)
+    // push `t` ~152 records past the branch.
     for (3..153) |i| {
         const line = try std.fmt.allocPrint(testing.allocator, "        %{d}: int32 = add %0, %0\n", .{i});
         defer testing.allocator.free(line);

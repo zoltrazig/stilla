@@ -364,7 +364,7 @@ test "2.9 Step 8: direct-call result coalescing — take dropped only when safe"
     var saw_alias_read: bool = false;
     for (image.instructions) |rec| {
         const d = llir.decode(rec) orelse continue;
-        if (d.op == .addi and d.b == llir.frameReg(alias)) saw_alias_read = true;
+        if (d.op == .addi_i32 and d.b == llir.frameReg(alias)) saw_alias_read = true;
     }
     try testing.expect(saw_alias_read);
 

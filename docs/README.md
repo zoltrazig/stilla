@@ -22,7 +22,7 @@ specifications (the spec suite index is [spec/README.md](../spec/README.md)).
 | [phase2-checker.md](phase2-checker.md) | Phase 2: inference, generic expansion, ownership analysis, checks |
 | [phase3-cfg-lowering.md](phase3-cfg-lowering.md) | Phase 3: annotated AST → CFG AIR, destruction placement, module init functions, syscalls |
 | [optimizer.md](optimizer.md) | Passes 7–8: tail-call elimination, inlining, CSE, copy propagation, and the mid-level rewrites |
-| [llir-typed.md](llir-typed.md) | the typed LLIR lowering layer (value-form lattice, typed-assembly surface) |
+| [llir-typed.md](llir-typed.md) | the typed LLIR lowering layer (typed opcodes, typed-assembly surface) |
 
 ## Runtime and embedding
 

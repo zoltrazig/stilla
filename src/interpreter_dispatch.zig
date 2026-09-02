@@ -71,10 +71,10 @@ fn hConst(self: *VmCtx, n: u32) void {
         .int, .float, .bool, .void => {
             val = if (isWidePrim(self, cr.type_))
                 (@as(u64, cr.b) << 32 | cr.a)
-            else if (is32IntPrim(self, cr.type_))
+            else if (isInt32Prim(self, cr.type_))
                 ValueCodec.extendInt32Bits(cr.a)
             else
-                cr.a;
+                cr.a; // u32/byte/bool/f32: the row's low bits are the canonical cell
         },
         .string => {
             // One table-owned object per distinct record; the
@@ -127,83 +127,65 @@ fn arithHandler(comptime op: llir.Opcode) Handler {
 }
 
 // --- typed arithmetic (immediate forms) -----------------------------------
-// R-Type `dst, src, imm7`: the 7-bit immediate sits in field c. Each
-// case is monomorphic — the signed forms sign-extend it, the `u` forms,
-// shift counts and bitwise masks use the raw field.
+// R-Type `dst, src, imm7`: the 7-bit immediate sits in field c. The rep
+// fixes the interpretation — the `.i*` members sign-extend it, the
+// `.u*` members use the raw (zero-extended) field — and the width of
+// the compute.
 
-fn arithImmSignedHandler(comptime op: llir.Opcode) Handler {
+fn arithImmHandler(comptime op: llir.Opcode) Handler {
     return struct {
         fn run(self: *VmCtx, n: u32) void {
             const v = self.loaded.code.items[self.runtime.pc];
-            const im7: u64 = @bitCast(vm_instr.imm7Signed(v.c));
-            const b = read(self, v.b);
-            const r = switch (op) {
-                .addi => b +% im7,
-                .subi => b -% im7,
-                .muli => b *% im7,
+            const rep = comptime llir.repOf(op).?;
+            const w: comptime_int = if (rep == .i32 or rep == .u32) 32 else 64;
+            const T = std.meta.Int(.unsigned, w);
+            const b: T = @truncate(read(self, v.b));
+            const im: T = if (rep == .i32 or rep == .i64)
+                @truncate(@as(u64, @bitCast(vm_instr.imm7Signed(v.c))))
+            else
+                @as(T, v.c);
+            const r: T = switch (op) {
+                .addi_i32, .addi_u32, .addi_i64, .addi_u64 => b +% im,
+                .subi_i32, .subi_u32, .subi_i64, .subi_u64 => b -% im,
+                .muli_i32, .muli_u32, .muli_i64, .muli_u64 => b *% im,
                 else => unreachable,
             };
-            write(self, v.a, r);
+            write(self, v.a, canonicalIntResult(op, r));
             return fallthrough(self, n);
         }
     }.run;
 }
 
-fn arithImmUnsignedHandler(comptime op: llir.Opcode) Handler {
+fn divImmHandler(comptime op: llir.Opcode) Handler {
     return struct {
         fn run(self: *VmCtx, n: u32) void {
             const v = self.loaded.code.items[self.runtime.pc];
-            const b = read(self, v.b);
-            const r = switch (op) {
-                .addiu => b +% v.c,
-                .subiu => b -% v.c,
-                .muliu => b *% v.c,
+            const rep = comptime llir.repOf(op).?;
+            const w: comptime_int = if (rep == .i32 or rep == .u32) 32 else 64;
+            const T = std.meta.Int(.unsigned, w);
+            const signed = rep == .i32 or rep == .i64;
+            const b: T = @truncate(read(self, v.b));
+            const im: T = if (signed) @truncate(@as(u64, @bitCast(vm_instr.imm7Signed(v.c)))) else @as(T, v.c);
+            if (im == 0) return stop(self, intTrap(self, error.DivByZero));
+            const r: T = switch (op) {
+                .divi_i32, .divi_i64, .divi_u32, .divi_u64 => blk: {
+                    if (signed) {
+                        // `i64_min / -1` traps at 64 bits; the 32-bit
+                        // exact quotient 2^31 wraps to `i32_min`.
+                        if (w == 64 and b == @as(T, 1) << (w - 1) and im == std.math.maxInt(T)) return stop(self, intTrap(self, error.DivOverflow));
+                        break :blk @truncate(@as(u64, @bitCast(@divTrunc(signExtendTo64(b, w), signExtendTo64(im, w)))));
+                    }
+                    break :blk b / im;
+                },
+                .remi_i32, .remi_i64, .remi_u32, .remi_u64 => blk: {
+                    if (signed) {
+                        break :blk @truncate(@as(u64, @bitCast(@rem(signExtendTo64(b, w), signExtendTo64(im, w))))); // i*_min % -1 == 0
+                    }
+                    break :blk b % im;
+                },
                 else => unreachable,
             };
-            write(self, v.a, r);
-            return fallthrough(self, n);
-        }
-    }.run;
-}
-
-fn divImmSignedHandler(comptime op: llir.Opcode) Handler {
-    return struct {
-        fn run(self: *VmCtx, n: u32) void {
-            const v = self.loaded.code.items[self.runtime.pc];
-            const b = read(self, v.b);
-            const im7 = @as(u64, @bitCast(vm_instr.imm7Signed(v.c)));
-            if (im7 == 0) return stop(self, intTrap(self, error.DivByZero));
-            switch (op) {
-                .divi => {
-                    if (b == (1 << 63) and im7 == 0xffff_ffff_ffff_ffff) return stop(self, intTrap(self, error.DivOverflow));
-                    const sb: i64 = @bitCast(b);
-                    const si: i64 = @bitCast(im7);
-                    write(self, v.a, @bitCast(@divTrunc(sb, si)));
-                },
-                .remi => {
-                    const sb: i64 = @bitCast(b);
-                    const si: i64 = @bitCast(im7);
-                    write(self, v.a, @bitCast(@rem(sb, si)));
-                },
-                else => unreachable,
-            }
-            return fallthrough(self, n);
-        }
-    }.run;
-}
-
-fn divImmUnsignedHandler(comptime op: llir.Opcode) Handler {
-    return struct {
-        fn run(self: *VmCtx, n: u32) void {
-            const v = self.loaded.code.items[self.runtime.pc];
-            const b = read(self, v.b);
-            const im7: u64 = v.c;
-            if (im7 == 0) return stop(self, intTrap(self, error.DivByZero));
-            switch (op) {
-                .diviu => write(self, v.a, b / im7),
-                .remiu => write(self, v.a, b % im7),
-                else => unreachable,
-            }
+            write(self, v.a, canonicalIntResult(op, r));
             return fallthrough(self, n);
         }
     }.run;
@@ -213,15 +195,18 @@ fn shiftImmHandler(comptime op: llir.Opcode) Handler {
     return struct {
         fn run(self: *VmCtx, n: u32) void {
             const v = self.loaded.code.items[self.runtime.pc];
-            const sh: u6 = @intCast(v.c & 63);
-            const b = read(self, v.b);
-            const r = switch (op) {
-                .shli => b << sh,
-                .shri => @as(u64, @bitCast(@as(i64, @bitCast(b)) >> sh)),
-                .shriu => b >> sh,
+            const rep = comptime llir.repOf(op).?;
+            const w: comptime_int = if (rep == .i32 or rep == .u32) 32 else 64;
+            const T = std.meta.Int(.unsigned, w);
+            const a: T = @truncate(read(self, v.b));
+            const sh: std.math.Log2Int(T) = @intCast(v.c & (w - 1));
+            const r: T = switch (op) {
+                .shli_i32, .shli_u32, .shli_i64, .shli_u64 => a << sh,
+                .shri_i32, .shri_i64 => @truncate(@as(u64, @bitCast(@as(i64, @bitCast(signExtendTo64(a, w))) >> @as(u6, sh)))),
+                .shri_u32, .shri_u64 => a >> sh,
                 else => unreachable,
             };
-            write(self, v.a, r);
+            write(self, v.a, canonicalIntResult(op, r));
             return fallthrough(self, n);
         }
     }.run;
@@ -259,48 +244,28 @@ fn fmacHandler(comptime op: llir.Opcode) Handler {
     }.run;
 }
 
-/// R-Type `dst, src, imm7`: field c sign-extends for `maddi`, is used
-/// raw for `maddiu`.
+/// R-Type `dst, src, imm7`: the rep fixes the immediate interpretation —
+/// the `.i*` members sign-extend the field, the `.u*` members use it raw
+/// (zero-extended).
 fn fmacImmHandler(comptime op: llir.Opcode) Handler {
     return struct {
         fn run(self: *VmCtx, n: u32) void {
             const v = self.loaded.code.items[self.runtime.pc];
             const acc = read(self, v.a);
             const b = read(self, v.b);
-            const im7 = if (op == .maddi) @as(u64, @bitCast(vm_instr.imm7Signed(v.c))) else v.c;
-            write(self, v.a, fmaciOp(self, acc, b, im7));
+            const rep = llir.repOf(op).?;
+            const im: u64 = if (rep == .i32 or rep == .i64) @bitCast(vm_instr.imm7Signed(v.c)) else v.c;
+            write(self, v.a, fmaciOp(self, op, acc, b, im));
             return fallthrough(self, n);
         }
     }.run;
 }
 
-// --- widthless unary / 32-bit canonicalization ----------------------------
-
-fn hNeg(self: *VmCtx, n: u32) void {
-    const v = self.loaded.code.items[self.runtime.pc];
-    // Two's complement `0 - b` on the full canonical cell; a 32-bit
-    // operand type's `neg; sext32` sequence wraps the result.
-    write(self, v.a, 0 -% read(self, v.b));
-    return fallthrough(self, n);
-}
-
-fn hSext32(self: *VmCtx, n: u32) void {
-    const v = self.loaded.code.items[self.runtime.pc];
-    write(self, v.a, ValueCodec.extendInt32Bits(@truncate(read(self, v.b))));
-    return fallthrough(self, n);
-}
-
-fn hZext32(self: *VmCtx, n: u32) void {
-    const v = self.loaded.code.items[self.runtime.pc];
-    // Zero-extend the low 32 bits into the full 64-bit cell (the
-    // unsigned staging form; the canonical i32/u32 cell is
-    // sign-extended, so a plain truncate is not a no-op here).
-    write(self, v.a, @as(u64, @as(u32, @truncate(read(self, v.b)))));
-    return fallthrough(self, n);
-}
+// --- typed unary (E-Type) --------------------------------------------------
 
 /// Typed unary (E-Type): `neg`/`abs`/`clz`/`popcount` and the float
-/// rounding family, rep-dispatched; 32-bit integer results canonicalize.
+/// rounding family, rep-dispatched; results canonicalize per rep (an
+/// `.i32` result sign-extends, a `.u32` result zero-extends).
 fn unaryHandler(comptime op: llir.Opcode) Handler {
     return struct {
         fn run(self: *VmCtx, n: u32) void {
@@ -1071,19 +1036,14 @@ pub const handlers: [maxOpcodeValue() + 1]Handler = blk: {
         t[@intFromEnum(op)] = switch (op) {
             .const_ => hConst,
             .fn_ref => hFnRef,
-            .add, .sub, .mul, .div, .divu, .rem, .remu, .min, .minu, .max, .maxu, .shl, .shr, .shru, .and_, .or_, .xor, .add_f32, .add_f64, .sub_f32, .sub_f64, .mul_f32, .mul_f64, .div_f32, .div_f64, .rem_f32, .rem_f64, .min_f32, .min_f64, .max_f32, .max_f64 => arithHandler(op),
-            .addi, .subi, .muli => arithImmSignedHandler(op),
-            .addiu, .subiu, .muliu => arithImmUnsignedHandler(op),
-            .divi, .remi => divImmSignedHandler(op),
-            .diviu, .remiu => divImmUnsignedHandler(op),
-            .shli, .shri, .shriu => shiftImmHandler(op),
+            .add_i32, .add_u32, .add_i64, .add_u64, .sub_i32, .sub_u32, .sub_i64, .sub_u64, .mul_i32, .mul_u32, .mul_i64, .mul_u64, .div_i32, .div_u32, .div_i64, .div_u64, .rem_i32, .rem_u32, .rem_i64, .rem_u64, .min_i32, .min_u32, .min_i64, .min_u64, .max_i32, .max_u32, .max_i64, .max_u64, .shl_i32, .shl_u32, .shl_i64, .shl_u64, .shr_i32, .shr_u32, .shr_i64, .shr_u64, .and_, .or_, .xor, .add_f32, .add_f64, .sub_f32, .sub_f64, .mul_f32, .mul_f64, .div_f32, .div_f64, .rem_f32, .rem_f64, .min_f32, .min_f64, .max_f32, .max_f64 => arithHandler(op),
+            .addi_i32, .addi_u32, .addi_i64, .addi_u64, .subi_i32, .subi_u32, .subi_i64, .subi_u64, .muli_i32, .muli_u32, .muli_i64, .muli_u64 => arithImmHandler(op),
+            .divi_i32, .divi_u32, .divi_i64, .divi_u64, .remi_i32, .remi_u32, .remi_i64, .remi_u64 => divImmHandler(op),
+            .shli_i32, .shli_u32, .shli_i64, .shli_u64, .shri_i32, .shri_u32, .shri_i64, .shri_u64 => shiftImmHandler(op),
             .andi, .ori, .xori => bitImmHandler(op),
-            .madd, .msub, .madd_f32, .madd_f64, .msub_f32, .msub_f64 => fmacHandler(op),
-            .maddi, .maddiu => fmacImmHandler(op),
-            .neg => hNeg,
-            .sext32 => hSext32,
-            .zext32 => hZext32,
-            .neg_f32, .neg_f64, .abs_i32, .abs_i64, .abs_f32, .abs_f64, .clz_i32, .clz_i64, .popcount_i32, .popcount_i64, .sqrt_f32, .sqrt_f64, .floor_f32, .floor_f64, .ceil_f32, .ceil_f64, .trunc_f32, .trunc_f64, .round_f32, .round_f64 => unaryHandler(op),
+            .madd_i32, .madd_u32, .madd_i64, .madd_u64, .msub_i32, .msub_u32, .msub_i64, .msub_u64, .madd_f32, .madd_f64, .msub_f32, .msub_f64 => fmacHandler(op),
+            .maddi_i32, .maddi_u32, .maddi_i64, .maddi_u64 => fmacImmHandler(op),
+            .neg_i32, .neg_u32, .neg_i64, .neg_u64, .neg_f32, .neg_f64, .abs_i32, .abs_i64, .abs_f32, .abs_f64, .clz_i32, .clz_i64, .popcount_i32, .popcount_i64, .sqrt_f32, .sqrt_f64, .floor_f32, .floor_f64, .ceil_f32, .ceil_f64, .trunc_f32, .trunc_f64, .round_f32, .round_f64 => unaryHandler(op),
             .seq, .seq_f32, .seq_f64, .sne, .sne_f32, .sne_f64, .slt, .sltu, .slt_f32, .slt_f64, .sle_f32, .sle_f64 => cmpHandler(op),
             .seqi, .snei, .slti, .sltiu, .sgti, .sgtiu => cmpImmHandler(op),
             .bool_eq => hBoolEq,
@@ -1694,16 +1654,17 @@ pub inline fn isWidePrim(self: *VmCtx, ty: u32) bool {
     };
 }
 
-pub inline fn is32IntPrim(self: *VmCtx, ty: u32) bool {
+pub inline fn isInt32Prim(self: *VmCtx, ty: u32) bool {
     const types = self.metaImage().types;
     if (ty >= types.len) return false;
     const td = types[ty];
-    return td.kind == .primitive and (td.a == @intFromEnum(llir.PrimitiveId.int32) or td.a == @intFromEnum(llir.PrimitiveId.uint32));
+    return td.kind == .primitive and td.a == @intFromEnum(llir.PrimitiveId.int32);
 }
 
 pub inline fn canonicalIntResult(op: llir.Opcode, value: Value) Value {
     return switch (llir.repOf(op) orelse return value) {
-        .i32, .u32 => ValueCodec.extendInt32Bits(@truncate(value)),
+        .i32 => ValueCodec.extendInt32Bits(@truncate(value)),
+        .u32 => @as(u64, @as(u32, @truncate(value))),
         else => value,
     };
 }
@@ -1800,19 +1761,19 @@ const Fam = enum {
 
 inline fn familyOf(op: llir.Opcode) Fam {
     return switch (op) {
-        .add, .add_f32, .add_f64 => .add,
-        .sub, .sub_f32, .sub_f64 => .sub,
-        .mul, .mul_f32, .mul_f64 => .mul,
-        .div, .divu, .div_f32, .div_f64 => .div,
-        .rem, .remu, .rem_f32, .rem_f64 => .rem,
-        .min, .minu, .min_f32, .min_f64 => .min,
-        .max, .maxu, .max_f32, .max_f64 => .max,
-        .shl => .shl,
-        .shr, .shru => .shr,
+        .add_i32, .add_u32, .add_i64, .add_u64, .add_f32, .add_f64 => .add,
+        .sub_i32, .sub_u32, .sub_i64, .sub_u64, .sub_f32, .sub_f64 => .sub,
+        .mul_i32, .mul_u32, .mul_i64, .mul_u64, .mul_f32, .mul_f64 => .mul,
+        .div_i32, .div_u32, .div_i64, .div_u64, .div_f32, .div_f64 => .div,
+        .rem_i32, .rem_u32, .rem_i64, .rem_u64, .rem_f32, .rem_f64 => .rem,
+        .min_i32, .min_u32, .min_i64, .min_u64, .min_f32, .min_f64 => .min,
+        .max_i32, .max_u32, .max_i64, .max_u64, .max_f32, .max_f64 => .max,
+        .shl_i32, .shl_u32, .shl_i64, .shl_u64 => .shl,
+        .shr_i32, .shr_u32, .shr_i64, .shr_u64 => .shr,
         .and_, .or_, .xor => .and_,
-        .madd, .madd_f32, .madd_f64 => .madd,
-        .msub, .msub_f32, .msub_f64 => .msub,
-        .neg_f32, .neg_f64 => .neg,
+        .madd_i32, .madd_u32, .madd_i64, .madd_u64, .madd_f32, .madd_f64 => .madd,
+        .msub_i32, .msub_u32, .msub_i64, .msub_u64, .msub_f32, .msub_f64 => .msub,
+        .neg_i32, .neg_u32, .neg_i64, .neg_u64, .neg_f32, .neg_f64 => .neg,
         .abs_i32, .abs_i64, .abs_f32, .abs_f64 => .abs,
         .clz_i32, .clz_i64 => .clz,
         .popcount_i32, .popcount_i64 => .popcount,
@@ -1834,15 +1795,15 @@ inline fn familyOf(op: llir.Opcode) Fam {
     };
 }
 
-/// One register-form binary operation. The widthless integer ops
-/// compute on the full canonical 64-bit cells (the signedness is
-/// fixed by the opcode — `div`/`divu`, `shr`/`shru`, `min`/`minu`,
-/// `max`/`maxu`); the float members dispatch on their rep. Integer
-/// traps: zero divisor, and the signed `i64_min / -1` division-
-/// overflow case. The 32-bit `int32_min / -1` case is not a trap:
-/// the opcode carries no width, so the division proceeds at 64 bits
-/// and the lowering's trailing `sext32` wraps the result to
-/// `int32_min` (Instruction Set §4 — the widthless trade-off).
+/// One register-form binary operation. The typed integer opcode names
+/// its rep: the VM truncates each canonical cell to the named width,
+/// computes at that width, and canonicalizes the result (an `.i32`
+/// result sign-extends, a `.u32` result zero-extends — Instruction Set
+/// §4). Signed division sign-extends to `i64` for the divide itself, so
+/// the 32-bit `int32_min / -1` case computes the exact quotient
+/// `2^31` whose low 32 bits wrap to `int32_min` — no trap, per the
+/// Runtime Specification; the 64-bit `i64_min / -1` case traps
+/// (`error.DivOverflow`). The float members dispatch on their rep.
 pub inline fn binOp(self: *VmCtx, op: llir.Opcode, av: Value, bv: Value) IntErr!Value {
     _ = self;
     const fam = familyOf(op);
@@ -1876,42 +1837,82 @@ pub inline fn binOp(self: *VmCtx, op: llir.Opcode, av: Value, bv: Value) IntErr!
         };
         return @bitCast(r);
     }
+    // The widthless bitwise ops carry no rep (`repOf` is null) and write
+    // their raw 64-bit result; the lowering canonicalizes to the operand
+    // width where a narrower type demands it.
+    if (op == .and_ or op == .or_ or op == .xor) {
+        const a: u64 = av;
+        const b: u64 = bv;
+        return switch (op) {
+            .and_ => a & b,
+            .or_ => a | b,
+            .xor => a ^ b,
+            else => unreachable,
+        };
+    }
+    // The typed integer path. The canonical-cell contract makes every
+    // width computable at 64 bits: an `i32` cell is the sign-extension
+    // of its low 32 bits (so signed 64-bit arithmetic on the cell gives
+    // the exact 32-bit signed result, whose low bits canonicalize), and
+    // a `u32` cell is zero-extended (so unsigned 64-bit arithmetic is
+    // the exact width result). Only the shift-count mask is width-
+    // specific; `canonicalIntResult` restores the rep's cell form.
+    const rep = llir.repOf(op) orelse unreachable;
+    const signed = rep == .i32 or rep == .i64;
+    const count_mask: u6 = if (rep == .i32 or rep == .u32) 31 else 63;
     const a: u64 = av;
     const b: u64 = bv;
-    const unsigned = op == .divu or op == .remu or op == .minu or op == .maxu or op == .shru;
     return switch (fam) {
-        .add => a +% b,
-        .sub => a -% b,
-        .mul => a *% b,
+        .add => canonicalIntResult(op, a +% b),
+        .sub => canonicalIntResult(op, a -% b),
+        .mul => canonicalIntResult(op, a *% b),
         .div => blk: {
-            if (b == 0) break :blk error.DivByZero;
-            if (!unsigned and a == (1 << 63) and b == 0xffff_ffff_ffff_ffff) break :blk error.DivOverflow;
-            if (unsigned) break :blk a / b;
-            const sa: i64 = @bitCast(a);
-            const sb: i64 = @bitCast(b);
-            break :blk @bitCast(@divTrunc(sa, sb));
+            if (b == 0) return error.DivByZero;
+            if (signed) {
+                // `i64_min / -1` traps — an `i32` canonical cell can
+                // never equal `i64_min`, so the check only ever fires at
+                // the 64-bit rep; the 32-bit `i32_min / -1` exact
+                // quotient 2^31 truncates to `i32_min` (no trap, the
+                // Runtime Specification's wrap).
+                if (a == (1 << 63) and b == std.math.maxInt(u64)) return error.DivOverflow;
+                const sa: i64 = @bitCast(a);
+                const sb: i64 = @bitCast(b);
+                break :blk canonicalIntResult(op, @as(u64, @bitCast(@divTrunc(sa, sb))));
+            }
+            break :blk a / b; // zero-extended cells: exact at the width
         },
         .rem => blk: {
-            if (b == 0) break :blk error.DivByZero;
-            if (unsigned) break :blk a % b;
-            const sa: i64 = @bitCast(a);
-            const sb: i64 = @bitCast(b);
-            break :blk @bitCast(@rem(sa, sb)); // i64_min % -1 == 0, never traps
+            if (b == 0) return error.DivByZero;
+            if (signed) {
+                const sa: i64 = @bitCast(a);
+                const sb: i64 = @bitCast(b);
+                break :blk canonicalIntResult(op, @as(u64, @bitCast(@rem(sa, sb)))); // i*_min % -1 == 0, never traps
+            }
+            break :blk a % b;
         },
-        .min => if (unsigned) @min(a, b) else @bitCast(@min(@as(i64, @bitCast(a)), @as(i64, @bitCast(b)))),
-        .max => if (unsigned) @max(a, b) else @bitCast(@max(@as(i64, @bitCast(a)), @as(i64, @bitCast(b)))),
-        .shl => a << @as(u6, @intCast(b & 63)),
-        .shr => if (unsigned) a >> @as(u6, @intCast(b & 63)) else @bitCast(@as(i64, @bitCast(a)) >> @as(u6, @intCast(b & 63))),
-        .and_ => a & b,
-        .or_ => a | b,
-        .xor => a ^ b,
+        .min => if (signed) @bitCast(@min(@as(i64, @bitCast(a)), @as(i64, @bitCast(b)))) else @min(a, b),
+        .max => if (signed) @bitCast(@max(@as(i64, @bitCast(a)), @as(i64, @bitCast(b)))) else @max(a, b),
+        .shl => canonicalIntResult(op, a << @as(u6, @intCast(b & count_mask))),
+        .shr => if (signed)
+            canonicalIntResult(op, @as(u64, @bitCast(@as(i64, @bitCast(a)) >> @as(u6, @intCast(b & count_mask)))))
+        else
+            canonicalIntResult(op, a >> @as(u6, @intCast(b & count_mask))),
         else => unreachable,
     };
 }
 
-/// Read-modify-write FMAC: `dst = dst ± b * c` — two separate
-/// wrap steps, never a fused rounding. The widthless integer forms
-/// wrap at 64 bits; the floats keep IEEE semantics.
+/// The sign extension of a width-`w` unsigned value to `i64` (the
+/// canonical-cell form of a signed value; a 64-bit value is itself).
+inline fn signExtendTo64(v: anytype, comptime w: u16) i64 {
+    if (w == 64) return @bitCast(@as(u64, v));
+    const s: u6 = 64 - @as(u16, w);
+    return @as(i64, @bitCast(@as(u64, v) << s)) >> s;
+}
+
+/// Read-modify-write FMAC: `dst = dst ± b * c` — two separate wrap
+/// steps at the rep's width, never a fused rounding. The floats keep
+/// IEEE semantics; the typed integer forms wrap and canonicalize per
+/// rep.
 pub inline fn fmacOp(self: *VmCtx, op: llir.Opcode, acc: Value, b: Value, c: Value) Value {
     _ = self;
     const fam = familyOf(op);
@@ -1929,14 +1930,32 @@ pub inline fn fmacOp(self: *VmCtx, op: llir.Opcode, acc: Value, b: Value, c: Val
         const r: f64 = if (fam == .madd) a + x * y else a - x * y;
         return @bitCast(r);
     }
+    const rep = llir.repOf(op) orelse unreachable;
+    if (rep == .i32 or rep == .u32) {
+        const a: u32 = @truncate(acc);
+        const x: u32 = @truncate(b);
+        const y: u32 = @truncate(c);
+        const r: u32 = if (fam == .madd) a +% x *% y else a -% x *% y;
+        return canonicalIntResult(op, r);
+    }
     return if (fam == .madd) acc +% b *% c else acc -% b *% c;
 }
 
 /// Read-modify-write immediate FMAC: `dst = dst + b * imm7` — the
 /// immediate already sign/zero-extended per opcode (Instruction Set
 /// §10), two separate wrap steps.
-pub inline fn fmaciOp(self: *VmCtx, acc: Value, b: Value, imm: u64) Value {
+/// Read-modify-write immediate FMAC: `dst = dst + b * imm7` — the
+/// immediate already sign/zero-extended per rep (Instruction Set
+/// §10), two separate wrap steps at the rep's width.
+pub inline fn fmaciOp(self: *VmCtx, op: llir.Opcode, acc: Value, b: Value, imm: u64) Value {
     _ = self;
+    const rep = llir.repOf(op) orelse unreachable;
+    if (rep == .i32 or rep == .u32) {
+        const a: u32 = @truncate(acc);
+        const x: u32 = @truncate(b);
+        const i: u32 = @truncate(imm);
+        return canonicalIntResult(op, a +% x *% i);
+    }
     return acc +% b *% imm;
 }
 
@@ -1952,6 +1971,7 @@ pub inline fn unOp(self: *VmCtx, op: llir.Opcode, av: Value) Value {
         .i32, .u32 => blk: {
             const a32: u32 = @truncate(av);
             break :blk switch (fam) {
+                .neg => 0 -% a32, // two's-complement at 32 bits; unaryHandler canonicalizes
                 .abs => if (rep == .i32) blk2: {
                     const sa: i32 = @bitCast(a32);
                     break :blk2 @as(u32, @bitCast(if (sa == std.math.minInt(i32)) sa else @as(i32, @intCast(@abs(sa)))));
@@ -1964,6 +1984,7 @@ pub inline fn unOp(self: *VmCtx, op: llir.Opcode, av: Value) Value {
         .i64, .u64 => blk: {
             const a: u64 = av;
             break :blk switch (fam) {
+                .neg => 0 -% a, // two's-complement at 64 bits
                 .abs => if (rep == .i64) blk2: {
                     const sa: i64 = @bitCast(a);
                     break :blk2 @as(u64, @bitCast(if (sa == std.math.minInt(i64)) sa else @as(i64, @intCast(@abs(sa)))));
@@ -2135,14 +2156,17 @@ pub inline fn ordCmp(less: bool, rep: llir.Rep, a: Value, b: Value) bool {
 pub inline fn doCast(self: *VmCtx, op: llir.Opcode, src: Value) Value {
     _ = self;
     return switch (op) {
-        .cvt_b_i32, .cvt_b_u32 => ValueCodec.extendInt32Bits(@truncate(src & 0xff)),
+        .cvt_b_i32 => ValueCodec.extendInt32Bits(@truncate(src & 0xff)),
+        .cvt_b_u32 => @as(u64, @as(u32, @truncate(src & 0xff))),
         .cvt_b_i64, .cvt_b_u64 => @as(u64, @as(u8, @truncate(src & 0xff))),
         .cvt_i32_b, .cvt_u32_b => src & 0xff,
         .cvt_i64_b, .cvt_u64_b => src & 0xff,
-        .cvt_i32_u32, .cvt_u32_i32 => ValueCodec.extendInt32Bits(@truncate(src)),
+        .cvt_i32_u32 => @as(u64, @as(u32, @truncate(src))),
+        .cvt_u32_i32 => ValueCodec.extendInt32Bits(@truncate(src)),
         .cvt_i32_i64, .cvt_i32_u64 => ValueCodec.extendInt32Bits(@truncate(src)),
         .cvt_u32_i64, .cvt_u32_u64 => @as(u64, @as(u32, @truncate(src))),
-        .cvt_i64_i32, .cvt_i64_u32, .cvt_u64_i32, .cvt_u64_u32 => ValueCodec.extendInt32Bits(@truncate(src)),
+        .cvt_i64_i32, .cvt_u64_i32 => ValueCodec.extendInt32Bits(@truncate(src)),
+        .cvt_i64_u32, .cvt_u64_u32 => @as(u64, @as(u32, @truncate(src))),
         .cvt_i64_u64, .cvt_u64_i64 => src,
         .cvt_b_f32 => ValueCodec.encodeFloat32(@floatFromInt(@as(u8, @truncate(src)))),
         .cvt_b_f64 => @bitCast(@as(f64, @floatFromInt(@as(u8, @truncate(src))))),

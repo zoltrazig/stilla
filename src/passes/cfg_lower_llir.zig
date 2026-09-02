@@ -158,11 +158,6 @@ pub const Builder = struct {
     /// `BlockDesc` rows, parallel to `ordered_blocks`, filled by
     /// `llir_linearize.run`.
     block_descs: std.ArrayList(llir.BlockDesc) = .empty,
-    /// Per-function value-forms (indexed by value id, parallel to the
-    /// function's `values`), computed once before budgeting/emission so
-    /// the typed expander's residual elimination and the budget agree on
-    /// the reduced §4 sequence length.
-    func_forms: std.AutoHashMapUnmanaged(*const cfg.IrFunc, []typed_layer.Form) = .empty,
 
     // --- linear-scan value→slot mapping, frame layout numbers ---------------
     /// Physical slot for every SSA value. Values with non-overlapping,
@@ -507,9 +502,6 @@ pub const Builder = struct {
         try llir_coalesce.run(self); // Step 8 result coalescing (llir_result_coalesce.zig)
         try lifecycle.plan(self); // release placement / tailcall kills (cfg_lower_lifecycle.zig)
         try llir_edges.planBlocks(self); // LLIR-only edge blocks for effect-bearing br/switch arms
-        for (self.ordered_funcs.items) |f| {
-            try self.func_forms.put(self.arena, f, try typed_layer.compute(self.arena, f));
-        }
         try llir_budget.run(self); // per-block record sizing (block-local only)
         try llir_intern.run(self); // side tables: strings/consts/types/decls/modules/sigs/bindings
         try llir_emit.run(self); // body emission: ID-ops/arith/cmp/cast/select/calls/ownership/drops/aggregates
@@ -524,13 +516,6 @@ pub const Builder = struct {
         if (self.operand_overflow) return error.ProgramTooLarge;
         if (self.export_duplicate) return error.DuplicateExport;
         return self.finish();
-    }
-
-    /// The value-forms of one function (indexed by value id). Computed by
-    /// `lowerLlir` before budgeting/emission; the typed expander's
-    /// residual elimination and the budget read them.
-    pub fn funcForms(self: *const Builder, f: *const cfg.IrFunc) []typed_layer.Form {
-        return self.func_forms.get(f) orelse &.{};
     }
 
     /// The register encoding of an SSA value's physical slot. Frame

@@ -225,7 +225,7 @@ test "3.1 LLIR validation: out-of-frame register operand" {
     );
     defer li.t_arena.deinit();
     defer li.arena.deinit();
-    const pc = firstPcOf(&li.image, .add).?;
+    const pc = firstPcOf(&li.image, .add_i32).?;
     const fi = llir.functionAtPc(li.image.functions, pc).?;
     const slots = li.image.functions[fi].f_count + li.image.functions[fi].x_count;
     const d = llir.decode(li.image.instructions[pc]).?;
@@ -308,7 +308,7 @@ test "3.1 LLIR validation: register operand that is neither a slot nor a special
     );
     defer li.t_arena.deinit();
     defer li.arena.deinit();
-    const pc = firstPcOf(&li.image, .add).?;
+    const pc = firstPcOf(&li.image, .add_i32).?;
     const d = llir.decode(li.image.instructions[pc]).?;
     // 0x40 is not an F slot of this 3-slot frame (f_count ≤ 109), not a
     // T register (0x6f–0x7e), and not a special — an invalid register
@@ -815,10 +815,10 @@ test "stage-2 structural: i64/u64 integer family matrix" {
         break :blk buildImage(&.{
             ir(.const_, 0, 0, 0), // %0: i64
             ir(.const_, 1, 1, 0), // %1: i64
-            ir(.add, 2, 0, 1),
-            ir(.div, 2, 0, 1), // signed i64 division
-            ir(.shr, 2, 0, 1), // arithmetic shift
-            ir(.neg, 2, 0, 0),
+            ir(.add_i32, 2, 0, 1),
+            ir(.div_i32, 2, 0, 1), // signed i64 division
+            ir(.shr_i32, 2, 0, 1), // arithmetic shift
+            ir(.neg_i32, 2, 0, 0),
             ir(.clz_i64, 2, 0, 0),
             ir(.slt, 0, 1, 0), // C-type comparison → cond
             ir(.ret, 2, 0, 0),
@@ -832,8 +832,8 @@ test "stage-2 structural: i64/u64 integer family matrix" {
         break :blk buildImageBlocks(&.{
             ir(.const_, 0, 0, 0), // %0: u64
             ir(.const_, 1, 1, 0), // %1: u64
-            ir(.divu, 2, 0, 1),
-            ir(.shru, 2, 0, 1),
+            ir(.div_u32, 2, 0, 1),
+            ir(.shr_u32, 2, 0, 1),
             ir(.sltu, 0, 1, 0), // %cond = (%0 < %1)
             ir(.bltu, 0, 1, 1), // branch on u64 → next block
             ir(.ret, 2, 0, 0),
@@ -1215,7 +1215,7 @@ test "stage-2 semantic trust: opcode reps are not re-derived from the type table
     const image = buildImage(&.{
         ir(.const_, 0, 0, 0), // %0: int32 per the ConstRecord
         ir(.const_, 1, 1, 0), // %1: int32
-        ir(.add, 2, 0, 1), // i64 add over the int32-typed cells
+        ir(.add_i32, 2, 0, 1), // i64 add over the int32-typed cells
         ir(.ret, 2, 0, 0),
     }, 3, &prim, &.{ intConst(t_int32, 1, 0), intConst(t_int32, 2, 0) }, t_i64, &st);
     try expectValid(&image);
@@ -1324,7 +1324,7 @@ test "3.1 LLIR validation: mid-block terminator is rejected" {
     );
     defer li.t_arena.deinit();
     defer li.arena.deinit();
-    const add_pc = firstPcOf(&li.image, .add).?;
+    const add_pc = firstPcOf(&li.image, .add_i32).?;
     @constCast(li.image.instructions)[add_pc] = llir.instrE(.ret, 0, 0);
     try expectRejected(&li.image, "is not at the block end");
 }
@@ -1467,7 +1467,7 @@ test "stage-2: valid images of 1 and 10,000 instructions validate with 0 allocat
     try testing.expect((try llir_validate.validate(&one, failing_alloc)) == null);
 
     var instrs: [10_000]llir.Instr = undefined;
-    @memset(instrs[0 .. instrs.len - 1], llir.instrR(.add, llir.frame_base, llir.frame_base, llir.frame_base + 1));
+    @memset(instrs[0 .. instrs.len - 1], llir.instrR(.add_i32, llir.frame_base, llir.frame_base, llir.frame_base + 1));
     instrs[instrs.len - 1] = llir.instrE(.ret, 0, 0);
     var st2: ImageStorage = .{};
     const ten_k = buildImage(&instrs, 2, &prim, &.{}, t_int32, &st2);
@@ -1489,7 +1489,7 @@ test "stage-2: raw-word mutation corpus never panics (Debug and ReleaseSafe)" {
     // except the last (R add, B beq + tbz, C cvt, I const + movwz,
     // U lui, E ret).
     const image = buildImageBlocks(&.{
-        ir(.add, 0, 0, 1), // R
+        ir(.add_i32, 0, 0, 1), // R
         ir(.beq, 0, 1, 1), // B → block 1
         ir(.cvt_i32_u32, 2, 0, 0), // C
         ir(.beq, 0, 1, 1), // B → block 2
@@ -1583,14 +1583,14 @@ test "3.2 validation: opcode-specific register class and F/T frame bounds" {
     // whose schema positions are `not`/`copy`/`cmov` only).
     var st2: ImageStorage = .{};
     const image2 = buildImage(&.{
-        llir.instrR(.add, llir.cond_reg, llir.frame_base, llir.frame_base + 1), // dst = cond
+        llir.instrR(.add_i32, llir.cond_reg, llir.frame_base, llir.frame_base + 1), // dst = cond
         ir(.ret, 0, 0, 0),
     }, 2, &prim, &.{}, t_int32, &st2);
     try expectRejected(&image2, "register operand is neither a slot nor a special register");
     // And `ra` in a source position of an R instruction is equally forged.
     var st3: ImageStorage = .{};
     const image3 = buildImage(&.{
-        llir.instrR(.add, llir.frame_base, llir.ra_reg, llir.frame_base + 1), // src = ra
+        llir.instrR(.add_i32, llir.frame_base, llir.ra_reg, llir.frame_base + 1), // src = ra
         ir(.ret, 0, 0, 0),
     }, 2, &prim, &.{}, t_int32, &st3);
     try expectRejected(&image3, "register operand is neither a slot nor a special register");
@@ -1690,7 +1690,7 @@ test "3.2 validation: cond lives across a non-cond instruction within a block" {
     var st: ImageStorage = .{};
     const image = buildImage(&.{
         ir(.seq, 0, 1, 0), // cond = (%0 == %1)
-        ir(.add, 2, 0, 1), // %2 = %0 + %1 -- does not write cond
+        ir(.add_i32, 2, 0, 1), // %2 = %0 + %1 -- does not write cond
         ir(.cmov, 3, 0, 1), // %3 = cond ? %0 : %1
         ir(.ret, 3, 0, 0),
     }, 4, &prim, &.{}, t_int32, &st);

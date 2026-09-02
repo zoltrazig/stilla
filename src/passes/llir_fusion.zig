@@ -87,17 +87,21 @@ fn constOf(v: *const cfg.Value) ?cfg.ConstValue {
 /// null when the constant does not fit the v9 7-bit immediate
 /// window — the site stays a `const` + register form
 /// (Instruction Set §3.3, §10). The field is the raw 7-bit pattern,
-/// and each opcode interprets it at decode: the arithmetic forms
-/// (`addi`/`subi`/`muli`/`maddi`/`divi`/`remi` and the C-Type
-/// `slti`/`sgti`/`seqi`/`snei`) sign-extend on the
-/// `i32`/`i64` reps (exact range
-/// `[-64, 63]`) and zero-extend on the `u32`/`u64` reps (exact range
+/// and each opcode interprets it at decode: the rep-carrying
+/// arithmetic forms sign-extend on the
+/// `.i32`/`.i64` members (exact range
+/// `[-64, 63]`) and zero-extend on the `.u32`/`.u64` members (exact range
 /// `[0, 127]`); the shift counts (`shli`/`shri`) and the bitwise masks
 /// (`andi`/`ori`/`xori`) always zero-extend (`[0, 127]`, mask semantics
 /// — `andi.i32 F0, F1, 0x7f` masks with `0x0000007f`, never
-/// sign-extended). There are **no float immediate forms** — every
-/// float constant materializes through `const`. Only numeric constants
-/// fuse (`typedOpcodeImm` gates the operand type to the numeric
+/// sign-extended). The C-Type comparisons split: the signed ordering
+/// (`slti`/`sgti`) and equality (`seqi`/`snei`) sign-extend (`[-64,
+/// 63]` — equality has no unsigned variant, so an unsigned equality
+/// constant only fuses inside that window), while the unsigned
+/// ordering (`sltiu`/`sgtiu`) zero-extends (`[0, 127]`). There are
+/// **no float immediate forms** — every float constant materializes
+/// through `const`. Only numeric constants fuse
+/// (`typedOpcodeImm` gates the operand type to the numeric
 /// families first).
 fn immOf(cv: cfg.ConstValue, kind: llir.TypedKind, t: cfg.Type) ?u8 {
     return typed.immOf(cv, kind, t);
@@ -345,13 +349,18 @@ pub fn peephole(b: *Builder) error{OutOfMemory}!FusionMetrics {
                         if (constOf(ri.index)) |cv| {
                             // The literal index becomes the immediate
                             // when it fits the zero-extended 8-bit field
-                            // (`.eq` selects the raw-pattern window, the
-                            // same decode `read_indexi` uses); a larger
-                            // index stays a `const` + register read.
-                            if (immOf(cv, .eq, .{ .primitive = .uint32 })) |imm| {
-                                b.setR(blk, idx, .read_indexi, b.slotOf(ins.results[0]), b.slotOf(ri.base), imm);
-                                decrementUse(&uses, ri.index);
-                                try b.consumed_instrs.put(b.arena, ins, {});
+                            // (`read_indexi` zero-extends its imm — the
+                            // same `[0, 127]` raw-pattern window the
+                            // typed immediate helper gives unsigned
+                            // ordering); a larger index stays a `const` +
+                            // register read.
+                            if (std.meta.activeTag(cv) == .int) {
+                                const i = cv.int;
+                                if (i >= 0 and i <= 127) {
+                                    b.setR(blk, idx, .read_indexi, b.slotOf(ins.results[0]), b.slotOf(ri.base), @intCast(i));
+                                    decrementUse(&uses, ri.index);
+                                    try b.consumed_instrs.put(b.arena, ins, {});
+                                }
                             }
                         }
                     },
@@ -438,8 +447,8 @@ pub fn peephole(b: *Builder) error{OutOfMemory}!FusionMetrics {
     return metrics;
 }
 
-/// Fuse `bin` (a binary op record sequence at block-local index `idx`
-/// of `blk`, `n` records long) with a constant operand.
+/// Fuse `bin` (a one-record arithmetic/comparison instruction at
+/// block-local index `idx` of `blk`) with a constant operand.
 /// Returns the fused constant's value, or null when no fusion applies.
 /// The constant must sit in the second operand position, or be
 /// reachable there: integer `eq`/`ne`/`add`/`mul` and bitwise operations commute;
@@ -447,14 +456,10 @@ pub fn peephole(b: *Builder) error{OutOfMemory}!FusionMetrics {
 /// `f32` never commutes; `sub`/`div`/`rem` are not
 /// commutative at all. The immediate is the constant's raw bit
 /// pattern; the type gates the variant via `typedOpcodeImm` (no
-/// `f32_remi`, no byte arithmetic, no bool/str forms). For the 32-bit
-/// shifts the immediate is rewritten mod 32 (the widthless shift masks
-/// mod 64 — the mod-32 semantics the 32-bit types demand). The fused
-/// op replaces the sequence's *primary* record (the register-form
-/// opcode — staged 32-bit sequences carry `andi`/`zext32` records
-/// ahead of it), and staging records that read the fused constant's
-/// slot are marked dead with the constant; the trailing `sext32`
-/// canonicalization stays (immediate forms compute at 64 bits too).
+/// float immediate forms, no byte arithmetic, no bool/str forms). The
+/// fused op replaces the instruction's register-form record; a fused
+/// 32-bit shift count is pre-reduced mod 32 (the opcode masks it
+/// again).
 fn tryFuse(b: *Builder, blk: *const cfg.BasicBlock, bi: u32, idx: u32, n: u32, dst: *const cfg.Value, tag: llir.TypedKind, bin: cfg.Bin, dead: [][]bool) error{OutOfMemory}!?*const cfg.Value {
     // The primary record's position: the register-form opcode, when
     // the family has one (comparisons on integer `gt`/`le`/`ge` lower
@@ -474,7 +479,7 @@ fn tryFuse(b: *Builder, blk: *const cfg.BasicBlock, bi: u32, idx: u32, n: u32, d
         // immediate field at the operand type.
         if (llir.typedOpcodeImm(tag, bin.a.type_)) |op| {
             if (immOf(cv, tag, bin.a.type_)) |imm| {
-                const imm2 = shiftImm(op, bin.a.type_, imm);
+                const imm2 = typed.shiftImm(op, imm);
                 if (llir.formatOf(op) == .c)
                     b.setC(blk, site, op, b.slotOf(bin.a), imm2)
                 else
@@ -502,7 +507,7 @@ fn tryFuse(b: *Builder, blk: *const cfg.BasicBlock, bi: u32, idx: u32, n: u32, d
         if (isCommutative(tag) and Builder.isInteger(bin.b.type_)) {
             if (llir.typedOpcodeImm(tag, bin.b.type_)) |op| {
                 if (immOf(cv, tag, bin.b.type_)) |imm| {
-                    const imm2 = shiftImm(op, bin.b.type_, imm);
+                    const imm2 = typed.shiftImm(op, imm);
                     if (llir.formatOf(op) == .c)
                         b.setC(blk, site, op, b.slotOf(bin.b), imm2)
                     else
@@ -513,13 +518,6 @@ fn tryFuse(b: *Builder, blk: *const cfg.BasicBlock, bi: u32, idx: u32, n: u32, d
         }
     }
     return null;
-}
-
-/// The fused shift count on a 32-bit type: the widthless shift masks
-/// the count mod 64, but the 32-bit types demand mod 32 — the lowering
-/// rewrites the constant at compile time (Instruction Set §4, §10).
-fn shiftImm(op: llir.Opcode, t: cfg.Type, imm: u8) u8 {
-    return typed.shiftImm(op, t, imm);
 }
 
 /// The integer `le`/`ge` comparisons emit as `not(slt)` — the
@@ -569,30 +567,17 @@ fn tryMadd(b: *Builder, blk: *const cfg.BasicBlock, idx: u32, ins: *const cfg.In
     if ((uses.get(acc) orelse 0) != 1) return; // accumulator must be consumed here
     const product_pos = def_pos.get(product) orelse return;
     if (product_pos.bi != b.block_ids.get(blk).?) return;
-    // The mul's record immediately precedes the add — directly (the
-    // 64-bit and float forms) or through the 32-bit canonicalization
-    // `sext32` (the mul result is truncated to the canonical cell
-    // before the add consumes it).
-    const trunc_between = product_pos.idx + 2 == idx;
-    if (product_pos.idx + 1 != idx and !trunc_between) return;
-    if (trunc_between) {
-        const between = llir.decode(b.block_records.items[product_pos.bi].items[product_pos.idx + 1]) orelse return;
-        if (between.op != .sext32) return;
-    }
-    const is32 = product.type_ == .primitive and (product.type_.primitive == .int32 or product.type_.primitive == .uint32);
-    if (trunc_between and !is32) return;
-    if (trunc_between) {
-        const trailing = llir.decode(b.block_records.items[product_pos.bi].items[idx + 1]) orelse return;
-        if (trailing.op != .sext32) return;
-    }
+    // The mul's record immediately precedes the add: the typed mul is
+    // exactly one record (Instruction Set §4), no canonicalization in
+    // between.
+    if (product_pos.idx + 1 != idx) return;
 
     const mul = product.def.?.op.mul; // Bin{a, b} — the product's operand order
     const t = product.type_;
     const acc_slot = b.slotOf(acc);
-    // The fused record replaces the truncation between a 32-bit mul and
-    // add; the add record is dead and its existing trailing `sext32`
-    // remains. 64-bit and float forms replace the add directly.
-    const fused_idx: u32 = if (trunc_between) product_pos.idx + 1 else idx;
+    // The fused record replaces the add record. The fused record is
+    // written at the add's index; the mul record is deleted.
+    const fused_idx: u32 = idx;
     if (constOf(mul.b)) |cv| {
         // Constant multiplier on the right: `*_maddi` when the constant
         // fits the 8-bit immediate field (order preserved); otherwise
@@ -629,13 +614,12 @@ fn tryMadd(b: *Builder, blk: *const cfg.BasicBlock, idx: u32, ins: *const cfg.In
         b.setR(blk, fused_idx, op, acc_slot, b.slotOf(mul.a), b.slotOf(mul.b));
     }
     // Allocation already put the add result in the accumulator's slot.
-    // Both instructions are consumed: the 32-bit add record is deleted
-    // while its following canonicalization stays; the mul is deleted.
+    // Both instructions are consumed: the add record is deleted (the
+    // fused record stands in its place) and the mul is deleted.
     try b.consumed_instrs.put(b.arena, ins, {});
     try b.consumed_instrs.put(b.arena, product.def.?, {});
     const pos = def_pos.get(product).?;
     dead[pos.bi][pos.idx] = true;
-    if (trunc_between) dead[pos.bi][idx] = true;
     // The product is computed internally, so the fused record reads
     // neither mul operand's product slot. The accumulator, however, is
     // the read-modify-write dst — the fused record reads the acc slot

@@ -1,11 +1,10 @@
 //! Test file: `frontend LLIR typed` — the typed lowering layer
-//! (`passes/cfg_lower_typed.zig`) exercised over real compiled CFGs:
-//! the value-form lattice constrains every value's top-bits state from
-//! its producer (docs/llir-typed.md §2 — the value-form lattice).
-//! The white-box producer rules live in the
-//! module's own test block; these black-box tests run the lattice over
-//! the frontend's CFG and pin the observable outcomes for common
-//! shapes.
+//! (`passes/cfg_lower_typed.zig`) exercised over real compiled CFGs.
+//! In v10 the opcode carries the full rep (`add.i32`/`div.u32`/…) and
+//! every arithmetic instruction is exactly one record (Instruction Set
+//! §4) — there are no value forms and no canonicalization records.
+//! These black-box tests pin that boundary: the Layer A op view, the
+//! typed printer, and the one-record emission over the frontend's CFG.
 //!
 //! Run via `zig build test` (wired into `src/root.zig`'s test block).
 
@@ -13,7 +12,6 @@ const std = @import("std");
 const cfg = @import("cfg.zig");
 const llir = @import("llir.zig");
 const typed = @import("passes/cfg_lower_typed.zig");
-const budget = @import("passes/cfg_lower_llir_budget.zig");
 const cfg_lower_llir = @import("passes/cfg_lower_llir.zig");
 const llir_validate = @import("passes/llir_validate.zig");
 const lower = @import("lower.zig");
@@ -21,83 +19,7 @@ const testing = std.testing;
 const helpers = @import("frontend_test_support.zig");
 const compileText = helpers.compileText;
 
-/// The form of the result of the first instruction in `f` whose op tag is
-/// `tag`. The lattice is computed fresh over a scratch arena; only the
-/// scalar form is returned, so the arena can be dropped.
-fn defForm(f: *const cfg.IrFunc, comptime tag: cfg.OpTag) typed.Form {
-    var arena = std.heap.ArenaAllocator.init(testing.allocator);
-    defer arena.deinit();
-    const forms = typed.compute(arena.allocator(), f) catch unreachable;
-    for (f.blocks) |blk| {
-        for (blk.instrs) |ins| {
-            if (ins.results.len == 0) continue;
-            if (std.meta.activeTag(ins.op) == tag) return forms[ins.results[0].id];
-        }
-    }
-    unreachable;
-}
-
-test "lattice over compiled CFG: a u32 literal is zero-extended" {
-    var c = try compileText("app", &.{
-        .{
-            "app",
-            \\const builtin = import("builtin");
-            \\fn main() -> void {
-            \\    let x: uint32 = 5;
-            \\    builtin.print(builtin.str(x));
-            \\}
-        },
-    });
-    defer c.deinit();
-    const program = &c.program.?;
-    const main = helpers.findFunc(program, "app.main");
-    try testing.expectEqual(typed.Form.zero_extended, defForm(main, .const_));
-}
-
-test "lattice over compiled CFG: an i32 add is sign-extended" {
-    var c = try compileText("app", &.{
-        .{
-            "app",
-            \\const builtin = import("builtin");
-            \\fn main(p: int32, q: int32) -> void {
-            \\    let r = p + q;
-            \\    builtin.print(builtin.str(r));
-            \\}
-        },
-    });
-    defer c.deinit();
-    const program = &c.program.?;
-    const main = helpers.findFunc(program, "app.main");
-    try testing.expectEqual(typed.Form.sign_extended, defForm(main, .add));
-}
-
-test "lattice over compiled CFG: a parameter has no known form" {
-    var c = try compileText("app", &.{
-        .{
-            "app",
-            \\const builtin = import("builtin");
-            \\fn main(p: int32) -> void {
-            \\    builtin.print(builtin.str(p));
-            \\}
-        },
-    });
-    defer c.deinit();
-    const program = &c.program.?;
-    const main = helpers.findFunc(program, "app.main");
-    const forms = try typed.compute(testing.allocator, main);
-    defer testing.allocator.free(forms);
-    // The parameter is an SSA root (no defining instruction).
-    var found = false;
-    for (main.values) |v| {
-        if (v.def == null) {
-            try testing.expectEqual(typed.Form.unknown, forms[v.id]);
-            found = true;
-        }
-    }
-    try testing.expect(found);
-}
-
-test "typed printer is faithful to the §4 record stream" {
+test "typed printer is faithful to the typed record" {
     var c = try compileText("app", &.{
         .{
             "app",
@@ -120,9 +42,10 @@ test "typed printer is faithful to the §4 record stream" {
     try testing.expectEqual(llir.TypedKind.add, op.kind);
     try testing.expectEqual(cfg.Type{ .primitive = .int32 }, op.type_);
 
-    // The width model matches the §4 expansion: an i32 `add` is
-    // `add; sext32` — two records.
-    try testing.expectEqual(@as(u32, 2), budget.arithSeqCount(.add, op.type_));
+    // The typed opcode for the type is the rep-carrying member, and the
+    // record count of the arithmetic is exactly one (no canonicalization
+    // records exist in v10).
+    try testing.expectEqual(llir.Opcode.add_i32, llir.typedOpcode(.add, op.type_, undefined).?);
 
     // The typed assembly renders the same op with its width rep.
     const text = try typed.printTyped(testing.allocator, main);
@@ -130,13 +53,40 @@ test "typed printer is faithful to the §4 record stream" {
     try testing.expect(std.mem.indexOf(u8, text, "i32 = add.i32") != null);
 }
 
-test "B.0 keeps the leading zext32 of a u32 divide of a cast-produced dividend" {
-    // A cast into u32 writes an extendInt32Bits-canonical (sign-extended)
-    // cell, so the dividend's value-form is `sign_extended` and the
-    // div.u32 sequence keeps its staging `zext32 T15, @a` (a high cast
-    // result with bit 31 set must be zero-extended before the full-cell
-    // unsigned operation). Using a cast (not a constant dividend) keeps the
-    // divide in the CFG instead of constant-folding it away.
+test "an i32 add lowers to exactly one `add.i32` record — no canonicalization" {
+    var c = try compileText("app", &.{
+        .{
+            "app",
+            \\const builtin = import("builtin");
+            \\fn main(p: int32, q: int32) -> void {
+            \\    let r = p + q;
+            \\    builtin.print(builtin.str(r));
+            \\}
+        },
+    });
+    defer c.deinit();
+    const program = &c.program.?;
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var b = cfg_lower_llir.Builder.init(arena.allocator(), program);
+    const image = try b.lowerLlir();
+    try testing.expectEqual(@as(?[]const u8, null), try llir_validate.validate(&image, testing.allocator));
+
+    // The add record is `add.i32`; the v10 opcode set has no
+    // canonicalization opcodes at all, so one record is the whole
+    // operation.
+    var n_add: usize = 0;
+    for (image.instructions) |rec| {
+        const d = llir.decode(rec) orelse continue;
+        if (d.op == .add_i32) n_add += 1;
+    }
+    try testing.expectEqual(@as(usize, 1), n_add);
+}
+
+test "a u32 divide lowers to exactly one `div.u32` record — no staging" {
+    // Using a cast (not a constant dividend) keeps the divide in the
+    // CFG instead of constant-folding it away.
     var c = try compileText("app", &.{
         .{
             "app",
@@ -156,23 +106,39 @@ test "B.0 keeps the leading zext32 of a u32 divide of a cast-produced dividend" 
     const asmText = try lower.llirAsm(&b, image, testing.allocator);
     defer testing.allocator.free(asmText);
 
-    const q = helpers.findFunc(program, "app.q");
-    const forms = try typed.compute(testing.allocator, q);
-    defer testing.allocator.free(forms);
-    var saw_div = false;
-    for (q.blocks) |blk| {
-        for (blk.instrs) |ins| {
-            if (std.meta.activeTag(ins.op) == .div) {
-                const a = ins.op.div.a;
-                try testing.expectEqual(typed.Form.sign_extended, forms[a.id]);
-                saw_div = true;
-            }
-        }
-    }
-    try testing.expect(saw_div);
+    // One typed record: the mnemonic carries the rep; no staging
+    // register, no canonicalization records.
+    try testing.expect(std.mem.indexOf(u8, asmText, "div.u32") != null);
+    try testing.expect(std.mem.indexOf(u8, asmText, "zext32") == null);
+    try testing.expect(std.mem.indexOf(u8, asmText, "sext32") == null);
+}
 
-    // The program is tiny: `q` lowers a u32 divide, `main` is empty, so the
-    // only 32-bit arithmetic is the div. The staging `zext32 T15` stays.
-    try testing.expect(std.mem.indexOf(u8, asmText, "divu") != null);
-    try testing.expect(std.mem.indexOf(u8, asmText, "zext32 T15") != null);
+test "shift counts ride in the typed shift record — no mod-32 masking record" {
+    var c = try compileText("app", &.{
+        .{
+            "app",
+            \\const builtin = import("builtin");
+            \\fn main(p: int32, s: int32) -> void {
+            \\    let r = p << s;
+            \\    builtin.print(builtin.str(r));
+            \\}
+        },
+    });
+    defer c.deinit();
+    const program = &c.program.?;
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var b = cfg_lower_llir.Builder.init(arena.allocator(), program);
+    const image = try b.lowerLlir();
+    try testing.expectEqual(@as(?[]const u8, null), try llir_validate.validate(&image, testing.allocator));
+
+    // `shl.i32` masks the count internally (§4): one record, no
+    // `andi` staging copy.
+    var n_shl: usize = 0;
+    for (image.instructions) |rec| {
+        const d = llir.decode(rec) orelse continue;
+        if (d.op == .shl_i32) n_shl += 1;
+    }
+    try testing.expectEqual(@as(usize, 1), n_shl);
 }

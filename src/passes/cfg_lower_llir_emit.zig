@@ -29,6 +29,13 @@ const typed = @import("cfg_lower_typed.zig");
 
 const Builder = lower.Builder;
 
+/// The cross-module import staging register: the T cell the
+/// `module_ref` + `load_member` import path stages the module handle
+/// through (a cross-module `fn_ref`, and a cross-module direct call).
+/// v10 note: this is no longer the arithmetic staging cell — the typed
+/// integer opcodes need no staging (Instruction Set §4).
+const norm_stage: u32 = llir.temp_base + (llir.temp_count - 1);
+
 /// Emit every instruction family in the driver's fixed order: the
 /// ID-operand records first, then the type-specialized arithmetic,
 /// comparisons/casts, the select composite, calls/syscalls,
@@ -205,17 +212,13 @@ fn makeUnOp(tag: cfg.OpTag, t: cfg.Type, a: *cfg.Value, result: *cfg.Value) type
 /// per instruction at its block-local index; slots are the slot-allocation
 /// mapping; records are disjoint from the ID-op rows.
 ///
-/// The widthless integer ops compute at 64 bits on the canonical cells,
-/// so the 32-bit operand types emit extra canonicalization records the
-/// interpreter no longer performs: `sext32` after the width-sensitive
-/// results (`add`, `sub`, `mul`, signed `div`, `shl`), `zext32` on
-/// unsigned div/rem/min/max/shift inputs, and the mod-32 shift-count mask.
-/// The sequence lengths are fixed by `budget.arithSeqCount`, so the sized
-/// and emitted records agree by construction.
+/// The typed integer opcodes compute at their named width and
+/// self-canonicalize (Instruction Set §4), so every arithmetic
+/// instruction is exactly one record — the register form. (Const+op
+/// immediate fusion is the fusion pass's job, pass 2b: it rewrites the
+/// register form to the immediate form and kills the const record.)
 fn emitArith(bld: *Builder) error{OutOfMemory}!void {
     for (bld.ordered_funcs.items, 0..) |_, fi| {
-        const f = bld.ordered_funcs.items[fi];
-        const forms = bld.funcForms(f);
         const r = bld.block_ranges.items[fi];
         for (r.start..r.start + r.len) |bi| {
             const blk = bld.ordered_blocks.items[bi];
@@ -223,16 +226,13 @@ fn emitArith(bld: *Builder) error{OutOfMemory}!void {
             for (blk.instrs) |ins| {
                 if (std.meta.activeTag(ins.op) == .phi) continue;
                 switch (ins.op) {
-                    // The typed expander writes the whole §4 sequence at
-                    // `idx`; the loop's `idx += recordCount` below advances
-                    // past it (matching the budget).
                     .add, .sub, .mul, .div, .rem, .min, .max, .shl, .shr, .bitand, .bitor, .bitxor => |bin| {
-                        _ = try emitBinArith(bld, blk, idx, makeBinOp(std.meta.activeTag(ins.op), bin, ins.results[0]), forms[bin.a.id], ins);
+                        emitBinArith(bld, blk, idx, makeBinOp(std.meta.activeTag(ins.op), bin, ins.results[0]));
                     },
                     // `neg`, `abs`, `clz`, `popcount` go through the same
                     // typed expander (unary forms; `c == 0`).
                     .neg, .abs, .clz, .popcount => |v| {
-                        _ = try emitBinArith(bld, blk, idx, makeUnOp(std.meta.activeTag(ins.op), v.type_, v, ins.results[0]), typed.Form.unknown, ins);
+                        emitBinArith(bld, blk, idx, makeUnOp(std.meta.activeTag(ins.op), v.type_, v, ins.results[0]));
                     },
                     .not_ => |v| bld.setE(blk, idx, .not, bld.slotOf(ins.results[0]), bld.slotOf(v)),
                     .concat => |bin| bld.setR(blk, idx, .concat, bld.slotOf(ins.results[0]), bld.slotOf(bin.a), bld.slotOf(bin.b)),
@@ -244,175 +244,26 @@ fn emitArith(bld: *Builder) error{OutOfMemory}!void {
     }
 }
 
-/// The 32-bit normalization staging register: the single T cell the
-/// 32-bit arithmetic sequences stage through (the mod-32 shift-count
-/// mask and the unsigned div/rem/shift zero-extension). T15 is never a
-/// spill sentinel (`llir_alloc` caps the sentinels at `temp_count - 1`),
-/// so the staging reference is always unambiguous, and every sequence
-/// reads it back within the same block — no T value crosses a call.
-const norm_stage: u32 = llir.temp_base + (llir.temp_count - 1);
-
-/// Emit one widthless register-form arithmetic sequence: the opcode
-/// plus the 32-bit canonicalization records the operand type demands
-/// (Instruction Set §4). This is the typed expander (B.1): it consumes
-/// the typed op and writes exactly the §4 record count — the same count
-/// the budget derives, so sized and emitted records agree by construction.
-/// For a fuse-eligible constant on the right (div/rem/shl/shr, step 6),
-/// it emits the immediate form directly and never writes the constant's
-/// staging record (`zext32`/`andi`).
-fn emitBinArith(bld: *Builder, blk: *const cfg.BasicBlock, idx: u32, op: typed.TypedOp, form_a: typed.Form, ins: *const cfg.Instr) error{OutOfMemory}!void {
+/// Emit one typed arithmetic record: the opcode carries the full rep
+/// (`add.i32`/`shr.u64`/…), computes at that width, and
+/// self-canonicalizes its result cell (Instruction Set §4) — exactly
+/// one record, the register form. Const+op immediate fusion is the
+/// fusion pass's job (pass 2b rewrites this record to the immediate
+/// form and kills the const); no staging records exist in v10.
+fn emitBinArith(bld: *Builder, blk: *const cfg.BasicBlock, idx: u32, op: typed.TypedOp) void {
     const t = op.type_;
     const dst = bld.slotOf(op.result);
     const sa = bld.slotOf(op.a);
     const sb = if (op.b) |b| bld.slotOf(b) else 0;
-    const is32 = t == .primitive and (t.primitive == .int32 or t.primitive == .uint32);
-    const fuse: ?typed.FusedImm = if (op.b) |bb| blk2: {
-        if (typed.constOf(bb)) |cv| break :blk2 typed.fusedImmR(op.kind, t, cv);
-        break :blk2 null;
-    } else null;
     switch (op.kind) {
-        // `neg` is widthless (two's complement is sign-agnostic): a
-        // 32-bit operand type emits the trailing `sext32`.
-        .neg => {
-            bld.setE(blk, idx, arithOpcode(.neg, t), dst, sa);
-            if (is32) bld.setE(blk, idx + 1, .sext32, dst, dst);
-        },
-        // `abs`, `clz`, `popcount` keep their widthful reps
-        // (width-sensitive results) — one record, no canonicalization.
-        .abs, .clz, .popcount => bld.setE(blk, idx, arithOpcode(op.kind, t), dst, sa),
+        // The E-type unaries: `neg` is the typed integer-4 family (plus
+        // its float members); `abs`/`clz`/`popcount` keep their
+        // widthful reps (width-sensitive results) — one record, no
+        // canonicalization.
+        .neg, .abs, .clz, .popcount => bld.setE(blk, idx, arithOpcode(op.kind, t), dst, sa),
+        // The R-type binary families: one rep-carrying record.
         .add, .sub, .mul, .div, .rem, .min, .max, .shl, .shr, .bitand, .bitor, .bitxor => {
-            if (!is32) {
-                // The 64-bit integer types and the floats: one widthless/
-                // rep record, no canonicalization.
-                bld.setR(blk, idx, arithOpcode(op.kind, t), dst, sa, sb);
-                return;
-            }
-            switch (op.kind) {
-                .add, .sub => {
-                    bld.setR(blk, idx, arithOpcode(op.kind, t), dst, sa, sb);
-                    bld.setE(blk, idx + 1, .sext32, dst, dst);
-                },
-                .bitand, .bitor, .bitxor => {
-                    // Bitwise operations preserve the canonical sign extension.
-                    bld.setR(blk, idx, arithOpcode(op.kind, t), dst, sa, sb);
-                },
-                .min, .max => {
-                    if (t.primitive == .uint32) {
-                        const elide = typed.elideLeadingZext(op.kind, t, form_a);
-                        if (elide) {
-                            bld.setE(blk, idx, .zext32, dst, sb);
-                            bld.setR(blk, idx + 1, arithOpcode(op.kind, t), dst, sa, dst);
-                            bld.setE(blk, idx + 2, .sext32, dst, dst);
-                        } else {
-                            bld.setE(blk, idx, .zext32, norm_stage, sa);
-                            bld.setE(blk, idx + 1, .zext32, dst, sb);
-                            bld.setR(blk, idx + 2, arithOpcode(op.kind, t), dst, norm_stage, dst);
-                            bld.setE(blk, idx + 3, .sext32, dst, dst);
-                        }
-                    } else {
-                        bld.setR(blk, idx, arithOpcode(op.kind, t), dst, sa, sb);
-                    }
-                },
-                .mul => {
-                    bld.setR(blk, idx, .mul, dst, sa, sb);
-                    bld.setE(blk, idx + 1, .sext32, dst, dst);
-                },
-                .div, .rem => {
-                    if (t.primitive == .uint32) {
-                        const elide = typed.elideLeadingZext(op.kind, t, form_a);
-                        if (fuse) |f| {
-                            // The fused unsigned immediate reads the
-                            // zero-extended dividend: the already-zero
-                            // operand form directly, or the `zext32`
-                            // staging when it had to be widened.
-                            if (elide) {
-                                bld.setR(blk, idx, f.op, dst, sa, f.imm);
-                                bld.setE(blk, idx + 1, .sext32, dst, dst);
-                            } else {
-                                bld.setE(blk, idx, .zext32, norm_stage, sa);
-                                bld.setR(blk, idx + 1, f.op, dst, norm_stage, f.imm);
-                                bld.setE(blk, idx + 2, .sext32, dst, dst);
-                            }
-                            try bld.fused_instrs.put(bld.arena, ins, {});
-                        } else if (elide) {
-                            bld.setE(blk, idx, .zext32, dst, sb);
-                            bld.setR(blk, idx + 1, if (op.kind == .div) .divu else .remu, dst, sa, dst);
-                            bld.setE(blk, idx + 2, .sext32, dst, dst);
-                        } else {
-                            // The sign-extended canonical cells must be
-                            // zero-extended before the full-cell unsigned
-                            // operation, and the result canonicalized.
-                            bld.setE(blk, idx, .zext32, norm_stage, sa);
-                            bld.setE(blk, idx + 1, .zext32, dst, sb);
-                            bld.setR(blk, idx + 2, if (op.kind == .div) .divu else .remu, dst, norm_stage, dst);
-                            bld.setE(blk, idx + 3, .sext32, dst, dst);
-                        }
-                    } else {
-                        if (fuse) |f| {
-                            bld.setR(blk, idx, f.op, dst, sa, f.imm);
-                            if (op.kind == .div and is32) bld.setE(blk, idx + 1, .sext32, dst, dst);
-                            try bld.fused_instrs.put(bld.arena, ins, {});
-                        } else {
-                            bld.setR(blk, idx, if (op.kind == .div) .div else .rem, dst, sa, sb);
-                            if (op.kind == .div and is32) bld.setE(blk, idx + 1, .sext32, dst, dst);
-                        }
-                    }
-                },
-                .shl => {
-                    if (fuse) |f| {
-                        bld.setR(blk, idx, f.op, dst, sa, f.imm);
-                        if (is32) bld.setE(blk, idx + 1, .sext32, dst, dst);
-                        try bld.fused_instrs.put(bld.arena, ins, {});
-                    } else {
-                        // mod-32 count masking + the 64-bit shift + the
-                        // canonicalization (the shift's low 32 bits are
-                        // correct, the extension bits are not).
-                        bld.setR(blk, idx, .andi, norm_stage, sb, 31);
-                        bld.setR(blk, idx + 1, .shl, dst, sa, norm_stage);
-                        bld.setE(blk, idx + 2, .sext32, dst, dst);
-                    }
-                },
-                .shr => {
-                    if (fuse) |f| {
-                        if (t.primitive == .uint32) {
-                            const elide = typed.elideLeadingZext(.shr, t, form_a);
-                            if (elide) {
-                                bld.setR(blk, idx, f.op, dst, sa, f.imm);
-                                bld.setE(blk, idx + 1, .sext32, dst, dst);
-                            } else {
-                                bld.setE(blk, idx, .zext32, dst, sa);
-                                bld.setR(blk, idx + 1, f.op, dst, dst, f.imm);
-                                bld.setE(blk, idx + 2, .sext32, dst, dst);
-                            }
-                        } else {
-                            bld.setR(blk, idx, f.op, dst, sa, f.imm);
-                        }
-                        try bld.fused_instrs.put(bld.arena, ins, {});
-                    } else {
-                        bld.setR(blk, idx, .andi, norm_stage, sb, 31);
-                        if (t.primitive == .uint32) {
-                            const elide = typed.elideLeadingZext(.shr, t, form_a);
-                            if (elide) {
-                                // The operand is already zero-extended; the shift
-                                // reads it directly and the result canonicalizes.
-                                bld.setR(blk, idx + 1, .shru, dst, sa, norm_stage);
-                                bld.setE(blk, idx + 2, .sext32, dst, dst);
-                            } else {
-                                // The zero-fill shift needs a zero-extended operand;
-                                // its result is canonicalized too.
-                                bld.setE(blk, idx + 1, .zext32, dst, sa);
-                                bld.setR(blk, idx + 2, .shru, dst, dst, norm_stage);
-                                bld.setE(blk, idx + 3, .sext32, dst, dst);
-                            }
-                        } else {
-                            // The arithmetic shift of a sign-extended cell is
-                            // canonical — no truncation needed.
-                            bld.setR(blk, idx + 1, .shr, dst, sa, norm_stage);
-                        }
-                    }
-                },
-                else => unreachable,
-            }
+            bld.setR(blk, idx, arithOpcode(op.kind, t), dst, sa, sb);
         },
         else => unreachable,
     }

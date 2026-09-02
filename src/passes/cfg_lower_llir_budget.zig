@@ -150,22 +150,9 @@ pub fn mainRecordCount(bld: *Builder, blk: *const cfg.BasicBlock, ins: *const cf
         },
         else => {},
     }
-    // The widthless integer arithmetic emits the 32-bit canonicalization
-    // records (`sext32`/`zext32`/the shift-count mask) beyond the main
-    // opcode — the same sequence `emitBinArith` writes (Instruction Set
-    // §4).
-    switch (ins.op) {
-        .add, .sub, .mul, .div, .rem, .min, .max, .shl, .shr, .bitand, .bitor, .bitxor => |bin| {
-            n += arithRecordCount(ins, bin, bld.funcForms(funcOf(bld, blk))[bin.a.id]) - 1;
-        },
-        // The widthless `neg` is unary: a 32-bit operand type emits the
-        // trailing `sext32` canonicalization (Instruction Set §4).
-        .neg => |v| {
-            _ = v;
-            n += arithRecordCount(ins, null, typed.Form.unknown) - 1;
-        },
-        else => {},
-    }
+    // The typed integer arithmetic emits exactly one record (the
+    // opcode carries the rep and self-canonicalizes — Instruction Set
+    // §4); no canonicalization records exist in v10.
     if (std.meta.activeTag(ins.op) == .call and bld.callNeedsTake(blk, ins)) n += 1;
     // A select is two records: `copy cond_reg, %cond` plus `cmov`.
     if (std.meta.activeTag(ins.op) == .select) n += 1;
@@ -176,66 +163,6 @@ pub fn mainRecordCount(bld: *Builder, blk: *const cfg.BasicBlock, ins: *const cf
 /// the block's global BlockId).
 fn funcOf(bld: *const Builder, blk: *const cfg.BasicBlock) *const cfg.IrFunc {
     return bld.ordered_funcs.items[bld.funcIndexOfBlock(blk)];
-}
-
-/// The §4 record count of one widthless arithmetic sequence, reduced by
-/// the B.0 residual elimination when the operand's value-form lets the
-/// expander elide a record: the budget sizes the pre-filled list to the
-/// exact count the expander writes, so sized and emitted records agree by
-/// construction even after elimination (Plan §5).
-/// The §4 record count of one widthless arithmetic sequence, reduced by (a)
-/// the B.0 residual elimination when the operand's value-form lets the
-/// expander elide a record, and (b) the expander's immediate fusion (step 6)
-/// when the right operand is a fuse-eligible constant — the fused form drops
-/// the constant's staging record (`zext32`/`andi`). The budget sizes the
-/// pre-filled list to the exact count the expander writes, so sized and
-/// emitted records agree by construction even after elimination/fusion.
-fn arithRecordCount(ins: *const cfg.Instr, bin: ?cfg.Bin, form_a: typed.Form) u32 {
-    const tag = std.meta.activeTag(ins.op);
-    const kind = typed.typedKindOf(tag) orelse unreachable;
-    const t = if (bin) |bb| bb.a.type_ else switch (ins.op) {
-        .neg, .abs, .clz, .popcount => |v| v.type_,
-        else => unreachable,
-    };
-    var cnt = typed.arithSeqLen(kind, t);
-    if (typed.elideLeadingZext(kind, t, form_a)) cnt -= 1;
-    // Expander-side immediate fusion: a fuse-eligible constant on the
-    // right (div/rem/shl/shr) is emitted as the immediate form, so the
-    // constant's staging record (`zext32 td, b` / `andi T15, b, 31`) is
-    // never written; the const record itself is dropped later by the
-    // compaction (the fusion pass's use-count no longer counts it).
-    if (bin) |bb| {
-        if (typed.constOf(bb.b)) |cv| {
-            if (typed.fusedImmR(kind, t, cv) != null) cnt -= fusedStagingReduction(kind, t);
-        }
-    }
-    return cnt;
-}
-
-/// The number of constant-staging records a §4 sequence loses when its
-/// constant operand fuses to the immediate form: the unsigned `div`/`rem`
-/// `zext32 dst, b` and the `shl`/`shr` `andi T15, b, 31`. `min`/`max` have
-/// no immediate form; signed `div`/`rem` and the 64-bit shifts keep their
-/// count (the const record is still dropped by the compaction).
-fn fusedStagingReduction(kind: llir.TypedKind, t: cfg.Type) u32 {
-    return switch (kind) {
-        .div, .rem => if (t == .primitive and t.primitive == .uint32) 1 else 0,
-        .shl, .shr => if (t == .primitive and (t.primitive == .int32 or t.primitive == .uint32)) 1 else 0,
-        else => 0,
-    };
-}
-
-/// The record count of one widthless arithmetic sequence on operand
-/// type `t`: the opcode plus the 32-bit canonicalization records the
-/// lowering emits. The 64-bit integer types and the floats emit exactly
-/// one record; the 32-bit types add `sext32` canonicalization (add,
-/// sub, mul, neg, signed div, shl), the mod-32 shift-count mask
-/// (`andi`), and — for unsigned div/rem/min/max and the zero-fill shift
-/// — `zext32` input staging (Instruction Set §4, §10). Derived from the
-/// typed expander (`cfg_lower_typed.arithSeqLen`), the single source of
-/// truth for the §4 sequence shape.
-pub fn arithSeqCount(tag: cfg.OpTag, t: cfg.Type) u32 {
-    return typed.arithSeqLen(typed.typedKindOf(tag) orelse unreachable, t);
 }
 
 /// True for comparisons, which all lower to C-Type and therefore

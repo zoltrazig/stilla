@@ -253,18 +253,27 @@ pub fn fusedBranchReads(cond: *const cfg.Value) ?BranchReads {
 }
 
 /// The imm7 pattern of a constant at a branch's operand type, or
-/// null when the constant does not fit the window: `i32`/`i64` reps
-/// sign-extend the raw 7-bit pattern (exact range `[-64, 63]`),
-/// `u32`/`u64` zero-extend it (`[0, 127]`); the float reps have no
-/// immediate branches.
-fn imm7Of(cv: cfg.ConstValue, type_: cfg.Type) ?u8 {
+/// null when the constant does not fit the window. Ordering branches
+/// zero-extend on the unsigned reps (`bltiu`: `[0, 127]`) and
+/// sign-extend on the signed reps (`blti`: `[-64, 63]`); equality
+/// branches (`beqi`/`bnei`) sign-extend on every integer type
+/// (Instruction Set §4) — there is no unsigned equality variant — so
+/// `equality` selects the signed window on the unsigned reps too.
+fn imm7Of(cv: cfg.ConstValue, type_: cfg.Type, equality: bool) ?u8 {
     const i = switch (cv) {
         .int => |i| i,
         else => return null,
     };
     return switch (type_.primitive) {
         .int32, .int64 => if (i < -64 or i > 63) return null else @intCast(@as(u8, @bitCast(@as(i8, @intCast(i)))) & 0x7f),
-        .uint32, .uint64, .byte => if (i < 0 or i > 127) return null else @intCast(i),
+        .uint32, .uint64, .byte => blk: {
+            if (equality) {
+                if (i < -64 or i > 63) break :blk null;
+                break :blk @intCast(@as(u8, @bitCast(@as(i8, @intCast(i)))) & 0x7f);
+            }
+            if (i < 0 or i > 127) break :blk null;
+            break :blk @intCast(i);
+        },
         else => null,
     };
 }
@@ -277,7 +286,8 @@ fn imm7Of(cv: cfg.ConstValue, type_: cfg.Type) ?u8 {
 /// falls back to the register form with the constant materialized.
 /// The immediate family is chosen by the value operand's type.
 fn immBranchOf(tag: cfg.OpTag, value: *const cfg.Value, cv: cfg.ConstValue, const_left: bool) ?FusedBranch {
-    const imm7 = imm7Of(cv, value.type_) orelse return null;
+    const equality = tag == .eq or tag == .ne;
+    const imm7 = imm7Of(cv, value.type_, equality) orelse return null;
     const base: ?[]const u8 = if (const_left)
         switch (tag) {
             .lt => null, // k < a ≡ a > k — no `bgti`

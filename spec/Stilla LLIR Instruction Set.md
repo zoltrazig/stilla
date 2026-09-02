@@ -14,18 +14,19 @@
 > `Opcode` enum and the shared `encode`/`decode` mapping are exhaustive over
 > the opcode set, so the code and this document must be updated together.
 >
-> In the **v10** encoding (the instruction-encoding half of the binary
-> format — the artifact format is module-local since version 15; the
-> header carries the module symbol and the symbolic entry member), the numeric semantics of
+> In the **v10** encoding, the numeric semantics of
 > every operation are written into the logical opcode at CFG → LLIR lowering
 > time, so the serialized instruction record carries its own
 > numeric semantics — loading decodes each record once into the VM's fixed
-> 8-byte instruction image (§12.1, `vm_instr.zig`) and constructs no per-PC
+> instruction image (§12.1, `vm_instr.zig`) and constructs no per-PC
 > execution plan beyond that 1:1 decode. Float families carry the width in the
-> opcode (`add.f32`/`add.f64`); integer families are widthless — they
-> compute on the full 64-bit canonical cell, and where a 32-bit source
-> type demands modulo-2³² semantics the lowering emits explicit
-> canonicalization records around the widthless opcode (§4).
+> opcode (`add.f32`/`add.f64`); the integer arithmetic families carry the
+> full rep (`add.i32`, `add.u32`, `add.i64`, `add.u64`) — the opcode names
+> the operand type, the VM computes at that width, and every result
+> self-canonicalizes into the canonical cell of its rep (§4). There are
+> no widthless integer arithmetic opcodes and no canonicalization
+> records: the lowering emits exactly one record per arithmetic
+> operation.
 
 ## Table of Contents
 
@@ -67,20 +68,25 @@ execution cache — is a VM concern. The encoded LLIR remains self-describing,
 and every dispatch strategy must have identical observable behavior to
 decoding each instruction directly.
 
-The defining v10 property is **self-describing numeric opcodes**: the numeric semantics of
+The defining property is **self-describing numeric opcodes**: the numeric semantics of
 every polymorphic operation ride in the logical opcode, not in a
 load-time-resolved side channel. Each typed family (§4, §5, §7, §8) fixes
 its operand representation in the opcode name. The **float families** are
 rep-carrying: an `f32`/`f64` suffix fixes the width (`add.f64`,
-`seq.f32`). The **integer families are widthless**: one opcode (`add`,
-`mul`, `andi`, …) serves every integer width, computing on the full
-64-bit canonical cell; where the operation differs by signedness the
-family splits into signed and unsigned mnemonics (`div`/`divu`,
-`shr`/`shru`, `min`/`minu`). A 32-bit source type never selects a
-narrower opcode — the lowering wraps and canonicalizes through the
-explicit `sext32`/`zext32` records of §4 instead. Comparison and branch
-opcodes likewise distinguish only signed from unsigned ordering: canonical
-cells have already normalized 32-bit integers to 64 bits. The decoder and interpreter read everything they need
+`seq.f32`). The **integer arithmetic families are rep-carrying** too: an
+`i32`/`u32`/`i64`/`u64` suffix names the operand type (`add.i32`,
+`mul.u64`), the VM computes at that width, and the result
+self-canonicalizes — an `.i32` result sign-extends its low 32 bits into
+the 64-bit cell, a `.u32` result zero-extends, a 64-bit result writes
+the full cell (§4). Every cell of a 32-bit type therefore has exactly
+one canonical form — the cell's top half is fixed by the value's rep —
+so no canonicalization records exist and the lowering emits one record
+per arithmetic operation. The remaining integer families are
+rep-agnostic on canonical cells: the bitwise ops (`and`/`or`/`xor` and
+their immediate forms) preserve canonicality bit-for-bit; the
+comparisons and branches split only by signedness (`slt`/`sltu`,
+`blt`/`bltu`) because the canonical cell has already normalized the
+width; the count families (`clz`/`popcount`) carry the width only. The decoder and interpreter read everything they need
 from the decoded opcode. An implementation may cache that decoding, but the
 cache must derive only from the encoded LLIR and must not change its meaning.
 
@@ -139,19 +145,19 @@ code/reserved-field combinations of §14.
 ## 2.2 The six formats
 
 ```text
-R-type: 00 | code(9) | a(7) | b(7) | c(7)        512 codes, 71 assigned
+R-type: 00 | code(9) | a(7) | b(7) | c(7)        512 codes, 116 assigned
 B-type: 01 | code(6) | lhs(7) | rhs_or_imm7(7) | offs10   64 codes, 20 assigned
-I-type: 110 | code(6) | a(7) | imm16              64 codes, 32 assigned
+I-type: 110 | code(6) | a(7) | imm16              64 codes, 31 assigned
 C-type: 111000 | code(6) | reserved(6) = 0 | a(7) | b(7)  64 codes, 64 assigned
-E-type: 111001 | code(6) | reserved(6) = 0 | a(7) | b(7)  64 codes, 37 assigned
+E-type: 111001 | code(6) | reserved(6) = 0 | a(7) | b(7)  64 codes, 38 assigned
 U-type: op(5) | a(7) | imm20                      4 opcodes (11101 ×2 / 11110 / 11111)
 ```
 
 U-type carries four opcodes under three prefixes: `auipc`/`lui` own
 `11110`/`11111`, and prefix `11101` holds both jumps, split by the
-register field (`ra` = `jal`, `zero` = `j`, §9.1). E-type keeps 37
-opcodes across selectors `0–43` (with `1–3` and `13/15/17/19` retired);
-selectors `44–63` are reserved (§8, §14).
+register field (`ra` = `jal`, `zero` = `j`, §9.1). E-type keeps 38
+opcodes across selectors `0–43` (with `6–7` and `13/15/17/19`
+reserved); selectors `44–63` are reserved (§8, §14).
 
 The opcode tables' **Behavior** column is normative pseudocode over these
 encoded fields. The surrounding family rules refine rep-dependent arithmetic,
@@ -236,10 +242,9 @@ A register operand is one of exactly 128 encodings:
 | --- | --- | --- |
 | `0x00` | `zero` | special register with a **dual role**: reading it produces the all-zero bit pattern for the scalar type its instruction's rep/contract requires; writing it discards the result (one encoding, role-dependent meaning, RISC-V `x0` style). Writing `zero` performs no retain, release, or ownership transfer; the frontend only ever writes Copy/void results to `zero` — a trusted semantic invariant, not a loader check |
 | `0x01` | `cond` | the single condition register: the block-local short-lived destination of the C-type comparisons (and `not`/`copy` may read/write it). The next instruction that writes `cond`, any call, or any block boundary must find it already consumed; `cmov`/`copy` may read it later in the same block. Not a frame register; no stack address |
-| `0x01` | `cond` | the single condition register: the block-local short-lived destination of the C-type comparisons (and `not`/`copy` may read/write it). The next instruction that writes `cond`, any call, or any block boundary must find it already consumed; `cmov`/`copy` may read it later in the same block. Not a frame register; no stack address |
 | `0x02` | `ra` | the fixed link register. Only `jal`'s explicit link destination, `jalr`'s implicit link destination, and the return path may touch it; the structural validator rejects every other read or write. On a call, `ra` first receives `current_pc + 1`; nested calls may overwrite it, so the incoming link is saved in the frame header ([LLIR Specification](Stilla%20LLIR%20Specification.md) §5) and restored at return. It is a **reserved hole** inside the fast bank: call-convention-only, never a scratch cell — the link lives in the frame header, so its bank cell stays dead (reads never reach it; writes are discarded) |
 | `0x03–0x12` | **T0–T15 (16 global volatile temporaries)** | the VM's single bank of volatile execution storage, shared across frames and functions; caller-saved — every `jal ra`, `jalr`, or non-self tailcall logically clobbers all of it; not in the frame, not counted against the frame budget, no persistent slot type (§3.1.1) |
-| `0x13–0x7f` | **F0–F108 (109 frame registers)** | `stack[fp + (n - 0x13)]`; parameters, long-lived values, spills, the call convention; cells are raw `u64` values — no inline representation tag, no fixed-width payload field — the exact value type of every operand rides in the opcode — a float family's rep or an integer family's signedness and canonicalization sequence — or the descriptor-carried types (§12–§13), never in the cell |
+| `0x13–0x7f` | **F0–F108 (109 frame registers)** | `stack[fp + (n - 0x13)]`; parameters, long-lived values, spills, the call convention; cells are raw `u64` values — no inline representation tag, no fixed-width payload field — the exact value type of every operand rides in the opcode — a family's rep, an integer arithmetic member's `i32`/`u32`/`i64`/`u64` — or the descriptor-carried types (§12–§13), never in the cell |
 
 Constants (frozen with this document; `src/llir.zig` mirrors them):
 
@@ -267,8 +272,8 @@ supplies the type's zero; a decode that sees `zero` in a destination field
 drops the result; `ra` and `cond` are position-restricted per §3.2.
 
 **F and T are both ordinary operands**: arithmetic, memory, effect, and
-control instructions do not distinguish their origin (`add T0, F2, F3`
-and `add F4, T0, T1` are both legal); only the specials' placement
+control instructions do not distinguish their origin (`add.i64 T0, F2, F3`
+and `add.i32 F4, T0, T1` are both legal); only the specials' placement
 rules (§3.2) restrict a register. Side tables hold `ValueReg = u8` and may
 name F or T (`destructure_dsts` rows); the `slot_*` sources are always F
 cells — arguments home to the caller's output window and T does not
@@ -295,15 +300,14 @@ participate in the parameter ABI.
   recursion needs no special handling; there is no per-call save/restore.
   The allocator may therefore use the full T0–T15 range, but no T value
   may be live across a call, passed as an argument, returned, or held.
-- **T15 is the 32-bit staging cell.** The 32-bit arithmetic sequences of
-  §4 stage a masked count or a zero-extended operand through `T15`
-  (`andi T15, count, 31`; `zext32 T15, src`). The register allocator
-  therefore never assigns `T15` as a spill sentinel, and the staging
-  reference is always unambiguous. Every staging read happens within the
-  same block as its write, so the cell never crosses a call.
+- **T0–T15 are ordinary volatile temporaries.** No staging discipline
+  attaches to any of them: the typed integer opcodes of §4 compute at
+  their named width in one record, so no 32-bit sequence stages a masked
+  count or a zero-extended operand through a reserved cell. Every T
+  register is equally available to the allocator and to spills.
 - **Parameter ABI unchanged.** Parameters home to the caller's output
   window — the callee's `F0..F(P-1)`, the same physical cells, zero copy.
-  Calls only switch frames; T is never used to stage arguments. In v10 the
+  Calls only switch frames; T is never used to stage arguments. The
   window cells are also register-addressable: the caller's header reserve
   and output aliases (`O(0)..O(O-1)`) are the top `3 + O` encodings of the
   frame register range (`0x13–0x7f`), and a non-void call's result is
@@ -318,11 +322,10 @@ participate in the parameter ABI.
   the
   all 18 fast cells are saved.
 - **No reference counting, no persistent exact type.** F/X/T cells carry no
-  representation tag and no payload field — every cell is a raw `u64`. In
-  v10 the exact type of every operand is fixed by the opcode — a float
-  family's rep, an integer family's signedness, or its canonicalization
-  sequence — or the descriptor-carried types; no load-time analysis is
-  needed. T has no
+  representation tag and no payload field — every cell is a raw `u64`. The
+  exact type of every operand is fixed by the opcode — a
+  family's rep, an integer arithmetic member's `i32`/`u32`/`i64`/`u64` —
+  or the descriptor-carried types; no load-time analysis is needed. T has no
   **implicit** teardown — the runtime never releases a T cell on its own
   account — but **explicit** lifecycle operations may name a T register:
   the spill expansion stages a spilled owner through T
@@ -337,7 +340,7 @@ participate in the parameter ABI.
   §7.2), so `zero` never carries its own type: the instruction's rep or
   operand contract supplies it. The resolution rules:
   - a float opcode's rep fixes the type outright, and an integer
-    opcode's destination fixes the integer width: `add F0, F1, zero`,
+    opcode's rep fixes the integer width: `add.i32 F0, F1, zero`,
     `seq zero, F1, F2` (a discarded comparison result), `ret zero`
     (a void or Copy zero return);
   - a real register source supplies the type where the opcode is not
@@ -372,275 +375,304 @@ union tag, an inline table/descriptor ID, a spill-cell or window offset,
 or (for the branches and `jal`/`jr`/`auipc`/`lui`) a target or constant —
 never a register. The field width and interpretation are fixed per opcode
 (§10); the opcode determines sign/zero extension for the integer
-immediate families: the signed variants (`addi`, `subi`, `muli`, `divi`,
-`remi`, `maddi`, `shri`) sign-extend the 7-bit field (exact range
-`[-64, 63]`), the unsigned variants (`addiu`, `subiu`, `muliu`, `diviu`,
-`remiu`, `maddiu`, `shriu`) zero-extend it (exact range `[0, 127]`); the
-mask/count forms (`andi`/`ori`/`xori`/`shli`) always zero-extend.
+immediate families: the `.i32`/`.i64` members of the immediate families
+(`addi`, `subi`, `muli`, `divi`, `remi`, `maddi`, `shri`) sign-extend the
+7-bit field (exact range `[-64, 63]`), the `.u32`/`.u64` members
+(`addi.u32`…`maddi.u64`, `shri.u32`/`shri.u64`) zero-extend it (exact
+range `[0, 127]`); the mask/count forms (`andi`/`ori`/`xori`/`shli`)
+always zero-extend.
 
 # 4. Opcode tables: R-type
 
 Every opcode with top bits `00` shares the layout
 `code(9) | a(7) | b(7) | c(7)`. `a` is the destination (`zero` discards a
 Copy/void result), `b` a source (`zero` reads the type's zero), and `c` a
-second source or a 7-bit immediate, per the family. The 71 assigned
-opcodes occupy codes `0–70`; codes `71–511` are reserved and rejected by
+second source or a 7-bit immediate, per the family. The 116 assigned
+opcodes occupy codes `0–115`; codes `116–511` are reserved and rejected by
 validation.
 
 **Typed families.** Every family is a **contiguous run**: its members
 occupy consecutive logical values and consecutive encoded selectors in
 the order the family header lists them, so the first row of each table
-anchors the group and the remaining members follow at +1 each. A float
-family's members are `f32` then `f64`; a sign-agnostic operation is a
-single widthless member computing on the full 64-bit canonical cell; an
-operation that splits by signedness is a signed/unsigned pair, signed
-first (`div` = logical 10, `divu` = 11). The logical values span `1–234`
-but 7 retired E-type members leave holes, so 227 opcodes are defined —
-by format: R `1–71`, B `72–91`, C `92–155`, E `156–199` (with
-`157–159` and `169/171/173/175` retired), I `200–230`, U `231–234`
+anchors the group and the remaining members follow at +1 each. An integer
+arithmetic family's members are the four integer reps `i32, u32, i64,
+u64` in that order; a family with float members appends `f32, f64`
+(`add.i32, add.u32, add.i64, add.u64, add.f32, add.f64`). An operation
+that is genuinely rep-agnostic on canonical cells stays widthless — the
+bitwise ops (`and`, `or`, `xor`, `andi`, `ori`, `xori`) — while an
+operation whose result canonicalization differs by signedness carries
+the full rep even when the arithmetic itself is sign-agnostic
+(`shl.i32`/`shl.u32`), because the result cell's top half is fixed by
+the rep. The logical values span `1–273` with no holes — by format: R
+`1–116`, B `117–136`, C `137–200`, E `201–238`, I `239–269`, U `270–273`
 (sections below follow format class, so the numeric ranges interleave:
 C-type §7 and E-type §8 precede I-type §6 in numeric order) — and every
 format's encoded selectors are contiguous except the **reserved holes**:
-R `0–70`, B `0–19`, C `0–63`, E `0–43` **with `1–3` and `13/15/17/19`
-reserved** (the retired integer-`neg` members and the retired unsigned
-`clz`/`popcount` members), I `0–30` **with selector 10 reserved** (the
-former `result_take` slot, kept so the `slot_*` encodings never move; U
-keeps `jal`/`j` sharing selector 0, `auipc` 1, `lui` 2). The v10 layout
-has no inherited width slots; its alignment holes are the reserved
-I-type selector 10 and the retired E-type codes `1–3`, `13`, `15`, `17`,
-`19`. `repOf` reads a float member's rep from its `opInfo` row.
+R `0–115`, B `0–19`, C `0–63`, E `0–43` **with `6–7` and `13/15/17/19`
+reserved**, and I `0–31` **with selector 10 reserved**; U keeps
+`jal`/`j` sharing selector 0, `auipc` 1, `lui` 2. The reserved E-type codes
+`6–7`, `13`, `15`, `17`, `19` and the reserved I-type selector 10 are the
+layout's only alignment holes. `repOf` reads a family member's rep from its `opInfo` row.
 
-**The canonical-cell model and the 32-bit sequences.** Every integer
-opcode computes at 64 bits and writes the raw 64-bit result; a 32-bit
-source type's modulo-2³² semantics are the *lowering's* obligation,
-discharged with two untyped E-type canonicalization opcodes (§8):
-`sext32 dst, src` keeps the low 32 bits and sign-extends them (the
-canonical cell of a signed 32-bit value), and `zext32 dst, src` keeps the
-low 32 bits and zero-extends them (the operand form the full-cell
-unsigned operations require). The lowering boundary emits exactly these
-sequences: the CFG → LLIR expander (`cfg_lower_llir_emit.zig`) builds
-each logical op as a typed node and expands it to the widthless stream,
-and the record-sizer (`cfg_lower_llir_budget.zig`) derives the count from
-the typed expander's own sequence length (`cfg_lower_typed.arithSeqLen`),
-so the two stay in lockstep by construction. The operand value-form (the
-top-bits state, `docs/llir-typed.md`) lets the expander elide a leading
-`zext32` when the operand is already zero-extended. Every record's slots
-shown as `dst`/`a`/`b` are the SSA slots:
+**The typed-integer model.** Every integer arithmetic opcode names its
+operand type in the mnemonic and computes at that width. The operand
+cells are canonical (below), so the VM truncates each source to the
+named width, computes, and writes the **canonical cell of the result's
+rep**: an `.i32` result sign-extends its low 32 bits, a `.u32` result
+zero-extends them, and an `.i64`/`.u64` result is the full 64-bit
+pattern. The canonical-cell contract is uniform across all producers: a
+typed arithmetic opcode self-canonicalizes, a cast canonicalizes to its
+target rep, and `const` canonicalizes per its `ConstRecord` type — an
+`i32` cell is always the sign-extension of its low 32 bits, a `u32` cell
+always the zero-extension. Because the opcode carries the width, none of
+the 32-bit semantics are a lowering obligation: no `sext32`/`zext32`
+canonicalization records exist, no staging register holds a masked shift
+count, and the expander (`cfg_lower_llir_emit.zig`) and the record-sizer
+(`cfg_lower_llir_budget.zig`) agree by construction — every arithmetic
+operation is **exactly one record**, the register form or, when the
+right operand is a fuse-eligible constant, the immediate form (§10).
+Every record's slots shown as `dst`/`a`/`b` are the SSA slots.
 
-| 32-bit operation | emitted sequence |
-| --- | --- |
-| `add`, `sub` | `add dst, a, b`; `sext32 dst, dst` |
-| `mul` | `mul dst, a, b`; `sext32 dst, dst` |
-| `neg` | `neg dst, a`; `sext32 dst, dst` |
-| `bitand`, `bitor`, `bitxor` | `and`/`or`/`xor dst, a, b` — sign extension is preserved bit-for-bit, no canonicalization |
-| `min`/`max` signed | `min`/`max dst, a, b` — the compare is order-correct on canonical cells |
-| `min`/`max` unsigned | `zext32 T15, a`; `zext32 dst, b`; `minu`/`maxu dst, T15, dst`; `sext32 dst, dst` |
-| `div` signed | `div dst, a, b`; `sext32 dst, dst` |
-| `rem` signed | `rem dst, a, b` — the remainder of canonical cells is canonical, no truncation |
-| `div`/`rem` unsigned | `zext32 T15, a`; `zext32 dst, b`; `divu`/`remu dst, T15, dst`; `sext32 dst, dst` |
-| `shl` | `andi T15, b, 31`; `shl dst, a, T15`; `sext32 dst, dst` |
-| `shr` signed | `andi T15, b, 31`; `shr dst, a, T15` — arithmetic shift of a canonical cell is canonical |
-| `shr` unsigned | `andi T15, b, 31`; `zext32 dst, a`; `shru dst, dst, T15`; `sext32 dst, dst` |
-
-The count mask reduces the count mod 32 because the widthless shift masks
-mod 64; a fused immediate count is pre-reduced by the lowering instead
-(§10). The immediate forms replace only the primary opcode record — the
-canonicalization records stay, because the immediate forms compute at 64
-bits too (a fused `addi` still wraps through its trailing `sext32`). For
-the arithmetic expander's staged ops (`div`/`rem`/`shl`/`shr` on a 32-bit
-type with a fuse-eligible constant), the constant's staging record
-(`zext32 dst, b` / `andi T15, b, 31`) is **never emitted** (step 6) — the
-immediate form reads the zero-extended staging register instead.
-
-**Trap behavior is fixed by the opcode** ([Core Language
+**Trap behavior is fixed by the opcode's rep** ([Core Language
 Specification](Stilla%20Core%20Language%20Specification.md), [Runtime
 Specification](Stilla%20Runtime%20Specification.md)) — there is no program
-arithmetic mode. The widthless integer opcodes wrap modulo 2⁶⁴ at every
-step (WebAssembly semantics): `add`/`sub`/`mul` overflow wraps; the
-multiply-accumulate family wraps at each step. A 32-bit operation's
-modulo-2³² result is produced by its sequence's `sext32` — the wrap sits
-in the instruction stream. `neg` is widthless too — two's complement
-negation is sign-agnostic (bit-identical across signedness at the same
-width), so a 32-bit negation emits `neg; sext32` like `add`/`sub`. The
-rep-carrying unary `abs` is the one
-exception: its integer rep is the entire 32-bit sequence, wrapping at
-32 bits and self-canonicalizing in the single record (so `abs.i32` of the
-minimum is the minimum, §8). `div`/`divu`/`rem`/
-`remu` (and their immediate forms `divi`/`diviu`/`remi`/`remiu`, whose
-zero immediate is a zero divisor) trap on a zero divisor, and the signed
-`div` additionally traps on the 64-bit division-overflow case
-`i64_min / -1`. A 32-bit `min-int / -1` does **not** trap: the 64-bit
-quotient `0x8000_0000` is outside the canonical signed-32 range, and the
-sequence's `sext32` wraps it back to the minimum — the modulo-2³²
-WebAssembly result. `rem` never overflows (`i64_min % -1` is 0). The
-float families follow IEEE 754 and never trap (`rem`'s zero divisor
-included — `x % 0.0` is NaN). Casts never trap: an out-of-range integer
-cast truncates to the target width (low-order bits), a float→int cast
-truncates toward zero, saturating on NaN or out-of-range values (NaN
-becomes zero).
+arithmetic mode. Every integer opcode wraps at its named width
+(WebAssembly semantics at each width): `add`/`sub`/`mul` overflow wraps
+modulo 2³² at the 32-bit reps and modulo 2⁶⁴ at the 64-bit reps; the
+multiply-accumulate family wraps at each step; `neg` is two's-complement
+negation at the named width. `div`/`rem` (and their immediate forms
+`divi`/`remi`, whose zero immediate is a zero divisor) trap on a zero
+divisor at every width. `div.i64` additionally traps on the
+division-overflow case `i64_min / -1`; `div.i32` has **no overflow
+trap** — `i32_min / -1` wraps to `i32_min` (the Runtime Specification
+fixes the language semantics), and the record computes it directly.
+`rem` never overflows at any width (`i32_min % -1` and `i64_min % -1`
+are 0). Shift counts are masked by the opcode — mod 32 at the 32-bit
+reps, mod 64 at the 64-bit reps — so a shift never traps and never
+needs a masked staging copy. The float families follow IEEE 754 and
+never trap (`rem`'s zero divisor included — `x % 0.0` is NaN). Casts
+never trap: an out-of-range integer cast truncates to the target width
+(low-order bits), a float→int cast truncates toward zero, saturating on
+NaN or out-of-range values (NaN becomes zero).
 
-#### R-type — typed binary/immediate and inline-ID families — 71 opcodes
+#### R-type — typed binary/immediate and inline-ID families — 116 opcodes
 
-**add** — widthless integer, then `f32, f64`
+**add** — reps `i32, u32, i64, u64, f32, f64`
 
-`a = b + c` (64-bit; a 32-bit result wraps through its sequence's `sext32`). Sign-agnostic — no `addu`: the low 32 bits are identical whether the operands are zero- or sign-extended.
+`a = b + c` at the named width; the result is the canonical cell of the
+rep (an `.i32` result sign-extends its low 32 bits, a `.u32` result
+zero-extends, a 64-bit result writes the full cell). Overflow wraps.
 
 | Opcode | Comment |
 | --- | --- |
-| `add` | widthless integer, sign-agnostic |
+| `add.i32` | 32-bit signed |
+| `add.u32` | 32-bit unsigned |
+| `add.i64` | 64-bit signed |
+| `add.u64` | 64-bit unsigned |
 | `add.f32` | 32-bit float |
 | `add.f64` | 64-bit double float |
 
-**sub** — widthless integer, then `f32, f64`
+**sub** — reps `i32, u32, i64, u64, f32, f64`
 
-`a = b - c` (64-bit). Sign-agnostic — no `subu`: the low 32 bits are identical whether the operands are zero- or sign-extended, so unsigned subtraction needs no staging.
+`a = b - c` at the named width; wraps; result canonical per rep.
 
 | Opcode | Comment |
 | --- | --- |
-| `sub` | widthless integer, sign-agnostic |
+| `sub.i32` | 32-bit signed |
+| `sub.u32` | 32-bit unsigned |
+| `sub.i64` | 64-bit signed |
+| `sub.u64` | 64-bit unsigned |
 | `sub.f32` | 32-bit float |
 | `sub.f64` | 64-bit double float |
 
-**mul** — widthless integer, then `f32, f64`
+**mul** — reps `i32, u32, i64, u64, f32, f64`
 
-`a = b × c` (64-bit low half). Sign-agnostic — no `mulu`: the low 64 bits are identical whether the operands are zero- or sign-extended.
+`a = b × c` at the named width (the low half at the rep's width); wraps;
+result canonical per rep.
 
 | Opcode | Comment |
 | --- | --- |
-| `mul` | widthless integer, sign-agnostic |
+| `mul.i32` | 32-bit signed |
+| `mul.u32` | 32-bit unsigned |
+| `mul.i64` | 64-bit signed |
+| `mul.u64` | 64-bit unsigned |
 | `mul.f32` | 32-bit float |
 | `mul.f64` | 64-bit double float |
 
-**div** — signed/unsigned widthless pair, then `f32, f64`
+**div** — reps `i32, u32, i64, u64, f32, f64`
 
-`a = b / c` — the integer forms trap on a zero divisor, `div` additionally on `i64_min / -1`; the float forms never trap.
+`a = b / c` — the integer forms trap on a zero divisor at every width;
+`div.i64` additionally on `i64_min / -1` (`div.i32` has no overflow
+trap — `i32_min / -1` wraps to `i32_min`); the float forms never trap.
 
 | Opcode | Comment |
 | --- | --- |
-| `div` | signed |
-| `divu` | unsigned |
+| `div.i32` | signed, wraps on overflow |
+| `div.u32` | unsigned |
+| `div.i64` | signed, traps on `i64_min / -1` |
+| `div.u64` | unsigned |
 | `div.f32` | 32-bit float |
 | `div.f64` | 64-bit double float |
 
-**rem** — signed/unsigned widthless pair, then `f32, f64`
+**rem** — reps `i32, u32, i64, u64, f32, f64`
 
-`a = b % c`, the sign of the dividend — the integer forms trap on a zero divisor (never on overflow); the float forms never trap.
+`a = b % c`, the sign of the dividend — the integer forms trap on a zero
+divisor (never on overflow — `i32_min % -1` and `i64_min % -1` are 0);
+the float forms never trap.
 
 | Opcode | Comment |
 | --- | --- |
-| `rem` | signed |
-| `remu` | unsigned |
+| `rem.i32` | signed |
+| `rem.u32` | unsigned |
+| `rem.i64` | signed |
+| `rem.u64` | unsigned |
 | `rem.f32` | 32-bit float |
 | `rem.f64` | 64-bit double float |
 
-**min** — signed/unsigned widthless pair, then `f32, f64`
+**min** — reps `i32, u32, i64, u64, f32, f64`
 
-`a = min(b, c)` signed 64-bit.
+`a = min(b, c)` — the `.i*` members compare as signed integers at the
+named width, the `.u*` members as unsigned; the float members per IEEE.
 
 | Opcode | Comment |
 | --- | --- |
-| `min` | signed |
-| `minu` | unsigned |
+| `min.i32` | signed |
+| `min.u32` | unsigned |
+| `min.i64` | signed |
+| `min.u64` | unsigned |
 | `min.f32` | 32-bit float |
 | `min.f64` | 64-bit double float |
 
-**max** — signed/unsigned widthless pair, then `f32, f64`
+**max** — reps `i32, u32, i64, u64, f32, f64`
 
-`a = max(b, c)` signed 64-bit.
+`a = max(b, c)` — same signedness rule as `min`.
 
 | Opcode | Comment |
 | --- | --- |
-| `max` | signed |
-| `maxu` | unsigned |
+| `max.i32` | signed |
+| `max.u32` | unsigned |
+| `max.i64` | signed |
+| `max.u64` | unsigned |
 | `max.f32` | 32-bit float |
 | `max.f64` | 64-bit double float |
 
-**addi** — signed/unsigned widthless pair
+**addi** — reps `i32, u32, i64, u64`
 
-`a = b + imm7` (sign-extended, §10).
-
-| Opcode | Comment |
-| --- | --- |
-| `addi` | signed imm7 |
-| `addiu` | unsigned imm7 |
-
-**subi** — signed/unsigned widthless pair
-
-`a = b - imm7` (sign-extended).
+`a = b + imm7` — the `.i*` members sign-extend `imm7` (`[-64, 63]`), the
+`.u*` members zero-extend it (`[0, 127]`); result canonical per rep.
 
 | Opcode | Comment |
 | --- | --- |
-| `subi` | signed imm7 |
-| `subiu` | unsigned imm7 |
+| `addi.i32` | signed imm7 |
+| `addi.u32` | unsigned imm7 |
+| `addi.i64` | signed imm7 |
+| `addi.u64` | unsigned imm7 |
 
-**muli** — signed/unsigned widthless pair
+**subi** — reps `i32, u32, i64, u64`
 
-`a = b × imm7` (sign-extended).
-
-| Opcode | Comment |
-| --- | --- |
-| `muli` | signed imm7 |
-| `muliu` | unsigned imm7 |
-
-**divi** — signed/unsigned widthless pair
-
-`a = b / imm7` signed; a zero immediate is a zero divisor (traps).
+`a = b - imm7` — same immediate rule as `addi`.
 
 | Opcode | Comment |
 | --- | --- |
-| `divi` | signed imm7 |
-| `diviu` | unsigned imm7 |
+| `subi.i32` | signed imm7 |
+| `subi.u32` | unsigned imm7 |
+| `subi.i64` | signed imm7 |
+| `subi.u64` | unsigned imm7 |
 
-**remi** — signed/unsigned widthless pair
+**muli** — reps `i32, u32, i64, u64`
 
-`a = b % imm7` signed; a zero immediate is a zero divisor (traps).
-
-| Opcode | Comment |
-| --- | --- |
-| `remi` | signed imm7 |
-| `remiu` | unsigned imm7 |
-
-**shl** — widthless integer
-
-`a = b << (c mod 64)` — left shift is sign-agnostic, one opcode serves every integer width.
+`a = b × imm7` — same immediate rule as `addi`.
 
 | Opcode | Comment |
 | --- | --- |
-| `shl` | left shift, sign-agnostic |
+| `muli.i32` | signed imm7 |
+| `muli.u32` | unsigned imm7 |
+| `muli.i64` | signed imm7 |
+| `muli.u64` | unsigned imm7 |
 
-**shr** — signed/unsigned widthless pair
+**divi** — reps `i32, u32, i64, u64`
 
-`a = b >> (c mod 64)` arithmetic — sign-filling.
-
-| Opcode | Comment |
-| --- | --- |
-| `shr` | arithmetic (sign-filling) |
-| `shru` | logical (zero-filling) |
-
-**shli** — widthless integer
-
-`a = b << (imm7 mod 64)`.
+`a = b / imm7` — a zero immediate is a zero divisor (traps); `divi.i64`
+additionally traps on `i64_min / -1`; `divi.i32` wraps on overflow.
 
 | Opcode | Comment |
 | --- | --- |
-| `shli` | left shift by imm7 |
+| `divi.i32` | signed imm7 |
+| `divi.u32` | unsigned imm7 |
+| `divi.i64` | signed imm7 |
+| `divi.u64` | unsigned imm7 |
 
-**shri** — signed/unsigned widthless pair
+**remi** — reps `i32, u32, i64, u64`
 
-`a = b >> (imm7 mod 64)` arithmetic — sign-filling.
-
-| Opcode | Comment |
-| --- | --- |
-| `shri` | arithmetic by imm7 |
-| `shriu` | logical by imm7 |
-
-**and** — widthless integer (bit patterns are sign-agnostic)
-
-`a = b & c`.
+`a = b % imm7` — a zero immediate is a zero divisor (traps); remainder
+never overflows.
 
 | Opcode | Comment |
 | --- | --- |
-| `and` | bitwise AND, sign-agnostic |
+| `remi.i32` | signed imm7 |
+| `remi.u32` | unsigned imm7 |
+| `remi.i64` | signed imm7 |
+| `remi.u64` | unsigned imm7 |
+
+**shl** — reps `i32, u32, i64, u64`
+
+`a = b << (c mod W)` where `W` is the rep's width — the opcode masks the
+count (mod 32 at the 32-bit reps, mod 64 at the 64-bit reps), so no
+staging copy is needed; result canonical per rep.
+
+| Opcode | Comment |
+| --- | --- |
+| `shl.i32` | 32-bit shift left |
+| `shl.u32` | 32-bit shift left |
+| `shl.i64` | 64-bit shift left |
+| `shl.u64` | 64-bit shift left |
+
+**shr** — reps `i32, u32, i64, u64`
+
+`a = b >> (c mod W)` — the `.i*` members shift arithmetic
+(sign-filling), the `.u*` members logical (zero-filling); count masked
+like `shl`.
+
+| Opcode | Comment |
+| --- | --- |
+| `shr.i32` | arithmetic (sign-filling) |
+| `shr.u32` | logical (zero-filling) |
+| `shr.i64` | arithmetic (sign-filling) |
+| `shr.u64` | logical (zero-filling) |
+
+**shli** — reps `i32, u32, i64, u64`
+
+`a = b << (imm7 mod W)` — the raw field zero-extends (`[0, 127]`); the
+lowering pre-reduces a fused count mod `W`, and the opcode masks again.
+
+| Opcode | Comment |
+| --- | --- |
+| `shli.i32` | shift left by imm7, 32-bit |
+| `shli.u32` | shift left by imm7, 32-bit |
+| `shli.i64` | shift left by imm7, 64-bit |
+| `shli.u64` | shift left by imm7, 64-bit |
+
+**shri** — reps `i32, u32, i64, u64`
+
+`a = b >> (imm7 mod W)` — arithmetic for the `.i*` members, logical for
+the `.u*` members.
+
+| Opcode | Comment |
+| --- | --- |
+| `shri.i32` | arithmetic by imm7 |
+| `shri.u32` | logical by imm7 |
+| `shri.i64` | arithmetic by imm7 |
+| `shri.u64` | logical by imm7 |
+
+**and** — widthless integer (rep-agnostic on canonical cells)
+
+`a = b & c` — the bitwise combination of two canonical cells of the same
+rep is again canonical (the top half of a canonical cell is uniform, and
+bitwise ops preserve that), so one opcode serves every integer rep.
+
+| Opcode | Comment |
+| --- | --- |
+| `and` | bitwise AND, rep-agnostic |
 
 **or** — widthless integer
 
@@ -660,7 +692,8 @@ becomes zero).
 
 **andi** — widthless integer (always zero-extended, §10)
 
-`a = b & imm7`.
+`a = b & imm7` — the mask (`[0, 127]`) always clears bits above the low
+seven, so the result cell is canonical for the operand's rep.
 
 | Opcode | Comment |
 | --- | --- |
@@ -682,34 +715,44 @@ becomes zero).
 | --- | --- |
 | `xori` | bitwise XOR with imm7 |
 
-**madd** — widthless integer, then `f32, f64`
+**madd** — reps `i32, u32, i64, u64, f32, f64`
 
-`a = a + b × c` (each step wraps at 64 bits).
+`a = a + b × c` at the named width (each step wraps; `a` is read
+modifying-write); result canonical per rep.
 
 | Opcode | Comment |
 | --- | --- |
-| `madd` | widthless integer, sign-agnostic |
+| `madd.i32` | 32-bit signed |
+| `madd.u32` | 32-bit unsigned |
+| `madd.i64` | 64-bit signed |
+| `madd.u64` | 64-bit unsigned |
 | `madd.f32` | 32-bit float |
 | `madd.f64` | 64-bit double float |
 
-**msub** — widthless integer, then `f32, f64`
+**msub** — reps `i32, u32, i64, u64, f32, f64`
 
-`a = a - b × c` (each step wraps at 64 bits).
+`a = a - b × c` at the named width (each step wraps); result canonical
+per rep.
 
 | Opcode | Comment |
 | --- | --- |
-| `msub` | widthless integer, sign-agnostic |
+| `msub.i32` | 32-bit signed |
+| `msub.u32` | 32-bit unsigned |
+| `msub.i64` | 64-bit signed |
+| `msub.u64` | 64-bit unsigned |
 | `msub.f32` | 32-bit float |
 | `msub.f64` | 64-bit double float |
 
-**maddi** — signed/unsigned widthless pair
+**maddi** — reps `i32, u32, i64, u64`
 
-`a = a + b × imm7` (sign-extended immediate).
+`a = a + b × imm7` — same immediate rule as `addi`.
 
 | Opcode | Comment |
 | --- | --- |
-| `maddi` | signed imm7 |
-| `maddiu` | unsigned imm7 |
+| `maddi.i32` | signed imm7 |
+| `maddi.u32` | unsigned imm7 |
+| `maddi.i64` | signed imm7 |
+| `maddi.u64` | unsigned imm7 |
 
 **untyped**
 
@@ -733,15 +776,13 @@ becomes zero).
 | `cmov` | `a = cond ? b : c` | — | — |
 
 **The immediate families** read their 7-bit `c` field per opcode (§10):
-the signed variants (`addi`/`subi`/`muli`/`divi`/`remi`/`maddi`/`shri`)
-sign-extend; the unsigned variants (`addiu`/`subiu`/`muliu`/`diviu`/
-`remiu`/`maddiu`/`shriu`) zero-extend; the shift counts (`shli`) and the
+the `.i32`/`.i64` members (`addi.i32`…`maddi.i64`, `shri.i32`/`shri.i64`)
+sign-extend; the `.u32`/`.u64` members (`addi.u32`…`maddi.u64`,
+`shri.u32`/`shri.u64`) zero-extend; the shift counts (`shli`) and the
 bitwise masks (`andi`/`ori`/`xori`) always zero-extend (`[0, 127]`, mask
 semantics — `andi F0, F1, 0x7f` masks with `0x0000007f`, never
 sign-extended). A constant outside the window is not fused — it
 materializes through `const` (or the move-wide family for `u64` patterns)
-and the register form is used (§10). **The float families have no
-immediate forms**: every float constant materializes through `const`.
 
 **All comparisons** use the C-type families in §7. Integer constants in the
 7-bit immediate window use the C-type `slti`/`sgti`/`seqi`/`snei` families;
@@ -754,17 +795,17 @@ swap) — two instructions, the comparison followed by `not` writing the
 result slot read-modify-write. The
 `byte` ordering uses `sltu` (with `not(sltu)` for the `ge` form); equality uses `seq`/`sne`.
 
-Integer comparison opcodes carry no width variant. Every 32-bit producer
-stores its value as a canonical 64-bit cell (§4), so the comparison and
-branch families select only signed or unsigned 64-bit ordering. The float
-families retain their `f32`/`f64` variants.
+Integer comparison opcodes carry no width variant: the typed arithmetic
+of §4 stores every 32-bit result as its rep's canonical 64-bit cell, so
+the comparison and branch families select only signed or unsigned 64-bit
+ordering. The float families retain their `f32`/`f64` variants.
 
 **The inline-ID rows** carry 7-bit dense indexes (`[0, 127]`): `MemberId`
 for `load_member`/`read_field`/`read_tuple`/`read_payload`, a register or
 imm7 index for `read_index`/`read_indexi`, `DestructureDescId` in `a` for
 `unpack_variant`/`borrow_variant`, and `TypeId` for `type_is`/`any_pack_*`/
 `any_unpack_*`. An ID of 128 or more is a compile-time rejection
-(`error.IdOutOfRange`) — v10 adds no wide-ID fallback. `tail`'s `c` is
+(`error.IdOutOfRange`) — there is no wide-ID fallback. `tail`'s `c` is
 validated zero. `cmov`
 reads the implicit condition register.
 
@@ -901,8 +942,9 @@ Branch by `offs10` when `lhs != imm7`.
 # 6. Opcode tables: I-type
 
 Every opcode with the 3-bit prefix `110` shares the layout
-`code(6) | a(7) | imm16`. The 32 assigned opcodes occupy codes `0–31`;
-codes `32–63` are reserved and rejected. `a` is the single register and
+`code(6) | a(7) | imm16`. The 31 assigned opcodes occupy codes `0–31`
+(selector 10 reserved); codes `32–63` are reserved and rejected. `a` is
+the single register and
 `imm16` a 16-bit value, ID, or offset.
 
 #### I-type — register + imm16 — 31 opcodes
@@ -968,17 +1010,15 @@ Terminator.
 | `switch` | Jump to the arm for tag `a` in descriptor `imm16` | T | T |
 | `jalr` | `call(read(a) + signExtend16(imm16))` | T | T |
 
-The I-type selector 10 is **reserved** — the slot the v9
-`result_take` occupied. The v10 call-result transfer is the generic
+The I-type selector 10 is **reserved** — it keeps the `slot_*`/`spill_*`
+encodings fixed. The call-result transfer is the generic
 `take` (§8), a plain register transfer: the non-void call's result is
 published by the callee's `ret` into the caller register `F(L+3+O-A)`
 ([LLIR Specification](Stilla%20LLIR%20Specification.md) §5) and
 consumed by exactly one `take dst, F(L+3+O-A)` at the fallthrough —
 or, when the lowering coalesced the result onto the alias itself
 (Step 8, direct calls only, result not live across another call), read
-in place with no take. The
-reserved selector keeps the `slot_*`/`spill_*` encodings fixed across
-the v9 → v10 bump.
+in place with no take.
 
 **Spill and slot transfer**
 
@@ -1210,22 +1250,30 @@ unavailable; a callee does not inherit the caller's condition.
 | --- | --- | --- | --- |
 | `cvt.b.i32` | `a = cast.b→i32(b)` | — | — |
 | `cvt.b.u32` | `a = cast.b→u32(b)` | — | — |
-| `cvt.b.i64` | `a = cast.b→i64(b)` | — | — |
-| `cvt.b.u64` | `a = cast.b→u64(b)` | — | — |
 | `cvt.b.f32` | `a = cast.b→f32(b)` | — | — |
 | `cvt.b.f64` | `a = cast.b→f64(b)` | — | — |
 | `cvt.i32.b` | `a = cast.i32→b(b)` | — | — |
 | `cvt.i32.u32` | `a = cast.i32→u32(b)` | — | — |
-| `cvt.i32.i64` | `a = cast.i32→i64(b)` | — | — |
-| `cvt.i32.u64` | `a = cast.i32→u64(b)` | — | — |
 | `cvt.i32.f32` | `a = cast.i32→f32(b)` | — | — |
 | `cvt.i32.f64` | `a = cast.i32→f64(b)` | — | — |
 | `cvt.u32.b` | `a = cast.u32→b(b)` | — | — |
 | `cvt.u32.i32` | `a = cast.u32→i32(b)` | — | — |
-| `cvt.u32.i64` | `a = cast.u32→i64(b)` | — | — |
-| `cvt.u32.u64` | `a = cast.u32→u64(b)` | — | — |
 | `cvt.u32.f32` | `a = cast.u32→f32(b)` | — | — |
 | `cvt.u32.f64` | `a = cast.u32→f64(b)` | — | — |
+| `cvt.f32.b` | `a = cast.f32→b(b)` | — | — |
+| `cvt.f32.i32` | `a = cast.f32→i32(b)` | — | — |
+| `cvt.f32.u32` | `a = cast.f32→u32(b)` | — | — |
+| `cvt.f32.f64` | `a = cast.f32→f64(b)` | — | — |
+| `cvt.f64.b` | `a = cast.f64→b(b)` | — | — |
+| `cvt.f64.i32` | `a = cast.f64→i32(b)` | — | — |
+| `cvt.f64.u32` | `a = cast.f64→u32(b)` | — | — |
+| `cvt.f64.f32` | `a = cast.f64→f32(b)` | — | — |
+| `cvt.b.i64` | `a = cast.b→i64(b)` | — | — |
+| `cvt.b.u64` | `a = cast.b→u64(b)` | — | — |
+| `cvt.i32.i64` | `a = cast.i32→i64(b)` | — | — |
+| `cvt.i32.u64` | `a = cast.i32→u64(b)` | — | — |
+| `cvt.u32.i64` | `a = cast.u32→i64(b)` | — | — |
+| `cvt.u32.u64` | `a = cast.u32→u64(b)` | — | — |
 | `cvt.i64.b` | `a = cast.i64→b(b)` | — | — |
 | `cvt.i64.i32` | `a = cast.i64→i32(b)` | — | — |
 | `cvt.i64.u32` | `a = cast.i64→u32(b)` | — | — |
@@ -1238,47 +1286,37 @@ unavailable; a callee does not inherit the caller's condition.
 | `cvt.u64.i64` | `a = cast.u64→i64(b)` | — | — |
 | `cvt.u64.f32` | `a = cast.u64→f32(b)` | — | — |
 | `cvt.u64.f64` | `a = cast.u64→f64(b)` | — | — |
-| `cvt.f32.b` | `a = cast.f32→b(b)` | — | — |
-| `cvt.f32.i32` | `a = cast.f32→i32(b)` | — | — |
-| `cvt.f32.u32` | `a = cast.f32→u32(b)` | — | — |
 | `cvt.f32.i64` | `a = cast.f32→i64(b)` | — | — |
 | `cvt.f32.u64` | `a = cast.f32→u64(b)` | — | — |
-| `cvt.f32.f64` | `a = cast.f32→f64(b)` | — | — |
-| `cvt.f64.b` | `a = cast.f64→b(b)` | — | — |
-| `cvt.f64.i32` | `a = cast.f64→i32(b)` | — | — |
-| `cvt.f64.u32` | `a = cast.f64→u32(b)` | — | — |
 | `cvt.f64.i64` | `a = cast.f64→i64(b)` | — | — |
 | `cvt.f64.u64` | `a = cast.f64→u64(b)` | — | — |
-| `cvt.f64.f32` | `a = cast.f64→f32(b)` | — | — |
 
 # 8. Opcode tables: E-type
 
 Every opcode with the 6-bit prefix `111001` shares the layout
 `code(6) | reserved(6) = 0 | a(7) | b(7)` — the same body shape as C-type,
-distinguished only by the prefix. The 37 assigned opcodes occupy codes
-`0–43` (with `1–3` and `13/15/17/19` reserved — the retired integer-`neg`
-members and the retired unsigned `clz`/`popcount` members); codes
-`44–63` are reserved. A nonzero reserved field is rejected.
-The operand roles are fixed per opcode: the unary and canonicalization
-rows read `a = dst, b = src`; the transfer/lifecycle rows vary as listed.
-The E-type holds the typed unary operations (outside the casts), the
-32-bit canonicalization pair, the copy/borrow/move/take transfers, the
-counted lifecycle, and the return/tail/trap terminators.
+distinguished only by the prefix. The 38 assigned opcodes occupy codes
+`0–43` (with `6–7` and `13/15/17/19` reserved); codes `44–63` are reserved. A nonzero reserved field is
+rejected. The operand roles are fixed per opcode: the unary rows read
+`a = dst, b = src`; the transfer/lifecycle rows vary as listed. The
+E-type holds the typed unary operations (outside the casts), the
+copy/borrow/move/take transfers, the counted lifecycle, and the
+return/tail/trap terminators.
 `cmov` is the one ternary transfer — it needs three register operands and
 lives in R-type (§4); the E-type body carries only two.
 
-**Typed unary.** `neg` is widthless — one untyped integer opcode
-computing on the canonical 64-bit cell (its 32-bit sequence adds
-`sext32`, §4), with `neg.f32`/`neg.f64` float members; `abs`
+**Typed unary.** `neg` is a typed integer family — the reps `i32, u32,
+i64, u64` (two's-complement negation at the named width, result
+canonical per rep) — with `neg.f32`/`neg.f64` float members; `abs`
 is a **4-rep family with the declared order `i32, i64, f32, f64`** — the
 integer subfamily is the signed integers only (unsigned `abs` is the
 identity and has no opcode) followed by the float subfamily. `clz`/
 `popcount` are integer-2 families — the width selectors `i32`/`i64`,
 valid for both signed and unsigned inputs (counts are sign-agnostic,
 §4); `sqrt`/`floor`/`ceil`/`trunc`/`round`
-are float-2 families. All unary rows are total except the signed-rep
-integer `neg`/`abs` wrapping rules (WebAssembly semantics, §4) and never
-trap.
+are float-2 families. All unary rows are total except the integer
+`neg`/`abs` wrapping rules at their named widths (WebAssembly semantics,
+§4) and never trap.
 
 **Transfer.** `not` is the boolean complement, may read/write `cond` in
 place (`not cond, cond`). `copy` is a bit-copy: it may read `zero` (when
@@ -1287,8 +1325,7 @@ and may write `cond`; the general `copy dst, zero` for a non-bool type is
 materialized as a typed `const` by the lowering. `borrow` and `move`
 require real slots on both sides (no special may name them) and their
 results may not be discarded; `move` transfers ownership and uninitializes
-the source. `take dst, src` is the **generic take** — the v10 successor of
-v9's `result_take`: `dst` may be any destination including `zero` (a
+the source. `take dst, src` is the **generic take**: `dst` may be any destination including `zero` (a
 `zero` destination discards the value — only void/Copy results may be
 discarded, §3.2), the source must be a real F/T register, and the
 **source is cleared** (uninitialized) after the transfer. The post-call
@@ -1315,26 +1352,21 @@ void returns write `zero`); `b` is zero (validated). `tailcall_self`
 reuses the current frame, preserves `ra`, and takes no operands (`a`/`b`
 zero). `trap` terminates unconditionally (`a`/`b` zero).
 
-#### E-type — unary, canonicalization, transfer, lifecycle, and control — 41 opcodes
+#### E-type — unary, transfer, lifecycle, and control — 38 opcodes
 
-**neg** — widthless integer, then `f32, f64`
+**neg** — reps `i32, u32, i64, u64, f32, f64`
 
-`a = -b` — two's complement on the full canonical cell; the sign-agnostic result wraps modulo 2⁶⁴ (WebAssembly semantics, §4), and a 32-bit operand type's `neg; sext32` sequence wraps it modulo 2³². Never traps.
+`a = -b` — two's-complement negation at the named width; wraps
+(WebAssembly semantics, §4); result canonical per rep. Never traps.
 
 | Opcode | Comment |
 | --- | --- |
-| `neg` | negate a 32- or 64-bit integer cell |
+| `neg.i32` | negate 32-bit signed |
+| `neg.u32` | negate 32-bit unsigned |
+| `neg.i64` | negate 64-bit signed |
+| `neg.u64` | negate 64-bit unsigned |
 | `neg.f32` | negate 32-bit float |
 | `neg.f64` | negate 64-bit double float |
-
-**32-bit canonicalization** — untyped, no rep
-
-`sext32`: `a = signExtend32(low 32 bits of b)` — the canonical cell of a 32-bit result. `zext32`: `a = zeroExtend32(low 32 bits of b)` — the operand form the full-cell unsigned operations require.
-
-| Opcode | Comment |
-| --- | --- |
-| `sext32` | sign-extend 32→64 |
-| `zext32` | zero-extend 32→64 |
 
 **abs** — reps `i32, i64, f32, f64`
 
@@ -1425,7 +1457,6 @@ member of the same width (`popcount.u32` → `popcount.i32`,
 | `copy` | `a = b` | — | — |
 | `borrow` | `a = borrow(b)` | — | — |
 | `move` | `a = move(b)` | — | — |
-| `take` | `a = take(b)`; clear `b` | — | — |
 | `release` | `release(a)` | — | — |
 | `copy_retain` | `a = retain(b)` | — | — |
 | `replace_copy` | `tmp = retain(b); release(a); a = tmp` | — | — |
@@ -1434,6 +1465,7 @@ member of the same width (`popcount.u32` → `popcount.i32`,
 | `ret` | `return a` | — | T |
 | `tailcall_self` | Install prepared arguments and jump to the current function entry | — | T |
 | `trap` | Terminate with a runtime trap | — | T |
+| `take` | `a = take(b)`; clear `b` | — | — |
 
 # 9. Opcode tables: U-type
 
@@ -1476,8 +1508,8 @@ immediate shifted left 12 as a pc-relative displacement.
 ## 9.1 j — the link-less jump
 
 Conceptually `j` and `jal` differ — a frame call versus an
-intra-function jump — and they remain separate logical opcodes (209
-vs. 210). At the encoding level, however, `j` extends the U-type `jal`
+intra-function jump — and they remain separate logical opcodes (270
+vs. 271). At the encoding level, however, `j` extends the U-type `jal`
 slot: it is the same word with the register field carrying the `zero`
 special register (`0x00`):
 
@@ -1503,10 +1535,10 @@ two's-complement intervals — the asymmetric ends are the normative bounds
 (any "reach ±512"-style shorthand elsewhere in this document cites the
 magnitude, not the bound):
 
-| Item | v10 range |
+| Item | range |
 | --- | --- |
-| signed fused immediate (`addi`/`subi`/`muli`/`divi`/`remi`/`maddi`/`shri`; C-type `slti`/`sgti`/`seqi`/`snei`; B-type `blti`/`beqi`/`bnei`) | `[-64, 63]`, sign-extended from the 7-bit pattern |
-| mask/unsigned fused immediate (`addiu`/`subiu`/`muliu`/`diviu`/`remiu`/`maddiu`/`shriu`; `andi`/`ori`/`xori`; `shli` counts) | `[0, 127]`, zero-extended |
+| signed fused immediate (the `.i32`/`.i64` members of `addi`/`subi`/`muli`/`divi`/`remi`/`maddi`/`shri`; C-type `slti`/`sgti`/`seqi`/`snei`; B-type `blti`/`beqi`/`bnei`) | `[-64, 63]`, sign-extended from the 7-bit pattern |
+| mask/unsigned fused immediate (the `.u32`/`.u64` members of the same families; `andi`/`ori`/`xori`; `shli` counts) | `[0, 127]`, zero-extended |
 | conditional branch `offs10` (all B-type) | `[-512, 511]` |
 | `jal`/`j` offset | `[-524288, 524287]` (signed 20-bit, instruction granularity) |
 | `auipc`/`lui` upper immediate | every raw 20-bit pattern; `signExtend20(imm) << 12` |
@@ -1518,16 +1550,14 @@ magnitude, not the bound):
 **Fusion windows.** A constant fuses into an immediate-form opcode only
 when it fits the opcode's window; otherwise it materializes through
 `const` (or move-wide for `u64` patterns) and the register form is used.
-The signed variants sign-extend the raw 7-bit pattern (so `0x7f` is −1);
-the unsigned variants and the mask/count forms zero-extend it (so `0x7f`
-is 127; `andi F0, F1, 0x7f` masks with `0x0000007f`). Shift counts are
-masked to the low 6 bits (mod 64) at decode — a shift never traps
-(`x << 32` is `x` at 64 bits). A 32-bit shift's mod-32 count semantics
-are a lowering obligation (§4): the register form masks through
-`andi T15, count, 31`, and a fused count is pre-reduced mod 32 by the
-peephole. The immediate forms compute at 64 bits, so a fused 32-bit
-operation keeps its sequence's `sext32` (§4). **The float families have
-no immediate forms** — every float constant materializes through `const`.
+The `.i*` members sign-extend the raw 7-bit pattern (so `0x7f` is −1);
+the `.u*` members and the mask/count forms zero-extend it (so `0x7f` is
+127; `andi F0, F1, 0x7f` masks with `0x0000007f`). Shift counts are
+masked to the rep's width by the opcode (mod 32 at the 32-bit reps, mod
+64 otherwise) — a shift never traps (`shl.i64 x, 32` is `x`; `shl.i32 x,
+32` is 0), and a fused count may be pre-reduced by the lowering with the
+opcode masking it again. **The float families have no immediate forms**
+— every float constant materializes through `const`.
 An `imm` colliding with a special-register encoding is an ordinary
 immediate (`0x6d` inside an I-type `imm16` is the value 109; in a
 sign-extending field `0x6d` is −19); the interpreter never treats it as a
@@ -1799,8 +1829,8 @@ trust-boundary list ([LLIR Specification](Stilla%20LLIR%20Specification.md) §8)
 
 - a word whose top two bits are `10` (the reserved class), a word whose
   top bits are `11` but match no format prefix, an unassigned code in any
-  format (R codes 71–511; B codes 20–63; E codes 44–63;
-  I codes 31–63 **and the reserved I-type selector 10**), or a `11101`
+  format (R codes 116–511; B codes 20–63; E codes 44–63;
+  I codes 32–63 **and the reserved I-type selector 10**), or a `11101`
   word whose register field is neither `ra`
   nor `zero`;
 - a C-type/E-type word whose six reserved bits are nonzero;
@@ -1867,10 +1897,10 @@ Validation is **structural only**: it checks shapes, ranges, tags, and
 bounds — it does not re-prove SSA dominance, ownership, borrow
 provenance, or lifecycle ordering, which the frontend has already
 established ([LLIR Specification](Stilla%20LLIR%20Specification.md) §8).
-v10 performs no typed dataflow analysis and derives no execution plan; the
-opcode — a float rep, an integer signedness, or a canonicalization
-sequence — and the descriptor-carried types are the single source of
-operand types.
+It performs no typed dataflow analysis and derives no execution plan; the
+opcode — a float rep or an integer arithmetic member's
+`i32`/`u32`/`i64`/`u64` — and the descriptor-carried types are the
+single source of operand types.
 
 # 15. Non-goals
 
@@ -1879,8 +1909,8 @@ representation, the frame/call transfer contract, module-instantiation
 lifecycle, host vtables, GC, concurrency, JIT compilation, source maps,
 debug information, and a stable file format — are listed in [Stilla LLIR
 Specification](Stilla%20LLIR%20Specification.md). This document
-additionally fixes the opcode set: §4–§9 are the complete set — 227
-logical opcodes — and adding an opcode is a specification change. The v10
+additionally fixes the opcode set: §4–§9 are the complete set — 273
+logical opcodes — and adding an opcode is a specification change. The
 set is **semantically trusted, structurally validated**: it is not a
 security boundary for arbitrary external LLIR ([LLIR
 Specification](Stilla%20LLIR%20Specification.md) §8).
@@ -1894,7 +1924,7 @@ the four little-endian bytes.
 
 | Example | Logical opcode | Encoded | Word | Bytes (LE) |
 | --- | --- | --- | --- | --- |
-| normal R-type | `add` | `00` + code 0 + `a=F1,b=F2,c=F3` (`0x14`,`0x15`,`0x16`) | `0x00050a96` | `96 0a 05 00` |
+| normal R-type | `add.i32` | `00` + code 0 + `a=F1,b=F2,c=F3` (`0x14`,`0x15`,`0x16`) | `0x00050a96` | `96 0a 05 00` |
 | C-type immediate comparison | `slti` | `111000` + code 16 + `a=F0,b=0x7f` | `0xe10009ff` | `ff 09 00 e1` |
 | B-type bit-test | `tbz` | `01` + code 18 + `lhs=F0, bit=5, offs10=-1` | `0x522617ff` | `ff 17 26 52` |
 | negative B conditional offset | `beq` | `01` + code 0 + `lhs=F1, rhs=F2, offs10=-2` | `0x402857fe` | `fe 57 28 40` |
@@ -1905,7 +1935,7 @@ the four little-endian bytes.
 | I-type `jalr` | `jalr` | `110` + code 11 + `a=T0, imm16=-1` | `0xc583ffff` | `ff ff 83 c5` |
 | C-type cast | `cvt.i32.u32` | `111000` + code 27 + `a=F0, b=F1` | `0xe1b00994` | `94 09 b0 e1` |
 | C-type comparison | `seq` | `111000` + code 0 + `a=F1, b=F2` | `0xe0000a15` | `15 0a 00 e0` |
-| E-type representative | `neg` | `111001` + code 0 + `a=F0, b=F1` | `0xe4000994` | `94 09 00 e4` |
+| E-type representative | `neg.i32` | `111001` + code 0 + `a=F0, b=F1` | `0xe4000994` | `94 09 00 e4` |
 | E-type return | `ret` | `111001` + code 40 + `a=0, b=0` | `0xe6800000` | `00 00 80 e6` |
 | U-type `lui` | `lui` | `11111` + `a=F0 (0x13), imm20=1` | `0xf9300001` | `01 00 30 f9` |
 | U-type `auipc` | `auipc` | `11110` + `a=F0 (0x13), imm20=-1` | `0xf13fffff` | `ff ff 3f f1` |

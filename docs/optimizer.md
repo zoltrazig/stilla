@@ -46,25 +46,24 @@ with the driver entry is [passes.md](passes.md).
 
 ## The LLIR lowering boundary (separate from the CFG optimizer)
 
-The redundancy elimination at the CFG → LLIR *boundary* is
-not a CFG rewrite. It lives in the typed layer
-(`cfg_lower_typed.zig`, `cfg_lower_llir_emit.zig`): a value-form lattice
-(the top-bits state of the 64-bit cell) is computed once per function,
-and the expander uses it to elide a canonicalization record whose operand
-form makes it a no-op (`typed.elideLeadingZext` — a leading `zext32` on
-an already-zero-extended operand of a u32 `div`/`rem`/`min`/`max`/`shr`).
-The expander also owns the staged immediate fusion (step 6): a 32-bit
-`div`/`rem`/`shl`/`shr` with a fuse-eligible constant is emitted as the
-immediate form, and the constant's `zext32`/`andi` staging record is never
-written (it reads the zero-extended staging register). This is distinct
-from the record-level peepholes that remain in `llir_fusion.zig` (the
-non-staged and 64-bit immediate fusion, the `le`/`ge` comparison
-`not`-kill, and the multiply-accumulate fuse), which run on the
-already-emitted widthless stream. The CFG-side CSE stays at construction
-and in `cfg_cse.zig`. The emitter consumes the form lattice
-(`typed.compute` → `func_forms`) for that residual elimination only; no
-CSE runs on the un-expanded typed IR in production — `typedOps` /
-`printTyped` are the inspection/test surface for what Layer A sees.
+The typed opcode choice at the CFG → LLIR *boundary* is not a CFG
+rewrite. It lives in the typed layer (`cfg_lower_typed.zig`,
+`cfg_lower_llir_emit.zig`): each arithmetic / comparison / cast node
+becomes one `TypedOp` (the operand's rep in the opcode —
+`add.i32`/`shr.u64`), and the emitter writes exactly one record per
+node — no canonicalization records, no staging register, no value-form
+lattice: every producer leaves its canonical cell canonical by
+construction. Immediate fusion is part
+of the same choice: an arithmetic node whose right operand is a
+constant inside the rep's immediate window lowers as the immediate form
+(`addi.i32`, `divi.u64`) and the single-use `const` slot read drops out.
+This is distinct from the record-level peepholes that remain in
+`llir_fusion.zig` (the remaining immediate fusion outside the expander,
+the `le`/`ge` comparison `not`-kill, and the multiply-accumulate fuse),
+which run on the already-emitted record stream. The CFG-side CSE stays
+at construction and in `cfg_cse.zig`. No CSE runs on the typed ops in
+production — `typedOps` / `printTyped` are the inspection/test surface
+for what Layer A sees.
 
 ## AIR validator (Pass 6.1)
 

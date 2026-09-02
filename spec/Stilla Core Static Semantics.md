@@ -154,7 +154,7 @@ An opaque value is *Unique* by declaration, irrespective of its type arguments.
 
 No construction, member access, or destructuring is defined on an opaque value: a struct literal, variant construction, member access, struct pattern, or consuming destructure over an opaque type is a compile-time error.
 
-An opaque value may be a plain, `borrow`, or `move` parameter; a return value; an element of `list`, `box`, or `tuple`; and an `any` payload, recovered with the ordinary `as` / `match` operations.
+An opaque value may be a `borrow` or `move` parameter (never plain — a plain parameter accepts only *Copy* argument types); a return value; an element of `list`, `box`, or `tuple`; and an `any` payload, recovered with the ordinary `as` / `match` operations.
 
 Destruction of an opaque value dispatches to the host type's destructor (the Runtime specification); an opaque type has no user `drop` hook.
 

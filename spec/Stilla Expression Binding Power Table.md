@@ -16,7 +16,7 @@
 >   level: lexical tokens, types, patterns, statements, declarations. It
 >   references this document for `expression`.
 > - **the Core specification** — normative meaning of the constructs (its
->   operator discussions, e.g. Core §16, describe the same structure this
+>   operator discussions, e.g. Types & Ownership §16, describe the same structure this
 >   document fixes syntactically).
 >
 > This document replaces the layered expression productions that earlier
@@ -100,7 +100,7 @@ Conventions used throughout this document:
 Levels in one ascending line (loosest → tightest):
 
 ```
-or < and < comparison < | < ^ < & < <<,>> < +,- < *,/,% < as < postfix-suffix
+or < and < comparison < | < ^ < & < <<,>> < +,- < *,/,% < `- ! move` (prefix) < as < postfix-suffix
 ```
 
 or, comparing the former ABNF rules:
@@ -118,7 +118,7 @@ tighter than everything.
 ## Operator-by-operator notes
 
 - **`or` / `and`** — ordinary left-associative boolean operators
-  (Core §16). `a or b and c` groups `a or (b and c)`.
+  (Types & Ownership §16). `a or b and c` groups `a or (b and c)`.
 - **Comparisons** — a comparison's right operand is parsed at the
   bitwise-`|` level, so `a < b | c` groups `a < (b | c)` and `a == b + c`
   groups `a == (b + c)`, but `a < b or c` groups `(a < b) or c`.
@@ -131,16 +131,16 @@ tighter than everything.
   never opens a nested comparison either: it is parsed at power 4, which
   excludes comparison (3) and looser levels.
 - **Bitwise operators** — sit between comparison and shift, like C and
-  Python (Core §16.1): `|` loosest, `&` tightest. `a | b ^ c` groups
+  Python (Types & Ownership §16.1): `|` loosest, `&` tightest. `a | b ^ c` groups
   `a | (b ^ c)`; `a & b | c` groups `(a & b) | c`; all three are
   left-associative; all bind tighter than comparisons (`a & b == c` is
   `(a & b) == c`) and looser than shifts (`a & b << c` is `a & (b << c)`).
 - **Shifts** — `a + b << c` groups `(a + b) << c`, like C and Zig
-  (Core §16.3); a shifted expression used in arithmetic must be
+  (Types & Ownership §16.3); a shifted expression used in arithmetic must be
   parenthesized.
 - **`as` (cast)** — the only infix operator whose right side is a *type*
   rather than an expression: `x as type`, chained for repeated casts
-  (Core §16). Because the right side is a type, `as` is implemented as a
+  (Types & Ownership §16). Because the right side is a type, `as` is implemented as a
   postfix-style loop inside the led, not as a recursive expression parse.
   It binds tighter than `* / %` (a cast operand of an arithmetic operator
   need not be parenthesized: `x as int32 * y` is `(x as int32) * y`) and
@@ -174,9 +174,9 @@ Prefix operators are nuds. `-` and `!` parse their operand at power 10
 
 | Prefix form | Operand | Note |
 | --- | --- | --- |
-| `- expression` | parsed at power 10 | numeric negation (Core §16). There is **no negative literal**: `-1` is negation applied to the literal `1`, matching the lexical grammar, where `-` is never part of an `integer` or `float` token. |
-| `! expression` | parsed at power 10 | logical negation (Core §16). |
-| `move identifier` | a single identifier, not an expression | names a complete local binding to move (Core §10.3); there is no general borrow expression. `move` does not recurse: `move x as int32` does not parse. |
+| `- expression` | parsed at power 10 | numeric negation (Types & Ownership §16). There is **no negative literal**: `-1` is negation applied to the literal `1`, matching the lexical grammar, where `-` is never part of an `integer` or `float` token. |
+| `! expression` | parsed at power 10 | logical negation (Types & Ownership §16). |
+| `move identifier` | a single identifier, not an expression | names a complete local binding to move (Types & Ownership §10.4); there is no general borrow expression. `move` does not recurse: `move x as int32` does not parse. |
 
 ## The postfix chain
 
@@ -222,7 +222,7 @@ Primary forms (nuds) with no operator to their left:
 | void | `(` `)` | the empty tuple, the unique value of type `void` |
 | paren / tuple | `( expression )`, `( e, ... )`, `( e, )` | `(e)` is a parenthesized expression, not a single-element tuple; a one-element tuple is written `(e,)` |
 | list literal | `[ e, ... ]` (optional trailing comma) | there is no index-read suffix; `[` after a path is always type arguments |
-| lambda | `fn ( param-list ) -> type block` | `fn` in expression position; no type parameters; the return type is required (Core §6.3) |
+| lambda | `fn ( param-list ) -> type block` | `fn` in expression position; no type parameters; the return type is required (Core Language §6.3) |
 | `if` | `if ( expression ) block [ else ( block / if-expression ) ]` | control-flow expression |
 | `match` | `match ( expression ) { pattern => expression, ... }` | at least one arm required |
 | `import` | `import ( string )` | module-level initializer only (static semantics) |

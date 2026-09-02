@@ -675,9 +675,9 @@ The op spellings are the canonical spellings from the op schema. The `load_membe
 
 ---
 
-# 11. Lowering rules (source → AIR)
+# 11. Lowering rules
 
-The frontend walks the annotated, monomorphic AST with a builder that appends instructions to the current block and introduces blocks at control-flow points. The mapping:
+This section maps **source → AIR** constructs. The frontend walks the annotated, monomorphic AST with a builder that appends instructions to the current block and introduces blocks at control-flow points. The mapping:
 
 | source construct | AIR |
 | --- | --- |

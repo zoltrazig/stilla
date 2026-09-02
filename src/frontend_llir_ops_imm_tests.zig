@@ -87,7 +87,7 @@ test "2.14 LLIR lowering: compiled const+op folds to immediate variants" {
     for (image.instructions) |rec| {
         const op = llir.decode(rec).?.op;
         switch (op) {
-            .addi => {
+            .addi_i32 => {
                 n_addi += 1;
                 try testing.expectEqual(@as(u32, 2), llir.decode(rec).?.c); // imm 2
             },
@@ -165,21 +165,21 @@ test "2.14 LLIR lowering: shifts lower to the unified family and fuse counts" {
     for (image.instructions) |rec| {
         const d = llir.decode(rec).?;
         switch (d.op) {
-            .shli => {
+            .shli_i32 => {
                 n_shli += 1;
                 try testing.expectEqual(@as(u32, 2), d.c); // `a << 2`
             },
-            .shri => {
+            .shri_i32 => {
                 n_shri += 1;
                 try testing.expectEqual(@as(u32, 3), d.c); // `a >> 3`
             },
-            .shl => {
+            .shl_i32 => {
                 n_shl += 1;
                 // `a << b` (register count) and `2 << a` (constant on
                 // the left — never fused, shifts are not commutative):
                 // `c` carries the count's slot index.
             },
-            .shru => {
+            .shr_u32 => {
                 n_shru += 1; // `a >> b` (u32), count in `c`
             },
             else => {},
@@ -208,7 +208,7 @@ test "2.14 LLIR lowering: shifts lower to the unified family and fuse counts" {
     var n_shrui: usize = 0;
     for (image2.instructions) |rec| {
         const d = llir.decode(rec).?;
-        if (d.op == .shriu) {
+        if (d.op == .shri_u32) {
             n_shrui += 1;
             try testing.expectEqual(@as(u32, 1), d.c);
         }
@@ -216,13 +216,12 @@ test "2.14 LLIR lowering: shifts lower to the unified family and fuse counts" {
     try testing.expectEqual(@as(usize, 1), n_shrui);
 }
 
-test "2.14 LLIR lowering: u32 div/rem by a const fuses in the expander and reads the zero-extended staging" {
-    // The expander (B.1, step 6) emits the immediate form for an unsigned
-    // 32-bit div by a constant and never writes the constant's `zext32`
-    // staging record. The dividend (a `uint32` parameter, form unknown) is
-    // still zero-extended through `T15` before the widthless `diviu`, so a
-    // sign-extended operand cell divides correctly; the fused constant's
-    // record is dropped by the compaction.
+test "2.14 LLIR lowering: u32 div/rem by a const fuses to the typed immediate form" {
+    // The typed `div.u32` register form lowers as one record (§4), and
+    // the fusion pass (2.14) rewrites it to `divi.u32` — the immediate
+    // reads the dividend's canonical cell directly; no staging record
+    // exists in v10. The fused constant's record is dropped by the
+    // compaction.
     var t = try cfg_parse.parseText(
         \\module "app" {
         \\func @h(a: uint32) -> uint32 {
@@ -239,20 +238,20 @@ test "2.14 LLIR lowering: u32 div/rem by a const fuses in the expander and reads
     var b = cfg_lower_llir.Builder.init(arena.allocator(), &t.program);
     const image = try b.lowerLlir();
 
-    const norm_stage: u32 = llir.temp_base + (llir.temp_count - 1);
+    const dividend_slot = b.slotOf(t.program.funcs[0].values[0]);
     var n_diviu: usize = 0;
     var n_divu: usize = 0;
     for (image.instructions) |rec| {
         const d = llir.decode(rec).?;
         switch (d.op) {
-            .diviu => {
+            .divi_u32 => {
                 n_diviu += 1;
                 try testing.expectEqual(@as(u32, 7), d.c);
-                // The source is the zero-extended staging register, not the
-                // raw operand, so a sign-extended cell is still correct.
-                try testing.expectEqual(norm_stage, d.b);
+                // The source is the dividend's own slot — the canonical
+                // cell needs no widening.
+                try testing.expectEqual(dividend_slot, d.b);
             },
-            .divu => n_divu += 1,
+            .div_u32 => n_divu += 1,
             else => {},
         }
     }
@@ -470,7 +469,7 @@ test "2.14 LLIR lowering: fused const in a phi-bearing block keeps its own recor
     for (image.instructions) |rec| {
         const d = llir.decode(rec).?;
         switch (d.op) {
-            .addi => {
+            .addi_i32 => {
                 n_addi += 1;
                 try testing.expectEqual(@as(u32, 1), d.c); // imm 1
             },
@@ -584,25 +583,25 @@ test "2.14 LLIR lowering: immediate semantics — raw bit patterns, commute, swa
     for (image.instructions) |rec| {
         const d = llir.decode(rec).?;
         switch (d.op) {
-            .addi => {
+            .addi_i32 => {
                 n_addi += 1;
                 // `%0 + -2` carries -2's 7-bit pattern (0x7e — an
                 // ordinary immediate, never a register; sign-extended
                 // to i32 at decode).
                 try testing.expectEqual(@as(u32, 0x7e), d.c);
             },
-            .addiu => {
+            .addi_u32 => {
                 n_addiu += 1;
                 // `%4 + 8` (u32): a uint32 constant must sit in
                 // [0, 127] for the zero-extending addiu.
                 try testing.expectEqual(@as(u32, 8), d.c);
             },
-            .muli => {
+            .muli_i32 => {
                 n_muli += 1;
                 // `3 * %2` commuted to `%2 * 3`.
                 try testing.expectEqual(@as(u32, 3), d.c);
             },
-            .muliu => {
+            .muli_u32 => {
                 n_muliu += 1;
                 // `%2 * 8` (u32) fused with imm 8.
                 try testing.expectEqual(@as(u32, 8), d.c);
@@ -630,9 +629,9 @@ test "2.14 LLIR lowering: immediate semantics — raw bit patterns, commute, swa
             .sltu => n_sltu += 1,
             .not => n_not += 1,
             // `%0 + %1` (u32 max, 4294967295) does not fit the 7-bit
-            // field, so it stays a register-form `add` reading the
+            // field, so it stays a register-form `add.u32` reading the
             // const's slot.
-            .add => n_add += 1,
+            .add_u32 => n_add += 1,
             else => {},
         }
     }
@@ -739,26 +738,25 @@ test "2.14 LLIR lowering: compaction re-backfills every absolute-PC reference" {
     const then_pc = b.pcOf(then);
     const else_pc = b.pcOf(else_);
 
-    // Entry's records after fusion: addi, sext32, slt, copy dst,
-    // cond, ble — the const is gone (the fused `addi` reads the
-    // immediate), but the add's `sext32` canonicalization stays (the
-    // immediate form computes at 64 bits too); the `gt %2, %0`
+    // Entry's records after fusion: addi, slt, copy dst, cond, ble —
+    // the const is gone (the fused `addi` reads the immediate) and the
+    // typed `add.i32` is a single record, so entry is one record
+    // shorter per fusion than in v9; the `gt %2, %0`
     // condition fuses to a compare-and-branch (`a > b` ⟺ `b < a` →
     // slt, operands swapped, then `copy dst, cond` materializes the
     // bool), and the trailing-j elimination inverts it (`blt` → `ble`,
     // operands exchanged — `!(%0 < %2) ≡ %0 >= %2 ≡ ble %2, %0`): the
     // then block is the next in the layout, so it falls through and
     // the branch carries the else target — no `j` remains.
-    try testing.expectEqual(llir.Opcode.addi, llir.decode(image.instructions[e_pc]).?.op);
-    try testing.expectEqual(llir.Opcode.sext32, llir.decode(image.instructions[e_pc + 1]).?.op);
-    try testing.expectEqual(llir.Opcode.slt, llir.decode(image.instructions[e_pc + 2]).?.op);
-    try testing.expectEqual(llir.Opcode.copy, llir.decode(image.instructions[e_pc + 3]).?.op);
-    const blt_rec = llir.decode(image.instructions[e_pc + 4]).?;
+    try testing.expectEqual(llir.Opcode.addi_i32, llir.decode(image.instructions[e_pc]).?.op);
+    try testing.expectEqual(llir.Opcode.slt, llir.decode(image.instructions[e_pc + 1]).?.op);
+    try testing.expectEqual(llir.Opcode.copy, llir.decode(image.instructions[e_pc + 2]).?.op);
+    const blt_rec = llir.decode(image.instructions[e_pc + 3]).?;
     try testing.expectEqual(llir.Opcode.ble, blt_rec.op);
     // The targets were re-based: then/else starts after the shift,
     // encoded as signed offsets from the branch's own pc.
-    try testing.expectEqual(else_pc, llir.bTypeTarget(e_pc + 4, blt_rec.offs10));
-    try testing.expectEqual(e_pc + 5, then_pc); // the deleted const's record is replaced by the add's sext32 — still a net one-record shift
+    try testing.expectEqual(else_pc, llir.bTypeTarget(e_pc + 3, blt_rec.offs10));
+    try testing.expectEqual(e_pc + 4, then_pc); // the deleted const's record nets one record less
     // Block and function ranges agree with the compacted image.
     try testing.expectEqual(fd.code_start, e_pc);
     try testing.expectEqual(fd.entry_pc, e_pc);
@@ -959,7 +957,7 @@ test "2.15 LLIR lowering: compiled mul+add folds to madd/maddi, literal list rea
             try testing.expectEqual(@as(?llir.Issue, null), llir.checkInstr(rec, slots));
             const d = llir.decode(rec).?;
             switch (d.op) {
-                .madd => {
+                .madd_i32 => {
                     n_madd += 1;
                     // `x * y + c`: accumulator = c's slot (r2), product
                     // operands x/y in their original order (r0, r1).
@@ -967,7 +965,7 @@ test "2.15 LLIR lowering: compiled mul+add folds to madd/maddi, literal list rea
                     try testing.expectEqual(llir.frameReg(0), d.b);
                     try testing.expectEqual(llir.frameReg(1), d.c);
                 },
-                .maddi => {
+                .maddi_i32 => {
                     n_maddi += 1;
                     // `x * 2 + c`: accumulator = c's slot (r1), imm = 2.
                     try testing.expectEqual(llir.frameReg(1), d.a);
@@ -1119,7 +1117,7 @@ test "2.15 LLIR lowering: madd semantics — preconditions, f32 rules, slot rewr
         for (image.instructions[fd.code_start..fd.code_end]) |rec| {
             const d = llir.decode(rec).?;
             switch (d.op) {
-                .madd => {
+                .madd_i32 => {
                     n_i32_madd += 1;
                     // @f: `add %2, %3` → dst = the accumulator (r2),
                     // product operands in order (r0, r1).
@@ -1127,7 +1125,7 @@ test "2.15 LLIR lowering: madd semantics — preconditions, f32 rules, slot rewr
                     try testing.expectEqual(b.slotOf(f.values[0]), d.b);
                     try testing.expectEqual(b.slotOf(f.values[1]), d.c);
                 },
-                .maddi => {
+                .maddi_i32 => {
                     n_i32_maddi += 1;
                     // @g: `mul %0, 3` + `add %1, %m`.
                     try testing.expectEqual(b.slotOf(f.values[1]), d.a);
@@ -1145,9 +1143,9 @@ test "2.15 LLIR lowering: madd semantics — preconditions, f32 rules, slot rewr
                 },
                 .mul_f32 => n_f32_mul += 1, // @h: no reorder, no fusion
                 .add_f32 => n_f32_add += 1,
-                .mul => n_i32_mul += 1, // @k (multi-use product), @m (multi-use accumulator)
-                .add => n_i32_add += 1,
-                .neg => n_neg += 1,
+                .mul_i32 => n_i32_mul += 1, // @k (multi-use product), @m (multi-use accumulator)
+                .add_i32 => n_i32_add += 1,
+                .neg_i32 => n_neg += 1,
                 .read_indexi => {
                     n_read_indexi += 1;
                     // @r: two literal-index reads, c = 4 and c = 9.
@@ -1183,7 +1181,7 @@ test "2.15 LLIR lowering: madd semantics — preconditions, f32 rules, slot rewr
     var found_rewritten = false;
     for (image.instructions[f_fd.code_start..f_fd.code_end]) |rec| {
         const d = llir.decode(rec).?;
-        if (d.op == .mul) {
+        if (d.op == .mul_i32) {
             try testing.expectEqual(llir.frameReg(2), d.b); // reads the remapped result slot
             found_rewritten = true;
         }
@@ -1238,7 +1236,7 @@ test "2.15 LLIR lowering: corpus fused multiply-accumulate and immediate-index m
                 const op = llir.decode(rec).?.op;
                 switch (op) {
                     .madd_f32, .madd_f64 => n_madd += 1,
-                    .maddi, .maddiu => n_maddi += 1,
+                    .maddi_i32, .maddi_u32 => n_maddi += 1,
                     .read_indexi => n_read_indexi += 1,
                     else => {},
                 }

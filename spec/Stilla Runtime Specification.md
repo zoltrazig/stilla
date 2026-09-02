@@ -79,8 +79,7 @@ These terms are used throughout this specification. Language-level terms (bindin
   termination (Host Environment).
 - **host-provided module** — a module implemented by the host that exposes a statically
   known Stilla-compatible interface (Host-provided modules).
-- **runtime trap** — a deterministic runtime failure such as overflow, division by zero,
-  invalid list element read, or invalid `any` recovery (Runtime traps and numeric
+- **runtime trap** — a deterministic runtime failure such as division by zero, the signed division-overflow case `int64_min / -1`, an invalid list element read, or an invalid `any` recovery (Runtime traps and numeric
   behavior).
 
 ## 1.5 Conformance
@@ -254,8 +253,10 @@ host modules are ready after registration and have no Stilla initializer.
 Resolution is implementation-defined behind the `ModuleLoader` callback,
 but a symbol must resolve unambiguously before execution.
 
-Import cycles are rejected in Stilla v1.3 (initialization-cycle detection
-is a runtime trap).
+Import cycles among source modules are rejected at compile time in Stilla v1.3
+(Import resolution); the runtime nonetheless detects an initialization cycle
+that arises at load — among independently produced artifacts or host-provided
+modules — and traps at the resolving instruction (Error taxonomy).
 
 The standard library is specified separately.
 
@@ -414,6 +415,8 @@ Every conforming implementation must provide the following minimum interfaces.
 Sections 4.1–4.2 and 4.5–4.9 are members of the importable standard-library
 `builtin` module; Sections 4.3–4.4 are members of the separately importable
 `list` module (Stilla Core Language Specification, Stilla Standard Library).
+The `builtin` module also provides one type member, `builtin.Option`
+(defined in the Standard Library).
 A member with a Stilla body is an ordinary function; a
 bodyless member in the implementation-supplied standard-library bundle is an
 intrinsic that the frontend must expand during source-to-AIR lowering, as defined by the
@@ -858,10 +861,10 @@ copy the complete raw cell; no transfer validates, masks, or rewrites payload bi
 - `int32` arithmetic is performed modulo 2³² and never traps on overflow (WebAssembly
   semantics). `int32` division traps on a zero divisor only — the division-overflow
   case `int32_min div -1` wraps modulo 2³² to `int32_min` and never traps (unlike
-  WebAssembly, whose `i32.div_s` traps on `min / -1`: the widthless canonical cell of
-  the [LLIR Instruction Set](Stilla%20LLIR%20Instruction%20Set.md) executes the
-  division at 64 bits and the lowering's `sext32` truncates the exact quotient, so no
-  32-bit division overflow exists); `int32` remainder traps on a zero divisor only —
+  WebAssembly, whose `i32.div_s` traps on `min / -1`: the typed `div.i32`
+  of the [LLIR Instruction Set](Stilla%20LLIR%20Instruction%20Set.md)
+  computes at 32 bits and wraps, so no 32-bit division overflow exists);
+  `int32` remainder traps on a zero divisor only —
   `int32_min rem -1` is 0 (WebAssembly semantics).
 - `int64`/`uint64` arithmetic is performed modulo 2⁶⁴ and never traps on overflow or
   underflow (WebAssembly semantics extended to 64 bits). `int64` division traps on a zero
