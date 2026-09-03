@@ -21,6 +21,7 @@ const moduleinfo = @import("moduleinfo.zig");
 const lower = @import("lower.zig");
 const cfg_parse = @import("passes/cfg_parse.zig");
 const cfg_validate = @import("passes/cfg_validate.zig");
+const cfg_inline = @import("passes/cfg_inline.zig");
 const testing = std.testing;
 const helpers = @import("frontend_test_support.zig");
 const compileText = helpers.compileText;
@@ -807,6 +808,61 @@ test "Pass 8.0 inlining: nested splices keep block names unique and round-trip" 
     const text2 = try irText(&reparsed);
     defer testing.allocator.free(text2);
     try testing.expectEqualStrings(text, text2);
+}
+
+test "Pass 8.0 print-order renumber honors terminator operands" {
+    // renumberPrintOrder assigns ids in a def-before-use block order so
+    // the text form re-parses (air.md §13). The eligibility test used to
+    // exempt terminator operands, so a block whose `br` condition is
+    // defined in a later-created block printed before that block — a
+    // forward reference the text grammar rejects (only phi incomings may
+    // forward-reference). Regression: an `or`/`and` statement whose
+    // cond value was defined many statements earlier (across inlined-call
+    // joins) printed its `br` before the def and failed the optimizer's
+    // own re-parse check.
+    var t = try cfg_parse.parseText(
+        \\module "app" {
+        \\func @loop(x: int32) -> int32 {
+        \\entry:
+        \\    %1: int32 = const 0
+        \\    j head
+        \\head:
+        \\    %2: bool = lt %1, %0
+        \\    j body
+        \\body:
+        \\    %3: int32 = add %1, %1
+        \\    br %2 ? tail : head
+        \\tail:
+        \\    %4: int32 = add %3, %3
+        \\    ret %4
+        \\}
+        \\}
+    );
+    defer t.arena.deinit();
+    const f = t.program.funcs[0];
+
+    // The rewrite passes can leave a use in a block created before its
+    // def's block (creation order is not dominance order): permute the
+    // block list so the `br` block precedes the block defining its cond.
+    const order = try testing.allocator.alloc(*cfg.BasicBlock, f.blocks.len);
+    defer testing.allocator.free(order);
+    const by_name = [_][]const u8{ "entry", "body", "head", "tail" };
+    for (by_name, 0..) |nm, i| order[i] = @constCast(helpers.findBlock(f.blocks, nm));
+    f.blocks = order;
+
+    try cfg_inline.renumberPrintOrder(f, testing.allocator);
+    const text = try cfg.print(&t.program, testing.allocator);
+    defer testing.allocator.free(text);
+    // The renumbered text is valid SSA text: `body`'s `br %2` prints after
+    // `head`'s definition of `%2`, so the text re-parses.
+    var p = cfg.Parser.init(testing.allocator);
+    defer p.deinit();
+    const reparsed = try p.parse(text);
+    const text2 = try cfg.print(&reparsed, testing.allocator);
+    defer testing.allocator.free(text2);
+    try testing.expectEqualStrings(text, text2);
+    // renumberPrintOrder rebuilt f.values with the testing allocator.
+    testing.allocator.free(f.values);
 }
 
 test "Pass 8.9 optimization harness: corpus compile, optimize, and measure" {

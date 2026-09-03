@@ -45,6 +45,8 @@ behavior the generator can model exactly (no UB in the generator's model):
 
 - scalar literals of every primitive integer width plus `bool`; no float
   literals are ever printed (see float strategy below)
+- boolean logic over comparisons and `!`, including short-circuit
+  `and`/`or` statements
 - wrapping integer arithmetic, truncating `div`/`rem`, bitwise `&`, and
   shifts with width-masked counts
 - explicit `as` casts between every integer/float pair the generator uses
@@ -109,13 +111,10 @@ with the runtime. The generator shapes around them:
 - **Function-body bitwise/`if` contexts.** Values bound from casts and
   function parameters behave specially inside `fn` bodies; stsmith keeps
   function bodies to arithmetic, `&`, shifts, and comparisons.
-- **Short-circuit `and`/`or` in generated statements** can trip stilla's
-  if-conversion ("optimizer invariant violation"); stsmith exercises boolean
-  logic with comparisons and `!` and control flow with recursion and
-  `match` instead.
 - **`==` exists only for `byte/int32/uint32/float32/bool/str`**, so 64-bit
-  equality is asserted as paired `<=`/`>=` on a bound local (a single
-  `and`-joined comparison miscompiles).
+  equality is asserted as an `and`-joined `<=`/`>=` pair on a bound local.
+  (This also exercises short-circuit `and` in statement position; the
+  if-conversion miscompile that used to trip on it is fixed.)
 - **Ordering comparisons do not type integer literals** from the other
   operand, so literals always appear on the right of a typed variable or
   inside a typed `==`.
@@ -131,6 +130,16 @@ with the runtime. The generator shapes around them:
   steps rarely (low flavor weight, sampled again inside the flavor), so most
   seeds pass and seeds that do fail are flagging this implementation bug —
   per the project rule the spec governs, not the runtime.
+- **Inlining a many-call statement can miscompile.** A statement that calls
+  the same pure helper several times (e.g. an integer expression with two
+  `f6()` calls, helpers that nest calls to other helpers, sampled with
+  `--funcs 8`) can compute a wrong result after the inliner splices the
+  helpers; a later `builtin.assert` then panics even though the identical
+  program compiles and runs correctly with the optimizer's inlining step
+  off. This is independent of `and`/`or` (a no-`and`/`or` program with the
+  same shape fails) and reproduces on a build with none of the stsmith
+  workarounds active, so it is a real frontend bug, not a generator-model
+  gap; the generator flags it when the option mix reaches it.
 
 These are documented here so the generator's model stays honest: any
 generated program that fails under `stilla --run` is either a real stilla

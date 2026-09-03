@@ -189,6 +189,15 @@ fn convertDiamond(f: *cfg.IrFunc, b0: *cfg.BasicBlock, allocator: std.mem.Alloca
         try emitted.append(allocator, .{ .phi_result = c.result, .sel_value = v });
     }
     b0.instrs = try out.toOwnedSlice(allocator);
+    // The arms' instructions now live in the cond block; empty the arms so
+    // each Instr has exactly one containing block (the validator's defBlock
+    // scan is first-match over f.blocks — a hoisted instruction left in an
+    // arm whose block precedes the cond would be attributed to the arm and
+    // rejected as not dominating its uses). The emptied arms keep only
+    // their `j`, become unreachable, and are removed by dead-block
+    // elimination, which follows in the driver sequence.
+    b1.instrs = &.{};
+    b2.instrs = &.{};
 
     // Forward every use of each phi result to its select, drop the phis
     // from the join, and redirect the cond block to fall through.

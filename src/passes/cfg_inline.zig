@@ -590,10 +590,11 @@ fn mapOrigin(origin: ?cfg.BorrowOrigin, value_map: *const std.AutoHashMap(*cfg.V
 /// Assign fresh value ids in a def-before-use order, so the printed text
 /// (blocks in `cfg.BlockOrder` — smallest value id first) is valid SSA
 /// text (air.md §13): repeatedly emit the first block whose non-phi
-/// instruction operands are all defined in already-emitted blocks or in
-/// the block itself (phi incomings and terminator operands may
-/// forward-reference). This is a stable topological order of the
-/// use-dependency graph; the block list itself is left in creation order.
+/// instruction and terminator operands are all defined in already-emitted
+/// blocks or in the block itself (only phi incomings may
+/// forward-reference — a loop back edge). This is a stable topological
+/// order of the use-dependency graph; the block list itself is left in
+/// creation order.
 ///
 /// The rewrite passes (copyProp, phiSimplify) substitute values across
 /// blocks and `cfg.renumberValues` preserves the pre-existing relative
@@ -656,14 +657,28 @@ pub fn renumberPrintOrder(f: *cfg.IrFunc, allocator: std.mem.Allocator) !void {
     f.values = try values.toOwnedSlice(allocator);
 }
 
-/// Every non-phi instruction operand of `b` is defined in an emitted block
-/// or in `b` itself (defs earlier in the same block print first).
+/// Every non-phi instruction operand of `b` — and every terminator operand
+/// — is defined in an emitted block or in `b` itself (defs earlier in the
+/// same block print first). Terminator operands (`br` cond, `switch` disc,
+/// `ret` value, `tailcall` args) must hold too: the AIR text grammar lets
+/// only phi incomings reference a value defined later in the text (a loop
+/// back edge), so a cond printed before its definition would not re-parse.
 fn operandsEmitted(b: *const cfg.BasicBlock, own: u32, def_block: *const std.AutoHashMap(*cfg.Value, u32), emitted: []const bool) bool {
     for (b.instrs) |instr| {
         if (instr.op == .phi) continue;
         if (!opOperandsEmitted(instr.op, own, def_block, emitted)) return false;
     }
-    return true;
+    return terminatorOperandsEmitted(b.terminator, own, def_block, emitted);
+}
+
+fn terminatorOperandsEmitted(t: cfg.Terminator, own: u32, def_block: *const std.AutoHashMap(*cfg.Value, u32), emitted: []const bool) bool {
+    return switch (t) {
+        .ret => |v| if (v) |value| valueEmitted(value, own, def_block, emitted) else true,
+        .j, .trap => true,
+        .br => |x| valueEmitted(x.cond, own, def_block, emitted),
+        .@"switch" => |x| valueEmitted(x.disc, own, def_block, emitted),
+        .tailcall => |x| argsEmitted(x.args, own, def_block, emitted),
+    };
 }
 
 fn opOperandsEmitted(op: cfg.Op, own: u32, def_block: *const std.AutoHashMap(*cfg.Value, u32), emitted: []const bool) bool {

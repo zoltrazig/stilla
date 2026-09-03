@@ -608,6 +608,54 @@ test "2.2 LLIR lowering: trailing-j elimination — fall-through else, inverted 
     try testing.expectEqual(@as(?[]const u8, null), try llir_validate.validate(&image, testing.allocator));
 }
 
+test "2.2 LLIR lowering: inverted-branch reach to a backward target is a signed distance" {
+    // The inverted trailing-j form (then body falls through, the branch
+    // carries else) computes the else target's distance from the end of
+    // the cond block to decide whether the ±512 reach holds. The else
+    // target of a loop back edge sits *behind* the cond block, so the
+    // distance is negative — the budget's unsigned subtraction overflowed
+    // (a Debug panic) instead of answering "out of reach". Regression:
+    // seed-12 stsmith output (short-circuit `and`/`or` over inlined
+    // calls) crashed the LLIR budget on exactly this shape.
+    var t = try cfg_parse.parseText(
+        \\module "app" {
+        \\func @loop(x: int32) -> int32 {
+        \\entry:
+        \\    %1: int32 = const 0
+        \\    j head
+        \\head:
+        \\    %2: bool = lt %1, %0
+        \\    j body
+        \\body:
+        \\    %3: int32 = add %1, %1
+        \\    br %2 ? tail : head
+        \\tail:
+        \\    %4: int32 = add %3, %3
+        \\    ret %4
+        \\}
+        \\}
+    );
+    defer t.arena.deinit();
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var b = cfg_lower_llir.Builder.init(arena.allocator(), &t.program);
+    const image = try b.lowerLlir();
+
+    // Layout: entry, head, body, tail — body's br has tail as the next
+    // block (the inverted one-record candidate) and the loop header head
+    // as a backward else target. The budget answers without overflow.
+    const f = t.program.funcs[0];
+    const body = helpers.findBlock(f.blocks, "body");
+    const tail = helpers.findBlock(f.blocks, "tail");
+    try testing.expectEqual(b.pcOf(body), image.blocks[b.block_ids.get(body).?].start_pc);
+    try testing.expectEqual(b.pcOf(tail), image.blocks[b.block_ids.get(tail).?].start_pc);
+    // One record: the inverted branch to head (the backward target) with
+    // the tail body falling through.
+    try testing.expectEqual(@as(u32, 1), b.terminatorRecordCount(body));
+    try testing.expectEqual(@as(?[]const u8, null), try llir_validate.validate(&image, testing.allocator));
+}
+
 test "2.3 LLIR lowering: physical slot mapping and frame layout" {
     var c = try compileText("app", &.{
         .{

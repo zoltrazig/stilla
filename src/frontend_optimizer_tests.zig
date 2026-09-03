@@ -1781,6 +1781,44 @@ test "Pass 8.8 if-conversion turns a pure select diamond branchless" {
     try testing.expect(std.mem.indexOf(u8, out, "br %") == null);
 }
 
+test "Pass 8.8 if-conversion leaves every hoisted instruction in one block" {
+    // A nested `or`/`and` over inlined calls: if-conversion hoists the
+    // inner diamond's arm instructions into its cond block. Regression:
+    // the arms' own instruction lists were never emptied, so each hoisted
+    // instruction lived in two blocks; the validator's defBlock scan
+    // (first match over f.blocks) attributed the def to the arm when the
+    // arm preceded the cond block in creation order, and the conversion
+    // was rejected as "not dominated" (optimizer invariant violation) —
+    // which stsmith hit with short-circuit `and`/`or` statements.
+    var c = try compileOpt("app", &.{
+        .{
+            "app",
+            \\const builtin = import("builtin");
+            \\fn f1() -> int64 {
+            \\    ((-250826282122) >> ((-196082829395) >> (-25495947749))) + (142791762226)
+            \\}
+            \\fn f4() -> uint64 {
+            \\    ((257500157809) & (249363292281)) * ((123056492540) & (165846480652))
+            \\}
+            \\fn main() -> void {
+            \\    let v1: uint32 = 9;
+            \\    let v3: uint64 = 12;
+            \\    let v45: int64 = f1();
+            \\    let v49: bool = (((v45) << (v45)) > (v45)) or ((((f4()) >> (((v45 as uint64)) >> ((v3) << ((v3) & (f4()))))) > (v3)) and (((v1) + ((v45 as uint32))) >= ((v1) & (v1))));
+            \\    builtin.assert(v49 == true, "x");
+            \\}
+        },
+    });
+    defer c.deinit();
+
+    // The conversion completes (the compile validated after if-conversion),
+    // and the short-circuit diamond became a branchless select.
+    const out = try irText(&c.program.?);
+    defer testing.allocator.free(out);
+    try testing.expect(std.mem.indexOf(u8, out, "select ") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "select %") != null);
+}
+
 test "Pass 8.8 if-conversion absorbs short-circuit and/or second operands" {
     // `a > 0 and b > 0`: the short-circuit's else arm is `false`, the
     // then arm is the pure second comparison — the whole `and` becomes

@@ -223,8 +223,11 @@ pub fn terminatorRecordCount(bld: *const Builder, blk: *const cfg.BasicBlock) u3
                         if (Builder.invertBranch(branch_op) == null) return 2;
                     }
                 }
-                const dist = bld.starts_cons.items[bld.block_ids.get(b.else_).?] -
-                    (bld.starts_cons.items[bi] + bld.block_lens_cons.items[bi]) + 1;
+                // The else target may sit behind the current block (a
+                // loop back edge) — offs10 is a signed offset, so the
+                // distance is computed in a signed domain.
+                const dist: i64 = @as(i64, bld.starts_cons.items[bld.block_ids.get(b.else_).?]) -
+                    (@as(i64, bld.starts_cons.items[bi]) + @as(i64, bld.block_lens_cons.items[bi])) + 1;
                 return if (dist >= -512 and dist <= 512) 1 else 2;
             }
             return 2;

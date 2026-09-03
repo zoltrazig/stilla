@@ -668,14 +668,16 @@ const Gen = struct {
         const have_str2 = self.countStrVars() >= 2;
         if (depth == 0) return self.leafBool(have_bv, have_str2, vars, max_fn);
         const r = self.rng.below(100);
-        // NB: and/or (short-circuit) nodes are intentionally not generated:
-        // stilla's if-conversion miscompiles some contexts that combine them
-        // with calls or binds ("optimizer invariant violation"). Comparisons,
-        // `!`, and literal bools still exercise boolean logic; control flow
-        // comes from recursion and match.
+        // Short-circuit `and`/`or` combine two bool subtrees; the
+        // evaluation order matches Stilla's (both short-circuit), so the
+        // model stays honest. Earlier builds of stilla miscompiled some
+        // if-converted `and`/`or` shapes ("optimizer invariant
+        // violation") and generation was withheld; the frontend bug is
+        // fixed, so the operands are exercised again.
         if (r < 50) return self.leafBool(have_bv, have_str2, vars, max_fn);
         if (r < 80) return self.allocExpr(.{ .not = self.bBool(depth - 1, vars, max_fn) });
-        return self.leafBool(have_bv, have_str2, vars, max_fn);
+        const is_and = self.rng.chance(50);
+        return self.allocExpr(.{ .and_or = .{ .is_and = is_and, .a = self.bBool(depth - 1, vars, max_fn), .b = self.bBool(depth - 1, vars, max_fn) } });
     }
 
     fn countStrVars(self: *Gen) usize {
@@ -1101,9 +1103,10 @@ const Gen = struct {
 
     /// Assert that an int expression equals an expected value. Equality (==)
     /// exists only for byte/int32/uint32/float32/bool/str (Core §16.3), so
-    /// 64-bit widths assert equality via paired <= / >= on a bound local
-    /// (referencing the value twice would duplicate a possibly-expensive or
-    /// conditional expression).
+    /// 64-bit widths assert equality via an `and`-joined <= / >= on a bound
+    /// local (referencing the value twice would duplicate a possibly-
+    /// expensive or conditional expression). The short-circuit `and` also
+    /// exercises the if-conversion path the generator used to avoid.
     fn intEqAssert(self: *Gen, e: []const u8, v: IntVal, m: []const u8) !void {
         const lit_s = self.litText(v);
         switch (v.w) {
@@ -1111,12 +1114,7 @@ const Gen = struct {
             .i64, .u64 => {
                 const nm = self.newVar();
                 try self.line("let {s}: {s} = {s};", .{ nm, model.typeName(v.w), e });
-                // Two separate asserts: stilla's if-conversion miscompiles
-                // `and` of two 64-bit ordering comparisons (optimizer
-                // "not dominated" invariant violation), so no single
-                // combined assertion here.
-                try self.line("builtin.assert(({s}) <= {s}, \"{s}\");", .{ nm, lit_s, self.msg() });
-                try self.line("builtin.assert(({s}) >= {s}, \"{s}\");", .{ nm, lit_s, self.msg() });
+                try self.line("builtin.assert((({s}) <= {s}) and (({s}) >= {s}), \"{s}\");", .{ nm, lit_s, nm, lit_s, m });
             },
         }
     }
