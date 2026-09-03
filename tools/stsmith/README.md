@@ -105,19 +105,6 @@ is exactly integral and representable, then projected back with
 current stilla behaviors would otherwise make the generator's model disagree
 with the runtime. The generator shapes around them:
 
-- **Bitwise `|` / `^` are only reliable on compile-time constants.** On any
-  operand derived from a binding/param/cast the frontend folds them into `&`.
-  stsmith therefore never emits them, and uses `&` (correct everywhere).
-- **Function-body bitwise/`if` contexts.** Values bound from casts and
-  function parameters behave specially inside `fn` bodies; stsmith keeps
-  function bodies to arithmetic, `&`, shifts, and comparisons.
-- **`==` exists only for `byte/int32/uint32/float32/bool/str`**, so 64-bit
-  equality is asserted as an `and`-joined `<=`/`>=` pair on a bound local.
-  (This also exercises short-circuit `and` in statement position; the
-  if-conversion miscompile that used to trip on it is fixed.)
-- **Ordering comparisons do not type integer literals** from the other
-  operand, so literals always appear on the right of a typed variable or
-  inside a typed `==`.
 - Float operands are kept small enough (`<= 2^12` for `float32`, `<= 2^26`
   for `float64`) that `+ - *` stay exactly representable.
 These are documented here so the generator's model stays honest: any

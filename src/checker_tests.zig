@@ -324,6 +324,10 @@ test "checker widens integer literals to the other binary operand's width" {
         \\fn brand(x: int64) -> int64 { x }
         \\fn um(a: uint32) -> uint32 { a - 1 }
         \\fn ul(a: uint32) -> uint32 { 1 + a }
+        \\fn nsub(a: int64) -> int64 { a - -1 }
+        \\fn ncmp(a: int64) -> bool { -1 < a }
+        \\fn neq(a: int64) -> bool { -1 == a }
+        \\fn uc(c: uint32) -> uint32 { -3 + c }
         \\fn ucall() -> uint32 { uarg(7) }
         \\fn uarg(x: uint32) -> uint32 { x }
     );

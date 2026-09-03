@@ -606,9 +606,19 @@ fn inferExprAs(frame: *Frame, e: *const ast.Expr, expected: ?cfg.Type) CheckErro
 fn inferBinaryOperands(frame: *Frame, b: *const ast.Binary) CheckError!?cfg.Type {
     const lt = try inferExpr(frame, b.lhs);
     const rt = try inferExprAs(frame, b.rhs, lt);
-    if ((b.lhs.* == .int or b.lhs.* == .float) and lt != null and rt != null) {
+    // A literal on the left is widened symmetrically once the right side's
+    // type is known. A negated literal (`-4`, parsed as a unary neg of an
+    // `int`) is a literal in this sense too — `-4 < x` with `x: int64`
+    // must type the literal at int64, not reject the comparison.
+    if (lt != null and rt != null) {
         if (rt.? == .primitive and !cfg.Type.eql(lt.?, rt.?)) {
-            return inferExprAs(frame, b.lhs, rt);
+            switch (b.lhs.*) {
+                .int, .float => return inferExprAs(frame, b.lhs, rt),
+                .unary => |u| if (u.op == .neg and (u.operand.* == .int or u.operand.* == .float)) {
+                    return inferExprAs(frame, b.lhs, rt);
+                },
+                else => {},
+            }
         }
     }
     return lt;
