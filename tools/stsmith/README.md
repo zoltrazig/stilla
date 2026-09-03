@@ -120,17 +120,6 @@ with the runtime. The generator shapes around them:
   inside a typed `==`.
 - Float operands are kept small enough (`<= 2^12` for `float32`, `<= 2^26`
   for `float64`) that `+ - *` stay exactly representable.
-- **`iter.fold_with` steps that read their context miscompute.** The spec
-  (StdLib §7, `iter.st`) says the context is borrowed and passed unchanged to
-  every step, so the generator models `c` as the argument constant; the
-  current runtime instead returns wrong totals (`acc + c * x` over
-  `range(1, 4)` with context 100 prints 1000, expected 600) while
-  context-ignoring steps and `iter.each` (whose context is a function value)
-  are correct. The generator keeps the spec model and emits context-reading
-  steps rarely (low flavor weight, sampled again inside the flavor), so most
-  seeds pass and seeds that do fail are flagging this implementation bug —
-  per the project rule the spec governs, not the runtime.
-
 These are documented here so the generator's model stays honest: any
 generated program that fails under `stilla --run` is either a real stilla
 bug or a mismatch worth reporting — never silent UB.

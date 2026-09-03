@@ -1862,11 +1862,10 @@ const Gen = struct {
 
     /// iter.fold_with. The spec (StdLib §7) says the borrowed context equals
     /// the argument on every step, so a context-reading step models as
-    /// `(acc op ctx) op x` with the fixed ctx constant. Context-reading
-    /// steps currently miscompute at runtime (see README "Stilla behaviors
-    /// stsmith avoids"), so they are sampled only 15% of the time inside
-    /// this already-light flavor; otherwise the context-ignoring step is
-    /// emitted, whose model is identical to fold.
+    /// `(acc op ctx) op x` with the fixed ctx constant — the step's same-op
+    /// associativity (`acc op c op x` binds left) keeps the model exact.
+    /// Context-reading steps are sampled at reduced weight so the fold
+    /// flavors cover the context-ignoring shape too.
     fn sStdFoldCtx(self: *Gen) !void {
         const r = self.drawRange();
         const init = self.rng.range(-2000, 2000);
