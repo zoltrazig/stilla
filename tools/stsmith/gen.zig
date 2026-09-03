@@ -211,7 +211,6 @@ const Gen = struct {
     /// `|` / `^` are suppressed: stilla's frontend folds any such op whose
     /// operands include a function parameter into `&` (observed empirically),
     /// so emitting them there would make the runtime disagree with our model.
-    fn_body_bits_restricted: bool = false,
 
     // a single fixed classify(any) helper, generated up front
     classify_name: []const u8 = "classify",
@@ -623,27 +622,25 @@ const Gen = struct {
     }
 
     fn randIntOp(self: *Gen, allow_div: bool) BinOp {
-        // NB: bitwise `|` and `^` are never generated: stilla's lowering
-        // folds them into `&` whenever an operand is not a compile-time
-        // constant (function params, cast results, bound locals) — observed
-        // empirically. `&` is correct everywhere, so it stays.
-        const restrict = self.fn_body_bits_restricted;
         if (!allow_div) {
-            return switch (self.rng.below(4)) {
+            return switch (self.rng.below(6)) {
                 0 => .add,
                 1 => .sub,
                 2 => .mul,
-                else => .band,
+                3 => .band,
+                4 => .bor,
+                else => .bxor,
             };
         }
-        _ = restrict;
-        return switch (self.rng.below(6)) {
+        return switch (self.rng.below(8)) {
             0 => .add,
             1 => .sub,
             2 => .mul,
             3 => .div,
             4 => .rem,
-            else => .band,
+            5 => .band,
+            6 => .bor,
+            else => .bxor,
         };
     }
 
@@ -725,25 +722,16 @@ const Gen = struct {
             }
             roll -= 2;
         }
-        // int comparison (eq/ne exist only for byte/int32/uint32/float32/bool/str;
-        // 64-bit widths get the ordering comparisons only)
+        // int comparison: eq/ne/lt/le/gt/ge across every integer width
         const cw = WIDTHS[self.rng.index(WIDTHS.len)];
         const a = self.bInt(cw, 1, vars, max_fn, false);
         const b = self.bInt(cw, 1, vars, max_fn, false);
-        const six = cw == .i32 or cw == .u32;
-        const op: model.Cmp = if (six)
-            switch (self.rng.below(6)) {
-                0 => .eq,
-                1 => .ne,
-                2 => .lt,
-                3 => .le,
-                4 => .gt,
-                else => .ge,
-            }
-        else switch (self.rng.below(4)) {
-            0 => .lt,
-            1 => .le,
-            2 => .gt,
+        const op: model.Cmp = switch (self.rng.below(6)) {
+            0 => .eq,
+            1 => .ne,
+            2 => .lt,
+            3 => .le,
+            4 => .gt,
             else => .ge,
         };
         return self.allocExpr(.{ .icmp = .{ .op = op, .a = a, .b = b } });
@@ -816,9 +804,7 @@ const Gen = struct {
             }
             const res_w = WIDTHS[self.rng.index(WIDTHS.len)];
             const max_fn = self.fns.items.len;
-            self.fn_body_bits_restricted = true;
             const body = self.bInt(res_w, 2, vars, max_fn, false);
-            self.fn_body_bits_restricted = false;
             self.fns.append(.{
                 .name = self.newFn(),
                 .res_w = res_w,
@@ -832,9 +818,7 @@ const Gen = struct {
         const vars = self.allocSlice(VarRef, 1);
         vars[0] = .{ .name = "n", .w = .i32 };
         const max_fn = self.fns.items.len;
-        self.fn_body_bits_restricted = true;
         self.classify_int_body = self.bInt(.i32, 2, vars, max_fn, false);
-        self.fn_body_bits_restricted = false;
         self.classify_str_equal = self.pickStr();
         self.classify_c = IntVal.mk(.i32, self.rng.range(1, 100));
         self.classify_d = IntVal.mk(.i32, self.rng.range(1, 100));
@@ -846,11 +830,9 @@ const Gen = struct {
         xv[0] = .{ .name = "x", .w = .i32 };
         var c: usize = 0;
         while (c < 2) : (c += 1) {
-            self.fn_body_bits_restricted = true;
             const base = self.bInt(.i32, 2, xv, 0, false);
             const step = self.bInt(.i32, 2, xv, 0, false);
             const next = self.bInt(.i32, 2, xv, 0, false);
-            self.fn_body_bits_restricted = false;
             self.recs.append(.{
                 .name = self.newRec(),
                 .is_count = true,
@@ -867,10 +849,8 @@ const Gen = struct {
         const hv = self.allocSlice(VarRef, 1);
         hv[0] = .{ .name = "h", .w = .i32 };
         const empty_vars = self.allocSlice(VarRef, 0);
-        self.fn_body_bits_restricted = true;
         const l_base = self.bInt(.i32, 1, empty_vars, 0, false);
         const l_map = self.bInt(.i32, 2, if (wild_head) empty_vars else hv, 0, false);
-        self.fn_body_bits_restricted = false;
         self.recs.append(.{
             .name = self.newRec(),
             .is_count = false,
@@ -1101,22 +1081,11 @@ const Gen = struct {
         return .{ .e = e, .v = self.evalBool(e, &.{}) };
     }
 
-    /// Assert that an int expression equals an expected value. Equality (==)
-    /// exists only for byte/int32/uint32/float32/bool/str (Core §16.3), so
-    /// 64-bit widths assert equality via an `and`-joined <= / >= on a bound
-    /// local (referencing the value twice would duplicate a possibly-
-    /// expensive or conditional expression). The short-circuit `and` also
-    /// exercises the if-conversion path the generator used to avoid.
+    /// Assert that an int expression equals an expected value. Equality
+    /// (==) exists across every integer width (Core §16.3).
     fn intEqAssert(self: *Gen, e: []const u8, v: IntVal, m: []const u8) !void {
         const lit_s = self.litText(v);
-        switch (v.w) {
-            .i32, .u32 => try self.line("builtin.assert(({s}) == {s}, \"{s}\");", .{ e, lit_s, m }),
-            .i64, .u64 => {
-                const nm = self.newVar();
-                try self.line("let {s}: {s} = {s};", .{ nm, model.typeName(v.w), e });
-                try self.line("builtin.assert((({s}) <= {s}) and (({s}) >= {s}), \"{s}\");", .{ nm, lit_s, nm, lit_s, m });
-            },
-        }
+        try self.line("builtin.assert(({s}) == {s}, \"{s}\");", .{ e, lit_s, m });
     }
 
     fn sBindInt(self: *Gen) !void {
@@ -1387,9 +1356,7 @@ const Gen = struct {
         const wild = self.rng.chance(50); // [_, ..t]: expr never reads the head
         const hv = self.allocSlice(VarRef, 1);
         hv[0] = .{ .name = "h", .w = .i32 };
-        self.fn_body_bits_restricted = true; // h is a pattern binding (behaves like a param)
         const hE = self.bInt(.i32, 2, if (wild) self.allocSlice(VarRef, 0) else hv, 0, false);
-        self.fn_body_bits_restricted = false;
         var binds = [_]Bind{.{ .name = "h", .value = .{ .int = IntVal.mk(.i32, 0) } }};
         const expected: IntVal = if (n > 0) blk: {
             binds[0].value = .{ .int = vals[0] };
@@ -1507,9 +1474,7 @@ const Gen = struct {
                 for (refs, 0..) |r, k| {
                     frame[k] = .{ .name = r.name, .value = .{ .int = vals[bidx[k]] } };
                 }
-                self.fn_body_bits_restricted = true; // arm bindings behave like params
                 const body = self.bInt(.i32, 2, refs, 0, false);
-                self.fn_body_bits_restricted = false;
                 chosen_expected = self.evalInt(body, frame).?;
                 body_text = self.intText(body);
             }
