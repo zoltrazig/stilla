@@ -1608,9 +1608,8 @@ pub fn opConstruct(self: *VmCtx, d: VmInstr) HeapErr!void {
             const decl = image.type_decls[row.a];
             switch (decl.kind) {
                 .struct_ => {
-                    const n: usize = decl.d -| decl.c;
-                    const h = try self.runtime.heap.allocObjectIn(.struct_, self.curModIdx(), ty, n, 0);
-                    for (0..n) |k| {
+                    const h = try self.runtime.heap.allocObjectIn(.struct_, self.curModIdx(), ty, decl.d, 0);
+                    for (0..decl.d) |k| {
                         const v = read(self, image.call_args[dd.args_start + @as(u32, @intCast(k))]);
                         h.setCell(k, v);
                         const ft = image.type_decl_fields[decl.c + k];

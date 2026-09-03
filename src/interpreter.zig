@@ -520,11 +520,11 @@ pub const VmCtx = struct {
                     return;
                 }
                 var k = decl.d;
-                while (k > decl.c) {
+                while (k > 0) {
                     k -= 1;
-                    const ft = image.type_decl_fields[k];
+                    const ft = image.type_decl_fields[decl.c + k];
                     if (ft == llir.no_index) continue;
-                    const v = h.cell(k - decl.c);
+                    const v = h.cell(k);
                     if (v != 0) try self.runtime.destroy_work.append(self.allocator, .{ .value = .{ .type_id = ft, .addr = v } });
                 }
             },

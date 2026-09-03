@@ -168,6 +168,32 @@ test "M6: builtin module runs through the binary load path" {
     );
 }
 
+test "M6: a later declared struct's fields construct, read, and destroy correctly" {
+    // Regression: a struct TypeDeclDesc's field range { c, d } into the
+    // flat type_decl_fields table is { start, len }; the interpreter
+    // consumers treated `d` as an absolute end, so the range silently
+    // collapsed to empty for every struct after the first (`c > 0`) —
+    // the second declared struct constructed the wrong cells and its
+    // fields read null. The asserts trap on the read side; the str fields
+    // destroy through the same corrected range at scope end.
+    try runBinRoundTrip(
+        \\const builtin = import("builtin");
+        \\struct A { x: int32; y: int32; }
+        \\struct B { x: str; y: str; }
+        \\struct C { a: int32; b: str; c: str; d: int32; }
+        \\fn main() -> void {
+        \\    let a = A { x: 40, y: 2 };
+        \\    let b = B { x: "fourty-", y: "two" };
+        \\    let c = C { a: 1, b: "tw", c: "o", d: 41 };
+        \\    builtin.assert(a.x + a.y == 42, "A");
+        \\    builtin.assert(b.x == "fourty-" and b.y == "two", "B");
+        \\    builtin.assert(c.a + c.d == 42 and c.b == "tw" and c.c == "o", "C");
+        \\}
+    ,
+        "",
+    );
+}
+
 test "M6: math module runs through the binary load path" {
     try runBinRoundTrip(
         \\const math = import("math");
