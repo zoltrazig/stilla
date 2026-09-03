@@ -130,14 +130,6 @@ with the runtime. The generator shapes around them:
   steps rarely (low flavor weight, sampled again inside the flavor), so most
   seeds pass and seeds that do fail are flagging this implementation bug —
   per the project rule the spec governs, not the runtime.
-- **The 2.15 madd fusion can fire without its preparation.** Loop shapes
-  that multiply then accumulate (`mul a, k1` / `mul a, k2` / `add t, t2`,
-  e.g. a tail-recursive helper with an `(x*n) + (x*m)` recurrence, sampled
-  with `--funcs 8` or via helper inlining) miscompile: `llir_alloc`'s
-  liveness fixed point over-approximates the accumulator's end past the
-  add, which vetoes the coalescing `llir_fusion`'s `*_madd` rewrite
-  assumes, so the fused record writes the accumulator cell while phi edge
-  copies still read the add result's own (never-written) slot.
 
 These are documented here so the generator's model stays honest: any
 generated program that fails under `stilla --run` is either a real stilla

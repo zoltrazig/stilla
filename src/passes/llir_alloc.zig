@@ -415,7 +415,19 @@ fn allocateFunctionSlots(bld: *Builder, f: *const cfg.IrFunc, slots: *std.ArrayL
         if (coalesceSource(f, value, uses)) |source| {
             const source_slot = bld.value_slots.get(source) orelse return allocateNaiveSlots(bld, f, slots);
             const source_end = slots.items[source_slot].end;
-            if (source_end <= interval.start and patterns.canInPlace(value)) {
+            // A madd-shaped add coalesces into its accumulator's cell
+            // even when the liveness fixed point extends the
+            // accumulator's end past the add (a loop artifact: a value
+            // defined and used in the same latch block gets gen-set
+            // membership that propagates around the loop). The
+            // accumulator has exactly one use — this add — so its true
+            // end IS the add position (`interval.start`); the
+            // fixed-point overshoot must not veto the in-place reuse
+            // the 2.15 madd fusion (llir_fusion.zig) relies on, or the
+            // fused record writes the accumulator cell while phi edge
+            // copies still read the add result's own slot.
+            const madd_shape = value.def != null and std.meta.activeTag(value.def.?.op) == .add;
+            if ((madd_shape or source_end <= interval.start) and patterns.canInPlace(value)) {
                 bld.value_slots.put(bld.arena, value, source_slot) catch return error.OutOfMemory;
                 slots.items[source_slot].end = @max(slots.items[source_slot].end, interval.end);
                 slots.items[source_slot].active = true;

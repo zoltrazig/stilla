@@ -575,6 +575,14 @@ fn tryMadd(b: *Builder, blk: *const cfg.BasicBlock, idx: u32, ins: *const cfg.In
     const mul = product.def.?.op.mul; // Bin{a, b} — the product's operand order
     const t = product.type_;
     const acc_slot = b.slotOf(acc);
+    // The fused record's dst is the accumulator slot and its result
+    // reads as the add result's slot downstream (phi edge copies,
+    // terminators). Allocation coalesces the add result into the
+    // accumulator cell only when the intervals line up — a loop-carried
+    // accumulator's fixed-point end can overshoot the add's position,
+    // skipping the coalesce — so skip the fusion unless the result
+    // actually landed in the accumulator cell (llir_alloc.zig).
+    if (b.slotOf(ins.results[0]) != acc_slot) return;
     // The fused record replaces the add record. The fused record is
     // written at the add's index; the mul record is deleted.
     const fused_idx: u32 = idx;
