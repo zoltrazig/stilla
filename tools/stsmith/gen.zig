@@ -85,9 +85,12 @@ const RecFn = struct {
     c_base: *Expr,
     c_step: *Expr,
     c_next: *Expr,
-    // list template: base int32 literal; map over head int32 "h"
+    // list template: base int32 literal; map over head int32 "h". When
+    // `wild_head` is set the map never references the head and the pattern
+    // is emitted as `[_, ..t]`.
     l_base: *Expr,
     l_map: *Expr,
+    wild_head: bool = false,
 };
 
 const StructDecl = struct { name: []const u8, fields: []Field };
@@ -97,6 +100,9 @@ const Variant = struct { name: []const u8, payloads: []IntW };
 const TupleDecl = struct { name: []const u8, ws: []IntW };
 
 const WIDTHS = [_]IntW{ .i32, .i64, .u32, .u64 };
+
+/// struct field names, indexed by field position (2..3 fields per struct)
+const FIELD_NAMES = [_][]const u8{ "x", "y", "z" };
 
 fn binOpName(op: BinOp) []const u8 {
     return switch (op) {
@@ -140,6 +146,9 @@ const Flav = enum {
     std_list,
     std_search,
     std_fold,
+    std_cfold,
+    std_tryfold,
+    std_foldctx,
 };
 
 /// every flavor runs once (in this order), then random draws take over
@@ -148,7 +157,7 @@ const PRELUDE = [_]Flav{
     .bind_bool,  .rec_list,    .float_exact, .str_stmt, .list_proj,
     .tuple_stmt, .struct_stmt, .union_stmt,  .any_stmt, .print_stmt,
     .std_str,    .std_slice,   .std_pair,    .std_list, .std_search,
-    .std_fold,
+    .std_fold,   .std_cfold,   .std_tryfold,
 };
 
 const FLAV_WEIGHTS = [_]struct { f: Flav, w: u32 }{
@@ -163,7 +172,7 @@ const FLAV_WEIGHTS = [_]struct { f: Flav, w: u32 }{
     .{ .f = .str_stmt, .w = 3 },
     .{ .f = .list_proj, .w = 1 },
     .{ .f = .tuple_stmt, .w = 1 },
-    .{ .f = .struct_stmt, .w = 1 },
+    .{ .f = .struct_stmt, .w = 2 },
     .{ .f = .union_stmt, .w = 1 },
     .{ .f = .any_stmt, .w = 2 },
     .{ .f = .print_stmt, .w = 1 },
@@ -173,6 +182,9 @@ const FLAV_WEIGHTS = [_]struct { f: Flav, w: u32 }{
     .{ .f = .std_list, .w = 2 },
     .{ .f = .std_search, .w = 2 },
     .{ .f = .std_fold, .w = 1 },
+    .{ .f = .std_cfold, .w = 2 },
+    .{ .f = .std_tryfold, .w = 2 },
+    .{ .f = .std_foldctx, .w = 1 },
 };
 
 const Gen = struct {
@@ -244,7 +256,8 @@ const Gen = struct {
                 "const string = import(\"string\");\n" ++
                 "const lists = import(\"list\");\n" ++
                 "const iter = import(\"iter\");\n" ++
-                "using builtin.Option;\n\n",
+                "using builtin.Option;\n" ++
+                "using iter.Result;\n\n",
             .{ self.opts.seed, self.opts.statements, self.opts.funcs, self.opts.max_depth },
         ) catch unreachable;
         try self.out.appendSlice(s);
@@ -737,10 +750,11 @@ const Gen = struct {
     // ============ type-decl and function preparation ============
 
     fn buildTypeDecls(self: *Gen) void {
-        // structs (exactly one: stilla resolves struct fields by name across
-        // the module, and fields of a second declared struct read garbage —
-        // observed empirically, so extra structs are unsafe)
-        const struct_count: u32 = 1;
+        // structs (1..3): fields are resolved per struct type, including
+        // across structs that reuse field names (the former one-struct-per-
+        // module limitation, fixed in the interpreter — see the removed
+        // entry in README's avoided-behaviors list)
+        const struct_count: u32 = @intCast(1 + self.rng.index(3));
         var s: usize = 0;
         while (s < struct_count) : (s += 1) {
             const fcount = 2 + self.rng.index(2); // 2..3 fields
@@ -748,10 +762,9 @@ const Gen = struct {
             const fields = self.allocSlice(Field, fcount);
             for (fields, 0..) |*f, j| {
                 f.* = .{
-                    // unique field names: stilla resolves struct fields by
-                    // name across the whole module, so duplicated names in
-                    // different structs corrupt reads.
-                    .name = std.fmt.allocPrint(self.alloc, "{s}_{d}", .{ sname, j }) catch unreachable,
+                    // short field names, deliberately reused across structs:
+                    // resolution must be per struct type
+                    .name = FIELD_NAMES[j],
                     .w = WIDTHS[self.rng.index(WIDTHS.len)],
                 };
             }
@@ -846,13 +859,15 @@ const Gen = struct {
                 .l_map = undefined,
             }) catch unreachable;
         }
-        // one list recursion template
+        // one list recursion template; the head pattern is a wildcard when
+        // the sampled map expression never reads it
+        const wild_head = self.rng.chance(50);
         const hv = self.allocSlice(VarRef, 1);
         hv[0] = .{ .name = "h", .w = .i32 };
         const empty_vars = self.allocSlice(VarRef, 0);
         self.fn_body_bits_restricted = true;
         const l_base = self.bInt(.i32, 1, empty_vars, 0, false);
-        const l_map = self.bInt(.i32, 2, hv, 0, false);
+        const l_map = self.bInt(.i32, 2, if (wild_head) empty_vars else hv, 0, false);
         self.fn_body_bits_restricted = false;
         self.recs.append(.{
             .name = self.newRec(),
@@ -862,6 +877,7 @@ const Gen = struct {
             .c_next = undefined,
             .l_base = l_base,
             .l_map = l_map,
+            .wild_head = wild_head,
         }) catch unreachable;
     }
 
@@ -989,10 +1005,10 @@ const Gen = struct {
                 "fn {s}(xs: list[int32]) -> int32 {{\n" ++
                     "    match (xs) {{\n" ++
                     "        [] => {s},\n" ++
-                    "        [h, ..t] => ({s}) + {s}(t),\n" ++
+                    "        [{s}, ..t] => ({s}) + {s}(t),\n" ++
                     "    }}\n" ++
                     "}}\n\n",
-                .{ r.name, self.intText(r.l_base), self.intText(r.l_map), r.name },
+                .{ r.name, self.intText(r.l_base), if (r.wild_head) "_" else "h", self.intText(r.l_map), r.name },
             ) catch unreachable;
             try self.raw(s);
         }
@@ -1057,6 +1073,9 @@ const Gen = struct {
                 .std_list => try self.sStdList(),
                 .std_search => try self.sStdSearch(),
                 .std_fold => try self.sStdFold(),
+                .std_cfold => try self.sStdCFold(),
+                .std_tryfold => try self.sStdTryFold(),
+                .std_foldctx => try self.sStdFoldCtx(),
             }
         }
         try self.raw("}\n");
@@ -1367,10 +1386,11 @@ const Gen = struct {
         } else {
             try self.line("let {s}: list[int32] = [{s}];", .{ ln, elems });
         }
+        const wild = self.rng.chance(50); // [_, ..t]: expr never reads the head
         const hv = self.allocSlice(VarRef, 1);
         hv[0] = .{ .name = "h", .w = .i32 };
         self.fn_body_bits_restricted = true; // h is a pattern binding (behaves like a param)
-        const hE = self.bInt(.i32, 2, hv, 0, false);
+        const hE = self.bInt(.i32, 2, if (wild) self.allocSlice(VarRef, 0) else hv, 0, false);
         self.fn_body_bits_restricted = false;
         var binds = [_]Bind{.{ .name = "h", .value = .{ .int = IntVal.mk(.i32, 0) } }};
         const expected: IntVal = if (n > 0) blk: {
@@ -1379,8 +1399,8 @@ const Gen = struct {
         } else IntVal.mk(.i32, 777);
         const dv = IntVal.mk(.i32, 777);
         const htext = self.intText(hE);
-        try self.line("builtin.assert(match ({s}) {{ [h, ..t] => {s}, [] => {s} }} == {s}, \"{s}\");", .{
-            ln, htext, self.litText(dv), self.litText(expected), self.msg(),
+        try self.line("builtin.assert(match ({s}) {{ [{s}, ..t] => {s}, [] => {s} }} == {s}, \"{s}\");", .{
+            ln, if (wild) "_" else "h", htext, self.litText(dv), self.litText(expected), self.msg(),
         });
     }
 
@@ -1393,6 +1413,20 @@ const Gen = struct {
         const a0 = self.newVar();
         const a1 = self.newVar();
         try self.line("let {s}: {s} = ({s}, {s});", .{ tv, td.name, self.intText(a.e), self.intText(b.e) });
+        // half the time one destructure slot is a wildcard; only the bound
+        // side becomes a local and gets asserted
+        if (self.rng.chance(50)) {
+            if (self.rng.chance(50)) {
+                try self.line("let ({s}, _) = {s};", .{ a0, tv });
+                self.pushLocal(a0, .{ .int = a.v });
+                try self.intEqAssert(a0, a.v, self.msg());
+            } else {
+                try self.line("let (_, {s}) = {s};", .{ a1, tv });
+                self.pushLocal(a1, .{ .int = b.v });
+                try self.intEqAssert(a1, b.v, self.msg());
+            }
+            return;
+        }
         try self.line("let ({s}, {s}) = {s};", .{ a0, a1, tv });
         self.pushLocal(a0, .{ .int = a.v });
         self.pushLocal(a1, .{ .int = b.v });
@@ -1441,33 +1475,55 @@ const Gen = struct {
         try self.line("let {s}: {s} = {s}::{s}({s});", .{ uv, ud.name, ud.name, vd.name, payload_join });
 
         var arm_parts = std.array_list.Managed([]const u8).init(self.alloc);
-        var chosen_expected: IntVal = undefined;
+        // Arm-shape sampling: 40% wildcard `_` in some payload positions of
+        // the taken variant, 30% a collapsed `_` catch-all tail (pattern
+        // arms only for a prefix of the variants), 30% fully-bound
+        // exhaustive arms. A taken variant covered by the tail matches the
+        // catch-all, so the expected value is the tail body (0).
+        const shape = self.rng.below(10);
+        const wild_payloads = shape < 4;
+        const wild_tail = shape >= 4 and shape < 7;
+        const split: usize = if (wild_tail) 1 + self.rng.index(ud.variants.len - 1) else ud.variants.len;
+        var chosen_expected = IntVal.mk(.i32, 0);
         for (ud.variants, 0..) |v, j| {
+            if (j >= split) break;
             const is_taken = (j == vi);
             var names = self.allocSlice([]const u8, v.payloads.len);
-            var refs = self.allocSlice(VarRef, v.payloads.len);
+            var bound = self.allocSlice(VarRef, v.payloads.len);
+            var bidx = self.allocSlice(usize, v.payloads.len);
+            var nbound: usize = 0;
             for (v.payloads, 0..) |pw, k| {
-                names[k] = std.fmt.allocPrint(self.alloc, "q{d}_{d}", .{ j, k }) catch unreachable;
-                refs[k] = .{ .name = names[k], .w = pw };
+                if (is_taken and wild_payloads and self.rng.chance(50)) {
+                    names[k] = "_";
+                } else {
+                    names[k] = std.fmt.allocPrint(self.alloc, "q{d}_{d}", .{ j, k }) catch unreachable;
+                    bound[nbound] = .{ .name = names[k], .w = pw };
+                    bidx[nbound] = k;
+                    nbound += 1;
+                }
             }
-            var body: *Expr = undefined;
+            var body_text: []const u8 = "0";
             if (is_taken) {
-                var frame = self.allocSlice(Bind, v.payloads.len);
-                for (v.payloads, 0..) |_, k| {
-                    frame[k] = .{ .name = names[k], .value = .{ .int = vals[k] } };
+                const refs = bound[0..nbound];
+                var frame = self.allocSlice(Bind, nbound);
+                for (refs, 0..) |r, k| {
+                    frame[k] = .{ .name = r.name, .value = .{ .int = vals[bidx[k]] } };
                 }
                 self.fn_body_bits_restricted = true; // arm bindings behave like params
-                body = self.bInt(.i32, 2, refs, 0, false);
+                const body = self.bInt(.i32, 2, refs, 0, false);
                 self.fn_body_bits_restricted = false;
                 chosen_expected = self.evalInt(body, frame).?;
+                body_text = self.intText(body);
             }
-            const body_text = if (is_taken) self.intText(body) else "0";
             const pattern = if (v.payloads.len > 0) blk: {
                 const args = std.mem.join(self.alloc, ", ", names) catch unreachable;
                 break :blk std.fmt.allocPrint(self.alloc, "{s}::{s}({s})", .{ ud.name, v.name, args }) catch unreachable;
             } else std.fmt.allocPrint(self.alloc, "{s}::{s}", .{ ud.name, v.name }) catch unreachable;
             const arm = std.fmt.allocPrint(self.alloc, "        {s} => {s},", .{ pattern, body_text }) catch unreachable;
             arm_parts.append(arm) catch unreachable;
+        }
+        if (wild_tail) {
+            arm_parts.append("        _ => 0,") catch unreachable;
         }
         const arms = std.mem.join(self.alloc, "\n", arm_parts.items) catch unreachable;
         const whole = std.fmt.allocPrint(self.alloc, "    builtin.assert(match ({s}) {{\n{s}\n    }} == {s}, \"{s}\");", .{
@@ -1523,6 +1579,16 @@ const Gen = struct {
 
     fn strEqAssert(self: *Gen, nm: []const u8, v: []const u8, m: []const u8) !void {
         try self.line("builtin.assert({s} == \"{s}\", \"{s}\");", .{ nm, v, m });
+    }
+
+    /// Assert a found Option[int32]: half the time via the `Some(_)`
+    /// wildcard form (presence only), half via a payload equality check.
+    fn assertOptionFound(self: *Gen, opt: []const u8, k: i64) !void {
+        if (self.rng.chance(50)) {
+            try self.line("builtin.assert(match ({s}) {{ Option::Some(_) => true, Option::None => false }}, \"{s}\");", .{ opt, self.msg() });
+        } else {
+            try self.line("builtin.assert(match ({s}) {{ Option::Some(v) => v == {d}, Option::None => false }}, \"{s}\");", .{ opt, k, self.msg() });
+        }
     }
 
     /// ASCII case conversion; byte-exact for the ASCII strings emitted.
@@ -1655,7 +1721,7 @@ const Gen = struct {
             const io = self.newVar();
             try self.line("let {s} = string.index_of({s}, {s});", .{ io, a, b_arg });
             if (self.strFind(av, b_val)) |k| {
-                try self.line("builtin.assert(match ({s}) {{ Option::Some(v) => v == {d}, Option::None => false }}, \"{s}\");", .{ io, k, self.msg() });
+                try self.assertOptionFound(io, @intCast(k));
             } else {
                 try self.line("builtin.assert(match ({s}) {{ Option::Some(v) => v == 0, Option::None => true }}, \"{s}\");", .{ io, self.msg() });
             }
@@ -1675,7 +1741,8 @@ const Gen = struct {
         try self.intEqAssert(len_e, IntVal.mk(.i32, @intCast(len)), self.msg());
         // head consumes the list, so this must come after the len assert.
         if (!empty) {
-            try self.line("builtin.assert(match (lists.head({s})) {{ Option::Some(v) => v == {d}, Option::None => false }}, \"{s}\");", .{ l, a, self.msg() });
+            const h = std.fmt.allocPrint(self.alloc, "lists.head({s})", .{l}) catch unreachable;
+            try self.assertOptionFound(h, a);
         } else {
             try self.line("builtin.assert(match (lists.head({s})) {{ Option::Some(v) => v == 0, Option::None => true }}, \"{s}\");", .{ l, self.msg() });
         }
@@ -1706,29 +1773,137 @@ const Gen = struct {
             const res = self.newVar();
             try self.line("let {s} = lists.index_of({s}, {d}, {s});", .{ res, l, needle, eq });
             if (found) {
-                try self.line("builtin.assert(match ({s}) {{ Option::Some(v) => v == {d}, Option::None => false }}, \"{s}\");", .{ res, needle - a, self.msg() });
+                try self.assertOptionFound(res, needle - a);
             } else {
                 try self.line("builtin.assert(match ({s}) {{ Option::Some(v) => v == 0, Option::None => true }}, \"{s}\");", .{ res, self.msg() });
             }
         }
     }
 
+    /// Inclusive [a, b] int32 range draw shared by the stdlib list/iter
+    /// statements: empty 25% of the time, otherwise up to 10 elements.
+    const Range = struct { a: i64, b: i64, empty: bool };
+
+    fn drawRange(self: *Gen) Range {
+        const a = self.rng.range(-8, 8);
+        const empty = self.rng.chance(25);
+        const b: i64 = if (empty) a - self.rng.range(1, 3) else self.rng.range(a, a + 9);
+        return .{ .a = a, .b = b, .empty = empty };
+    }
+
+    /// init + wrapping int32 sum of the range elements (the fold model).
+    fn foldRange(r: Range, init: IntVal) IntVal {
+        var acc = init;
+        var i: i64 = r.a;
+        while (i <= r.b) : (i += 1) {
+            acc = IntVal.add(acc, IntVal.mk(.i32, @intCast(i)));
+        }
+        return acc;
+    }
+
     /// iter.fold with the addition step over a fresh list.range: the model is
     /// init + the sum of the inclusive range elements, wrapping like the
     /// runtime.
     fn sStdFold(self: *Gen) !void {
-        const a = self.rng.range(-8, 8);
-        const empty = self.rng.chance(25);
-        const b: i64 = if (empty) a - self.rng.range(1, 3) else self.rng.range(a, a + 9);
+        const r = self.drawRange();
         const init = self.rng.range(-2000, 2000);
-        var acc = IntVal.mk(.i32, @intCast(init));
-        var i: i64 = a;
-        while (i <= b) : (i += 1) {
-            acc = IntVal.add(acc, IntVal.mk(.i32, @intCast(i)));
-        }
         const step = "fn(move acc: int32, borrow x: int32) -> int32 { acc + x }";
         const res = self.newVar();
-        try self.line("let {s} = iter.fold(lists.range({d}, {d}), {d}, {s});", .{ res, a, b, init, step });
+        try self.line("let {s} = iter.fold(lists.range({d}, {d}), {d}, {s});", .{ res, r.a, r.b, init, step });
+        try self.intEqAssert(res, foldRange(r, IntVal.mk(.i32, @intCast(init))), self.msg());
+    }
+
+    /// iter.consume_fold: the consuming variant of fold over a fresh range,
+    /// same spec model. 20% of the time this flavor instead emits
+    /// iter.each / iter.consume_each with a builtin.print action — a void
+    /// action has no value to assert, so those are output-only statements.
+    fn sStdCFold(self: *Gen) !void {
+        if (self.rng.below(10) < 8) {
+            const r = self.drawRange();
+            const init = self.rng.range(-2000, 2000);
+            const step = "fn(move acc: int32, move x: int32) -> int32 { acc + x }";
+            const res = self.newVar();
+            try self.line("let {s} = iter.consume_fold(lists.range({d}, {d}), {d}, {s});", .{ res, r.a, r.b, init, step });
+            try self.intEqAssert(res, foldRange(r, IntVal.mk(.i32, @intCast(init))), self.msg());
+        } else {
+            const consuming = self.rng.chance(50);
+            const call: []const u8 = if (consuming) "iter.consume_each" else "iter.each";
+            const act: []const u8 = if (consuming)
+                "fn(move x: int32) -> void { builtin.print(builtin.str(x)); }"
+            else
+                "fn(borrow x: int32) -> void { builtin.print(builtin.str(x)); }";
+            const r = self.drawRange();
+            try self.line("{s}(lists.range({d}, {d}), {s});", .{ call, r.a, r.b, act });
+        }
+    }
+
+    /// iter.try_fold with a spec-modeled step: an always-`Complete` step
+    /// folds the whole range (result `Complete(init + sum)`); an
+    /// always-`Break` step stops at the first element (result `Break(a)`,
+    /// or `Complete(init)` for an empty range). The result is asserted
+    /// through a `match` whose catch-all `_` arm yields false.
+    fn sStdTryFold(self: *Gen) !void {
+        const r = self.drawRange();
+        const init = self.rng.range(-2000, 2000);
+        const res = self.newVar();
+        if (self.rng.chance(40)) {
+            const step = "fn(move acc: int32, borrow x: int32) -> iter.Result[int32, int32] { iter.Result::Break(x) }";
+            try self.line("let {s} = iter.try_fold(lists.range({d}, {d}), {d}, {s});", .{ res, r.a, r.b, init, step });
+            if (r.empty) {
+                try self.line("builtin.assert(match ({s}) {{ Result::Complete(v) => v == {d}, _ => false }}, \"{s}\");", .{ res, init, self.msg() });
+            } else {
+                try self.line("builtin.assert(match ({s}) {{ Result::Break(v) => v == {d}, _ => false }}, \"{s}\");", .{ res, r.a, self.msg() });
+            }
+        } else {
+            const step = "fn(move acc: int32, borrow x: int32) -> iter.Result[int32, int32] { iter.Result::Complete(acc + x) }";
+            try self.line("let {s} = iter.try_fold(lists.range({d}, {d}), {d}, {s});", .{ res, r.a, r.b, init, step });
+            const expected = foldRange(r, IntVal.mk(.i32, @intCast(init)));
+            try self.line("builtin.assert(match ({s}) {{ Result::Complete(v) => v == {s}, _ => false }}, \"{s}\");", .{ res, self.litText(expected), self.msg() });
+        }
+    }
+
+    /// iter.fold_with. The spec (StdLib §7) says the borrowed context equals
+    /// the argument on every step, so a context-reading step models as
+    /// `(acc op ctx) op x` with the fixed ctx constant. Context-reading
+    /// steps currently miscompute at runtime (see README "Stilla behaviors
+    /// stsmith avoids"), so they are sampled only 15% of the time inside
+    /// this already-light flavor; otherwise the context-ignoring step is
+    /// emitted, whose model is identical to fold.
+    fn sStdFoldCtx(self: *Gen) !void {
+        const r = self.drawRange();
+        const init = self.rng.range(-2000, 2000);
+        const ctx = self.rng.range(-100, 100);
+        const read_ctx = self.rng.chance(15);
+        const op_roll = self.rng.below(3);
+        const opn: []const u8 = switch (op_roll) {
+            0 => "+",
+            1 => "-",
+            else => "*",
+        };
+        const step = if (read_ctx)
+            std.fmt.allocPrint(self.alloc, "fn(move acc: int32, borrow c: int32, borrow x: int32) -> int32 {{ acc {s} c {s} x }}", .{ opn, opn }) catch unreachable
+        else
+            "fn(move acc: int32, borrow c: int32, borrow x: int32) -> int32 { acc + x }";
+        const ctxv = IntVal.mk(.i32, @intCast(ctx));
+        var acc = IntVal.mk(.i32, @intCast(init));
+        var i: i64 = r.a;
+        while (i <= r.b) : (i += 1) {
+            const xv = IntVal.mk(.i32, @intCast(i));
+            acc = if (!read_ctx) IntVal.add(acc, xv) else blk: {
+                const with_ctx = switch (op_roll) {
+                    0 => IntVal.add(acc, ctxv),
+                    1 => IntVal.sub(acc, ctxv),
+                    else => IntVal.mul(acc, ctxv),
+                };
+                break :blk switch (op_roll) {
+                    0 => IntVal.add(with_ctx, xv),
+                    1 => IntVal.sub(with_ctx, xv),
+                    else => IntVal.mul(with_ctx, xv),
+                };
+            };
+        }
+        const res = self.newVar();
+        try self.line("let {s} = iter.fold_with(lists.range({d}, {d}), {d}, {d}, {s});", .{ res, r.a, r.b, init, ctx, step });
         try self.intEqAssert(res, acc, self.msg());
     }
 };
@@ -1755,4 +1930,16 @@ test "generated program parses basic shape" {
     try std.testing.expect(std.mem.indexOf(u8, src, "const lists = import(\"list\");") != null);
     try std.testing.expect(std.mem.indexOf(u8, src, "const string = import(\"string\");") != null);
     try std.testing.expect(std.mem.indexOf(u8, src, "const iter = import(\"iter\");") != null);
+}
+
+test "prelude always emits try_fold match with wildcard arm" {
+    const alloc = std.testing.allocator;
+    // statements >= PRELUDE.len runs every prelude flavor, so these strings
+    // are deterministic; the sampled wildcard forms and fold_with flavor are
+    // deliberately not asserted.
+    const src = try generate(alloc, Options{ .seed = 7, .statements = 40, .funcs = 3 });
+    defer alloc.free(src);
+    try std.testing.expect(std.mem.indexOf(u8, src, "using iter.Result;") != null);
+    try std.testing.expect(std.mem.indexOf(u8, src, "iter.try_fold") != null);
+    try std.testing.expect(std.mem.indexOf(u8, src, "_ => false") != null);
 }

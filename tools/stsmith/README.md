@@ -50,8 +50,15 @@ behavior the generator can model exactly (no UB in the generator's model):
 - explicit `as` casts between every integer/float pair the generator uses
 - named helper functions with parameters and calls; recursion via a
   count-down template and via `[h, ..t]` list patterns
-- structs, tuples, unions with exhaustive `match`, `list[T]` literals and
-  patterns, and `any` payloads recovered through type-test `match` and `as`
+- structs (one to three per module, with field names deliberately reused
+  across structs), tuples, unions with exhaustive `match`, `list[T]`
+  literals and patterns, and `any` payloads recovered through type-test
+  `match` and `as`
+- wildcard `_` patterns in every pattern position the generator can model:
+  whole-arm catch-alls (the `classify` helper, collapsed union-arm tails,
+  `Result`/`Option` matches), payload positions in union patterns
+  (`U::V(_, q)`), tuple destructuring (`let (a, _) = ...`), and list heads
+  (`[_, ..t]` in both statement matches and the list-recursion template)
 - `str` constants, concatenation, and `builtin.str`/`builtin.print`
 
 Every generated program additionally imports the derived standard-library
@@ -65,8 +72,15 @@ weaves a modeled subset of each into the statement stream:
 - `list`: `lists.range` lists checked with `len` and `head` (including
   empty ranges), plus `contains`/`count`/`index_of` driven through an
   equality lambda
-- `iter`: `fold` with an addition lambda; the model result is the init
-  plus the wrapping sum of the range elements
+- `iter`: `fold` and `consume_fold` with an addition lambda; `try_fold`
+  with an always-`Complete` or always-`Break` step, asserted through a
+  `match` on the returned `iter.Result` with a `_` catch-all arm; and
+  `fold_with` whose step models the borrowed context per the spec (the
+  context equals the argument on every invocation). `iter.each` /
+  `iter.consume_each` run with a `builtin.print` action (output only,
+  like `builtin.print` statements, since a void action has no value to
+  assert). The model result for every fold is the init plus the wrapping
+  sum of the range elements
 
 The generator emits only ASCII strings, so the stdlib's Unicode operations
 (code-point indexing, case conversion, whitespace trimming) are byte-exact
@@ -102,14 +116,21 @@ with the runtime. The generator shapes around them:
 - **`==` exists only for `byte/int32/uint32/float32/bool/str`**, so 64-bit
   equality is asserted as paired `<=`/`>=` on a bound local (a single
   `and`-joined comparison miscompiles).
-- **Only one `struct` per module**: stilla resolves struct fields by name
-  across the whole module, and fields of a second declared struct read
-  garbage.
 - **Ordering comparisons do not type integer literals** from the other
   operand, so literals always appear on the right of a typed variable or
   inside a typed `==`.
 - Float operands are kept small enough (`<= 2^12` for `float32`, `<= 2^26`
   for `float64`) that `+ - *` stay exactly representable.
+- **`iter.fold_with` steps that read their context miscompute.** The spec
+  (StdLib §7, `iter.st`) says the context is borrowed and passed unchanged to
+  every step, so the generator models `c` as the argument constant; the
+  current runtime instead returns wrong totals (`acc + c * x` over
+  `range(1, 4)` with context 100 prints 1000, expected 600) while
+  context-ignoring steps and `iter.each` (whose context is a function value)
+  are correct. The generator keeps the spec model and emits context-reading
+  steps rarely (low flavor weight, sampled again inside the flavor), so most
+  seeds pass and seeds that do fail are flagging this implementation bug —
+  per the project rule the spec governs, not the runtime.
 
 These are documented here so the generator's model stays honest: any
 generated program that fails under `stilla --run` is either a real stilla
