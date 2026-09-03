@@ -130,16 +130,14 @@ with the runtime. The generator shapes around them:
   steps rarely (low flavor weight, sampled again inside the flavor), so most
   seeds pass and seeds that do fail are flagging this implementation bug —
   per the project rule the spec governs, not the runtime.
-- **Inlining a many-call statement can miscompile.** A statement that calls
-  the same pure helper several times (e.g. an integer expression with two
-  `f6()` calls, helpers that nest calls to other helpers, sampled with
-  `--funcs 8`) can compute a wrong result after the inliner splices the
-  helpers; a later `builtin.assert` then panics even though the identical
-  program compiles and runs correctly with the optimizer's inlining step
-  off. This is independent of `and`/`or` (a no-`and`/`or` program with the
-  same shape fails) and reproduces on a build with none of the stsmith
-  workarounds active, so it is a real frontend bug, not a generator-model
-  gap; the generator flags it when the option mix reaches it.
+- **The 2.15 madd fusion can fire without its preparation.** Loop shapes
+  that multiply then accumulate (`mul a, k1` / `mul a, k2` / `add t, t2`,
+  e.g. a tail-recursive helper with an `(x*n) + (x*m)` recurrence, sampled
+  with `--funcs 8` or via helper inlining) miscompile: `llir_alloc`'s
+  liveness fixed point over-approximates the accumulator's end past the
+  add, which vetoes the coalescing `llir_fusion`'s `*_madd` rewrite
+  assumes, so the fused record writes the accumulator cell while phi edge
+  copies still read the add result's own (never-written) slot.
 
 These are documented here so the generator's model stays honest: any
 generated program that fails under `stilla --run` is either a real stilla
