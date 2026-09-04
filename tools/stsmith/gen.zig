@@ -7,6 +7,12 @@ pub const Options = struct {
     statements: u32 = 60,
     funcs: u32 = 5,
     max_depth: u32 = 6,
+    /// Also weave a drop-hook Unique type (U0) and borrow/move access
+    /// patterns into the program. Default off: while the stilla runtime can
+    /// miscompile hook-hosting modules that specialize inline lambdas
+    /// (list-search / try_fold / fold family) into invalid images (see the
+    /// README's avoided-behaviors list), the default output stays runnable.
+    drop_hook: bool = false,
 };
 
 /// Generate a complete self-checking Stilla program. The returned bytes are
@@ -27,6 +33,7 @@ pub fn generate(alloc: std.mem.Allocator, opts: Options) ![]const u8 {
         .structs = std.array_list.Managed(StructDecl).init(a),
         .unions = std.array_list.Managed(UnionDecl).init(a),
         .tuple_types = std.array_list.Managed(TupleDecl).init(a),
+        .unique_locals = std.array_list.Managed(UVal).init(a),
     };
     try g.run();
     return alloc.dupe(u8, g.out.items);
@@ -64,6 +71,18 @@ const Local = struct { name: []const u8, value: model.Value };
 const Bind = struct { name: []const u8, value: model.Value };
 
 const VarRef = struct { name: []const u8, w: IntW };
+
+/// A live owner of the unique drop-hook struct U0. Every instance is built
+/// by mk(v) with both fields equal to v (x == y), so one int tracks the
+/// whole value. `alive` mirrors the ownership state the runtime enforces: a
+/// dead owner (moved or explicitly dropped) is never named again by later
+/// statements, and a still-alive owner is destroyed automatically when main
+/// ends.
+const UVal = struct {
+    name: []const u8,
+    x: IntVal,
+    alive: bool = true,
+};
 
 // -------- acyclic helpers --------
 
@@ -139,6 +158,7 @@ const Flav = enum {
     struct_stmt,
     union_stmt,
     any_stmt,
+    unique_stmt,
     print_stmt,
     std_str,
     std_slice,
@@ -153,11 +173,11 @@ const Flav = enum {
 
 /// every flavor runs once (in this order), then random draws take over
 const PRELUDE = [_]Flav{
-    .check_int,  .bind_int,    .check_bool,  .call_fn,  .rec_count,
-    .bind_bool,  .rec_list,    .float_exact, .str_stmt, .list_proj,
-    .tuple_stmt, .struct_stmt, .union_stmt,  .any_stmt, .print_stmt,
-    .std_str,    .std_slice,   .std_pair,    .std_list, .std_search,
-    .std_fold,   .std_cfold,   .std_tryfold,
+    .check_int,  .bind_int,    .check_bool,  .call_fn,     .rec_count,
+    .bind_bool,  .rec_list,    .float_exact, .str_stmt,    .list_proj,
+    .tuple_stmt, .struct_stmt, .union_stmt,  .any_stmt,    .print_stmt,
+    .std_str,    .std_slice,   .std_pair,    .std_list,    .std_search,
+    .std_fold,   .std_cfold,   .std_tryfold, .unique_stmt,
 };
 
 const FLAV_WEIGHTS = [_]struct { f: Flav, w: u32 }{
@@ -185,6 +205,7 @@ const FLAV_WEIGHTS = [_]struct { f: Flav, w: u32 }{
     .{ .f = .std_cfold, .w = 2 },
     .{ .f = .std_tryfold, .w = 2 },
     .{ .f = .std_foldctx, .w = 1 },
+    .{ .f = .unique_stmt, .w = 2 }, // gated: skipped entirely when drop_hook is off
 };
 
 const Gen = struct {
@@ -206,6 +227,14 @@ const Gen = struct {
     structs: std.array_list.Managed(StructDecl),
     unions: std.array_list.Managed(UnionDecl),
     tuple_types: std.array_list.Managed(TupleDecl),
+    unique_locals: std.array_list.Managed(UVal),
+
+    // fixed drop-hook Unique type support (U0 + accessors): bodies sampled
+    // per program; expected values come from evalU with the owner's x (= y)
+    // bound under the member names "u.x" / "u.y".
+    rd_body: *Expr = undefined, // borrow reader body over u.x / u.y
+    tk_body: *Expr = undefined, // move taker body over u.x / u.y
+    cons_body: *Expr = undefined, // move taker that drops its binding early
 
     /// While building expressions that live inside a function body, bitwise
     /// `|` / `^` are suppressed: stilla's frontend folds any such op whose
@@ -241,25 +270,29 @@ const Gen = struct {
         self.buildHelpers();
         self.buildClassify();
         self.buildRecFns();
+        if (self.opts.drop_hook) self.buildUniqueHelpers();
         try self.emitDecls();
         try self.emitMain();
     }
 
     fn emitHeader(self: *Gen) !void {
-        const s = std.fmt.allocPrint(
+        const head = std.fmt.allocPrint(
             self.alloc,
             "// stsmith -- randomized Stilla program\n" ++
-                "// seed={d} statements={d} funcs={d} max-depth={d}\n" ++
-                "// Same seed + same options reproduce this file byte-for-byte.\n\n" ++
-                "const builtin = import(\"builtin\");\n" ++
-                "const string = import(\"string\");\n" ++
-                "const lists = import(\"list\");\n" ++
-                "const iter = import(\"iter\");\n" ++
-                "using builtin.Option;\n" ++
-                "using iter.Result;\n\n",
+                "// seed={d} statements={d} funcs={d} max-depth={d}\n",
             .{ self.opts.seed, self.opts.statements, self.opts.funcs, self.opts.max_depth },
         ) catch unreachable;
-        try self.out.appendSlice(s);
+        try self.out.appendSlice(head);
+        if (self.opts.drop_hook) try self.out.appendSlice("// drop-hook=true\n");
+        const rest =
+            "// Same seed + same options reproduce this file byte-for-byte.\n\n" ++
+            "const builtin = import(\"builtin\");\n" ++
+            "const string = import(\"string\");\n" ++
+            "const lists = import(\"list\");\n" ++
+            "const iter = import(\"iter\");\n" ++
+            "using builtin.Option;\n" ++
+            "using iter.Result;\n\n";
+        try self.out.appendSlice(rest);
     }
 
     fn line(self: *Gen, comptime fmt: []const u8, args: anytype) !void {
@@ -863,6 +896,64 @@ const Gen = struct {
         }) catch unreachable;
     }
 
+    // ============ the unique drop-hook type ============
+    //
+    // One affine struct with a user drop hook (Ownership §10.2, Destruction
+    // §9) per program. The hook body asserts the x == y construction
+    // invariant, so a hook firing at any destruction point — an explicit
+    // `drop`, a `move` parameter destroyed at callee scope end, or the
+    // scope-end automatic destruction of a still-alive owner — is
+    // model-checkable without the generator tracking destruction order.
+    // All instances come from mk(v) (x = y = v); the accessor bodies below
+    // are ordinary int32 expressions over the member names "u.x" / "u.y" —
+    // a VarRef/Bind name is also the printed member-access text, so
+    // intText and the evaluator need no special casing.
+
+    fn buildUniqueHelpers(self: *Gen) void {
+        const vars = self.allocSlice(VarRef, 2);
+        vars[0] = .{ .name = "u.x", .w = .i32 };
+        vars[1] = .{ .name = "u.y", .w = .i32 };
+        self.rd_body = self.bInt(.i32, 2, vars, self.fns.items.len, false);
+        self.tk_body = self.bInt(.i32, 2, vars, self.fns.items.len, false);
+        self.cons_body = self.bInt(.i32, 2, vars, self.fns.items.len, false);
+    }
+
+    /// Expected value of a unique accessor body over an owner whose field
+    /// value is x (y == x by construction).
+    fn evalU(self: *Gen, body: *Expr, x: IntVal) IntVal {
+        const binds = [_]Bind{
+            .{ .name = "u.x", .value = .{ .int = x } },
+            .{ .name = "u.y", .value = .{ .int = x } },
+        };
+        return self.evalInt(body, binds[0..]).?;
+    }
+
+    fn aliveUniqueCount(self: *Gen) usize {
+        var n: usize = 0;
+        for (self.unique_locals.items) |uv| {
+            if (uv.alive) n += 1;
+        }
+        return n;
+    }
+
+    fn pickAliveUnique(self: *Gen) ?*UVal {
+        const n = self.aliveUniqueCount();
+        if (n == 0) return null;
+        const pick = self.rng.index(n);
+        var i: usize = 0;
+        for (self.unique_locals.items) |*uv| {
+            if (uv.alive) {
+                if (i == pick) return uv;
+                i += 1;
+            }
+        }
+        unreachable;
+    }
+
+    fn pushUnique(self: *Gen, name: []const u8, x: IntVal) void {
+        self.unique_locals.append(.{ .name = name, .x = x }) catch unreachable;
+    }
+
     // ============ recursion evaluation ============
 
     fn evalRecC(self: *Gen, r: *RecFn, count: i32, x0: i32) IntVal {
@@ -935,6 +1026,7 @@ const Gen = struct {
         for (self.recs.items) |*r| {
             try self.writeRecFn(r);
         }
+        if (self.opts.drop_hook) try self.emitUnique();
     }
 
     fn writeFnDecl(self: *Gen, fi: *const FnInfo) !void {
@@ -996,18 +1088,79 @@ const Gen = struct {
         }
     }
 
+    fn emitUnique(self: *Gen) !void {
+        try self.top("struct U0 {{", .{});
+        try self.top("    x: int32;", .{});
+        try self.top("    y: int32;", .{});
+        try self.top("    drop(u) {{", .{});
+        try self.top("        builtin.assert((u.x) == (u.y), \"uok\");", .{});
+        try self.top("    }}", .{});
+        try self.top("}}", .{});
+        try self.blank();
+
+        try self.top("fn mk(v: int32) -> U0 {{", .{});
+        try self.top("    U0 {{ x: v, y: v }}", .{});
+        try self.top("}}", .{});
+        try self.blank();
+
+        try self.top("fn rd(borrow u: U0) -> int32 {{", .{});
+        try self.line("{s}", .{self.intText(self.rd_body)});
+        try self.top("}}", .{});
+        try self.blank();
+
+        try self.top("fn fwd(borrow u: U0) -> int32 {{", .{});
+        try self.line("rd(u)", .{});
+        try self.top("}}", .{});
+        try self.blank();
+
+        try self.top("fn tk(move u: U0) -> int32 {{", .{});
+        try self.line("{s}", .{self.intText(self.tk_body)});
+        try self.top("}}", .{});
+        try self.blank();
+
+        try self.top("fn cons(move u: U0) -> int32 {{", .{});
+        try self.line("let r = {s};", .{self.intText(self.cons_body)});
+        try self.line("drop u;", .{});
+        try self.line("r", .{});
+        try self.top("}}", .{});
+        try self.blank();
+    }
+
     // ---------- statement dispatch ----------
 
     fn flavorFor(self: *Gen, i: usize) Flav {
-        if (i < PRELUDE.len) return PRELUDE[i];
+        if (i < PRELUDE.len) {
+            const pf = PRELUDE[i];
+            if (self.flavorAllowed(pf)) return pf;
+        }
         var total: u32 = 0;
-        for (FLAV_WEIGHTS) |fw| total += fw.w;
+        for (FLAV_WEIGHTS) |fw| {
+            if (self.flavorAllowed(fw.f)) total += fw.w;
+        }
         var roll = self.rng.below(total);
         for (FLAV_WEIGHTS) |fw| {
+            if (!self.flavorAllowed(fw.f)) continue;
             if (roll < fw.w) return fw.f;
             roll -= fw.w;
         }
         return .check_int;
+    }
+
+    /// Flavor gating (Options.drop_hook): the unique-owner statements only
+    /// run in drop-hook mode, and in that mode every flavor that passes an
+    /// inline lambda / generic function value to the stdlib is withheld.
+    /// While stilla can miscompile hook-hosting modules that specialize
+    /// such calls — reliably the list-search and try_fold shapes, and
+    /// inline-lambda specialization in larger modules — to invalid images
+    /// (README's avoided-behaviors list), hook mode conservatively withholds
+    /// the whole lambda-passing family. Skipping keeps the default mode's
+    /// draw stream identical to a drop-hook-free generator.
+    fn flavorAllowed(self: *Gen, f: Flav) bool {
+        return switch (f) {
+            .unique_stmt => self.opts.drop_hook,
+            .std_search, .std_fold, .std_cfold, .std_tryfold, .std_foldctx => !self.opts.drop_hook,
+            else => true,
+        };
     }
 
     fn emitMain(self: *Gen) !void {
@@ -1048,6 +1201,7 @@ const Gen = struct {
                 .struct_stmt => try self.sStruct(),
                 .union_stmt => try self.sUnion(),
                 .any_stmt => try self.sAny(),
+                .unique_stmt => try self.sUnique(),
                 .print_stmt => try self.sPrint(),
                 .std_str => try self.sStdStr(),
                 .std_slice => try self.sStdSlice(),
@@ -1529,6 +1683,62 @@ const Gen = struct {
         try self.line("builtin.print(builtin.str({s}));", .{loc.?.name});
     }
 
+    // ---------- unique drop-hook owner statements ----------
+    //
+    // Access patterns per Ownership §10.4-§10.6: repeated borrows and a
+    // borrow-to-borrow forward (`fwd`) on a live owner, an explicit `drop`,
+    // a `move` into an owning parameter — of a bound owner (with the `move`
+    // keyword) and of a fresh `mk(v)` expression (which transfers
+    // implicitly) — and a `move` parameter (`cons`) that drops its own
+    // binding after reading. Only alive owners are named again; model and
+    // emitted code agree on when an owner dies, so use-after-move never
+    // compiles and every expected value is asserted.
+    fn sUnique(self: *Gen) !void {
+        const roll = self.rng.below(100);
+        if (self.aliveUniqueCount() == 0 or roll < 35) {
+            // fresh owner: bind mk(v), then read it through the borrow
+            // accessor. Runs first whenever no owner is alive yet.
+            const v = self.lit(.i32);
+            const nm = self.newVar();
+            try self.line("let {s}: U0 = mk({s});", .{ nm, self.litText(v) });
+            self.pushUnique(nm, v);
+            const rd_call = std.fmt.allocPrint(self.alloc, "rd({s})", .{nm}) catch unreachable;
+            try self.intEqAssert(rd_call, self.evalU(self.rd_body, v), self.msg());
+            return;
+        }
+        const uv = self.pickAliveUnique().?;
+        if (roll < 50) {
+            // borrow a live owner again (read-only, still alive)
+            const rd_call = std.fmt.allocPrint(self.alloc, "rd({s})", .{uv.name}) catch unreachable;
+            try self.intEqAssert(rd_call, self.evalU(self.rd_body, uv.x), self.msg());
+        } else if (roll < 60) {
+            // borrow forwarding: rd through a second borrow parameter
+            const fwd_call = std.fmt.allocPrint(self.alloc, "fwd({s})", .{uv.name}) catch unreachable;
+            try self.intEqAssert(fwd_call, self.evalU(self.rd_body, uv.x), self.msg());
+        } else if (roll < 70) {
+            // explicit drop of a live owner (Destruction §9.4)
+            uv.alive = false;
+            try self.line("drop {s};", .{uv.name});
+        } else if (roll < 80) {
+            // move a bound owner into an owning parameter; it dies here
+            uv.alive = false;
+            try self.line("builtin.assert(tk(move {s}) == {s}, \"{s}\");", .{ uv.name, self.litText(self.evalU(self.tk_body, uv.x)), self.msg() });
+        } else if (roll < 86) {
+            // borrow a fresh mk(v) temporary (implicit borrow)
+            const v = self.lit(.i32);
+            const rd_call = std.fmt.allocPrint(self.alloc, "rd(mk({s}))", .{self.litText(v)}) catch unreachable;
+            try self.intEqAssert(rd_call, self.evalU(self.rd_body, v), self.msg());
+        } else if (roll < 93) {
+            // fresh value transfers implicitly to a move parameter
+            const v = self.lit(.i32);
+            try self.line("builtin.assert(tk(mk({s})) == {s}, \"{s}\");", .{ self.litText(v), self.litText(self.evalU(self.tk_body, v)), self.msg() });
+        } else {
+            // a move parameter that drops its own binding after reading
+            const v = self.lit(.i32);
+            try self.line("builtin.assert(cons(mk({s})) == {s}, \"{s}\");", .{ self.litText(v), self.litText(self.evalU(self.cons_body, v)), self.msg() });
+        }
+    }
+
     // ============ stdlib string/list/iter statements ============
     //
     // These exercise the derived standard-library modules (string.st,
@@ -1892,6 +2102,59 @@ test "generated program parses basic shape" {
     try std.testing.expect(std.mem.indexOf(u8, src, "const lists = import(\"list\");") != null);
     try std.testing.expect(std.mem.indexOf(u8, src, "const string = import(\"string\");") != null);
     try std.testing.expect(std.mem.indexOf(u8, src, "const iter = import(\"iter\");") != null);
+}
+
+test "program declares the drop-hook Unique type and its accessors" {
+    const alloc = std.testing.allocator;
+    const src = try generate(alloc, Options{ .seed = 7, .statements = 40, .funcs = 3, .drop_hook = true });
+    defer alloc.free(src);
+    try std.testing.expect(std.mem.indexOf(u8, src, "struct U0 {") != null);
+    try std.testing.expect(std.mem.indexOf(u8, src, "(u.x) == (u.y)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, src, "fn mk(v: int32) -> U0") != null);
+    try std.testing.expect(std.mem.indexOf(u8, src, "fn rd(borrow u: U0)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, src, "fn fwd(borrow u: U0)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, src, "fn tk(move u: U0)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, src, "fn cons(move u: U0)") != null);
+}
+
+test "unique statements bind owners and borrow them in main" {
+    const alloc = std.testing.allocator;
+    // statements > PRELUDE.len forces the unique_stmt prelude slot, and the
+    // first unique draw always binds a fresh owner, so these strings are
+    // deterministic; the sampled move/drop/forward shapes are not asserted.
+    const src = try generate(alloc, Options{ .seed = 7, .statements = 40, .funcs = 3, .drop_hook = true });
+    defer alloc.free(src);
+    try std.testing.expect(std.mem.indexOf(u8, src, ": U0 = mk(") != null);
+    try std.testing.expect(std.mem.indexOf(u8, src, "rd(v") != null);
+    try std.testing.expect(std.mem.indexOf(u8, src, "drop(u)") != null);
+}
+
+test "drop-hook coverage is gated off by default" {
+    const alloc = std.testing.allocator;
+    const src = try generate(alloc, Options{ .seed = 7, .statements = 40, .funcs = 3 });
+    defer alloc.free(src);
+    try std.testing.expect(std.mem.indexOf(u8, src, "struct U0 {") == null);
+    try std.testing.expect(std.mem.indexOf(u8, src, "drop(u)") == null);
+    try std.testing.expect(std.mem.indexOf(u8, src, "drop-hook=true") == null);
+}
+
+test "drop-hook mode records the option and withholds lambda-passing flavors" {
+    const alloc = std.testing.allocator;
+    const src = try generate(alloc, Options{ .seed = 7, .statements = 40, .funcs = 3, .drop_hook = true });
+    defer alloc.free(src);
+    try std.testing.expect(std.mem.indexOf(u8, src, "drop-hook=true") != null);
+    try std.testing.expect(std.mem.indexOf(u8, src, "struct U0 {") != null);
+    // hook mode must not reach the stdlib flavors that stilla miscompiles
+    // in hook-hosting modules (README avoided-behaviors list).
+    try std.testing.expect(std.mem.indexOf(u8, src, "iter.fold(") == null);
+    try std.testing.expect(std.mem.indexOf(u8, src, "iter.consume_fold(") == null);
+    try std.testing.expect(std.mem.indexOf(u8, src, "iter.try_fold(") == null);
+    try std.testing.expect(std.mem.indexOf(u8, src, "iter.fold_with(") == null);
+    try std.testing.expect(std.mem.indexOf(u8, src, "iter.each(") == null);
+    try std.testing.expect(std.mem.indexOf(u8, src, "iter.consume_each(") == null);
+    try std.testing.expect(std.mem.indexOf(u8, src, "lists.contains(") == null);
+    try std.testing.expect(std.mem.indexOf(u8, src, "lists.count(") == null);
+    try std.testing.expect(std.mem.indexOf(u8, src, "lists.index_of(") == null);
 }
 
 test "prelude always emits try_fold match with wildcard arm" {

@@ -11,6 +11,7 @@ Usage:
     zig build                          # build zig-out/bin/stsmith and stilla
     python3 tools/stsmith/sweep.py
     python3 tools/stsmith/sweep.py --seed 0-100 --statements 120
+    python3 tools/stsmith/sweep.py --seed 0-100 --drop-hook
 """
 import argparse
 import os
@@ -38,6 +39,9 @@ def main():
     ap.add_argument("--statements", type=int)
     ap.add_argument("--funcs", type=int)
     ap.add_argument("--max-depth", type=int)
+    ap.add_argument("--drop-hook", action="store_true",
+                    help="pass --drop-hook to stsmith (unique drop-hook type "
+                         "with borrow/move access patterns)")
     args = ap.parse_args()
 
     try:
@@ -64,6 +68,8 @@ def main():
             gen += ["--funcs", str(args.funcs)]
         if args.max_depth is not None:
             gen += ["--max-depth", str(args.max_depth)]
+        if args.drop_hook:
+            gen += ["--drop-hook"]
         rc, out, err = run(gen)
         if rc != 0:
             print(f"seed {seed}: GENERATION FAILED")

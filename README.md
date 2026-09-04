@@ -5,10 +5,87 @@ frontend compiler (module graph → type-checked CFG AIR → LLIR assembly and
 binary), the interpreter VM that executes it, and the host-embedding surface
 that connects both to a Zig or C host.
 
-> **Status:** WIP
-
 > Caveat: Almost all code in this program is Vibe Coded with DeepSeek V4 Flash.
 > DON'T PANIC.
+
+## Project status
+
+`zig build test` is green on HEAD. The checklist below is a code-level
+survey of what actually exists in `src/`; items are grouped by subsystem,
+and the trailing section lists what the code and docs still mark open.
+
+**Language frontend: source → CFG AIR**
+
+- [x] **Lexer, AST, parser** — grammar sub-parsers (`parse/`), binding-power
+  expression parsing, per-module diagnostic collection with recovery
+- [x] **Module graph** — multi-file import resolution (embedded `std/` bundle
+  and `-I` search dirs), cycle detection, topological ordering, host-binding
+  classification (`moduleinfo` + `passes/module_*`)
+- [x] **Type checker** — inference, ownership analysis with conditional
+  release and state merging, generic monomorphization, `any`/union/tuple/list
+- [x] **CFG lowering** — control flow, `match`/patterns, field paths, calls,
+  intrinsic (`builtin`) expansion, destruction placement, module init
+  functions, syscalls
+- [x] **CFG AIR** — lexer/parser/printer round-trip; a structural validator
+  runs on every lowered program
+- [x] **Mid-level optimizer** — tail-call, inline, CSE, copy-prop, PRE,
+  if-convert, dead-block, drop-elide, dead-instr, jump-threading,
+  phi-simplify; constant folding during emit; drop expansion
+- [x] **Frontend cache** — per-module, dependency-tracked
+
+**LLIR backend: CFG → frozen image → bytes**
+
+- [x] **Instruction set** — fixed-width 4-byte `Instr` in six formats, a
+  ~270-opcode table with per-op schemas, `zero`/`ra`/`cond` registers, the
+  frame/call contract, side-table records
+- [x] **Eleven-stage lowering** — prepare, allocation, lifecycle plan, edge
+  blocks, budget, intern, body/edge/control emit, fusion, linearize
+- [x] **Validation, assembly, binary** — `llir_validate`, `llir_asm`, and
+  `llir_emit_bin` + reader (`readBin`) round-trip; `--run` loads and
+  structure-validates a binary before executing
+
+**Runtime and embedding**
+
+- [x] **Interpreter** — raw-`u64`-cell LLIR execution: i32/u32/i64/u64/f32/f64,
+  bool, `any`; deterministic evaluation and destruction; panics as owned
+  messages
+- [x] **Lifecycle** — counted-value release placement, per-module destruction,
+  cleanup tokens, user `drop` hooks
+- [x] **Host layers** — signature-checked comptime registry, derived `.st`
+  interfaces, syscalls, `builtin.print` output hook (no runtime default)
+- [x] **Loader & artifacts** — dependency-order instantiation, host modules,
+  `VmLoadedData`/`VmRuntimeState` split, `artifact_bundle` build-once/run-many
+- [x] **Embedding** — `frontend.compile` + `runWithHostAndLoader`,
+  `examples/embed/random_demo.zig`, `libstilla.a` static library
+- [x] **CLI** — compile to AIR / LLIR assembly / LLIR binary; `--run` (source
+  or self-contained binary); `--module`/`--entry-fn`/`--no-entry-fn`/`-I`
+
+**Standard library (embedded `std/` source)**
+
+- [x] **Modules** — `math`, `string`, `array`, `list`, `iter`, `hashmap`,
+  `builtin`, compiled as ordinary Stilla alongside user code
+- [x] **Host adapters** — `array`/`hashmap` backed by Zig host modules
+
+**Tools and tests**
+
+- [x] ~30 per-area suites (frontend, checker, optimizer, LLIR
+  ops/wide/branch/normalize/validate/asm/bin, interpreter
+  scalar/lifecycle/image/load/host, cache) plus ownership-fusion tests
+- [x] Grammar→AST conformance suite over the normative ABNF and spec examples
+- [x] **stsmith** — randomized, self-checking program generator with a
+  seed-sweep harness
+- [x] CLI end-to-end probes (exit-code contract, `--emit-bin` round-trip)
+
+**Still open** (from code and docs)
+
+- [ ] Hot-reload is designed for but the reload entry point is not wired
+  (interpreter_loader.zig)
+- [ ] The `movwz*`/`movwn*`/`movwk*` I-format rows exist but the frontend
+  lowering does not emit them yet (longer forms are compiled instead)
+- [ ] `select` does not yet participate in CSE (optimizer.md §8.4 follow-up)
+- [ ] Inferred tuple/list elements can still carry a module value; §2.3 not
+  closed for container positions (phase2-checker.md)
+- [ ] Only the Zig API is public for embedding — no C header yet
 
 ## What is Stilla?
 
