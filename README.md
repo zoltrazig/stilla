@@ -1,5 +1,9 @@
 # Stilla Runtime (Zig)
 
+[![CI](https://img.shields.io/github/actions/workflow/status/zoltrazig/stilla/ci.yml?style=flat-square&label=CI)](https://github.com/zoltrazig/stilla/actions/workflows/ci.yml)
+[![Docs](https://img.shields.io/badge/docs-blue?style=flat-square)](https://zoltrazig.github.io/)
+[![Docs zh](https://img.shields.io/badge/docs-zh-blue?style=flat-square)](https://zoltrazig.github.io/zh/)
+
 A Zig implementation of the **Stilla v1.3 runtime** and its toolchain: the
 frontend compiler (module graph → type-checked CFG AIR → LLIR assembly and
 binary), the interpreter VM that executes it, and the host-embedding surface

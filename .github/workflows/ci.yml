@@ -16,8 +16,8 @@ jobs:
         with:
           # Version of the Zig compiler, e.g. "0.13.0" or "0.13.0-dev.351+64ef45eb0". "master" uses the latest nightly build. "latest" uses the latest tagged release. Leave empty to use minimum_zig_version from build.zig.zon, with a fallback to "latest".
           version: "0.16.0"
-      - run: zig build test -Doptimize=ReleaseSafe
+      - run: zig build -fincremental test -Doptimize=ReleaseSafe
       - name: stsmith sweep
         run: |
-          zig build -Doptimize=ReleaseSafe
+          zig build -fincremental -Doptimize=ReleaseSafe
           python3 tools/stsmith/sweep.py
