@@ -9,9 +9,13 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: mlugg/setup-zig@v1
+      - name: Setup Zig Compiler
+        # You may pin to the exact commit or the version.
+        # uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29
+        uses: mlugg/setup-zig@v2.2.1
         with:
-          version: 0.16.0
+          # Version of the Zig compiler, e.g. "0.13.0" or "0.13.0-dev.351+64ef45eb0". "master" uses the latest nightly build. "latest" uses the latest tagged release. Leave empty to use minimum_zig_version from build.zig.zon, with a fallback to "latest".
+          version: "0.16.0"
       - run: zig build test -Doptimize=ReleaseSafe
       - name: stsmith sweep
         run: |
