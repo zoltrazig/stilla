@@ -41,8 +41,13 @@ const OwnershipId = enum(u32) {
 pub fn run(bld: *Builder) error{OutOfMemory}!void {
     // Type declarations (indexed by the same TypeId `Type.named`
     // carries), the artifact header (self symbol, init, entry member,
-    // export table, slots). Seeded Builders already carry the canonical
-    // type environment, so `serializeDecls` is idempotent.
+    // export table, slots). Seeded Builders re-serialize the type
+    // environment rather than inheriting it: the drop-hook fields of a
+    // `TypeDeclDesc` are scope-local (the owning artifact's `FunctionId`,
+    // or a symbolic import elsewhere), so every artifact resolves them
+    // against its own function table. `serializeDecls` is 1:1 over
+    // `program.types`, so the row indexes (the shared `TypeId`s) are
+    // identical in every artifact.
     if (bld.type_decls.items.len != bld.program.types.len) {
         try serializeDecls(bld);
     }

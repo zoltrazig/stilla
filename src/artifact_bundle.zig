@@ -13,7 +13,10 @@
 //! signatures, strings, constants) is seeded identically into every
 //! artifact from the root build (docs/interpreter-vm.md §6), so a
 //! signature/type id means the same thing in every artifact of one
-//! compilation.
+//! compilation. The `TypeDesc` rows share that rule; the `TypeDeclDesc`
+//! rows are rebuilt per artifact (`seedShared` does not copy them)
+//! because their drop-hook fields are scope-local references — the
+//! owning artifact's `FunctionId`, a symbolic import elsewhere.
 
 const std = @import("std");
 const cfg = @import("cfg.zig");

@@ -4,11 +4,12 @@ Zig implementation of the Stilla v1.3 runtime and Stilla-to-CFG-AIR compiler. Us
 
 ## Commands
 
-- `zig build` installs `zig-out/lib/libstilla.a` and `zig-out/bin/stilla`.
-- `zig build test` runs the complete library and CLI test suite; prefer this before finishing.
+- `zig build -fincremental` installs `zig-out/lib/libstilla.a` and `zig-out/bin/stilla`.
+- `zig build -fincremental --release=safe` builds the same artifacts with ReleaseSafe optimizations.
+- `zig build -fincremental test` runs the complete library and CLI test suite; prefer this before finishing.
 - `zig fmt src/` formats sources. Run it before `zig fmt --check src/`; some files were historically not format-clean.
-- `zig build run -- examples/fib.st` compiles one Stilla source to CFG AIR on stdout.
-- `zig build examples` always regenerates AIR, LLIR assembly, and LLIR binary artifacts under `zig-out/examples/` and prints their sizes.
+- `zig build -fincremental run -- examples/fib.st` compiles one Stilla source to CFG AIR on stdout.
+- `zig build -fincremental examples` always regenerates AIR, LLIR assembly, and LLIR binary artifacts under `zig-out/examples/` and prints their sizes.
 - CLI options must precede the input file. Important forms are `--output <file>`, `--emit-asm`, `--emit-bin <file>`, `--module <spec>`, `--entry-fn <name>`, `--no-entry-fn`, and `-I <dir>`. `--emit-bin` cannot be combined with `--emit-asm` or `--output`.
 
 ## Testing

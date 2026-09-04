@@ -329,6 +329,119 @@ test "M6: one combined program across all stdlib modules runs end to end" {
     );
 }
 
+test "M6: a drop-hook module that passes inline lambdas to the stdlib loads and runs" {
+    // Regression: the root artifact resolved a struct's drop hook to a
+    // module-local `FunctionId`, and `seedShared` copied that type-decl row
+    // verbatim into every dependency artifact — where the id is out of range
+    // (or names the wrong function), so the validator rejected the stdlib
+    // artifact at load (`InvalidImage`). Type decls are per-artifact now, so
+    // hook-hosting modules may specialize inline lambdas like any other
+    // module. The dependency artifacts never need to invoke U0's hook —
+    // merely loading them was the failure; the final `drop u` proves the
+    // root artifact still resolves the hook locally.
+    try runBinRoundTrip(
+        \\const builtin = import("builtin");
+        \\const lists = import("list");
+        \\const iter = import("iter");
+        \\using iter.Result;
+        \\struct U0 {
+        \\    x: int32;
+        \\    y: int32;
+        \\    drop(u) {
+        \\        builtin.assert((u.x) == (u.y), "uok");
+        \\    }
+        \\}
+        \\fn main() -> void {
+        \\    let u: U0 = U0 { x: 1, y: 1 };
+        \\    let xs = lists.range(0, 5);
+        \\    let found = lists.contains(xs, 3, fn(borrow a: int32, borrow b: int32) -> bool { a == b });
+        \\    let sum = iter.fold(lists.range(1, 4), 0, fn(move acc: int32, borrow x: int32) -> int32 { acc + x });
+        \\    match (iter.try_fold(xs, 0, fn(move s: int32, borrow x: int32) -> Result[int32, int32] {
+        \\        if (x == 4) { Result::Break(move s) } else { Result::Complete(s + x) }
+        \\    })) {
+        \\        Result::Break(r) => builtin.print(builtin.str(r)),
+        \\        Result::Complete(t) => builtin.print(builtin.str(t)),
+        \\    };
+        \\    builtin.assert(found, "found");
+        \\    builtin.print(builtin.str(sum));
+        \\    drop u;
+        \\    builtin.print("ok");
+        \\}
+    ,
+        "6\n10\nok\n",
+    );
+}
+
+// The drop-hook reference in a `TypeDeclDesc` is scope-local: the owning
+// artifact names its hook with a local `FunctionId` (`.b`), every other
+// artifact with a symbolic import (`.e`). Seeding used to copy the root's
+// row verbatim, so a dependency could carry an out-of-range id — or worse,
+// an in-range id naming one of its own functions. Both shapes are pinned
+// here: run the program, then inspect the same type-decl row in the root
+// and a dependency artifact.
+test "M6: the drop-hook type-decl reference is per-artifact (local id vs import)" {
+    var sources = moduleinfo.Sources{};
+    var smap = std.StringHashMapUnmanaged([]const u8).empty;
+    try smap.put(testing.allocator, "app",
+        \\const builtin = import("builtin");
+        \\const lists = import("list");
+        \\struct U0 {
+        \\    x: int32;
+        \\    y: int32;
+        \\    drop(u) {
+        \\        builtin.assert((u.x) == (u.y), "uok");
+        \\    }
+        \\}
+        \\fn main() -> void {
+        \\    let u: U0 = U0 { x: 1, y: 1 };
+        \\    let found = lists.contains(lists.range(0, 5), 3, fn(borrow a: int32, borrow b: int32) -> bool { a == b });
+        \\    builtin.assert(found, "found");
+        \\    drop u;
+        \\}
+    );
+    defer smap.deinit(testing.allocator);
+    sources.source = smap;
+    for (stdbundle.modules) |bm| try sources.standard_library.put(testing.allocator, bm.specifier, bm.source);
+    defer sources.standard_library.deinit(testing.allocator);
+    var compilation = try frontend.compile(testing.allocator, .{
+        .entry = "app",
+        .sources = sources,
+        .entry_fn = "main",
+        .optimize = false,
+    });
+    defer compilation.deinit();
+    const program = &(compilation.program orelse return error.TestUnexpectedResult);
+
+    // U0's type-decl row: the shared index is the `TypeId`.
+    var decl_idx: usize = 0;
+    for (program.types, 0..) |t, i| {
+        switch (t) {
+            .struct_ => |s| if (std.mem.eql(u8, s.name, "U0") and std.mem.eql(u8, s.module, "app")) {
+                decl_idx = i;
+            },
+            else => {},
+        }
+    }
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var bundle = try artifact_bundle.ArtifactBundle.build(arena.allocator(), program);
+
+    // Root artifact: the hook resolves locally.
+    const root_row = bundle.root.type_decls[decl_idx];
+    try testing.expect(root_row.b != llir.no_index);
+    try testing.expect(root_row.b < bundle.root.functions.len);
+    try testing.expect(root_row.e == llir.no_index);
+
+    // The list dependency names the same hook symbolically — never with a
+    // local `FunctionId`, which would be out of range or wrong.
+    const list_img = bundle.artifacts.get("list").?;
+    const list_row = list_img.type_decls[decl_idx];
+    try testing.expectEqual(llir.no_index, list_row.b);
+    try testing.expect(list_row.e != llir.no_index);
+    try testing.expect(list_row.e < list_img.imports.len);
+}
+
 /// Walk every stdlib module's declaration-only `fn` members and assert the
 /// default host dispatches each — a declared binding must never fall through
 /// to `.not_implemented`.

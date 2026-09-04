@@ -105,7 +105,10 @@ const Printer = struct {
         // `block_ranges` (stage-7 edge blocks included).
         var bi: usize = 0;
         for (self.image.functions, 0..) |fd, fi| {
-            const f = self.program.funcs[fi];
+            // image.functions pairs 1:1 with the Builder's scoped
+            // `ordered_funcs` — the entry module's functions for a
+            // per-module artifact, not the whole-program `program.funcs`.
+            const f = self.builder.ordered_funcs.items[fi];
             const r = self.builder.block_ranges.items[fi];
             const blocks = self.image.blocks[bi .. bi + r.len];
             try self.printFunc(f, fd, blocks, @intCast(r.start), @intCast(fi));
@@ -218,8 +221,8 @@ const Printer = struct {
                 try self.w(" ", .{});
                 const target = llir.jalTarget(pc, d.imm20);
                 if (llir.functionAtPc(self.image.functions, target)) |fid| {
-                    if (fid < self.program.funcs.len and fid < self.image.functions.len) {
-                        try self.appendFuncName(self.program.funcs[fid]);
+                    if (fid < self.builder.ordered_funcs.items.len) {
+                        try self.appendFuncName(self.builder.ordered_funcs.items[fid]);
                     } else {
                         try self.w("0x{x}", .{target});
                     }
@@ -393,8 +396,8 @@ const Printer = struct {
                 }
             },
             .fn_ref => {
-                if (value < self.program.funcs.len and value < self.image.functions.len) {
-                    try self.appendFuncName(self.program.funcs[value]);
+                if (value < self.builder.ordered_funcs.items.len) {
+                    try self.appendFuncName(self.builder.ordered_funcs.items[value]);
                 } else {
                     try self.uidToken(.function, value);
                 }

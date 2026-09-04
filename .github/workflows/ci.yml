@@ -1,0 +1,19 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: mlugg/setup-zig@v1
+        with:
+          version: 0.16.0
+      - run: zig build test -Doptimize=ReleaseSafe
+      - name: stsmith sweep
+        run: |
+          zig build -Doptimize=ReleaseSafe
+          python3 tools/stsmith/sweep.py

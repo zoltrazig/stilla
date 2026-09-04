@@ -463,10 +463,13 @@ pub const Builder = struct {
         }
         try self.constants.appendSlice(self.arena, canon.constants.items);
         try self.types.appendSlice(self.arena, canon.types.items);
-        try self.type_decls.appendSlice(self.arena, canon.type_decls.items);
-        try self.type_decl_fields.appendSlice(self.arena, canon.type_decl_fields.items);
-        try self.union_variants.appendSlice(self.arena, canon.union_variants.items);
-        try self.union_payloads.appendSlice(self.arena, canon.union_payloads.items);
+        // The type-decl tables are NOT seeded: their drop-hook fields hold
+        // scope-local `FunctionId`s (a struct's hook resolved against the
+        // owning artifact's function table), so each Builder serializes its
+        // own rows with `serializeDecls`. The table indexes are the shared
+        // `TypeId`s (1:1 over `program.types`), so cross-artifact type
+        // references stay consistent; only the per-artifact drop reference
+        // (local id or symbolic import) differs.
         try self.host_types.appendSlice(self.arena, canon.host_types.items);
         try self.signatures.appendSlice(self.arena, canon.signatures.items);
         try self.params.appendSlice(self.arena, canon.params.items);

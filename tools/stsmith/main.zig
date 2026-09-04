@@ -17,10 +17,6 @@ const usage =
     \\  --statements <n>  statements to generate in main (default: 60)
     \\  --funcs <n>       helper functions to generate (default: 5)
     \\  --max-depth <n>   max recursion depth for recursive templates (default: 6)
-    \\  --drop-hook       weave a drop-hook Unique type with borrow/move
-    \\                    access patterns (default: off — stilla can
-    \\                    miscompile hook-hosting modules that specialize
-    \\                    inline lambdas; see tools/stsmith/README.md)
     \\  --output <file>   write the program to <file> instead of stdout
     \\  -h, --help        show this help
     \\
@@ -68,8 +64,6 @@ fn run(io: std.Io, gpa: std.mem.Allocator, args: []const []const u8) u8 {
             if (i + 1 >= args.len) return usageFail(io);
             opts.max_depth = std.fmt.parseUnsigned(u32, args[i + 1], 10) catch return usageFail(io);
             i += 1;
-        } else if (std.mem.eql(u8, a, "--drop-hook")) {
-            opts.drop_hook = true;
         } else if (std.mem.eql(u8, a, "--output")) {
             if (i + 1 >= args.len) return usageFail(io);
             output = args[i + 1];

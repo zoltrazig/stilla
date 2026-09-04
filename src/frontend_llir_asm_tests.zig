@@ -758,3 +758,67 @@ test "5.1 LLIR assembly: the variant tag prints as a number, not a register" {
     // ...and no variant tag is ever rendered as the cond register.
     try testing.expect(std.mem.indexOf(u8, text, "borrow_variant #d0, r19, cond\n") == null);
 }
+
+test "5.1 LLIR assembly: a per-module artifact pairs functions with the scoped names" {
+    // The root artifact carries only the entry module's functions, so its
+    // FunctionIds index `ordered_funcs` — not the whole-program list, where
+    // dependency functions precede the entry module. Pairing against the
+    // whole-program list used to print dependency names (`@dep.f`) on
+    // entry-module headers, and lambda/hook names shifted likewise.
+    // Unoptimized: the fix is about name pairing, and the optimizer may
+    // reshape fn_ref/jal records (the other tests cover optimized shapes).
+    var c = try compileText("app", &.{
+        .{
+            "dep",
+            \\fn f(a: int32) -> int32 { a + 1 }
+        },
+        .{
+            "app",
+            \\const dep = import("dep");
+            \\const builtin = import("builtin");
+            \\struct U0 {
+            \\    x: int32;
+            \\    y: int32;
+            \\    drop(u) {
+            \\        builtin.assert((u.x) == (u.y), "uok");
+            \\    }
+            \\}
+            \\fn apply(g: fn(int32) -> int32, v: int32) -> int32 { g(v) }
+            \\fn main() -> void {
+            \\    let u: U0 = U0 { x: 1, y: 1 };
+            \\    let d = dep.f(1);
+            \\    let r = apply(fn(a: int32) -> int32 { a + 1 }, d);
+            \\    builtin.assert(r == 3, "r");
+            \\    drop u;
+            \\}
+        },
+    });
+    defer c.deinit();
+    const program = &c.program.?;
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var b = cfg_lower_llir.Builder.init(arena.allocator(), program);
+    const image = try b.lowerLlir();
+    try testing.expectEqual(@as(?[]const u8, null), try llir_validate.validate(&image, testing.allocator));
+    const text = try lower.llirAsm(&b, image, testing.allocator);
+    defer testing.allocator.free(text);
+
+    // Every entry-module function header names the function whose body it
+    // holds — the lambda under its hoisted name, the hook under its
+    // synthesized name.
+    try testing.expect(std.mem.indexOf(u8, text, "func @app.main {") != null);
+    try testing.expect(std.mem.indexOf(u8, text, "func @app.apply {") != null);
+    try testing.expect(std.mem.indexOf(u8, text, "func @app.U0.drop {") != null);
+    try testing.expect(std.mem.indexOf(u8, text, "func @app.main.lambda0 {") != null);
+    // The dependency's function is never a local header of the root
+    // artifact — its body lives in dep's own artifact (and with the
+    // optimizer on it may inline away entirely).
+    try testing.expect(std.mem.indexOf(u8, text, "func @dep.") == null);
+    // The lambda reference names its function; the drop stays the single
+    // unexpanded record (air.md §6.4) whose runtime resolution reads this
+    // artifact's type-decl row — the per-artifact reference the seeding bug
+    // corrupted.
+    try testing.expect(std.mem.indexOf(u8, text, "fn_ref r20, @app.main.lambda0") != null);
+    try testing.expect(std.mem.indexOf(u8, text, "drop r21 0") != null);
+}

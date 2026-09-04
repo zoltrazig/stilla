@@ -11,7 +11,7 @@ Stilla runtime disagrees with the generator's arithmetic or typing model.
 ## Usage
 
 ```
-zig build                       # builds zig-out/bin/stsmith
+zig build -fincremental --release=safe  # builds zig-out/bin/stsmith
 zig build stsmith -- --seed 42  # print a generated program to stdout
 zig build stsmith -- --seed 42 --output gen.st
 zig build stsmith-check -- --seed 42   # generate then run under stilla --run
@@ -33,10 +33,6 @@ All options precede the seed/positional-free flags and are optional:
 - `--statements <n>`  number of top-level statements in `main`; default 60.
 - `--funcs <n>`       number of generated helper functions; default 5.
 - `--max-depth <n>`   maximum recursion depth for recursive helpers; default 6.
-- `--drop-hook`       weave a drop-hook **Unique** struct and its `borrow` /
-                      `move` access patterns into the program (default:
-                      off — see "What it exercises" and the avoided-behaviors
-                      list below).
 - `--output <file>`   write the program here instead of stdout.
 
 The generator prints a header comment recording the seed and options so any
@@ -67,7 +63,7 @@ behavior the generator can model exactly (no UB in the generator's model):
   (`[_, ..t]` in both statement matches and the list-recursion template)
 - `str` constants, concatenation, and `builtin.str`/`builtin.print`
 
-With `--drop-hook`, generated programs additionally weave in an affine
+Generated programs additionally weave in an affine
 **Unique** struct with a user `drop` hook (Ownership §10.2, Destruction
 §9), plus the function access patterns the spec routes through it:
 `borrow` and `move` parameter modes (Ownership §10.6), borrow-to-borrow
@@ -88,9 +84,7 @@ borrowable by a `borrow` parameter without first binding it.
 Every generated program additionally imports the derived standard-library
 modules (`string`, `list`, `iter` — ordinary Stilla source the frontend
 compiles like user code, unlike the host-bound `builtin` members) and
-weaves a modeled subset of each into the statement stream. The
-lambda-passing flavors below are withheld in `--drop-hook` mode (see the
-avoided-behaviors list):
+weaves a modeled subset of each into the statement stream:
 
 - `string`: `len`/`is_empty`, `upper`/`lower`, `contains`,
   `starts_with`/`ends_with`, `index_of` (asserted through an `Option`
@@ -131,18 +125,7 @@ with the runtime. The generator shapes around them:
 
 - Float operands are kept small enough (`<= 2^12` for `float32`, `<= 2^26`
   for `float64`) that `+ - *` stay exactly representable.
-- While a module declares a user `drop` hook (Destruction §9), stilla can
-  miscompile hook-hosting modules that specialize inline lambdas passed to
-  the derived stdlib into an invalid image (`InvalidImage` at run). The
-  failure is compositional and module-level — the minimal `list-search` /
-  `try_fold` shapes fail reliably, and inline-lambda specialization in
-  larger hook-hosting modules fails too, while the identical call runs fine
-  in a module without the hook and a hook-hosting module with those calls
-  removed runs fine. `--drop-hook` mode therefore withholds every
-  lambda-passing statement flavor until the frontend bug is fixed, exactly
-  as earlier generation was withheld for the if-converted `and`/`or`
-  miscompile. Re-enable the flavors together when the runtime stops
-  producing invalid images for hook-hosting modules.
+
 These are documented here so the generator's model stays honest: any
 generated program that fails under `stilla --run` is either a real stilla
 bug or a mismatch worth reporting — never silent UB.

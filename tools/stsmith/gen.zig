@@ -7,12 +7,6 @@ pub const Options = struct {
     statements: u32 = 60,
     funcs: u32 = 5,
     max_depth: u32 = 6,
-    /// Also weave a drop-hook Unique type (U0) and borrow/move access
-    /// patterns into the program. Default off: while the stilla runtime can
-    /// miscompile hook-hosting modules that specialize inline lambdas
-    /// (list-search / try_fold / fold family) into invalid images (see the
-    /// README's avoided-behaviors list), the default output stays runnable.
-    drop_hook: bool = false,
 };
 
 /// Generate a complete self-checking Stilla program. The returned bytes are
@@ -205,7 +199,7 @@ const FLAV_WEIGHTS = [_]struct { f: Flav, w: u32 }{
     .{ .f = .std_cfold, .w = 2 },
     .{ .f = .std_tryfold, .w = 2 },
     .{ .f = .std_foldctx, .w = 1 },
-    .{ .f = .unique_stmt, .w = 2 }, // gated: skipped entirely when drop_hook is off
+    .{ .f = .unique_stmt, .w = 2 },
 };
 
 const Gen = struct {
@@ -270,29 +264,26 @@ const Gen = struct {
         self.buildHelpers();
         self.buildClassify();
         self.buildRecFns();
-        if (self.opts.drop_hook) self.buildUniqueHelpers();
+        self.buildUniqueHelpers();
         try self.emitDecls();
         try self.emitMain();
     }
 
     fn emitHeader(self: *Gen) !void {
-        const head = std.fmt.allocPrint(
+        const s = std.fmt.allocPrint(
             self.alloc,
             "// stsmith -- randomized Stilla program\n" ++
-                "// seed={d} statements={d} funcs={d} max-depth={d}\n",
+                "// seed={d} statements={d} funcs={d} max-depth={d}\n" ++
+                "// Same seed + same options reproduce this file byte-for-byte.\n\n" ++
+                "const builtin = import(\"builtin\");\n" ++
+                "const string = import(\"string\");\n" ++
+                "const lists = import(\"list\");\n" ++
+                "const iter = import(\"iter\");\n" ++
+                "using builtin.Option;\n" ++
+                "using iter.Result;\n\n",
             .{ self.opts.seed, self.opts.statements, self.opts.funcs, self.opts.max_depth },
         ) catch unreachable;
-        try self.out.appendSlice(head);
-        if (self.opts.drop_hook) try self.out.appendSlice("// drop-hook=true\n");
-        const rest =
-            "// Same seed + same options reproduce this file byte-for-byte.\n\n" ++
-            "const builtin = import(\"builtin\");\n" ++
-            "const string = import(\"string\");\n" ++
-            "const lists = import(\"list\");\n" ++
-            "const iter = import(\"iter\");\n" ++
-            "using builtin.Option;\n" ++
-            "using iter.Result;\n\n";
-        try self.out.appendSlice(rest);
+        try self.out.appendSlice(s);
     }
 
     fn line(self: *Gen, comptime fmt: []const u8, args: anytype) !void {
@@ -1026,7 +1017,7 @@ const Gen = struct {
         for (self.recs.items) |*r| {
             try self.writeRecFn(r);
         }
-        if (self.opts.drop_hook) try self.emitUnique();
+        try self.emitUnique();
     }
 
     fn writeFnDecl(self: *Gen, fi: *const FnInfo) !void {
@@ -1129,38 +1120,15 @@ const Gen = struct {
     // ---------- statement dispatch ----------
 
     fn flavorFor(self: *Gen, i: usize) Flav {
-        if (i < PRELUDE.len) {
-            const pf = PRELUDE[i];
-            if (self.flavorAllowed(pf)) return pf;
-        }
+        if (i < PRELUDE.len) return PRELUDE[i];
         var total: u32 = 0;
-        for (FLAV_WEIGHTS) |fw| {
-            if (self.flavorAllowed(fw.f)) total += fw.w;
-        }
+        for (FLAV_WEIGHTS) |fw| total += fw.w;
         var roll = self.rng.below(total);
         for (FLAV_WEIGHTS) |fw| {
-            if (!self.flavorAllowed(fw.f)) continue;
             if (roll < fw.w) return fw.f;
             roll -= fw.w;
         }
         return .check_int;
-    }
-
-    /// Flavor gating (Options.drop_hook): the unique-owner statements only
-    /// run in drop-hook mode, and in that mode every flavor that passes an
-    /// inline lambda / generic function value to the stdlib is withheld.
-    /// While stilla can miscompile hook-hosting modules that specialize
-    /// such calls — reliably the list-search and try_fold shapes, and
-    /// inline-lambda specialization in larger modules — to invalid images
-    /// (README's avoided-behaviors list), hook mode conservatively withholds
-    /// the whole lambda-passing family. Skipping keeps the default mode's
-    /// draw stream identical to a drop-hook-free generator.
-    fn flavorAllowed(self: *Gen, f: Flav) bool {
-        return switch (f) {
-            .unique_stmt => self.opts.drop_hook,
-            .std_search, .std_fold, .std_cfold, .std_tryfold, .std_foldctx => !self.opts.drop_hook,
-            else => true,
-        };
     }
 
     fn emitMain(self: *Gen) !void {
@@ -2106,7 +2074,7 @@ test "generated program parses basic shape" {
 
 test "program declares the drop-hook Unique type and its accessors" {
     const alloc = std.testing.allocator;
-    const src = try generate(alloc, Options{ .seed = 7, .statements = 40, .funcs = 3, .drop_hook = true });
+    const src = try generate(alloc, Options{ .seed = 7, .statements = 40, .funcs = 3 });
     defer alloc.free(src);
     try std.testing.expect(std.mem.indexOf(u8, src, "struct U0 {") != null);
     try std.testing.expect(std.mem.indexOf(u8, src, "(u.x) == (u.y)") != null);
@@ -2122,39 +2090,27 @@ test "unique statements bind owners and borrow them in main" {
     // statements > PRELUDE.len forces the unique_stmt prelude slot, and the
     // first unique draw always binds a fresh owner, so these strings are
     // deterministic; the sampled move/drop/forward shapes are not asserted.
-    const src = try generate(alloc, Options{ .seed = 7, .statements = 40, .funcs = 3, .drop_hook = true });
+    const src = try generate(alloc, Options{ .seed = 7, .statements = 40, .funcs = 3 });
     defer alloc.free(src);
     try std.testing.expect(std.mem.indexOf(u8, src, ": U0 = mk(") != null);
     try std.testing.expect(std.mem.indexOf(u8, src, "rd(v") != null);
     try std.testing.expect(std.mem.indexOf(u8, src, "drop(u)") != null);
 }
 
-test "drop-hook coverage is gated off by default" {
+test "default output always declares the drop-hook type and the lambda-passing flavors" {
     const alloc = std.testing.allocator;
+    // statements >= PRELUDE.len runs every prelude flavor, so the stdlib
+    // lambda shapes are deterministic; hook-hosting modules specialize them
+    // like any other module since the seedShared drop-hook FunctionId fix.
     const src = try generate(alloc, Options{ .seed = 7, .statements = 40, .funcs = 3 });
     defer alloc.free(src);
-    try std.testing.expect(std.mem.indexOf(u8, src, "struct U0 {") == null);
-    try std.testing.expect(std.mem.indexOf(u8, src, "drop(u)") == null);
-    try std.testing.expect(std.mem.indexOf(u8, src, "drop-hook=true") == null);
-}
-
-test "drop-hook mode records the option and withholds lambda-passing flavors" {
-    const alloc = std.testing.allocator;
-    const src = try generate(alloc, Options{ .seed = 7, .statements = 40, .funcs = 3, .drop_hook = true });
-    defer alloc.free(src);
-    try std.testing.expect(std.mem.indexOf(u8, src, "drop-hook=true") != null);
     try std.testing.expect(std.mem.indexOf(u8, src, "struct U0 {") != null);
-    // hook mode must not reach the stdlib flavors that stilla miscompiles
-    // in hook-hosting modules (README avoided-behaviors list).
-    try std.testing.expect(std.mem.indexOf(u8, src, "iter.fold(") == null);
-    try std.testing.expect(std.mem.indexOf(u8, src, "iter.consume_fold(") == null);
-    try std.testing.expect(std.mem.indexOf(u8, src, "iter.try_fold(") == null);
-    try std.testing.expect(std.mem.indexOf(u8, src, "iter.fold_with(") == null);
-    try std.testing.expect(std.mem.indexOf(u8, src, "iter.each(") == null);
-    try std.testing.expect(std.mem.indexOf(u8, src, "iter.consume_each(") == null);
-    try std.testing.expect(std.mem.indexOf(u8, src, "lists.contains(") == null);
-    try std.testing.expect(std.mem.indexOf(u8, src, "lists.count(") == null);
-    try std.testing.expect(std.mem.indexOf(u8, src, "lists.index_of(") == null);
+    // The list-search call shape (contains/count/index_of) is rng-drawn, but
+    // its equality lambda text is fixed; the fold shapes always spell
+    // `iter.fold(` / `iter.try_fold(`.
+    try std.testing.expect(std.mem.indexOf(u8, src, "fn(borrow a: int32, borrow b: int32) -> bool") != null);
+    try std.testing.expect(std.mem.indexOf(u8, src, "iter.try_fold(") != null);
+    try std.testing.expect(std.mem.indexOf(u8, src, "iter.fold(") != null);
 }
 
 test "prelude always emits try_fold match with wildcard arm" {

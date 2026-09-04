@@ -151,7 +151,7 @@ zig build test       # run unit tests
 For consumers that link the static library (C, C++, …):
 
 ```sh
-zig build -Doptimize=ReleaseSafe -p <prefix>   # install libstilla.a under <prefix>
+zig build -fincremental --release=safe -p <prefix>   # install libstilla.a under <prefix>
 ```
 
 ## The `stilla` executable
