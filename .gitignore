@@ -4,4 +4,3 @@ zig-out/
 .pi-subagents/
 .zig-gcache/
 .zig-lcache/
-.serena/

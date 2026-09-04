@@ -32,10 +32,32 @@ test {
 // library.
 // ---------------------------------------------------------------------------
 
-fn checkText(text: []const u8) !struct { arena: std.heap.ArenaAllocator, graph: *moduleinfo.ModuleGraph, ann: checker.Annotation } {
+/// One compiled program's phase-2 result. The arena is heap-allocated so
+/// its address is stable: the module graph stores the derived
+/// `Allocator` it was built with (moduleinfo.ModuleGraph.arena), and the
+/// returned value outlives the helper's frame, so a stack arena would
+/// leave that handle dangling (the ownership-fused crash class,
+/// ownership_fused_tests.zig). `deinit` frees the arena's chunks and
+/// destroys the arena struct.
+const CheckResult = struct {
+    arena: *std.heap.ArenaAllocator,
+    graph: *moduleinfo.ModuleGraph,
+    ann: checker.Annotation,
+
+    fn deinit(self: CheckResult) void {
+        self.arena.deinit();
+        testing.allocator.destroy(self.arena);
+    }
+};
+
+fn checkText(text: []const u8) !CheckResult {
     const alloc = testing.allocator;
-    var arena = std.heap.ArenaAllocator.init(alloc);
-    errdefer arena.deinit();
+    const arena = try alloc.create(std.heap.ArenaAllocator);
+    arena.* = std.heap.ArenaAllocator.init(alloc);
+    errdefer {
+        arena.deinit();
+        alloc.destroy(arena);
+    }
 
     var source_map = std.StringHashMapUnmanaged([]const u8).empty;
     try source_map.put(arena.allocator(), "test", text);
@@ -115,10 +137,14 @@ const OPAQUE_LIB =
 /// text is registered in the `standard_library` map, so its opaque
 /// declarations are legal; the app is an ordinary source module importing
 /// it.
-fn checkOpaqueText(hostlib: []const u8, app: []const u8) !struct { arena: std.heap.ArenaAllocator, graph: *moduleinfo.ModuleGraph, ann: checker.Annotation } {
+fn checkOpaqueText(hostlib: []const u8, app: []const u8) !CheckResult {
     const alloc = testing.allocator;
-    var arena = std.heap.ArenaAllocator.init(alloc);
-    errdefer arena.deinit();
+    const arena = try alloc.create(std.heap.ArenaAllocator);
+    arena.* = std.heap.ArenaAllocator.init(alloc);
+    errdefer {
+        arena.deinit();
+        alloc.destroy(arena);
+    }
 
     var source_map = std.StringHashMapUnmanaged([]const u8).empty;
     try source_map.put(arena.allocator(), "app", app);
@@ -157,10 +183,14 @@ fn expectOpaqueDiag(hostlib: []const u8, app: []const u8, want: []const u8) !voi
 /// in the same source map, so `dep` is an ordinary source module (not a
 /// standard-library interface) and its members are ordinary module value
 /// members (Core §2.5).
-fn checkAppAgainstDep(dep: []const u8, app: []const u8) !struct { arena: std.heap.ArenaAllocator, graph: *moduleinfo.ModuleGraph, ann: checker.Annotation } {
+fn checkAppAgainstDep(dep: []const u8, app: []const u8) !CheckResult {
     const alloc = testing.allocator;
-    var arena = std.heap.ArenaAllocator.init(alloc);
-    errdefer arena.deinit();
+    const arena = try alloc.create(std.heap.ArenaAllocator);
+    arena.* = std.heap.ArenaAllocator.init(alloc);
+    errdefer {
+        arena.deinit();
+        alloc.destroy(arena);
+    }
 
     var source_map = std.StringHashMapUnmanaged([]const u8).empty;
     try source_map.put(arena.allocator(), "dep", dep);
@@ -189,7 +219,7 @@ test "checker flags host bindings and leaves definitions alone" {
         \\fn host_fn(x: int32) -> int32;
         \\fn local_fn(x: int32) -> int32 { x }
     );
-    defer t.arena.deinit();
+    defer t.deinit();
 
     var saw_host = false;
     var saw_local = false;
@@ -216,7 +246,7 @@ test "checker flags generic host bindings and leaves bodies alone" {
         \\fn str[T](value: T) -> str;
         \\fn identity[T](move value: T) -> T { move value }
     );
-    defer t.arena.deinit();
+    defer t.deinit();
 
     var saw_generic_host = false;
     var saw_defined = false;
@@ -245,7 +275,7 @@ test "checker ignores non-function module items" {
         \\union Opt { Some(int32), None }
         \\using builtin.Option;
     );
-    defer t.arena.deinit();
+    defer t.deinit();
 
     try testing.expectEqual(@as(usize, 0), t.ann.host_bindings.count());
 }
@@ -257,7 +287,7 @@ test "checker annotates an empty program" {
         \\const version: int32 = 1;
         \\struct Point { x: float32; y: float32; }
     );
-    defer t.arena.deinit();
+    defer t.deinit();
     try testing.expectEqual(@as(usize, 0), t.ann.host_bindings.count());
 }
 
@@ -265,7 +295,7 @@ test "checker distinguishes a defined body with a trailing expression" {
     // A function with a body is never a host binding, even when the body
     // is an implicit return of an expression (Core §6).
     var t = try checkText("fn answer() -> int32 { 42 }");
-    defer t.arena.deinit();
+    defer t.deinit();
     try testing.expectEqual(@as(usize, 0), t.ann.host_bindings.count());
 }
 
@@ -331,7 +361,7 @@ test "checker widens integer literals to the other binary operand's width" {
         \\fn ucall() -> uint32 { uarg(7) }
         \\fn uarg(x: uint32) -> uint32 { x }
     );
-    defer t.arena.deinit();
+    defer t.deinit();
 }
 
 test "checker rejects an integer literal that overflows its contextual width" {
@@ -354,7 +384,7 @@ test "checker types float literals at the other binary operand's width" {
         \\fn dcall() -> float64 { rounder(2.5) }
         \\fn rounder(x: float64) -> float64 { x }
     );
-    defer t.arena.deinit();
+    defer t.deinit();
 }
 
 test "checker accepts integer shifts and rejects float/byte/mixed shifts" {
@@ -364,7 +394,7 @@ test "checker accepts integer shifts and rejects float/byte/mixed shifts" {
         \\fn l(a: int32, n: int32) -> int32 { a << n }
         \\fn r(a: uint32, n: uint32) -> uint32 { a >> n }
     );
-    defer t.arena.deinit();
+    defer t.deinit();
 
     try expectDiag(
         \\fn bad(a: float32) -> float32 { a << 1 }
@@ -386,7 +416,7 @@ test "checker accepts integer bitwise ops and rejects float/byte/mixed/bool" {
         \\fn o(x: uint32, y: uint32) -> uint32 { x | y }
         \\fn x(x: int32, y: int32) -> int32 { x ^ y }
     );
-    defer t.arena.deinit();
+    defer t.deinit();
 
     try expectDiag(
         \\fn bad(a: float32) -> float32 { a & 1 }
@@ -406,7 +436,7 @@ test "checker accepts float remainder (Core §16.3: float32 % float32)" {
     var t = try checkText(
         \\fn f(a: float32, b: float32) -> float32 { a % b }
     );
-    defer t.arena.deinit();
+    defer t.deinit();
 }
 
 test "checker rejects an invalid cast" {
@@ -458,7 +488,7 @@ test "checker types a literal at the declared field width" {
         \\struct Big { v: int64; }
         \\fn main() -> void { let b = Big{ v: 1 }; }
     );
-    defer t.arena.deinit();
+    defer t.deinit();
     try testing.expectEqual(@as(usize, 0), t.ann.host_bindings.count());
 }
 
@@ -470,7 +500,7 @@ test "checker matches arguments and returns through a transparent type alias" {
         \\fn f(x: Id) -> int32 { x + 1 }
         \\fn main() -> int32 { f(1) }
     );
-    defer t.arena.deinit();
+    defer t.deinit();
     try testing.expectEqual(@as(usize, 0), t.ann.host_bindings.count());
 }
 
@@ -481,7 +511,7 @@ test "checker widens a Copy argument implicitly to any" {
         \\fn wrap(x: any) -> void {}
         \\fn main() -> void { wrap(42); }
     );
-    defer t.arena.deinit();
+    defer t.deinit();
     try testing.expectEqual(@as(usize, 0), t.ann.host_bindings.count());
 }
 
@@ -508,7 +538,7 @@ test "checker accepts an explicit move into any" {
         \\    wrap(move f);
         \\}
     );
-    defer t.arena.deinit();
+    defer t.deinit();
     try testing.expectEqual(@as(usize, 0), t.ann.host_bindings.count());
 }
 
@@ -519,7 +549,7 @@ test "checker accepts an any recovered by as" {
     var t = try checkText(
         \\fn describe(a: any) -> int32 { (a as int32) + 1 }
     );
-    defer t.arena.deinit();
+    defer t.deinit();
     try testing.expectEqual(@as(usize, 0), t.ann.host_bindings.count());
 }
 
@@ -542,7 +572,7 @@ test "checker unifies a never branch with a value branch" {
         \\fn die() -> never { builtin.panic("x") }
         \\fn pick(flag: bool) -> int32 { if (flag) { 1 } else { die() } }
     );
-    defer t.arena.deinit();
+    defer t.deinit();
     try testing.expectEqual(@as(usize, 0), t.ann.host_bindings.count());
 }
 
@@ -557,7 +587,7 @@ test "checker leaves an unspecialized generic body unchecked" {
     var t = try checkText(
         \\fn strOnly[T](x: T) -> str { x }
     );
-    defer t.arena.deinit();
+    defer t.deinit();
     try testing.expectEqual(@as(usize, 0), t.ann.host_bindings.count());
 }
 
@@ -577,7 +607,7 @@ test "checker deduplicates generic specializations" {
         \\fn id[T](move x: T) -> T { move x }
         \\fn main() -> void { let a = id(42); let b = id(7); }
     );
-    defer t.arena.deinit();
+    defer t.deinit();
 
     // Two same-argument calls produce exactly one instance — a key that
     // differed per use site would yield a second one.
@@ -613,7 +643,7 @@ test "checker specializes an explicitly annotated generic call" {
         \\fn id[T](x: T) -> T { x }
         \\fn main() -> void { let a = id::[int32](42); }
     );
-    defer t.arena.deinit();
+    defer t.deinit();
 
     // One explicit specialization produces one instance, and the call
     // site maps to it via `call_of` (the annotation the lowerer consumes).
@@ -648,7 +678,7 @@ test "checker accepts an explicitly specialized generic as a value" {
         \\fn id[T](move x: T) -> T { move x }
         \\fn main() -> void { let f = id::[int32]; }
     );
-    defer t.arena.deinit();
+    defer t.deinit();
 
     // One explicit specialization produces one instance, and the
     // specialization expression maps to it via `spec_of` (the annotation
@@ -692,7 +722,7 @@ test "checker specializes a generic host binding without a body" {
         \\fn len[T](borrow xs: list[T]) -> int32;
         \\fn main() -> int32 { len([1, 2, 3]) }
     );
-    defer t.arena.deinit();
+    defer t.deinit();
 
     try testing.expectEqual(@as(usize, 1), t.ann.instances.items.len);
     const inst = t.ann.instances.items[0];
@@ -788,7 +818,7 @@ test "checker accepts moving an opaque host value" {
         \\    let d = hostlib.pass(move c);
         \\}
     );
-    defer t.arena.deinit();
+    defer t.deinit();
 }
 
 test "checker accepts borrowing an opaque host value" {
@@ -803,7 +833,7 @@ test "checker accepts borrowing an opaque host value" {
         \\    let e = f(d);
         \\}
     );
-    defer t.arena.deinit();
+    defer t.deinit();
 }
 
 test "checker rejects a directly recursive type without indirection" {
@@ -836,7 +866,7 @@ test "checker accepts recursion through box indirection" {
         \\struct B { a: box[A]; }
         \\fn main() -> void {}
     );
-    defer t.arena.deinit();
+    defer t.deinit();
     try testing.expectEqual(@as(usize, 0), t.ann.host_bindings.count());
 }
 
@@ -845,7 +875,7 @@ test "checker accepts recursion through a list type" {
         \\struct Tree { children: list[Tree]; }
         \\fn main() -> void {}
     );
-    defer t.arena.deinit();
+    defer t.deinit();
     try testing.expectEqual(@as(usize, 0), t.ann.host_bindings.count());
 }
 
@@ -854,7 +884,7 @@ test "checker accepts recursion through a function type" {
         \\struct F { call: fn(F) -> int32; }
         \\fn main() -> void {}
     );
-    defer t.arena.deinit();
+    defer t.deinit();
     try testing.expectEqual(@as(usize, 0), t.ann.host_bindings.count());
 }
 
@@ -865,7 +895,7 @@ test "checker accepts a recursive generic template" {
         \\struct List[T] { head: T; tail: box[List[T]]; }
         \\fn main() -> void {}
     );
-    defer t.arena.deinit();
+    defer t.deinit();
     try testing.expectEqual(@as(usize, 0), t.ann.host_bindings.count());
 }
 
@@ -951,7 +981,7 @@ test "checker accepts a recursive type through a nested box-hidden generic" {
         \\struct Node { x: B[Node]; }
         \\fn main() -> void {}
     );
-    defer t.arena.deinit();
+    defer t.deinit();
     try testing.expectEqual(@as(usize, 0), t.ann.host_bindings.count());
 }
 
@@ -963,7 +993,7 @@ test "checker accepts a box-hidden generic instantiation" {
         \\struct Node { x: Pair[Node]; }
         \\fn main() -> void {}
     );
-    defer t.arena.deinit();
+    defer t.deinit();
     try testing.expectEqual(@as(usize, 0), t.ann.host_bindings.count());
 }
 
@@ -989,7 +1019,7 @@ test "checker accepts the same declaration under different instantiations" {
         \\struct G { x: B[B[int32]]; }
         \\fn main() -> void {}
     );
-    defer t.arena.deinit();
+    defer t.deinit();
     try testing.expectEqual(@as(usize, 0), t.ann.host_bindings.count());
 }
 
@@ -1026,7 +1056,7 @@ test "checker restores the outer binding after a shadowing block" {
         \\    x
         \\}
     );
-    defer t.arena.deinit();
+    defer t.deinit();
     try testing.expectEqual(@as(usize, 0), t.ann.host_bindings.count());
 }
 
@@ -1044,7 +1074,7 @@ test "checker keeps an outer unique owner untouched by a shadowing move" {
         \\    consume(move f);
         \\}
     );
-    defer t.arena.deinit();
+    defer t.deinit();
     try testing.expectEqual(@as(usize, 0), t.ann.host_bindings.count());
 }
 
@@ -1055,7 +1085,7 @@ test "checker resolves a forward call to a later-declared function" {
         \\fn main() -> int32 { later() }
         \\fn later() -> int32 { 7 }
     );
-    defer t.arena.deinit();
+    defer t.deinit();
     try testing.expectEqual(@as(usize, 0), t.ann.host_bindings.count());
 }
 
@@ -1069,7 +1099,7 @@ test "checker binds a lambda parameter over an enclosing function parameter" {
         \\    g(1)
         \\}
     );
-    defer t.arena.deinit();
+    defer t.deinit();
     try testing.expectEqual(@as(usize, 0), t.ann.host_bindings.count());
 }
 
@@ -1090,7 +1120,7 @@ test "checker isolates a match pattern binding from an outer binding of the same
         \\    consume(move f);
         \\}
     );
-    defer t.arena.deinit();
+    defer t.deinit();
     try testing.expectEqual(@as(usize, 0), t.ann.host_bindings.count());
 }
 
@@ -1106,7 +1136,7 @@ test "checker resolves module-qualified value members of an imported module" {
         \\const dep = import("dep");
         \\fn main() -> int32 { dep.bump(1) + dep.base }
     );
-    defer t.arena.deinit();
+    defer t.deinit();
     try testing.expectEqual(@as(usize, 2), t.graph.modules.len);
     try testing.expectEqual(@as(usize, 0), t.ann.host_bindings.count());
 }
@@ -1170,7 +1200,7 @@ test "checker accepts a lambda referencing only its own scope" {
         \\    fn (x: int32) -> int32 { x * scale }
         \\}
     );
-    defer t.arena.deinit();
+    defer t.deinit();
     try testing.expectEqual(@as(usize, 0), t.ann.host_bindings.count());
 }
 
@@ -1180,7 +1210,7 @@ test "checker ignores locals shadowing module constant names" {
         \\fn f() -> int32 { let b = 5; b }
         \\const b: int32 = 1;
     );
-    defer t.arena.deinit();
+    defer t.deinit();
     try testing.expectEqual(@as(usize, 0), t.ann.host_bindings.count());
 }
 
@@ -1203,7 +1233,7 @@ test "checker accepts an explicitly void declaration" {
         \\fn nothing() -> void {}
         \\fn ok() -> void { let x: int32 = 1; }
     );
-    defer t.arena.deinit();
+    defer t.deinit();
     _ = t.ann;
 }
 
@@ -1213,7 +1243,7 @@ test "checker accepts a never declaration whose body diverges" {
     const t = try checkText(
         \\fn diverge() -> never { diverge() }
     );
-    defer t.arena.deinit();
+    defer t.deinit();
     _ = t.ann;
 }
 
@@ -1266,7 +1296,7 @@ test "checker marks a binding released on only one if branch as maybe" {
         \\    if (true) { consume(move f); } else { }
         \\}
     );
-    defer t.arena.deinit();
+    defer t.deinit();
     try testing.expectEqual(@as(usize, 1), try countBindingsWithState(t, .maybe));
 }
 
@@ -1282,7 +1312,7 @@ test "checker marks a binding released by one match arm as maybe" {
         \\    }
         \\}
     );
-    defer t.arena.deinit();
+    defer t.deinit();
     try testing.expectEqual(@as(usize, 1), try countBindingsWithState(t, .maybe));
 }
 
@@ -1297,7 +1327,7 @@ test "checker marks a binding released by a short-circuit right operand as maybe
         \\    true and { drop f; true };
         \\}
     );
-    defer t.arena.deinit();
+    defer t.deinit();
     try testing.expectEqual(@as(usize, 1), try countBindingsWithState(t, .maybe));
 }
 
@@ -1310,7 +1340,7 @@ test "checker accepts releasing a binding on every if branch and marks it releas
         \\    if (true) { consume(move f); } else { consume(move f); }
         \\}
     );
-    defer t.arena.deinit();
+    defer t.deinit();
 
     // The annotation records exactly one definitely-released binding.
     const ma = t.ann.per_module.get("test").?;
@@ -1382,7 +1412,7 @@ test "checker accepts a trap path that does not release" {
         \\    if (true) { consume(move f); } else { die() }
         \\}
     );
-    defer t.arena.deinit();
+    defer t.deinit();
     const ma = t.ann.per_module.get("test").?;
     var released_count: usize = 0;
     var it = ma.bindings.valueIterator();
@@ -1407,7 +1437,7 @@ test "checker marks a release conditional inside a match arm as maybe" {
         \\    }
         \\}
     );
-    defer t.arena.deinit();
+    defer t.deinit();
     try testing.expectEqual(@as(usize, 1), try countBindingsWithState(t, .maybe));
 }
 
@@ -1437,7 +1467,7 @@ test "checker accepts a construct after a binding was already released" {
         \\    if (true) { } else { };
         \\}
     );
-    defer t.arena.deinit();
+    defer t.deinit();
     try testing.expectEqual(@as(usize, 0), t.ann.host_bindings.count());
 }
 
@@ -1470,7 +1500,7 @@ test "checker accepts moving the payload of a consuming match" {
         \\    match (move u) { U::Some(f) => consume(move f), U::None => 0 };
         \\}
     );
-    defer t.arena.deinit();
+    defer t.deinit();
     try testing.expectEqual(@as(usize, 0), t.ann.host_bindings.count());
 }
 
@@ -1508,7 +1538,7 @@ test "checker accepts a Copy argument to a plain parameter" {
         \\fn add(a: int32, b: int32) -> int32 { a + b }
         \\fn main() -> int32 { add(1, 2) }
     );
-    defer t.arena.deinit();
+    defer t.deinit();
     try testing.expectEqual(@as(usize, 0), t.ann.host_bindings.count());
 }
 
@@ -1532,7 +1562,7 @@ test "checker accepts an explicit move into a move parameter" {
         \\    consume(move f);
         \\}
     );
-    defer t.arena.deinit();
+    defer t.deinit();
     try testing.expectEqual(@as(usize, 0), t.ann.host_bindings.count());
 }
 
@@ -1543,7 +1573,7 @@ test "checker accepts a fresh unique value into a move parameter" {
         \\fn consume(move f: File) -> void {}
         \\fn main() -> void { consume(File{ fd: 1 }) }
     );
-    defer t.arena.deinit();
+    defer t.deinit();
     try testing.expectEqual(@as(usize, 0), t.ann.host_bindings.count());
 }
 
@@ -1557,7 +1587,7 @@ test "checker accepts an owned unique local as an implicit tail return" {
         \\fn make() -> File { let f = File{ fd: 1 }; f }
         \\fn main() -> void { let g = make(); }
     );
-    defer t.arena.deinit();
+    defer t.deinit();
     try testing.expectEqual(@as(usize, 0), t.ann.host_bindings.count());
 }
 
@@ -1585,7 +1615,7 @@ test "checker accepts a borrow call and keeps the caller's owner alive" {
         \\    drop f;
         \\}
     );
-    defer t.arena.deinit();
+    defer t.deinit();
     try testing.expectEqual(@as(usize, 0), t.ann.host_bindings.count());
 }
 
@@ -1646,7 +1676,7 @@ test "checker accepts reading an earlier module constant" {
         \\const a = 1;
         \\const b = a;
     );
-    defer t.arena.deinit();
+    defer t.deinit();
     try testing.expectEqual(@as(usize, 0), t.ann.host_bindings.count());
 }
 
@@ -1658,7 +1688,7 @@ test "checker accepts a function reading a later constant when nothing calls it"
         \\fn f() -> int32 { b }
         \\const b: int32 = 2;
     );
-    defer t.arena.deinit();
+    defer t.deinit();
     try testing.expectEqual(@as(usize, 0), t.ann.host_bindings.count());
 }
 
@@ -1691,7 +1721,7 @@ test "checker accepts a drop hook reading an earlier module constant" {
         \\struct File { fd: int32; drop(f) { let _ = earlier; } }
         \\const log: File = File{ fd: 1 };
     );
-    defer t.arena.deinit();
+    defer t.deinit();
     try testing.expectEqual(@as(usize, 0), t.ann.host_bindings.count());
 }
 
@@ -1706,7 +1736,7 @@ test "checker accepts a mutual call cycle that reads no constants" {
         \\fn f() -> int32 { g() }
         \\fn g() -> int32 { f() }
     );
-    defer t.arena.deinit();
+    defer t.deinit();
     try testing.expectEqual(@as(usize, 0), t.ann.host_bindings.count());
 }
 
@@ -1762,7 +1792,7 @@ test "checker accepts a drop hook that reads Copy fields" {
         \\struct File { fd: int32; drop(file) { let x = file.fd; } }
         \\fn main() -> void {}
     );
-    defer t.arena.deinit();
+    defer t.deinit();
     try testing.expectEqual(@as(usize, 0), t.ann.host_bindings.count());
 }
 
@@ -1794,7 +1824,7 @@ test "checker accepts a Copy projection as a drop hook result" {
         \\struct File { fd: int32; drop(file) { let r = file.fd; r } }
         \\fn main() -> void {}
     );
-    defer t.arena.deinit();
+    defer t.deinit();
     try testing.expectEqual(@as(usize, 0), t.ann.host_bindings.count());
 }
 
@@ -1819,7 +1849,7 @@ test "checker accepts an exhaustive union match" {
         \\union R { Ok(int32), Err(str) }
         \\fn f(r: R) -> int32 { match (r) { R::Ok(v) => v, R::Err(e) => 0 } }
     );
-    defer t.arena.deinit();
+    defer t.deinit();
     try testing.expectEqual(@as(usize, 0), t.ann.host_bindings.count());
 }
 
@@ -1835,7 +1865,7 @@ test "checker accepts a type-test match over any" {
     var t = try checkText(
         \\fn describe(a: any) -> int32 { match (a) { int32 n => n, str s => 1, _ => -1 } }
     );
-    defer t.arena.deinit();
+    defer t.deinit();
     try testing.expectEqual(@as(usize, 0), t.ann.host_bindings.count());
 }
 
@@ -1869,6 +1899,6 @@ test "checker leaves code after a never call unchecked for reachability" {
         \\fn die() -> never { builtin.panic("x") }
         \\fn main() -> int32 { die(); 42 }
     );
-    defer t.arena.deinit();
+    defer t.deinit();
     try testing.expectEqual(@as(usize, 0), t.ann.host_bindings.count());
 }

@@ -51,7 +51,18 @@ const Value = vm_types.Value;
 /// the compilation (program + graph), a re-run checker's annotation,
 /// the validated LLIR image, and the per-function lookup tables.
 const Fused = struct {
-    arena: std.heap.ArenaAllocator,
+    /// The oracle arena, heap-allocated so its address is stable. The
+    /// Builder and every derived `Allocator` capture `&arena` and
+    /// outlive `init`'s frame (`scanFunc`'s record recount allocates
+    /// from `bld.arena` after `init` returns), so an init-local
+    /// `ArenaAllocator` would leave them dangling at the return — the
+    /// borrow/move/conditional-release oracles crashed on x86 exactly
+    /// there (allocating through the dead slot reads a garbage
+    /// `used_list`, and the arena allocator faults in `loadBuf`). Same
+    /// rule `frontend.compile` documents for `Compilation`: allocators
+    /// derived from an arena stay valid only while the arena object
+    /// itself does not move.
+    arena: *std.heap.ArenaAllocator,
     compilation: frontend.Compilation,
     ann: checker.Annotation,
     /// The "app" module's annotation (view a).
@@ -66,8 +77,12 @@ const Fused = struct {
     fids: std.StringArrayHashMapUnmanaged(llir.FunctionId) = .empty,
 
     fn init(allocator: std.mem.Allocator, src: []const u8, optimize: bool) !Fused {
-        var arena = std.heap.ArenaAllocator.init(allocator);
-        errdefer arena.deinit();
+        const arena = try allocator.create(std.heap.ArenaAllocator);
+        arena.* = std.heap.ArenaAllocator.init(allocator);
+        errdefer {
+            arena.deinit();
+            allocator.destroy(arena);
+        }
         var sources = moduleinfo.Sources{};
         var smap = std.StringHashMapUnmanaged([]const u8).empty;
         try smap.put(arena.allocator(), "app", src);
@@ -146,6 +161,7 @@ const Fused = struct {
         self.fids.deinit(testing.allocator);
         self.compilation.deinit();
         self.arena.deinit();
+        testing.allocator.destroy(self.arena);
     }
 
     fn fid(self: *const Fused, name: []const u8) !llir.FunctionId {

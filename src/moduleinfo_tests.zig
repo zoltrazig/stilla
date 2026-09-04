@@ -35,19 +35,31 @@ test {
 // (Phase 1 of the frontend pipeline).
 // ---------------------------------------------------------------------------
 
-/// Build a module graph from an entry specifier and a set of in-memory
-/// source modules. The arena is heap-allocated so `graph.arena` (an
-/// `Allocator` whose `ptr` is the `ArenaAllocator`) stays valid after this
-/// helper returns — the graph is used directly by tests afterwards, unlike
-/// the frontend which only touches it during `compile()`. `deinit` frees
-/// the arena and its backing memory.
-fn buildGraph(entry: []const u8, texts: []const struct { []const u8, []const u8 }) !struct {
+/// One built module graph. The arena is heap-allocated so its address is
+/// stable: the graph stores the derived `Allocator` it was built with
+/// (moduleinfo.ModuleGraph.arena), and the returned value outlives the
+/// helper's frame, so a stack arena would leave that handle dangling
+/// (the ownership-fused crash class, ownership_fused_tests.zig).
+/// `deinit` frees the arena's chunks and destroys the arena struct.
+const GraphResult = struct {
     arena: *std.heap.ArenaAllocator,
     graph: *moduleinfo.ModuleGraph,
-} {
+
+    fn deinit(self: GraphResult) void {
+        self.arena.deinit();
+        testing.allocator.destroy(self.arena);
+    }
+};
+
+/// Build a module graph from an entry specifier and a set of in-memory
+/// source modules (see `GraphResult` for the arena lifetime rule).
+fn buildGraph(entry: []const u8, texts: []const struct { []const u8, []const u8 }) !GraphResult {
     const arena = try testing.allocator.create(std.heap.ArenaAllocator);
-    errdefer testing.allocator.destroy(arena);
     arena.* = std.heap.ArenaAllocator.init(testing.allocator);
+    errdefer {
+        arena.deinit();
+        testing.allocator.destroy(arena);
+    }
     const arena_alloc = arena.allocator();
 
     var sources = moduleinfo.Sources{};
@@ -66,8 +78,7 @@ test "moduleinfo loads the entry module and orders modules by dependency" {
         .{ "calc", "fn add(a: int32, b: int32) -> int32 { a + b }" },
         .{ "use", "const calc = import(\"calc\");\nfn main() -> int32 { calc.add(1, 2) }" },
     });
-    defer testing.allocator.destroy(t.arena);
-    defer t.arena.deinit();
+    defer t.deinit();
 
     try testing.expectEqual(@as(usize, 2), t.graph.modules.len);
     // Dependencies before dependents (phase1-module-graph.md, Import-cycle detection): `calc` first.
@@ -84,8 +95,7 @@ test "moduleinfo resolves the stdbundle standard-library modules" {
     var t = try buildGraph("app", &.{
         .{ "app", "const math = import(\"math\");\nfn main() -> void {}" },
     });
-    defer testing.allocator.destroy(t.arena);
-    defer t.arena.deinit();
+    defer t.deinit();
 
     try testing.expectEqual(@as(usize, 2), t.graph.modules.len);
     const math = t.graph.module("math").?;
@@ -189,8 +199,7 @@ test "moduleinfo builds member tables: values, types, using aliases" {
             \\fn main() -> void {}
         },
     });
-    defer testing.allocator.destroy(t.arena);
-    defer t.arena.deinit();
+    defer t.deinit();
 
     const app = t.graph.module("app").?;
     // Value members: functions first, then module-value consts and
@@ -236,8 +245,7 @@ test "moduleinfo member lookup helpers" {
             \\fn main() -> void {}
         },
     });
-    defer testing.allocator.destroy(t.arena);
-    defer t.arena.deinit();
+    defer t.deinit();
 
     const app = t.graph.module("app").?;
     try testing.expectEqualStrings("pi", app.valueMember("pi").?.name.text);
@@ -257,8 +265,7 @@ test "moduleinfo flags host bindings (declarations without definitions)" {
             \\fn main() -> void {}
         },
     });
-    defer testing.allocator.destroy(t.arena);
-    defer t.arena.deinit();
+    defer t.deinit();
 
     const app = t.graph.module("app").?;
     try testing.expect(app.isHostBinding("host_fn"));
@@ -313,8 +320,7 @@ test "moduleinfo preserves module identity through const aliases" {
             \\fn main() -> void { let x = public_math.pi; }
         },
     });
-    defer testing.allocator.destroy(t.arena);
-    defer t.arena.deinit();
+    defer t.deinit();
 
     const app = t.graph.module("app").?;
     // Both consts carry the resolved specifier "math": the import and
@@ -343,8 +349,7 @@ test "moduleinfo resolves module-qualified type names" {
             \\fn main() -> void {}
         },
     });
-    defer testing.allocator.destroy(t.arena);
-    defer t.arena.deinit();
+    defer t.deinit();
 
     const resolve = moduleinfo.resolveOf(t.graph);
     const app = t.graph.module("app").?;
@@ -368,8 +373,7 @@ test "moduleinfo structDecl and unionDecl follow transparent aliases" {
             \\fn main() -> void {}
         },
     });
-    defer testing.allocator.destroy(t.arena);
-    defer t.arena.deinit();
+    defer t.deinit();
 
     const resolve = moduleinfo.resolveOf(t.graph);
     const app = t.graph.module("app").?;
@@ -394,8 +398,7 @@ test "moduleinfo fieldIndex and variantIndex" {
             \\fn main() -> void {}
         },
     });
-    defer testing.allocator.destroy(t.arena);
-    defer t.arena.deinit();
+    defer t.deinit();
 
     const resolve = moduleinfo.resolveOf(t.graph);
     const app = t.graph.module("app").?;
@@ -411,8 +414,7 @@ test "moduleinfo fieldIndex and variantIndex" {
 
 test "moduleinfo ownershipOf classifies primitives and containers" {
     var t = try buildGraph("app", &.{.{ "app", "fn main() -> void {}" }});
-    defer testing.allocator.destroy(t.arena);
-    defer t.arena.deinit();
+    defer t.deinit();
     const resolve = moduleinfo.resolveOf(t.graph);
     const app = t.graph.module("app").?;
 
@@ -450,8 +452,7 @@ test "moduleinfo ownershipOf resolves named structs and unions" {
             \\fn main() -> void {}
         },
     });
-    defer testing.allocator.destroy(t.arena);
-    defer t.arena.deinit();
+    defer t.deinit();
 
     const resolve = moduleinfo.resolveOf(t.graph);
     const app = t.graph.module("app").?;
@@ -476,8 +477,7 @@ test "moduleinfo ownershipOf handles recursive types through indirection" {
             \\fn main() -> void {}
         },
     });
-    defer testing.allocator.destroy(t.arena);
-    defer t.arena.deinit();
+    defer t.deinit();
 
     const resolve = moduleinfo.resolveOf(t.graph);
     const app = t.graph.module("app").?;
@@ -495,8 +495,7 @@ test "moduleinfo ownershipOf handles recursive types through indirection" {
             \\fn main() -> void {}
         },
     });
-    defer testing.allocator.destroy(t2.arena);
-    defer t2.arena.deinit();
+    defer t2.deinit();
 
     const resolve2 = moduleinfo.resolveOf(t2.graph);
     const app2 = t2.graph.module("app").?;
@@ -519,8 +518,7 @@ test "moduleinfo ownershipOf: containers of a named Copy type are Copy" {
             \\fn main() -> void {}
         },
     });
-    defer testing.allocator.destroy(t.arena);
-    defer t.arena.deinit();
+    defer t.deinit();
 
     const resolve = moduleinfo.resolveOf(t.graph);
     const app = t.graph.module("app").?;
@@ -552,8 +550,7 @@ test "moduleinfo resolveType expands aliases and resolves containers" {
             \\fn main() -> void {}
         },
     });
-    defer testing.allocator.destroy(t.arena);
-    defer t.arena.deinit();
+    defer t.deinit();
 
     const resolve = moduleinfo.resolveOf(t.graph);
     const app = t.graph.module("app").?;
@@ -599,8 +596,7 @@ test "moduleinfo inferExprType infers module constant types" {
             \\fn main() -> void {}
         },
     });
-    defer testing.allocator.destroy(t.arena);
-    defer t.arena.deinit();
+    defer t.deinit();
 
     const resolve = moduleinfo.resolveOf(t.graph);
     const app = t.graph.module("app").?;
@@ -630,8 +626,7 @@ test "moduleinfo resolvePathMember and resolvePathTarget" {
             \\fn main() -> void { let x = calc.add(1, 2); }
         },
     });
-    defer testing.allocator.destroy(t.arena);
-    defer t.arena.deinit();
+    defer t.deinit();
 
     const resolve = moduleinfo.resolveOf(t.graph);
     const app = t.graph.module("app").?;
@@ -672,8 +667,7 @@ test "moduleinfo specializeSignature instantiates generic host bindings" {
             \\}
         },
     });
-    defer testing.allocator.destroy(t.arena);
-    defer t.arena.deinit();
+    defer t.deinit();
 
     const resolve = moduleinfo.resolveOf(t.graph);
     const len_vm = t.graph.module("list").?.valueMember("len").?;
@@ -760,8 +754,7 @@ test "moduleinfo resolveTypeName follows using aliases for local type members" {
             \\fn main() -> void {}
         },
     });
-    defer testing.allocator.destroy(t.arena);
-    defer t.arena.deinit();
+    defer t.deinit();
 
     const resolve = moduleinfo.resolveOf(t.graph);
     const app = t.graph.module("app").?;
@@ -782,8 +775,7 @@ test "moduleinfo isHostBinding distinguishes host and source modules" {
             \\fn main() -> void { builtin.print("x"); }
         },
     });
-    defer testing.allocator.destroy(t.arena);
-    defer t.arena.deinit();
+    defer t.deinit();
 
     const app = t.graph.module("app").?;
     const builtin = t.graph.module("builtin").?;
@@ -844,8 +836,7 @@ test "moduleinfo classifies value members by origin: intrinsic vs host binding" 
             \\fn main() -> void {}
         },
     });
-    defer testing.allocator.destroy(t.arena);
-    defer t.arena.deinit();
+    defer t.deinit();
 
     const app = t.graph.module("app").?;
     const math = t.graph.module("math").?;
