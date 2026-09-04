@@ -1883,9 +1883,16 @@ pub inline fn binOp(self: *VmCtx, op: llir.Opcode, av: Value, bv: Value) IntErr!
         .rem => blk: {
             if (b == 0) return error.DivByZero;
             if (signed) {
+                // `i64_min % -1 == 0` mathematically, but the exact
+                // quotient overflows: the x86 `idiv` faults (SIGFPE;
+                // the ARM `sdiv` wraps silently, so the trap is
+                // observable only on x86). Guard before `@rem`,
+                // mirroring the `.div` arm — a canonical `i32` cell is
+                // sign-extended and can never present this pattern.
+                if (a == (1 << 63) and b == std.math.maxInt(u64)) break :blk canonicalIntResult(op, 0);
                 const sa: i64 = @bitCast(a);
                 const sb: i64 = @bitCast(b);
-                break :blk canonicalIntResult(op, @as(u64, @bitCast(@rem(sa, sb)))); // i*_min % -1 == 0, never traps
+                break :blk canonicalIntResult(op, @as(u64, @bitCast(@rem(sa, sb))));
             }
             break :blk a % b;
         },

@@ -79,10 +79,19 @@ const Fused = struct {
             .optimize = optimize,
         });
         errdefer compilation.deinit();
-        const program = &(compilation.program orelse {
+        // The program struct lives by value in the compilation; copy it
+        // into arena-owned storage so the stored `program` pointer (and
+        // the Builder's copy of it) outlives this frame. Taking
+        // `&(compilation.program orelse ...)` aliases the init-local's
+        // slot, which dies at the return — the fused oracles then
+        // iterated a stale stack copy after init (dangling, crashes the
+        // borrow/move/conditional-release tests on x86).
+        const program_value = compilation.program orelse {
             if (compilation.diag) |d| std.log.err("FUSED COMPILE DIAG: {s}", .{d.message});
             return error.TestUnexpectedResult;
-        });
+        };
+        const program = try arena.allocator().create(cfg.IrProgram);
+        program.* = program_value;
         const graph = compilation.graph.?;
 
         // Re-run phase 2 for the annotation (the compilation's own

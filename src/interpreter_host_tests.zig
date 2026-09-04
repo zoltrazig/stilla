@@ -428,10 +428,19 @@ test "host: math module computes the 20 StdLib functions with IEEE edges" {
             return error.TestUnexpectedResult;
         },
     }
-    try testing.expectEqualStrings(
-        "nan\nnan\n-0\n0\nnan\n-inf\ninf\n",
-        state2.buffer[0..state2.len],
-    );
+    // IEEE 754 leaves the sign bit of a NaN produced by sqrt's domain
+    // error unspecified: the x86 SSE `sqrtss` returns the indefinite
+    // QNaN ("-nan"), most other targets the default QNaN ("nan").
+    // Everything else above is exact — the fmin/fmax NaN propagation is
+    // pinned to the positive QNaN by `fminIeee`, and the -0/+0
+    // tie-breaks are specified.
+    const out = state2.buffer[0..state2.len];
+    const head = "nan\nnan\n-0\n0\n";
+    const tail = "-inf\ninf\n";
+    try testing.expectEqualStrings(head, out[0..head.len]);
+    const rest = out[head.len..];
+    try testing.expect(std.mem.startsWith(u8, rest, "nan\n") or std.mem.startsWith(u8, rest, "-nan\n"));
+    try testing.expectEqualStrings(tail, rest[if (std.mem.startsWith(u8, rest, "-nan\n")) "-nan\n".len else "nan\n".len..]);
 }
 
 test "host: string module computes the 19 StdLib functions with code-point semantics" {
