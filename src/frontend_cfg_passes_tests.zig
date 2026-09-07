@@ -776,6 +776,81 @@ test "Pass 8.4 dead-instruction elimination drops unused match payloads" {
     try testing.expect(std.mem.indexOf(u8, body, "read_payload") == null);
 }
 
+test "Pass 8.7 dead-instruction elimination removes dead shifts and bitwise ops" {
+    // Shifts and bitwise ops never trap (Runtime §7.2: the shift count is
+    // masked to its low 5 bits, the bitwise ops work on raw patterns) and
+    // have no effects, so an unused Copy result is removable like any
+    // other total arithmetic.
+    var t = try cfg_parse.parseText(
+        \\module "app" {
+        \\func @f(a: int32, b: int32) -> int32 {
+        \\entry:
+        \\    %2: int32 = shl %0, %1
+        \\    %3: int32 = shr %0, %1
+        \\    %4: int32 = bitand %0, %1
+        \\    %5: int32 = bitor %0, %1
+        \\    %6: int32 = bitxor %0, %1
+        \\    ret %0
+        \\}
+        \\}
+    );
+    defer t.arena.deinit();
+    try lower.deadInstr(&t.program, t.arena.allocator());
+
+    try testing.expectEqual(@as(usize, 0), t.program.funcs[0].blocks[0].instrs.len);
+}
+
+test "Pass 8.7 dead-instruction elimination is trap-aware for div/rem" {
+    // The integer forms of div/rem trap on a zero divisor (and the 64-bit
+    // signed-division overflow), so a dead one stays — removing it would
+    // delete an observable trap. The float forms are total (IEEE: `x/0`
+    // is ±inf, `x%0` is NaN — Runtime §7.2) and are removed.
+    var t = try cfg_parse.parseText(
+        \\module "app" {
+        \\func @f(a: int32, b: int32, x: float32, y: float32) -> int32 {
+        \\entry:
+        \\    %4: int32 = div %0, %1
+        \\    %5: int32 = rem %0, %1
+        \\    %6: float32 = div %2, %3
+        \\    %7: float32 = rem %2, %3
+        \\    ret %0
+        \\}
+        \\}
+    );
+    defer t.arena.deinit();
+    try lower.deadInstr(&t.program, t.arena.allocator());
+
+    const instrs = t.program.funcs[0].blocks[0].instrs;
+    try testing.expectEqual(@as(usize, 2), instrs.len);
+    try testing.expect(instrs[0].op == .div); // integer: the trap stays
+    try testing.expect(instrs[1].op == .rem);
+}
+
+test "Pass 8.7 dead-instruction elimination keeps unique results and views" {
+    // Ownership: a `copy` of an unique value (`any`) has an unique result
+    // whose refcount bump is observable, and a `tail` view is outside the
+    // candidate set (TODO.md's audit: no impediment for Copy results, but
+    // adoption is gated on a measured case) — neither is removed.
+    var t = try cfg_parse.parseText(
+        \\module "app" {
+        \\func @f(a: any, xs: list[int32]) -> int32 {
+        \\entry:
+        \\    %2: any = copy %0
+        \\    %3: list[int32] = tail %1
+        \\    %4: int32 = const 0
+        \\    ret %4
+        \\}
+        \\}
+    );
+    defer t.arena.deinit();
+    try lower.deadInstr(&t.program, t.arena.allocator());
+
+    const instrs = t.program.funcs[0].blocks[0].instrs;
+    try testing.expectEqual(@as(usize, 3), instrs.len);
+    try testing.expect(instrs[0].op == .copy);
+    try testing.expect(instrs[1].op == .tail);
+}
+
 test "Pass 8.0 inlining: nested splices keep block names unique and round-trip" {
     // fib_tail_call.st's `print_terms` TCO loop has `fib` (whose own body
     // holds a TCO'd `go` loop) inlined into it: the splice clones the

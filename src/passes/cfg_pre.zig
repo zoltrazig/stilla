@@ -15,16 +15,25 @@
 //! redundant and fully unavailable computations are CSE's and dead-code
 //! work, not PRE's).
 //!
-//! Only pure, deterministic, *non-trapping* ops are candidates: the
-//! comparisons (`eq`/`ne`/`lt`/`le`/`gt`/`ge`), `not_`, `type_is`, and the
-//! arithmetic family (integer arithmetic wraps modulo 2³² and never traps;
-//! float is IEEE, Runtime §7.2; numeric casts never trap — float→int
-//! saturates). `div`/`rem` (divisor zero; `i64_min / -1`), and the
-//! reads/projections (bounds) all trap,
-//! and PRE moves a computation onto paths that previously skipped it —
-//! hoisting a trapping op would change observable behavior. Calls,
-//! syscalls, and `concat` are impure and never candidates. Operands must
-//! match positionally (no commutativity), mirroring CSE.
+//! Candidates are the pure, deterministic, *non-trapping* ops: the
+//! comparisons (`eq`/`ne`/`lt`/`le`/`gt`/`ge`), the total unary ops
+//! (`not_`, `neg`, `abs`, `clz`, `popcount`, `type_is`), the total
+//! wrapping arithmetic (`add`/`sub`/`mul`/`min`/`max` — integer forms
+//! wrap modulo 2³², Runtime §7.2), the shifts (count masked to its low
+//! 5 bits) and bitwise ops, `num_cast` (casts never trap, Runtime
+//! §7.2), and the float forms of `div`/`rem` (IEEE: `x/0` is ±inf,
+//! `x%0` is NaN — total). The *integer* forms of `div`/`rem` trap on a
+//! zero divisor (and the 64-bit division-overflow case), so they stay
+//! excluded: PRE moves a computation onto paths that previously skipped
+//! it, and a trapping operation would change observable behavior.
+//! Operands must match positionally (no commutativity), mirroring CSE.
+//!
+//! `num_cast` is matched with one extra condition: `cfg.identical`
+//! compares only the operand, but a cast's *target type* lives on its
+//! result value — two casts of the same operand to different types are
+//! different computations, so availability additionally requires result
+//! type equality. (The other candidates cannot hit this: their opcode
+//! plus operand values fix the result type.)
 //!
 //! The hoist is sound because the candidate's operands are required to be
 //! defined in a *strict dominator* of the join (or be parameters): they
@@ -159,37 +168,32 @@ fn operandsDominate(
 /// position; returns the count.
 fn operandsOf(instr: *const cfg.Instr, out: *[2]*cfg.Value) usize {
     return switch (instr.op) {
-        .eq => |x| blk: {
+        // binary: both operands, in position
+        .eq,
+        .ne,
+        .lt,
+        .le,
+        .gt,
+        .ge,
+        .add,
+        .sub,
+        .mul,
+        .div,
+        .rem,
+        .min,
+        .max,
+        .shl,
+        .shr,
+        .bitand,
+        .bitor,
+        .bitxor,
+        => |x| blk: {
             out[0] = x.a;
             out[1] = x.b;
             break :blk 2;
         },
-        .ne => |x| blk: {
-            out[0] = x.a;
-            out[1] = x.b;
-            break :blk 2;
-        },
-        .lt => |x| blk: {
-            out[0] = x.a;
-            out[1] = x.b;
-            break :blk 2;
-        },
-        .le => |x| blk: {
-            out[0] = x.a;
-            out[1] = x.b;
-            break :blk 2;
-        },
-        .gt => |x| blk: {
-            out[0] = x.a;
-            out[1] = x.b;
-            break :blk 2;
-        },
-        .ge => |x| blk: {
-            out[0] = x.a;
-            out[1] = x.b;
-            break :blk 2;
-        },
-        .not_ => |x| blk: {
+        // unary: the single operand
+        .not_, .neg, .abs, .clz, .popcount, .num_cast => |x| blk: {
             out[0] = x;
             break :blk 1;
         },
@@ -213,11 +217,64 @@ fn defBlock(f: *const cfg.IrFunc, instr: *const cfg.Instr) ?*cfg.BasicBlock {
 }
 
 /// Hoistable ops: pure, deterministic, and non-trapping (see the header).
+/// `div`/`rem` are candidates only in their float forms — the integer
+/// forms trap on a zero divisor (Runtime §7.2); the operand's primitive
+/// kind picks the form, and a non-numeric operand (unreachable from the
+/// checker) is treated as trapping.
 fn isCandidate(instr: *const cfg.Instr) bool {
     return switch (instr.op) {
-        .eq, .ne, .lt, .le, .gt, .ge, .not_, .type_is => true,
+        .eq,
+        .ne,
+        .lt,
+        .le,
+        .gt,
+        .ge,
+        .not_,
+        .type_is,
+        .neg,
+        .abs,
+        .clz,
+        .popcount,
+        .num_cast,
+        .add,
+        .sub,
+        .mul,
+        .min,
+        .max,
+        .shl,
+        .shr,
+        .bitand,
+        .bitor,
+        .bitxor,
+        => true,
+        .div, .rem => isFloatBin(instr),
         else => false,
     };
+}
+
+/// True when `instr` is a float-typed `div`/`rem`: the IEEE forms are
+/// total (`x/0` is ±inf, `x%0` is NaN, Runtime §7.2), while the integer
+/// forms trap. A float-typed result is the discriminator (the result
+/// type is the operand type).
+fn isFloatBin(instr: *const cfg.Instr) bool {
+    if (instr.results.len == 0) return false;
+    return switch (instr.results[0].type_) {
+        .primitive => |k| k == .float32 or k == .float64,
+        else => false,
+    };
+}
+
+/// Structural match of a predecessor instruction against the candidate:
+/// `cfg.identical` (same opcode, same operands in position) plus the
+/// `num_cast` result-type equality the identical-check cannot see (its
+/// payload is only the operand; the target type lives on the result).
+fn sameComputation(pi: *const cfg.Instr, cand: *const cfg.Instr) bool {
+    if (!cfg.identical(pi.op, cand.op)) return false;
+    if (cand.op == .num_cast or pi.op == .num_cast) {
+        if (pi.results.len == 0 or cand.results.len == 0) return false;
+        if (!cfg.Type.eql(pi.results[0].type_, cand.results[0].type_)) return false;
+    }
+    return true;
 }
 
 /// Rewrite `cand` in `b` into a phi at the block head. `cand` is left
@@ -237,7 +294,7 @@ fn eliminate(
         for (p.instrs) |pi| {
             if (pi == cand) continue;
             if (pi.results.len == 0) continue;
-            if (cfg.identical(pi.op, cand.op)) {
+            if (sameComputation(pi, cand)) {
                 found = pi.results[0];
                 break;
             }

@@ -491,6 +491,110 @@ test "stage 7.1: a switch executes only the selected arm's effects" {
     try testing.expectEqual(@as(usize, 0), vm.runtime.heap.registry.count());
 }
 
+test "phi-cycle staging never reuses a live value's cell" {
+    // Optimizer + edge-staging regression (stsmith seed 881): PRE hoists
+    // a `num_cast` into both predecessors of a join, adding an int32 phi
+    // whose incoming registers cross the join's existing bool phi. The
+    // true-arm edge then needs a swap, staged through a "dead" cell. The
+    // dead-cell search compared positions from two unrelated coordinate
+    // spaces and only checked the candidate cell's same-typed occupant —
+    // not the cell itself: the allocator had since re-homed the
+    // still-live `v17` (a str, used later by string.trim) onto that cell,
+    // so the staging write clobbered it and the trim call decoded
+    // garbage ("trim: argument type mismatch" trap).
+    // cycleStagingSlotForType now always stages through the dedicated
+    // scratch row past the value cells (already reserved in `f_count` by
+    // the allocator), which is disjoint from every value cell by
+    // construction.
+    const Sink = struct {
+        fn invoke(vm: *interpreter.VmCtx, userdata: ?*const anyopaque, module_symbol: []const u8, member: []const u8, sig: interpreter.HostSignature, args: []const vm_types.Value) interpreter.HostResult {
+            if (std.mem.eql(u8, member, "print")) return .{ .value = 0 };
+            return interpreter.defaultHostCall(vm, userdata, module_symbol, member, sig, args);
+        }
+    };
+    var l = try load(
+        \\const builtin = import("builtin");
+        \\const string = import("string");
+        \\using builtin.Option;
+        \\struct T0 {
+        \\    x: uint64;
+        \\    y: int32;
+        \\    z: int32;
+        \\}
+        \\union T4 {
+        \\    V0(int32), V1(int64)
+        \\}
+        \\type t0 = tuple[int64, uint32];
+        \\fn f0() -> int32 {
+        \\    ((56813) & (-203542)) | (236382)
+        \\}
+        \\fn f1() -> int32 {
+        \\    f0()
+        \\}
+        \\fn f3() -> uint32 {
+        \\    ((3237465865) - (2512013095)) << (1069324769)
+        \\}
+        \\fn f4(a0: uint64, a1: int64) -> uint32 {
+        \\    (f3()) & ((a1 as uint32))
+        \\}
+        \\fn main() -> void {
+        \\    let v0: int32 = 3;
+        \\    let v2: int64 = -3;
+        \\    let v3: uint64 = 11;
+        \\    let v5 = "abc";
+        \\    builtin.assert((v3) == 11, "ok0");
+        \\    let v6: int32 = (((v0) % (v0)) ^ (-237841)) & (v0);
+        \\    let v7: uint32 = f4((v3) - (((v6 as uint64)) << (v3)), (v2) % ((v6 as int64)));
+        \\    let v9 = (v5 + v5);
+        \\    let v11: t0 = (((v7 as int64)) - ((((v7 as int64)) | ((v7 as int64))) - ((v2) & ((v7 as int64)))), ((v6 as uint32)) ^ (v7));
+        \\    let (v12, v13) = v11;
+        \\    let v14: T0 = T0 { x: (v3), y: ((((v13 as int32)) * ((v13 as int32))) + ((f1()) * (v6))), z: (f1()) };
+        \\    let v15: T4 = T4::V0((v13 as int32));
+        \\    builtin.assert(match (v15) {
+        \\        T4::V0(_) => 253392,
+        \\        T4::V1(q1_0) => 0,
+        \\    } == 253392, "ok1");
+        \\    builtin.print(builtin.str(v7));
+        \\    let v17 = string.substring(v5, 0, 3);
+        \\    let v26 = string.substring(v9, 6, 6);
+        \\    let v28: int32 = f0();
+        \\    let v30: bool = !(((v5) != (v26)) or (((f1()) >> (f1())) > ((v13 as int32))));
+        \\    builtin.assert((((v28) + ((v13 as int32))) >> (v28)) == 0, "scan2");
+        \\    let v36: uint32 = f3();
+        \\    let v41 = string.trim(v17);
+        \\    let v42: int32 = f0();
+        \\    let v49: T4 = T4::V0((((132976) ^ (204037)) - (((v36 as int32)) | (v42))) >> ((f1()) << (v42)));
+        \\    builtin.assert(match (v49) {
+        \\        T4::V0(_) => -199037,
+        \\        T4::V1(q1_0) => 0,
+        \\    } == -199037, "calc4");
+        \\}
+    , true);
+    defer l.deinit();
+    var vm = interpreter.VmCtx.init(testing.allocator);
+    defer vm.deinit();
+    vm.host = .{ .invoke = Sink.invoke };
+    try vm.setupRootArtifact(l.image, try l.fid("main"));
+    var result: ?Value = null;
+    while (!vm.runtime.terminated) {
+        if (try vm_dispatch.step(&vm)) |t| {
+            switch (t) {
+                .normal => |v| result = v,
+                .panic => |m| {
+                    std.log.err("staging regression panic: {s}", .{m});
+                    testing.allocator.free(m);
+                    return error.TestUnexpectedResult;
+                },
+            }
+            break;
+        }
+        try vm.drainDestroyWork();
+    }
+    vm.finishCleanup();
+    try testing.expectEqual(@as(Value, 0), result orelse return error.TestUnexpectedResult);
+    try testing.expectEqual(@as(usize, 0), vm.runtime.heap.registry.count());
+}
+
 test "host resource registry: duplicates reject; disposal runs exactly once" {
     var l = try load(
         \\fn main() -> int32 { 1 }

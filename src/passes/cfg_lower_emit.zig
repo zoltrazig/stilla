@@ -77,8 +77,9 @@ pub fn emit(
         // then arithmetic simplification, then CSE.
         if (tryFoldOp(op2, rt)) |c| {
             // Constant folding: a pure op over constants becomes the
-            // constant (trap-preserving — division by zero and `int32_min /
-            // -1` stay unfolded, see `tryFoldOp`).
+            // constant (trap-preserving — division by zero and the
+            // `int32_min / -1` division overflow stay unfolded, see
+            // `tryFoldOp`; `int32_min % -1` is total and folds to 0).
             op2 = .{ .const_ = c };
         } else if (op2 == .copy) {
             // Copy propagation: a `copy` of a Copy value is the
@@ -564,8 +565,9 @@ const Cmp = enum { eq, ne, lt, le, gt, ge };
 
 /// Fold `op` when it is a pure constant expression; null otherwise.
 /// Trap-preserving (Runtime §7.2): an expression the runtime would trap
-/// on — division/remainder by zero, or `INT_MIN / -1` — is
-/// left unfolded. Integer arithmetic wraps modulo 2³² (never traps), so
+/// on — division/remainder by zero, or the `INT_MIN / -1` division
+/// overflow — is left unfolded (`INT_MIN % -1` never traps and folds to
+/// 0). Integer arithmetic wraps modulo 2³² (never traps), so
 /// overflow folds to the wrapped value. Casts are total (never trap) and
 /// always fold when constant. `result_type` is the op's result type
 /// (`.neg` and `.cast` need it). Exposed for the construction-time
@@ -648,11 +650,11 @@ fn primKind(t: cfg.Type) ?ast.PrimitiveKind {
 
 /// Fold a binary arithmetic op. Trap-preserving (Runtime §7.2):
 /// division/remainder by zero and the `int32_min / -1` signed-division
-/// overflow are left unfolded so the runtime op traps; `int32_min % -1`
-/// (0, WebAssembly semantics — never traps) stays unfolded too,
-/// conservatively. Integer arithmetic wraps modulo 2³² (WebAssembly
-/// semantics, never traps), so overflow folds to the wrapped value; float
-/// arithmetic is IEEE and always folds.
+/// overflow are left unfolded so the runtime semantics own them;
+/// `int32_min % -1` folds to 0 (mathematically exact, never traps —
+/// WebAssembly semantics, Runtime §7.2). Integer arithmetic wraps modulo
+/// 2³² (WebAssembly semantics, never traps), so overflow folds to the
+/// wrapped value; float arithmetic is IEEE and always folds.
 fn foldArith(bin: cfg.Bin, op: Arith) ?cfg.ConstValue {
     const a = constOf(bin.a) orelse return null;
     const b = constOf(bin.b) orelse return null;
@@ -681,12 +683,18 @@ fn intArith(comptime T: type, a: cfg.ConstValue, b: cfg.ConstValue, op: Arith) ?
         },
         .div, .rem => {
             // Division/remainder traps are preserved: a zero divisor stays
-            // unfolded; the `int32_min / -1` signed-division overflow also
-            // stays unfolded — mandatory for `div` (it traps), conservative
-            // for `rem` (the runtime computes 0, WebAssembly semantics).
+            // unfolded, as does the `int32_min / -1` signed-division
+            // overflow (mandatory for `div`, whose 64-bit form traps; the
+            // 32-bit runtime wraps it, but folding would bake that choice
+            // in). `int32_min % -1` is mathematically 0 and never traps
+            // (WebAssembly semantics — the runtime computes 0), so `rem`
+            // folds to 0.
             if (y == 0) return null;
             if (comptime (T == i32)) {
-                if (x == std.math.minInt(i32) and y == -1) return null;
+                if (x == std.math.minInt(i32) and y == -1) {
+                    if (op == .rem) return .{ .int = 0 };
+                    return null;
+                }
             }
             return switch (op) {
                 .div => .{ .int = @as(i64, @divTrunc(x, y)) },

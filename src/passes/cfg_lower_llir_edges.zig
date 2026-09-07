@@ -23,8 +23,8 @@ pub const EdgeCopy = struct {
     op: llir.Opcode,
     dst: u32,
     src: u32,
-    /// The source value's type — cycle staging matches staging slots by
-    /// it (v1 has no slot-type rows).
+    /// The source value's type — cycle staging matches the reserved
+    /// staging row by it (v1 has no slot-type rows).
     src_type: ?*const cfg.Type = null,
     /// For `slot_*` records the imm16 window offset (the write position
     /// inside the outgoing call area); 0 otherwise.
@@ -118,8 +118,8 @@ fn effectSuccessors(
 }
 
 /// Whether edge `pred → succ` has any non-self phi copy — the cheap
-/// structural query `planBlocks` uses (before budgeting, so before
-/// `block_edge_starts` exists; cycle staging is irrelevant here).
+/// structural query `planBlocks` uses (before budgeting; cycle staging
+/// is irrelevant here).
 pub fn hasPhiCopies(bld: *const Builder, pred: *const cfg.BasicBlock, succ: *const cfg.BasicBlock) bool {
     for (succ.instrs) |ins| switch (ins.op) {
         .phi => |p| for (p.incoming) |in_| {
@@ -273,7 +273,7 @@ pub fn edgeCopyList(bld: *const Builder, pred: *const cfg.BasicBlock, succ: *con
             if (!known_type) try sink.append(bld.arena, source_type);
             staging = std.math.maxInt(u32);
         } else {
-            staging = cycleStagingSlotForType(bld, pred, source_type.*, c0.src, c0.dst, copies.items);
+            staging = cycleStagingSlotForType(bld, pred, source_type.*);
         }
         try out.append(bld.arena, .{ .op = c0.op, .dst = staging, .src = c0.src });
         var cur = c0;
@@ -313,54 +313,33 @@ pub fn edgeCopyCount(bld: *Builder, pred: *const cfg.BasicBlock, succ: *const cf
 
 /// The first cycle-staging slot — retained for callers that only
 /// need a representative staging id (the function has at least one
-/// phi-cycle type by construction). The `no_index` forbids match
-/// nothing: any free cell of the type is a valid representative.
+/// phi-cycle type by construction).
 pub fn cycleStagingSlot(bld: *const Builder, blk: *const cfg.BasicBlock) u32 {
     const fi = bld.funcIndexOfBlock(blk);
     const first = bld.scratch_cycle_types.items[fi].items[0];
-    return cycleStagingSlotForType(bld, blk, first.*, llir.no_index, llir.no_index, &.{});
+    return cycleStagingSlotForType(bld, blk, first.*);
 }
 
 /// The type-matched staging slot for a phi-cycle copy on edge
-/// `pred → succ` (the edge's dead-slot cutoff is `block_edge_starts`):
-/// the lowest dead F cell of the cycle's type — one no record in the
-/// edge's copy list writes (the staging write must not clobber a
-/// destination any copy transfers into: acyclic copies run before the
-/// cycle) — or the dedicated scratch cell `V + rank` past the value
-/// cells when none is dead. `forbid_a`/`forbid_b` are the staged
-/// copy's own src/dst *encodings* (avoid noop staging/landing copies);
-/// `copies`
-/// is the edge's raw phi-copy list (empty for the representative
-/// query). Returns the staging cell's register *encoding*.
-fn cycleStagingSlotForType(bld: *const Builder, blk: *const cfg.BasicBlock, type_: cfg.Type, forbid_a: u32, forbid_b: u32, copies: []const EdgeCopy) u32 {
+/// `pred → succ`: the dedicated scratch cell `V + rank` past the value
+/// cells — the one `llir_alloc` reserves for every distinct
+/// cycle-staging type (`f_count = value cells + cycle rows`; value
+/// cells never extend past `V`). The row is disjoint from every value
+/// cell by construction, so a stage can never clobber a live value
+/// regardless of how the frame layout reused value cells. (An earlier
+/// variant reused "dead" value cells to carry the stage; its liveness
+/// test compared positions from two unrelated coordinate spaces — the
+/// allocator's per-function instruction order against the budget's
+/// global emitted-record order — and could hand back a cell a still-live
+/// value had since taken over, clobbering it. The reserved scratch rows
+/// cost nothing extra — they are already part of `f_count` — so the
+/// dead-cell reuse was deleted outright.)
+fn cycleStagingSlotForType(bld: *const Builder, blk: *const cfg.BasicBlock, type_: cfg.Type) u32 {
     const fi = bld.funcIndexOfBlock(blk);
     const fd = bld.func_descs.items[fi];
-    const f = bld.ordered_funcs.items[fi];
-    const pred_bi = bld.block_ids.get(blk).?;
-    const edge_start = bld.block_edge_starts.items[pred_bi];
     const cycle_types = bld.scratch_cycle_types.items[fi].items;
     for (cycle_types, 0..) |known, rank| {
         if (!cfg.Type.eql(known.*, type_)) continue;
-        var values_base: u32 = 0;
-        for (0..fi) |i| values_base += @intCast(bld.ordered_funcs.items[i].values.len);
-        for (f.values, 0..) |v, vi| {
-            const s = bld.value_slots.get(v) orelse continue;
-            if (s >= fd.f_count) continue; // staging reuses dead F cells only
-            const enc = llir.frameReg(s);
-            if (enc == forbid_a or enc == forbid_b) continue; // avoid noop staging/landing copies
-            var conflicts = false;
-            for (copies) |c| {
-                if (enc == c.dst) {
-                    conflicts = true;
-                    break;
-                }
-            }
-            if (conflicts) continue; // another copy writes this cell: the stage would clobber it
-            // v1 has no slot-type rows: the value's own type is the
-            // slot's type by construction.
-            if (!cfg.Type.eql(v.type_, type_)) continue;
-            if (bld.value_ends.items[values_base + vi] < edge_start) return enc;
-        }
         // Staging cells sit past the value cells: f_count counts
         // values + staging (+1 spill-stage when the function spills —
         // `x_count > 0` — a reserved cell that routes spilled values

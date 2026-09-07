@@ -2,7 +2,7 @@
 //! `Builder` after slot allocation and lifecycle planning (value slots
 //! and the trailing release records fixed; the edge-copy lists
 //! resolvable). Out: the per-block `non_phi_counts`/
-//! `edge_copy_counts`/`block_edge_starts` reservations, the
+//! `edge_copy_counts` reservations, the
 //! conservative `starts_cons`/`block_lens_cons` tables, and the
 //! pre-sized block-local record lists that every emission stage fills
 //! exactly. This is a block-local size only: no PC is assigned, and
@@ -33,19 +33,15 @@ const Builder = lower.Builder;
 pub fn run(bld: *Builder) error{OutOfMemory}!void {
     // Pre-computation, in three decision-free passes so the
     // tables later stages read are complete before anything consults
-    // them: per-block non-phi counts + the edge-copy start positions
-    // (dead-slot cutoff for `edges.cycleStagingSlotForType`, which the
-    // edge-copy walk below may call), then the per-block edge-copy
+    // them: per-block non-phi counts, then the per-block edge-copy
     // counts + the conservative start/length tables (every `br` at
     // two records — the trailing-j reach check reads these, and the
     // final distances only shrink).
-    if (bld.block_edge_starts.items.len < bld.ordered_blocks.items.len) {
-        try bld.block_edge_starts.ensureTotalCapacity(bld.arena, bld.ordered_blocks.items.len);
+    if (bld.non_phi_counts.items.len < bld.ordered_blocks.items.len) {
         try bld.non_phi_counts.ensureTotalCapacity(bld.arena, bld.ordered_blocks.items.len);
         try bld.edge_copy_counts.ensureTotalCapacity(bld.arena, bld.ordered_blocks.items.len);
         try bld.starts_cons.ensureTotalCapacity(bld.arena, bld.ordered_blocks.items.len);
         try bld.block_lens_cons.ensureTotalCapacity(bld.arena, bld.ordered_blocks.items.len);
-        var pos: u32 = 0; // edge-copy start accumulator (terminators at the fixed br = 2 count)
         for (bld.ordered_blocks.items) |blk| {
             var n: u32 = 0;
             for (blk.instrs) |ins| {
@@ -53,8 +49,6 @@ pub fn run(bld: *Builder) error{OutOfMemory}!void {
                 n += try recordCount(bld, blk, ins); // argument moves
             }
             bld.non_phi_counts.appendAssumeCapacity(n);
-            bld.block_edge_starts.appendAssumeCapacity(pos + n);
-            pos += n + brTermCons(blk); // the terminator record(s) reserved in the record list
         }
         var pos_cons: u32 = 0;
         for (bld.ordered_blocks.items) |blk| {

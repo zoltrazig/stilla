@@ -1,21 +1,28 @@
 //! Pass: local dead-instruction elimination (optimizer.md, Pass 8.2). In: a
 //! lowered `cfg.IrProgram` (after drop elision, so the unobservable drops
-//! of Copy values are already gone). Out: the same program, with
-//! every instruction whose results are unused, Copy, and produced
-//! by a side-effect-free, non-consuming, non-trapping op removed.
+//! of Copy values are already gone). Out: the same program, with eligible
+//! instructions whose results are unused and Copy removed.
 //!
 //! Destruction is observable only for unique values (type_shape classifies
 //! any type with a user drop hook unique, and drop elision removes the
-//! unobservable drops of Copy values), so a Copy result that
-//! no instruction, terminator, or phi incoming reads can be removed
-//! outright. The op must also be pure: calls, syscalls, `drop`,
+//! unobservable drops of Copy values), so an unused Copy result can be
+//! removed only when its producer belongs to the explicit conservative set
+//! below. The op must also be pure: calls, syscalls, `drop`,
 //! `store_member`, `cleanup_*`, and the consuming destructures have
-//! effects and are never candidates. Trapping ops — `div`/`rem` (divisor
-//! zero), `read_index`/`tail` (bounds), `read_field`/`read_tuple` — are
-//! excluded: removing a dead trap changes observable
-//! behavior. `num_cast` is removable because casts never trap (Runtime
-//! §7.2): out-of-range values truncate. `read_payload` is included because
-//! the lowering emits it
+//! effects and are never candidates. `div`/`rem` are trap-aware rather
+//! than wholesale-excluded: the integer forms can trap (zero divisor,
+//! and the 64-bit signed-division overflow) and stay out, while the
+//! float forms are total (IEEE: `x/0` is ±inf, `x%0` is NaN) and a dead
+//! float `div`/`rem` is removed — the float result type is the
+//! discriminator. As is dynamically indexed `read_index` (bounds):
+//! removing a dead trap changes observable behavior. Fixed projections
+//! and `tail` are also outside the candidate set without being
+//! classified as trapping (see TODO.md's audit: no ownership impediment
+//! for Copy results, adoption gated on a measured corpus case).
+//! Shifts and bitwise ops never trap (Runtime §7.2) and are candidates.
+//! `num_cast` is removable because casts never trap (Runtime §7.2): float-to-int
+//! conversions truncate toward zero, map NaN to zero, and saturate.
+//! `read_payload` is included because the lowering emits it
 //! only inside a switch arm whose tag was just dispatched
 //! (cfg_lower_control, air.md §5.3), so it cannot trap in lowered AIR.
 //!
@@ -28,11 +35,14 @@
 const std = @import("std");
 const cfg = @import("stilla").cfg;
 
-/// The removable op set: side-effect-free, non-consuming, and — with the
-/// two exclusions below — non-trapping. A comptime check ties the set to
+/// The removable op set: side-effect-free, non-consuming, and non-trapping
+/// by schema (`may_trap = false`). A comptime check ties the set to
 /// the op schema: every candidate must be free of effects and consuming
 /// semantics, so a drift here (removing a call or a move) is a compile
-/// error, not a runtime surprise.
+/// error, not a runtime surprise. The one type-aware extension beyond
+/// this tag set — total float `div`/`rem` — lives in `isCandidate`
+/// (schema `may_trap` is op-level, so the float forms need the result
+/// type to be distinguished from their trapping integer forms).
 fn removable(tag: cfg.OpTag) bool {
     return switch (tag) {
         .const_,
@@ -49,6 +59,11 @@ fn removable(tag: cfg.OpTag) bool {
         .mul,
         .min,
         .max,
+        .shl,
+        .shr,
+        .bitand,
+        .bitor,
+        .bitxor,
         .concat,
         .eq,
         .ne,
@@ -155,13 +170,31 @@ fn deadFunc(f: *cfg.IrFunc, allocator: std.mem.Allocator) !void {
     try cfg.renumberValues(f, allocator);
 }
 
-/// A removable candidate: op in the safe set and every result Copy.
+/// A removable candidate: op in the safe set (or a total float
+/// `div`/`rem` — see `isFloatInstr`) and every result Copy.
 fn isCandidate(instr: *const cfg.Instr) bool {
-    if (instr.results.len == 0 or !removable(std.meta.activeTag(instr.op))) return false;
+    if (instr.results.len == 0) return false;
     for (instr.results) |r| {
         if ((r.ownership orelse .copy) == .unique) return false;
     }
-    return true;
+    if (removable(std.meta.activeTag(instr.op))) return true;
+    return isFloatInstr(instr);
+}
+
+/// The one type-aware extension of the tag set: a float `div`/`rem` is
+/// total (IEEE — `x/0` is ±inf, `x%0` is NaN, Runtime §7.2), so removing
+/// a dead one changes nothing; the integer forms trap on a zero divisor
+/// (and the 64-bit signed-division overflow) and a dead trap must stay.
+/// The float result type is the discriminator (the result type is the
+/// operand type).
+fn isFloatInstr(instr: *const cfg.Instr) bool {
+    return switch (instr.op) {
+        .div, .rem => switch (instr.results[0].type_) {
+            .primitive => |k| k == .float32 or k == .float64,
+            else => false,
+        },
+        else => false,
+    };
 }
 
 /// True when every result of `instr` has no remaining use.

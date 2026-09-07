@@ -573,8 +573,8 @@ pub const OpInfo = struct {
     /// (and the `int32_min / -1` signed-division overflow), index bounds,
     /// and invalid `any` recovery.
     /// Integer arithmetic wraps modulo 2³² and never traps (WebAssembly
-    /// semantics); casts never trap — out-of-range values truncate
-    /// (Runtime §7.2). An op that may
+    /// semantics); casts never trap — float-to-int conversions truncate
+    /// toward zero, map NaN to zero, and saturate (Runtime §7.2). An op that may
     /// trap must never be hoisted onto a path that could skip it (PRE).
     may_trap: bool,
     /// Has observable side effects beyond producing its result (calls,

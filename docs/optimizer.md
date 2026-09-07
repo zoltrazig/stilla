@@ -148,8 +148,12 @@ cannot:
 
 - **constant folding** — fold `arithmetic`/`bitwise`/`compare`/`logic`/`num_cast`
   ops whose operands are constant at their emit site (`tryFoldOp`,
-  braun13cc Algorithm 3's §3.1); `div`/`rem` by zero and out-of-range
-  `float32 → int32` must still trap (Runtime §7.1);
+  braun13cc Algorithm 3's §3.1); trapping integer `div`/`rem` cases stay
+  unfolded (the float forms are total), while `float32 → int32` is total
+  (truncate toward zero, NaN→0, then saturate; Runtime §7.2); the
+  mathematically exact `int32_min % -1` folds to `0` — it never traps
+  (WebAssembly semantics, Runtime §7.2) — while the `int32_min / -1`
+  division-overflow case stays unfolded;
 - **arithmetic simplification** — integer identities only (`x−x→0`,
   `x+0→x`, `x·1→x`, `x·0→0`, `x/1→x`, `x%1→0`, plus the bitwise
   identities `x&0→0`, `x|0→x`, `x^0→x`); float identities are
@@ -237,12 +241,32 @@ of length one); values are renumbered in text order afterwards (air.md
 
 `src/passes/cfg_pre.zig` — rewrite a computation available on some —
 but not all — incoming edges of a join to a phi, inserting the
-computation at the end of the edges that lacked it; candidates are pure,
-non-trapping ops only (comparisons, `not`, `type_is` — hoisting a
-trapping op onto a skipped path would change observable behavior,
-Runtime §7.2), Copy results, operands defined in a strict dominator of
-the join; the join's computation is replaced by the phi with the same
-result value, and values are renumbered in text order (air.md §10).
+computation at the end of the edges that lacked it. Candidates are the
+pure, non-trapping ops: the comparisons, the total unary ops (`not`,
+`neg`, `abs`, `clz`, `popcount`, `type_is`), the total wrapping
+arithmetic (`add`/`sub`/`mul`/`min`/`max` — integer forms wrap modulo
+2³²), the shifts (count masked to its low 5 bits), the bitwise ops,
+`num_cast` (casts never trap, Runtime §7.2), and the float forms of
+`div`/`rem` (IEEE-total: `x/0` is ±inf, `x%0` is NaN — the
+discriminator is the float result type). The integer `div`/`rem`
+forms trap on a zero divisor and stay excluded — hoisting a trapping
+op onto a skipped path would change observable behavior, Runtime §7.2
+— as do the schema-level trapping ops (`read_index`, `any_unpack_*`,
+`split_list`) and anything effectful or consuming. `concat` stays out:
+it allocates a fresh string, so moving it onto skipped paths changes
+allocation cost even though it is total. Copy results only, operands
+defined in a strict dominator of the join; the join's computation is
+replaced by the phi with the same result value, and values are
+renumbered in text order (air.md §10).
+
+`num_cast` availability needs one extra condition: `cfg.identical`
+compares only the operand, but a cast's *target type* lives on its
+result value — two casts of the same operand to different types are
+different computations. The pass therefore requires result-type
+equality (`cfg.Type.eql`) in addition to `cfg.identical` when matching
+a `num_cast` against a predecessor's computation; the other candidates
+cannot hit this, because their opcode plus operand values fix the
+result type.
 
 ### 8.4 If-conversion (branchless select)
 
@@ -284,13 +308,24 @@ guards text-form and validator input only.
 
 ### 8.7 Dead-instruction elimination
 
-`src/passes/cfg_dead_instr.zig` — remove an instruction whose results
-are unused, Copy, and produced by a side-effect-free, non-consuming,
-non-trapping op (`num_cast` qualifies — casts never trap, Runtime §7.2;
-the guarded `read_payload` of a match arm whose payload
-is unused is the common corpus case); iterated to a fixed point; calls,
-syscalls, consuming destructures, `div`/`rem`/reads (traps) and
-phis are never candidates.
+`src/passes/cfg_dead_instr.zig` — iteratively remove unused Copy results from
+its explicit, conservative set of side-effect-free, non-consuming,
+non-trapping candidates (`num_cast` qualifies — casts never trap, Runtime
+§7.2; the guarded `read_payload` of a match arm whose payload is unused is
+the common corpus case; shifts and bitwise ops qualify — the shift count
+is masked to its low 5 bits and the bitwise ops work on raw patterns,
+neither ever traps). The `div`/`rem` exclusion is type-aware rather than
+wholesale: the integer forms trap (zero divisor, and the 64-bit
+signed-division overflow) and a dead trap must stay, but the float forms
+are total (IEEE: `x/0` is ±inf, `x%0` is NaN) and a dead float
+`div`/`rem` is removed. Calls, syscalls, consuming destructures,
+dynamically indexed `read_index` (traps), and phis are never candidates.
+Fixed projections and `tail` are also outside the candidate set without
+being classified as trapping — the audit (TODO.md) found no ownership
+impediment for Copy results (`created = .operand` means the Copy-result
+filter already excludes every unique-base view) and no lowering-cost
+hazard, but adoption is gated on a measured corpus case per the
+acceptance criteria; the corpus today produces none.
 
 ### 8.8 Jump threading
 

@@ -556,7 +556,7 @@ test "Pass 8.1 folds wrapping arithmetic, leaves division traps unfolded" {
     // wrapped values, as does uint32 negation (two's-complement). Folding
     // must never turn a runtime trap into a value: div/rem by zero and the
     // int32_min div -1 division-overflow case stay as ops (int32_min rem
-    // -1 is 0 and never traps, but is left unfolded too, conservatively).
+    // -1 is 0 and never traps, so it folds to the constant).
     var t = try cfg_parse.parseText(
         \\module "app" {
         \\func @f() -> int32 {
@@ -597,8 +597,9 @@ test "Pass 8.1 folds wrapping arithmetic, leaves division traps unfolded" {
     try testing.expectEqual(@as(i64, -1), instrs[9].op.const_.int); // max - min wraps to -1
     try testing.expect(instrs[10].op == .const_);
     try testing.expectEqual(@as(i64, 1), instrs[10].op.const_.int); // max * max wraps to 1
-    try testing.expect(instrs[12].op == .div); // min div -1: traps, unfolded
-    try testing.expect(instrs[13].op == .rem); // min rem -1: 0, never traps — left unfolded conservatively
+    try testing.expect(instrs[12].op == .div); // min div -1: overflow case, unfolded
+    try testing.expect(instrs[13].op == .const_);
+    try testing.expectEqual(@as(i64, 0), instrs[13].op.const_.int); // min rem -1: exactly 0, never traps — folds
     try testing.expect(instrs[15].op == .const_);
     try testing.expectEqual(@as(i64, 3705032704), instrs[15].op.const_.int); // uint32 add wraps
     try testing.expect(instrs[17].op == .const_);
@@ -1447,6 +1448,223 @@ test "Pass 8.3 handles a self-loop back edge" {
     try testing.expect(phi.incoming[1].pred == body);
     try testing.expect(body.instrs[1].op == .lt);
     try testing.expect(phi.incoming[1].value == body.instrs[1].results[0]);
+}
+
+test "Pass 8.3 hoists total arithmetic, shift, and bitwise ops" {
+    // Total integer ops — `add` (wraps modulo 2³²) and `shl` (count
+    // masked to its low 5 bits) — never trap, so both are PRE candidates
+    // like the comparisons; `sub`/`mul`/`min`/`max`, the bitwise ops, and
+    // the unary arithmetic ops share the same path (cfg.opInfo:
+    // `may_trap = false`, `effects = false`, `consumes = .none`).
+    var t = try cfg_parse.parseText(
+        \\module "app" {
+        \\func @f(a: int32, b: int32, c: bool) -> int32 {
+        \\entry:
+        \\    br %2 ? apos : aels
+        \\apos:
+        \\    %3: int32 = add %0, %1
+        \\    j ajoin
+        \\aels:
+        \\    j ajoin
+        \\ajoin:
+        \\    %4: int32 = add %0, %1
+        \\    br %2 ? spos : sels
+        \\spos:
+        \\    %5: int32 = shl %0, %1
+        \\    j sjoin
+        \\sels:
+        \\    j sjoin
+        \\sjoin:
+        \\    %6: int32 = shl %0, %1
+        \\    ret %6
+        \\}
+        \\}
+    );
+    defer t.arena.deinit();
+    try lower.pre(&t.program, t.arena.allocator());
+
+    const blocks = t.program.funcs[0].blocks;
+    // ajoin: the `add` becomes a phi; the missing edge's copy is inserted
+    // at the end of `aels`.
+    const ajoin = blocks[3];
+    try testing.expectEqual(@as(usize, 1), ajoin.instrs.len);
+    const aphi = switch (ajoin.instrs[0].op) {
+        .phi => |p| p,
+        else => return error.UnexpectedOp,
+    };
+    try testing.expectEqual(@as(usize, 2), aphi.incoming.len);
+    try testing.expect(aphi.incoming[0].value == blocks[1].instrs[0].results[0]);
+    try testing.expect(aphi.incoming[1].value == blocks[2].instrs[0].results[0]);
+
+    // sjoin: the `shl` becomes a phi too.
+    const sjoin = blocks[6];
+    try testing.expectEqual(@as(usize, 1), sjoin.instrs.len);
+    const sphi = switch (sjoin.instrs[0].op) {
+        .phi => |p| p,
+        else => return error.UnexpectedOp,
+    };
+    try testing.expectEqual(@as(usize, 2), sphi.incoming.len);
+    try testing.expect(sphi.incoming[0].value == blocks[4].instrs[0].results[0]);
+    try testing.expect(sphi.incoming[1].value == blocks[5].instrs[0].results[0]);
+}
+
+test "Pass 8.3 hoists a float division (total) but never an integer one" {
+    // The float forms of `div`/`rem` are total (IEEE: `x/0` is ±inf,
+    // `x%0` is NaN — Runtime §7.2), so a partially redundant float `div`
+    // is a PRE candidate; the integer form traps on a zero divisor and
+    // stays in the join block (see the trapping-arithmetic test above).
+    var t = try cfg_parse.parseText(
+        \\module "app" {
+        \\func @f(a: float32, b: float32, c: bool) -> float32 {
+        \\entry:
+        \\    br %2 ? pos : els
+        \\pos:
+        \\    %3: float32 = div %0, %1
+        \\    j join
+        \\els:
+        \\    j join
+        \\join:
+        \\    %4: float32 = div %0, %1
+        \\    ret %4
+        \\}
+        \\}
+    );
+    defer t.arena.deinit();
+    try lower.pre(&t.program, t.arena.allocator());
+
+    const blocks = t.program.funcs[0].blocks;
+    try testing.expectEqual(@as(usize, 1), blocks[1].instrs.len);
+    try testing.expect(blocks[1].instrs[0].op == .div);
+    // The missing edge gets an inserted copy of the division...
+    try testing.expectEqual(@as(usize, 1), blocks[2].instrs.len);
+    try testing.expect(blocks[2].instrs[0].op == .div);
+    // ...and the join's computation becomes the phi of the two edges.
+    try testing.expectEqual(@as(usize, 1), blocks[3].instrs.len);
+    const phi = switch (blocks[3].instrs[0].op) {
+        .phi => |p| p,
+        else => return error.UnexpectedOp,
+    };
+    try testing.expectEqual(@as(usize, 2), phi.incoming.len);
+    try testing.expect(phi.incoming[0].value == blocks[1].instrs[0].results[0]);
+    try testing.expect(phi.incoming[1].value == blocks[2].instrs[0].results[0]);
+}
+
+test "Pass 8.3 merges num_casts of the same result type" {
+    // Both edges compute the float32→int32 cast of `%0`: `cfg.identical`
+    // matches the operands and the result types agree, so the join's cast
+    // becomes a phi and nothing is inserted.
+    var t = try cfg_parse.parseText(
+        \\module "app" {
+        \\func @f(a: float32, c: bool) -> int32 {
+        \\entry:
+        \\    br %1 ? pos : els
+        \\pos:
+        \\    %2: int32 = num_cast %0
+        \\    j join
+        \\els:
+        \\    %3: int32 = num_cast %0
+        \\    j join
+        \\join:
+        \\    %4: int32 = num_cast %0
+        \\    ret %4
+        \\}
+        \\}
+    );
+    defer t.arena.deinit();
+    try lower.pre(&t.program, t.arena.allocator());
+
+    const blocks = t.program.funcs[0].blocks;
+    try testing.expectEqual(@as(usize, 1), blocks[1].instrs.len);
+    try testing.expectEqual(@as(usize, 1), blocks[2].instrs.len);
+    const phi = switch (blocks[3].instrs[0].op) {
+        .phi => |p| p,
+        else => return error.UnexpectedOp,
+    };
+    try testing.expect(phi.incoming[0].value == blocks[1].instrs[0].results[0]);
+    try testing.expect(phi.incoming[1].value == blocks[2].instrs[0].results[0]);
+}
+
+test "Pass 8.3 never merges num_casts with different result types" {
+    // `cfg.identical` compares only the operand — a cast's target type
+    // lives on its result — so the int32 casts and the float32 cast of
+    // `%0` are different computations despite matching `identical`. PRE
+    // must take the float32 value from `pos` and insert a fresh float32
+    // cast on `els`, never wire the int32 cast into the float32 phi (the
+    // bug `sameComputation`'s type check guards: the availability scan
+    // hits the int32 casts first on both edges).
+    var t = try cfg_parse.parseText(
+        \\module "app" {
+        \\func @f(a: float32, c: bool) -> float32 {
+        \\entry:
+        \\    br %1 ? pos : els
+        \\pos:
+        \\    %2: int32 = num_cast %0
+        \\    %3: float32 = num_cast %0
+        \\    j join
+        \\els:
+        \\    %4: int32 = num_cast %0
+        \\    j join
+        \\join:
+        \\    %5: float32 = num_cast %0
+        \\    ret %5
+        \\}
+        \\}
+    );
+    defer t.arena.deinit();
+    try lower.pre(&t.program, t.arena.allocator());
+
+    const blocks = t.program.funcs[0].blocks;
+    // The int32 casts are untouched, and `els` received exactly one
+    // inserted instruction: a fresh float32 cast.
+    try testing.expectEqual(@as(usize, 2), blocks[1].instrs.len);
+    try testing.expectEqual(cfg.Type{ .primitive = .int32 }, blocks[1].instrs[0].results[0].type_);
+    try testing.expectEqual(@as(usize, 2), blocks[2].instrs.len);
+    try testing.expectEqual(cfg.Type{ .primitive = .int32 }, blocks[2].instrs[0].results[0].type_);
+    try testing.expectEqual(cfg.Type{ .primitive = .float32 }, blocks[2].instrs[1].results[0].type_);
+    // The phi takes the float32 casts only: pos's original one and the
+    // fresh insertion — never an int32 value.
+    const phi = switch (blocks[3].instrs[0].op) {
+        .phi => |p| p,
+        else => return error.UnexpectedOp,
+    };
+    try testing.expectEqual(@as(usize, 2), phi.incoming.len);
+    try testing.expect(phi.incoming[0].value == blocks[1].instrs[1].results[0]);
+    try testing.expect(phi.incoming[1].value == blocks[2].instrs[1].results[0]);
+    for (phi.incoming) |inc| {
+        try testing.expectEqual(cfg.Type{ .primitive = .float32 }, inc.value.type_);
+    }
+}
+
+test "Pass 8.3 leaves a borrowed-view computation alone (ownership)" {
+    // `tail` of an unique list is pure and non-trapping, but its result
+    // is a borrowed view (air.md §6.4): hoisting it would share the view
+    // across edges and change the destruction schedule, so it is not a
+    // candidate regardless of its purity.
+    var t = try cfg_parse.parseText(
+        \\module "app" {
+        \\func @f(xs: list[any], c: bool) -> list[any] {
+        \\entry:
+        \\    br %1 ? pos : els
+        \\pos:
+        \\    %2: list[any] = tail %0
+        \\    j join
+        \\els:
+        \\    j join
+        \\join:
+        \\    %3: list[any] = tail %0
+        \\    ret %3
+        \\}
+        \\}
+    );
+    defer t.arena.deinit();
+    try lower.pre(&t.program, t.arena.allocator());
+
+    const blocks = t.program.funcs[0].blocks;
+    try testing.expectEqual(@as(usize, 1), blocks[1].instrs.len);
+    try testing.expect(blocks[1].instrs[0].op == .tail);
+    try testing.expectEqual(@as(usize, 0), blocks[2].instrs.len);
+    try testing.expectEqual(@as(usize, 1), blocks[3].instrs.len);
+    try testing.expect(blocks[3].instrs[0].op == .tail);
 }
 
 test "Pass 8.3 optimized AIR round-trips through the standalone cfg parser" {

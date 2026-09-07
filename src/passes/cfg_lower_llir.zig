@@ -112,13 +112,6 @@ pub const Builder = struct {
     /// reserves none (its edges' effects live in the edge blocks), except
     /// a tailcall whose row covers the slot_* prep + leftover kills.
     edge_copy_counts: std.ArrayList(u32) = .empty,
-    /// Per-block edge-copy start position (= block_start +
-    /// non_phi_count), parallel to `ordered_blocks`. Pre-computed in
-    /// `cfg_lower_llir_budget.run` so `cfg_lower_llir_edges`'s
-    /// cycle-staging slot lookup can find dead value
-    /// slots without depending on `non_phi_counts` being already
-    /// populated for the current block.
-    block_edge_starts: std.ArrayList(u32) = .empty,
     /// Per-block conservative start position and full record
     /// length (non-phi + edge copies + terminator at the fixed br = 2
     /// count), parallel to `ordered_blocks` — the trailing-j
@@ -166,10 +159,9 @@ pub const Builder = struct {
     value_slots: std.AutoHashMapUnmanaged(*const cfg.Value, llir.SlotId) = .empty,
     /// Per-value interval end positions, parallel to the program's
     /// value array — the global position of each value's last use (or the
-    /// live-out extension). Used by the edge pass's
-    /// cycle-staging slot lookup to find dead
-    /// value slots that can be reused for cycle staging instead of
-    /// allocating dedicated scratch.
+    /// live-out extension). The allocator's spill replay and the
+    /// post-allocation result coalescing read the `(start, end)`
+    /// intervals.
     value_ends: std.ArrayList(u32) = .empty,
     /// Per-value interval start positions, parallel to `value_ends`
     /// (one entry per value in `f.values` order, across all functions).
