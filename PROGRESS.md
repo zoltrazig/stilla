@@ -29,7 +29,7 @@
 | --- | --- | --- | --- |
 | S0 | 文档先行 | 声明 HIR 接缝与 pass 顺序；开 PROGRESS | done（本次提交） |
 | S1 | hir.zig 结构 | arena 句柄/容器 + 注册表骨架 + 白盒 | done（本次提交） |
-| S2 | 文本 printer/parser | 前缀括号文本、binder 确定性编号、round-trip | pending |
+| S2 | 文本 printer/parser | 前缀括号文本、binder 确定性编号、round-trip | done（本次提交） |
 | S3 | 结构 validator | hir.md §10.1 第一级 | pending |
 | S4 | AST→HIR builder | M1a 主件；CFG 行为不变 | pending |
 | S5 | HIR→CFG + 等价门禁 | toggle + 字节差分 | pending |
@@ -67,15 +67,43 @@
       在 binder region 之外（结构镜像 §5.3）、payload 具体值、pattern 绑定叶引用
       arm region params、ownership views（0 = 默认 owned）、注册表身份/形状、typed
       rep 映射 cfg.Type。**整树拒绝测试（捕获/DAG/作用域）归 S3，不在 S1。**
-- 验收：`zig build -fincremental test` 全绿（1019 tests 通过，含 hir 的 7 个——
-      以一次临时失败断言验证确被收集，随后移除）；`zig build -fincremental` 绿。
+- 验收：`zig build -fincremental test` 全绿（1019 tests 通过，含 hir 的 7 个白盒）。
+      包含性证明记录：首次临时失败断言遇编译错误未生效；改用真实失败断言（hir.test.*
+      被点名）确认收集后移除，全绿。
 - 栅栏：无 `EffectSummary` / `effect_transfer` / `seg_*` 标识符落盘。
 
-### S2 — 文本 printer + parser（pending）
+### S2 — 文本 printer + parser（done）
 
-- 文件：`hir_print.zig`、`hir_parse.zig`（由 hir.zig 再导出，仿 cfg_print/cfg_parse）。
-- 验收：golden 取自 hir.md §4.7/§8.7 示例：`parse(print(parse(example))) == parse(example)`；
-  binder 重编号 round-trip。
+- 范围决策（用户批准）：引入**最小序列化上下文** `SerCtx`（夹具 decl 表 +
+  `cfg.substParams` 简单代换），§4.7 例2（match + Option[i32]）golden 逐字往返；
+  struct_make / field_get / variant_make 的成员/标签身份文本形态**推迟 + 报错**
+  （§4.4 缩写丢身份；print/parse 两侧显式拒绝，绝不静默降级）。
+- `passes/hir_parse.zig`：词法 + 递归下降（expr/ty/binder/pattern/region）；`#refs:`
+  字典（§4.8 stable key，严禁猜号）；**文本级 §5.3 初始化排除**（let init 先于声明入
+  作用域，自引用即报错）；函数边界不捕获留 S3（解析期通过）；arm pattern 绑定叶按
+  文本序映射 region params（类型经 decl 代换推导）；名义类型经 SerCtx 解析。
+- `passes/hir_print.zig`：canonical 单行输出；**确定性 binder 重编号**（首次引入序 =
+  文本出现序）；refs 打印号按 stable key 排序 + 字典行；结果类型派生 vs `: ty` 标注
+  （num_cast/any_cast/空 list_make 标注；fn/match/let/seq/call/tuple/list 结构推导）；
+  then 分支嵌套 if 加括号防 else 悬挂。
+- `hir.zig`：`SerCtx` + `mul.i32` 注册行 + print/parseText/Parser/Diag 再导出；追加测试
+  强制分析两个 pass——zig 懒分析下无调用者则其 test{} 不注册（探针实验证实；cfg.print
+  因 main 调用被分析、hir.print 无调用者）。
+- 测试（printer 属主 white-box）：§4.7 例1/2/3 + §8.7 片段 parse→print→parse α-等价；
+  canonical 输出逐字稳定；α-等价文本打印相同；let init 排除 / 出域引用 / 未声明 binder /
+  未知 opcode / 裸数字字面量 / 元数错误 / 无 ctx 名义类型 / refs 无字典条目 全拒绝；
+  成员身份 op 文本两侧拒绝。独立递归 α-等价比较器（binder 位置映射）。
+- 验收：`zig build test` 全绿 exit=0（全套 ~1032 tests 含 hir 文本套件——失败日志点名
+  `passes.hir_print.test.*` 证明收集）；`zig build -fincremental` 绿。
+- 栅栏：无 `EffectSummary`/`effect_transfer`/`seg_*` 落盘。
+
+#### S2 取舍与风险（记录）
+
+- refs 跨 invocation 字节稳定依赖 SerCtx stable key（同 ctx 内已稳定）；接真实 module
+  key 的缝在 S4。pattern 内数字字面量打裸数字（pattern 只存 value，重解析默认 i64/f64）。
+  非有限浮点非 v1 文本可序列化（报错）。
+- 发现 cfg 先例：AIR 文本成员用显式数字下标（`load_member %v, #3`）；hir §4.4 缩写形
+  态与 token 集均未定义成员身份 → 按用户决策推迟，报错保护，S4 定成员文本表达。
 
 ### S3 — 结构 validator（pending）
 
@@ -140,3 +168,4 @@
 | --- | --- | --- | --- |
 | 2026-09-08 | S0 | docs(hir) S0 提交 | 声明 M1a 接缝（passes.md/frontend.md/architecture.md/README.md）+ 开 PROGRESS |
 | 2026-09-08 | S1 | 本次 docs(hir) S1 提交 | hir.zig 数据骨架 + root.zig 导出 + 7 白盒测试；docs 措辞更新为「S1 数据已落地、阶段未接线」 |
+| 2026-09-08 | S2 | 本次 feat(hir) S2 提交 | passes/hir_parse.zig + hir_print.zig；hir.zig SerCtx/mul.i32/再导出/强制分析测试；§4.7/§8.7 golden round-trip + binder 重编号 + #refs 字典；成员身份文本推迟（用户批准） |

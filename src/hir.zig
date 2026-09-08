@@ -385,6 +385,7 @@ const typed_descriptors = [_]OpDescriptor{
     .{ .name = "add.u64", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .u64 },
     .{ .name = "div.i32", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .i32 },
     .{ .name = "div.u64", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .u64 },
+    .{ .name = "mul.i32", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .i32 },
     .{ .name = "add.f32", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .f32 },
     .{ .name = "add.f64", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .f64 },
 };
@@ -445,6 +446,37 @@ comptime {
 pub fn opId(name: []const u8) ?OpId {
     return registry.id(name);
 }
+
+// ---------------------------------------------------------------------------
+// Serialization context (hir.md §4.8 refs dictionary, §4.5 nominal types)
+// ---------------------------------------------------------------------------
+//
+// The canonical text form needs name/decl side tables that the IR itself
+// deliberately does not carry (names stay out of IR structures, §1.3).
+// These tables live here, keyed by the *checker's* numeric id spaces
+// (FuncId / ConstId / HostBindingId / cfg TypeId): the arrays are
+// index-by-id lookups. S2 tests build fixture contexts; S4/S5 wire the
+// real module tables in (same shape).
+
+pub const SerCtx = struct {
+    /// Nominal type declarations, indexed by `cfg.Type.Named.id`. The
+    /// printer renders `.named` decl ids through this table (written
+    /// name + type arguments); the parser resolves nominal type names
+    /// and derives pattern-binder types through it.
+    types: []const cfg.TypeDecl = &.{},
+    /// Function targets, indexed by FuncId: stable semantic key (hir.md
+    /// §4.8) and the function's monomorphic type (for `call` result
+    /// types through a `fnref` callee).
+    funcs: []const FuncDecl = &.{},
+    /// Module-level constants, indexed by ConstId.
+    consts: []const ConstDecl = &.{},
+    /// Host bindings, indexed by HostBindingId.
+    hosts: []const HostDecl = &.{},
+
+    pub const FuncDecl = struct { key: []const u8, type_: cfg.Type };
+    pub const ConstDecl = struct { key: []const u8, type_: cfg.Type };
+    pub const HostDecl = struct { key: []const u8, type_: cfg.Type };
+};
 
 // ---------------------------------------------------------------------------
 // Program — the low-level container (hir.md §3.2)
@@ -589,6 +621,19 @@ pub const Program = struct {
         return self.semantic_infos.items[n.sema].ownership_view;
     }
 };
+
+// ---------------------------------------------------------------------------
+// Text form: canonical printer and parser — implemented in src/passes/
+// (hir_parse.zig, hir_print.zig); re-exported here so `hir.print` and
+// `hir.parseText` keep working for tests and dumps (hir.md §4).
+// ---------------------------------------------------------------------------
+
+pub const ParseError = @import("passes/hir_parse.zig").ParseError;
+pub const Diag = @import("passes/hir_parse.zig").Diag;
+pub const Parser = @import("passes/hir_parse.zig").Parser;
+pub const parseText = @import("passes/hir_parse.zig").parseText;
+// pi-lens-ignore: zls:unknown
+pub const print = @import("passes/hir_print.zig").print;
 
 // ---------------------------------------------------------------------------
 // White-box tests (hir.md §10.2: owning module `test {}`)
@@ -827,4 +872,13 @@ test "registry: typed instances carry their scalar rep" {
     try t.expect(registry.id("add.i32").? != registry.id("add.u32").?);
     // The rep maps to the cfg.Type the node will carry.
     try t.expectEqual(cfg.Type{ .primitive = .uint64 }, ScalarRep.u64.toCfgType());
+}
+
+test "text passes are analyzed (forces hir_print/hir_parse analysis in test builds)" {
+    const parse_text = @import("passes/hir_parse.zig").parseText;
+    const print_text = @import("passes/hir_print.zig").print;
+    var p = try parse_text("fn (B0: i32) => mul.i32(%B0, 2i32)", .{});
+    defer p.arena.deinit();
+    const out = try print_text(&p.program, p.root, p.arena.allocator(), .{});
+    try std.testing.expectEqualStrings("fn (B0: i32) => mul.i32(%B0, 2i32)", out);
 }
