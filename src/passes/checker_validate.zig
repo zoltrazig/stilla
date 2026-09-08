@@ -1,4 +1,4 @@
-//! Pass: phase-2 consumer checks — phase2-checker.md, Checks enabled by annotation (type mismatch, match
+//! Pass: phase-2 consumer checks — checker.md, Checks enabled by annotation (type mismatch, match
 //! exhaustiveness, refutable patterns, recursive types, module-const
 //! initialization order).
 //! In: the per-module annotation from `checker_annotate` (expr_of,
@@ -75,7 +75,7 @@ fn validateItem(frame: *Frame, item: *ast.ModuleItem) CheckError!void {
         .func_def => |*f| if (f.body) |body| {
             // Generic templates are never checked unspecialized (Core
             // §12.4); each used specialization is validated under the
-            // concrete substitution (phase2-checker.md, Generic expansion).
+            // concrete substitution (checker.md, Generic expansion).
             if (f.type_params.len == 0) try validateFunc(frame, f, body);
         },
         else => {},
@@ -83,7 +83,7 @@ fn validateItem(frame: *Frame, item: *ast.ModuleItem) CheckError!void {
 }
 
 /// Run the checks over one monomorphized generic instance body
-/// (phase2-checker.md, Generic expansion; Core §12.4). The instance was annotated against its
+/// (checker.md, Generic expansion; Core §12.4). The instance was annotated against its
 /// defining module by `checkInstanceBody`; this runs the consumer checks
 /// over the same annotation.
 pub fn validateMonomorphized(ck: *checker.Checker, info: *ModuleInfo, ma: *ModuleAnnotation, f: *const ast.FuncDef) CheckError!void {
@@ -843,7 +843,7 @@ fn visitTypeEdge(
     switch (t.*) {
         .named => |n| {
             // Dotted names denote types of imported modules; imports are
-            // acyclic (phase1-module-graph.md, Import-cycle detection), so a non-generic cross-module reference cannot
+            // acyclic (module-graph.md, Import-cycle detection), so a non-generic cross-module reference cannot
             // cycle back. A cross-module GENERIC instantiation (`m.B[Node]`
             // storing `Node` inline) is a known limitation of this pass —
             // closing it needs cross-module type resolution.

@@ -1,5 +1,5 @@
 //! Pass: module-scope const type inference and generic specialization —
-//! phase2-checker.md, Expression inference — Generic expansion.
+//! checker.md, Expression inference — Generic expansion.
 //! In: `Resolve` view + `from` module + `ast.Expr` / function signature.
 //! Out: the inferred `cfg.Type` of a module-constant initializer, the
 //! module value member behind a dotted path (with or without its owning
@@ -186,7 +186,7 @@ fn inferBinaryType(resolve: Resolve, from: *ModuleInfo, b: *const ast.Binary) ?c
 
 /// The return type of a call, from the callee's resolved signature.
 /// Generic (host) bindings are specialized from the argument types
-/// (phase2-checker.md, Generic expansion; the syscall carries the concrete signature).
+/// (checker.md, Generic expansion; the syscall carries the concrete signature).
 fn callReturnType(resolve: Resolve, from: *ModuleInfo, c: *const ast.Call) ?cfg.Type {
     var callee = c.callee;
     while (true) switch (callee.*) {
@@ -216,7 +216,7 @@ fn callReturnType(resolve: Resolve, from: *ModuleInfo, c: *const ast.Call) ?cfg.
 }
 
 // ---------------------------------------------------------------------------
-// Generic specialization (phase2-checker.md, Generic expansion) — minimal, for host bindings
+// Generic specialization (checker.md, Generic expansion) — minimal, for host bindings
 // ---------------------------------------------------------------------------
 
 /// True when the named type string denotes an unresolved name in `from` —

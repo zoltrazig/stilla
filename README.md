@@ -88,7 +88,7 @@ and the trailing section lists what the code and docs still mark open.
   lowering does not emit them yet (longer forms are compiled instead)
 - [ ] `select` does not yet participate in CSE (optimizer.md §8.4 follow-up)
 - [ ] Inferred tuple/list elements can still carry a module value; §2.3 not
-  closed for container positions (phase2-checker.md)
+  closed for container positions (checker.md)
 - [ ] Only the Zig API is public for embedding — no C header yet
 
 ## What is Stilla?
@@ -127,14 +127,13 @@ The implementation documents live in [`docs/`](docs/) (indexed by
 
 | Document | Covers |
 | --- | --- |
-| [stilla-intro.md](docs/stilla-intro.md) | The language and its design, for new readers |
 | [architecture.md](docs/architecture.md) | End-to-end map: artifacts, pipeline, boundaries, host embedding |
-| [passes.md](docs/passes.md) | Canonical ordered pass inventory, with links to the detail documents |
-| [frontend.md](docs/frontend.md) | The compiler pipeline end to end: phase-1 module graph → phase-2 checker → phase-3 CFG AIR → LLIR backend |
-| [phase1-module-graph.md](docs/phase1-module-graph.md) | Phase 1: module identity, resolution, cycle detection, topo sort |
-| [phase2-checker.md](docs/phase2-checker.md) | Phase 2: inference, generic expansion, ownership analysis, checks |
-| [phase3-cfg-lowering.md](docs/phase3-cfg-lowering.md) | Phase 3: annotated AST → CFG AIR, destruction placement, module init functions |
-| [optimizer.md](docs/optimizer.md) | Passes 7–8: tail-call elimination, inlining, CSE, copy propagation, and the mid-level rewrites |
+| [passes.md](docs/passes.md) | Ordered inventory of every pass, with links to the detail documents |
+| [frontend.md](docs/frontend.md) | The compiler pipeline end to end: module graph → checker → CFG lowering → optimizer → LLIR backend |
+| [module-graph.md](docs/module-graph.md) | Module identity, resolution, loading, cycle detection, topo sort |
+| [checker.md](docs/checker.md) | Inference, generic expansion, ownership analysis, checks |
+| [cfg-lowering.md](docs/cfg-lowering.md) | Annotated AST → CFG AIR, destruction placement, module init functions |
+| [optimizer.md](docs/optimizer.md) | Tail-call elimination, inlining, CSE, copy propagation, and the mid-level rewrites |
 | [llir-typed.md](docs/llir-typed.md) | The typed LLIR lowering layer |
 | [host-bindings.md](docs/host-bindings.md) | The typed host-binding layer: comptime registry, signature checks, embedding |
 | [interpreter-vm.md](docs/interpreter-vm.md) | The LLIR interpreter VM: instruction image, execution loop, host adapters, destruction |
@@ -184,9 +183,9 @@ module "app" {
 Options: `--output <file>`, `--module <spec>`, `--entry-fn <name>` /
 `--no-entry-fn`, `-I <dir>`, and the emission modes `--emit-asm`,
 `--emit-bin <file>`, and `--run` (compile and execute). Diagnostics are
-`<file>:<line>:<col>: error: <message>`. The pipeline is documented in
-[frontend.md](docs/frontend.md); the LLIR backend it lowers to is in
-[frontend.md](docs/frontend.md) and [interpreter-vm.md](docs/interpreter-vm.md).
+`<file>:<line>:<col>: error: <message>`. The pipeline and the LLIR
+backend it lowers to are documented in [frontend.md](docs/frontend.md)
+and [interpreter-vm.md](docs/interpreter-vm.md).
 
 ## Using the library
 
@@ -314,8 +313,7 @@ const term = try stilla.interpreter.runProgram(arena, &built);
 `builtin.print` has no runtime default — the embedder supplies the
 output hook (`appPrint` above writes message + newline to stdout). The
 program's `main` returns `a + b`, which the example then verifies
-against the draws the host observed. See
-[host-bindings.md](docs/host-bindings.md) §3.4 for the full walkthrough;
+against the draws the host observed. See [host-bindings.md](docs/host-bindings.md) for the full walkthrough;
 `examples/embed/random_demo.zig` is the verbatim source.
 
 ### As a C embedder

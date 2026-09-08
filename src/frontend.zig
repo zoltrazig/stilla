@@ -1,4 +1,4 @@
-//! Frontend pipeline driver — frontend.md §1–§3, phase3-cfg-lowering.md.
+//! Frontend pipeline driver — frontend.md §1–§3, cfg-lowering.md.
 //!
 //! `compile` runs the whole frontend in one call: load and parse the
 //! transitive closure of modules reachable from the entry point (phase 1,
@@ -171,7 +171,7 @@ pub fn compile(allocator: std.mem.Allocator, options: Options) CompileError!Comp
         error.OutOfMemory => return error.OutOfMemory,
     };
 
-    // Phase 2: annotation and checks (phase2-checker.md).
+    // Phase 2: annotation and checks (checker.md).
     var ck = checker.Checker.init(arena_alloc);
     _ = ck.check(graph) catch |err| switch (err) {
         error.Diagnostic => {

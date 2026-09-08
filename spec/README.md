@@ -95,8 +95,8 @@ flowchart LR
 > Implementation notes (the pipeline driver, optimizer design, and interpreter
 > design) live outside this directory, in the repository's `docs/` tree:
 > [frontend](../docs/frontend.md),
-> [phase1-module-graph](../docs/phase1-module-graph.md),
-> [phase2-checker](../docs/phase2-checker.md),
-> [phase3-cfg-lowering](../docs/phase3-cfg-lowering.md),
+> [module-graph](../docs/module-graph.md),
+> [checker](../docs/checker.md),
+> [cfg-lowering](../docs/cfg-lowering.md),
 > [optimizer](../docs/optimizer.md), and
 > [interpreter-vm](../docs/interpreter-vm.md).

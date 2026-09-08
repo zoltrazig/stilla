@@ -28,7 +28,7 @@ pub fn lowerModule(self: *Lowerer, info: *moduleinfo.ModuleInfo) LowerError!*cfg
     // Every source / standard-library module has an @init, even when
     // empty — except `builtin`, whose members are all host bindings
     // with nothing to evaluate (air.md §11: init is null for host
-    // modules and builtin; phase3-cfg-lowering.md, Module init functions).
+    // modules and builtin; cfg-lowering.md, Module init functions).
     if (info.kind != .host and !std.mem.eql(u8, info.specifier, "builtin")) {
         init_func = try lowerInit(self, info);
         try funcs.append(self.arena, init_func.?);
@@ -44,7 +44,7 @@ pub fn lowerModule(self: *Lowerer, info: *moduleinfo.ModuleInfo) LowerError!*cfg
         else => {},
     };
     // The used specializations of generic functions declared by this
-    // module (phase2-checker.md, Generic expansion): each is a monomorphic function named
+    // module (checker.md, Generic expansion): each is a monomorphic function named
     // `{module}.{fn}.{id}` (air.md §11). Host bindings have no body
     // (`mono == null`) and are never lowered here.
     if (self.ann) |a| {
@@ -198,7 +198,7 @@ pub fn lowerInit(self: *Lowerer, info: *moduleinfo.ModuleInfo) LowerError!*cfg.I
                     // A void-typed constant has no observable value and
                     // its value is a phantom (no defining instruction);
                     // storing it would leave a dangling operand, so
-                    // nothing is stored for it (phase3-cfg-lowering.md, Lowering rules).
+                    // nothing is stored for it (cfg-lowering.md, Lowering rules).
                     if (cfg_lower_emit.isVoid(v.type_)) continue;
                     const slot = constSlot(info, vm) orelse continue;
                     _ = try cfg_lower_emit.emit(self, &fs, c.span, .{ .store_member = .{ .slot = slot, .value = v } }, null);

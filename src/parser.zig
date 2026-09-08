@@ -180,7 +180,7 @@ pub const Parser = struct {
         const name = try self.expectIdent();
         var type_: ?ast.Type = null;
         if (self.eat(.colon)) type_ = try parse_type.parseType(self);
-        // Declaration-only (host binding — phase3-cfg-lowering.md, System calls for host bindings): `const name: type;`
+        // Declaration-only (host binding — cfg-lowering.md, System calls for host bindings): `const name: type;`
         // has no initializer — the host provides the value.
         if (self.eat(.semicolon)) {
             return .{ .span = self.spanFrom(start), .name = name, .type_ = type_, .init = null };
@@ -211,7 +211,7 @@ pub const Parser = struct {
             return self.fail(self.cur().span, "a function declaration must declare its return type ('-> T'); write '-> void' when it returns nothing", .{});
         }
         const ret = try parse_type.parseType(self);
-        // Declaration-only (host binding — phase3-cfg-lowering.md, System calls for host bindings): `fn name(...) -> type;`
+        // Declaration-only (host binding — cfg-lowering.md, System calls for host bindings): `fn name(...) -> type;`
         // has no body — calls lower to system calls.
         if (self.eat(.semicolon)) {
             return .{ .span = self.spanFrom(start), .name = name, .type_params = type_params, .params = params, .ret = ret, .body = null };
@@ -705,7 +705,7 @@ test "rejects hostdata as a binding name" {
 }
 
 test "parses any in host-binding declarations" {
-    // Declaration-only (host binding — phase3-cfg-lowering.md, System calls for host bindings): `const name: type;`
+    // Declaration-only (host binding — cfg-lowering.md, System calls for host bindings): `const name: type;`
     // and `fn name(...) -> type;` may use `any` for opaque payloads.
     var t = try parseText("const handle: any; fn echo(x: any) -> any;");
     defer t.tp.deinit();

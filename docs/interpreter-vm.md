@@ -34,7 +34,7 @@ Three v10 properties are decisive before implementation:
 1. **The opcodes carry their numeric semantics.** The integer arithmetic
    families are typed (`add.i32`/`add.u32`/`add.i64`/`add.u64`, …) — the
    opcode carries the full rep, computes at that width on canonical
-   cells, and self-canonicalizes its result cell (Instruction Set §4);
+   cells, and self-canonicalizes its result cell (Instruction Set);
    there are no canonicalization records around an opcode. The float
    families carry the width in the opcode (`add.f64`, `seq.f32`);
    integer comparisons and branches carry only signedness because
@@ -150,12 +150,12 @@ const VmCtx = struct {
     /// resources below (the heap, the host-resource and
     /// string-constant registries, the destruction-work and
     /// continuation stacks, the host scratch
-    /// (argument cells + C-string bytes, docs/host-bindings.md §6),
+    /// (argument cells + C-string bytes, host-bindings.md),
     /// and the panic scratch buffer) — where execution is. No
     /// default: the heap requires the allocator at construction.
     runtime: VmRuntimeState,
     stack_limit: u32 = 1 << 20,
-    /// Host-binding dispatch (phase 6): the default adapter implements
+    /// Host-binding dispatch: the default adapter implements
     /// the required `builtin` interface; an embedding replaces it to
     /// provide its own host modules.
     host: HostCall = .{},
@@ -253,7 +253,7 @@ Keep register decoding in small helpers:
   handlers and the return path;
 - `cond` is the dedicated boolean condition register (`fast_regs[1]`);
   the zero/cond/ra/T block `[0, frame_base)` indexes `fast_regs` directly (one
-  bounds check per access, Instruction Set §3.1.1);
+  bounds check per access, Instruction Set);
 - no other register encoding exists — validation rejects everything else.
 
 X spill cells are addressed only by `spill_take`/`spill_put`'s `imm16` and
@@ -264,7 +264,7 @@ dedicated physical addressing, not the register path.
 
 Every cell is one raw `u64`; there is no kind field, no payload mask, and
 no bit pattern reserved for type information. The canonical scalar
-encodings are frozen by the Runtime Specification §7.2:
+encodings are frozen by the Runtime Specification:
 
 | Scalar | Canonical cell |
 | --- | --- |
@@ -603,7 +603,7 @@ signatures, stack capacity, and computed control-flow targets.
 
 Do not repeat the frame arithmetic here. Implement `enterCalleeId`,
 `returnFrom`,
-and `tailcallSelf` directly from the LLIR Specification §5 and keep parity
+and `tailcallSelf` directly from the LLIR Specification and keep parity
 tests against `MiniVm` in `frontend_llir_normalize_tests.zig`. The v10 model
 is the three-cell header `{ saved_fp, saved_fn, saved_ra }` with the
 Itanium-style window overlap. A static `jal`'s callee registry index is
@@ -625,7 +625,7 @@ preserves `ra`: it moves each prepared window slot `W - P + k` into the
 reused frame's parameter cell `Fk` (clearing the window slot — the
 `slot_*` preparation records honor their ownership forms at runtime,
 `slot_retain` retaining the counted source and `slot_move` transferring
-it, Instruction Set §5.5/§11.2), then jumps to the entry.
+it, Instruction Set), then jumps to the entry.
 
 Frame-header cells are ordinary raw cells read **by position**: the fixed
 three-cell header at `fp - 3` is decoded as `{ saved_fp, saved_fn,
@@ -697,7 +697,7 @@ RuntimeModule {
     image: *LlirProgram,        // the parsed per-module artifact
     code_base: u32,             // image base in `code` (vm_pc = code_base + llir_pc)
     code_len: u32, func_base: u32,
-    slots: []Value,             // module constant slots (Runtime §2.5)
+    slots: []Value,             // module constant slots (Runtime)
     slot_log: ArrayList(u32),   // teardown log: slots written by @init, in store order
     import_cache: []?u64,       // resolved member values, by import-descriptor index
     owned_image: bool, is_host: bool,
@@ -745,7 +745,7 @@ failure the old module is untouched: the provisional load is rolled back
 (`abortLoad`) and the previous mapping restored, so a bad artifact never
 displaces the running image.
 
-Initialization is decoupled from loading (Runtime §2.3): `module_ref` loads
+Initialization is decoupled from loading (Runtime): `module_ref` loads
 the target, initializes it if needed, then publishes its handle; `load_member`
 resolves the target's sorted export row after initialization and returns the
 function pc, slot value, nested module handle, or a clear error for
@@ -776,7 +776,7 @@ host-bindings.md; this section covers the interpreter-side contract.
 descriptor — the `(module_symbol, member_symbol)` byte pair in the
 executing artifact's `imports` table — into a `HostSignature` view (the
 artifact's signature row, resolved once; hosts never touch `TypeId`
-tables, host-bindings.md §3.0), then dispatches through `HostCall`: the
+tables, host-bindings.md), then dispatches through `HostCall`: the
 member-table registry (`defaultHostRegistry`, the stdlib modules) by
 default, or the opt-out `invoke` adapter when set. Same-named members in
 different modules (`string.len` vs `list.len`) reach different handlers
@@ -785,7 +785,7 @@ via the member tables; a module or member with no handler reports
 trap.
 
 The six stdlib modules are module structs registered through
-`host_bind.register` (host-bindings.md §7): 47 of the 60 members are
+`host_bind.register` (host-bindings.md): 47 of the 60 members are
 typed bindings — plain typed (all 20 `math` functions,
 `builtin.assert`/`panic`, the four pure `string` predicates,
 `string.len`), hidden-`*HostCtx` + error-return typed (the `string`
@@ -800,7 +800,7 @@ parameters: `list.len`, `builtin.box`/`unbox`, all of `array`/`hashmap`,
 `string` `join`/`from_utf8`/`from_codepoints`) are raw-shaped fns. The
 per-module member dispatch switches are deleted. Typed members with a
 hidden `*HostCtx` and the raw-shaped members share the `HostCtx` adapter
-context (host_bind.zig §3.2 — the VM plus the current call's signature,
+context (host-bindings.md — the VM plus the current call's signature,
 with the decode, allocation, list-walk, and trap helpers).
 `defaultHostCall` survives as the opt-out adapter: a registry dispatch
 that dynamic-host `invoke` overriders delegate non-intercepted members
@@ -822,19 +822,23 @@ Each member (typed or raw) is responsible for:
 The member fns keep the VM heap mechanics (decode cells, walk lists,
 allocate objects); the implementations are plain `pub` fns in `host.zig`
 (`hostStr`..`hostHash`, `stringLen`..`stringFromCodepoints`,
-`listLen`/`listRange` — the M2 handler structs collapsed into them) that
+`listLen`/`listRange` — the per-module handler structs collapsed into
+them) that
 receive only verified plain data and never touch the VM. The typed
 member machinery generates the decode/encode glue from a Zig/C function
 signature, with signature verification against the artifact before
-decoding (host-bindings.md §3, §5). The string handlers operate on code
-points, never byte offsets; their errors map to owned deterministic trap
-messages (StdLib §5, Runtime §7.2).
+decoding (host-bindings.md). The string handlers operate on code
+points, never byte offsets, with full Unicode default case conversion
+in `src/unicode_case.zig`; their errors map to owned deterministic trap
+messages (StdLib, Runtime).
 
-M3 opaque host objects (`array`, `hashmap`): each value is a heap shell
+Opaque host objects (`array`, `hashmap`): each value is a heap shell
 (`allocObject(.opaque_, ...)`) whose payload cell 0 holds the host object
-pointer (`ArrayObject`/`HashMapObject` storage in `host_array.zig`/`host_hashmap.zig` — plain data,
-no VM knowledge). The shell is registered in the host-resource registry
-keyed by its address, so `drop` (the `.opaque_` destruction arm) and panic
+pointer (`ArrayObject`/`HashMapObject` storage in
+`host_array.zig`/`host_hashmap.zig` — plain data, no VM knowledge; the
+hashmap uses open addressing with linear probing and tombstones at
+~70% load resize). The
+shell is registered in the host-resource registry keyed by its address, so `drop` (the `.opaque_` destruction arm) and panic
 teardown run the module disposer exactly once; the disposer releases every
 stored cell and frees the host object, while the destruction machinery frees
 the shell. The adapters own the retain/release contract: elements are
@@ -843,7 +847,7 @@ returned copy, `remove` transfers the value into the result `Option` and
 releases the stored key, overwrite releases the displaced cells, and
 release goes through a registry-checked helper so scalars and non-counted
 Copy shells (e.g. `Option[int32]` elements) never reach the counted
-lifecycle opcodes. Key hashing/equality for `hashmap` mirror `builtin.hash`
+lifecycle opcodes. key hashing/equality for `hashmap` mirror `builtin.hash`
 (Wyhash, seed 0) and `==` (str content equality); key types outside
 `builtin.hash`'s supported set (primitive scalars + str) trap
 deterministically — the frontend does not reject them today.
@@ -915,7 +919,7 @@ pub fn run(allocator: std.mem.Allocator, image: *LlirProgram) RunError!Terminati
 the symbolic resolver. `runWithHost` takes an explicit `HostCall` — a
 member-table registry plus an opt-out adapter (`host_bind.register`
 derives a module from a struct: `pub const symbol` + `pub fn` members,
-host-bindings.md §3) — instead
+host-bindings.md) — instead
 of the default stdlib registry; `runWithEntry` runs from an explicit
 module-local `FunctionId`; the `*AndLoader` forms (`runWithEntryAndLoader`,
 `runWithHostAndLoader`) resolve cross-module references through a
@@ -932,7 +936,7 @@ argument and result ownership.
 
 Before entering the entry function, the root module initializes eagerly
 through the same `vm_internal_pc` continuation mechanism used by
-`module_ref` (Runtime §3.3). A `VmCtx` is
+`module_ref` (Runtime). A `VmCtx` is
 single-use: `run` constructs it, transitions it from created to running to
 terminated, and completes cleanup before returning; a run cannot be resumed.
 
@@ -950,14 +954,16 @@ starting with the LLIR magic loads through `readBin` → `validateLlir` →
 `run`, executing from the header's symbolic entry member — the binary
 header carries the module symbol and entry member (binary format version
 16), so a serialized artifact is self-contained and needs no side
-information (D3). Anything else compiles the whole dependency closure
+information. Anything else compiles the whole dependency closure
 (entry plus `-I` imports and the embedded standard library) into one
 per-module artifact bundle and runs the root artifact through
 `runWithHostAndLoader`/`runWithEntryAndLoader` with the bundle's loader —
 real cross-module programs execute, not just what the optimizer inlines
 away. Exit codes: 0 normal termination, 1
 Stilla panic (the owned message — which records the trap site, §10 —
-goes to stderr), 2 load/compile error.
+goes to stderr), 2 load/compile error. The `--run` path is probed
+end-to-end from build.zig: its stdout cannot run in-process, because fd 1
+is the test-runner's `--listen` protocol pipe under `zig build test`.
 
 ## 12. Test strategy
 
@@ -984,6 +990,16 @@ The acceptance matrix is:
 | Allocation failure | failure injection proves no partial callee frame or published allocation result, preserves the specified pre-call `slot_*` effects, and terminates without leaks |
 | End to end | compile representative source programs, serialize, load, execute, and compare output/termination with golden results |
 
+The end-to-end corpus is one golden program per stdlib module
+(`builtin`, `math`, `string`, `list`, `array`, `hashmap`) plus a
+combined multi-module program, compiled, serialized to the LLIR binary,
+read back, structurally validated, and executed with an
+output-capturing host adapter; each asserts its golden termination and
+printed text exactly. A coverage guard walks every stdlib bundle
+module's declaration-only `fn` members and asserts the default host
+dispatches each — a declared stdlib binding never falls through to
+`.not_implemented`.
+
 Opcode completeness is checked mechanically: the dispatch table itself
 **is** the guard — it is built from an exhaustive comptime switch over
 every tag of the logical `Opcode` enum, so an opcode without a handler
@@ -995,89 +1011,7 @@ mechanical coverage: every 6-rep branch/comparison family (integer-4 +
 float-2), every integer-4 family, the casts, the move-wide family, and
 the U-type opcodes.
 
-## 13. Implementation milestones
-
-Each milestone leaves `zig build test` green and adds only the state required
-by the next one.
-
-1. **Execution skeleton:** validated in-memory program, scalar/control-flow
-   opcodes (rep-dispatched), root/direct calls (`jal ra`), the result
-   `take`, return, tailcall, traps, and stack limit.
-2. **Modules and basic host calls:** module instances/init continuation,
-   scalar/string print and panic, normal teardown log.
-3. **Heap and counted lifecycle:** object layouts, strings, lists, boxes,
-   aggregates, lifecycle instructions, iterative destruction without hooks.
-4. **Dynamic destruction and host resources:** `any`, unions, drop-hook
-   continuation, opaque/`hostdata`, and the resource registry.
-5. **Coverage and integration:** remaining opcodes, `jalr` indirect calls,
-   hand-built image cases, binary load path, end-to-end corpus, then CLI
-   wiring.
-
-Implemented milestones:
-
-- **M1 — Module identity + binary v11:** `ModuleDesc` carries the resolved
-  import specifier (`spec_*` into the strings blob); the binary format
-  round-trips it (version 10 → 11); the assembly projection renders it.
-- **M2 — Host dispatch + `math`/`string`/`list` bindings:** the default host
-  dispatches `(specifier, member)` to per-module adapters and handler
-  structs; `math` maps the 20 StdLib §4 functions onto IEEE 754 `f32`;
-  `string` implements the 19 StdLib §5 functions with code-point semantics
-  and full Unicode default case conversion (`src/unicode_case.zig`);
-  `list` provides O(1) `len` and inclusive `range`. Each cons node records
-  its suffix length, so `list#len` and `read_index` read it directly.
-- **M3 — Opaque host objects (`array`/`hashmap`):** opaque values are heap
-  shells registered in the host-resource registry keyed by the shell
-  address, so `drop` and panic teardown dispose each object exactly once;
-  `host_array.zig`/`host_hashmap.zig` hold the plain-data storage (open
-  addressing, linear probing, tombstones, ~70% load resize). The adapters
-  own the retain/release contract (`make`/`insert`/`set`/`clone` retain,
-  `get` copies out, `remove` transfers, overwrite releases the displaced
-  entry); `hashmap` keys mirror `builtin.hash` (Wyhash, seed 0) and `==`
-  (str content equality).
-- **M5 — CLI `--run` + binary load path:** `stilla --run` executes a
-  source file (compile → lower → resolve the entry through the builder's
-  `func_ids`) or, for an input starting with the LLIR magic, a
-  self-contained binary (readBin → validate → run from the header's entry
-  id; the header carries the entry `FunctionId`, binary format v12). Exit
-  codes: 0 normal, 1 panic (the owned message — with the trap site, §10 —
-  goes to stderr), 2 load/compile error. The `--run` process is probed
-  end-to-end from build.zig: stdout cannot run in-process, because fd 1
-  is the test-runner's `--listen` protocol pipe under `zig build test`.
-- **M6 — End-to-end acceptance corpus:** one golden program per stdlib
-  module (`builtin`, `math`, `string`, `list`, `array`, `hashmap`) plus a
-  combined multi-module program is compiled, serialized to the LLIR binary
-  (header entry resolved through the builder's `func_ids`), read back,
-  structurally validated, and executed with an output-capturing host
-  adapter; each asserts its golden termination and printed text exactly.
-  A coverage guard walks every bundle module's declaration-only `fn`
-  members and asserts the default host dispatches each — a declared
-  stdlib binding never falls through to `.not_implemented`.
-- **M7 — Typed host-binding registry (host-bindings.md):** `HostCall`
-  dispatches through a member-table registry (`defaultHostRegistry`);
-  `hSyscall` passes a `HostSignature` view (the artifact's signature
-  row, resolved once — hosts never touch `TypeId` tables) instead of a
-  bare signature index; `host_bind.zig` adds the typed member layer
-  (`host_bind.register` over a module struct — `pub const symbol` +
-  `pub fn` members; comptime decode/encode glue, hidden `*HostCtx`
-  adapter context, error-union returns with spec trap messages,
-  `HostResult` bodies, module userdata injection, reusable
-  `HostScratch` for NUL-terminated C strings). The six stdlib modules
-  migrated onto it: 47 of 60 members are typed bindings (all 20
-  `math`, `builtin.assert`/`panic`/`str`/`hash`, the `string`
-  predicates + producers + list-returning members, `list.range`); the
-  borrow/move/opaque/list-parameter members stay raw-shaped. The
-  per-module member dispatch switches, `moduleFromFields`, and the
-  handler structs (`DefaultHostCall`/`MathHostCall`/`StringHostCall`/
-  `ListHostCall`) are deleted — host.zig keeps the plain `pub` impl
-  fns. The pre-registry adapter contract remains as the `invoke`
-  opt-out for dynamic hosts (`defaultHostCall` now dispatches through
-  the registry).
-
-Do not implement all opcode handlers before the execution skeleton has a real
-end-to-end test. Conversely, do not declare completion until mechanical
-opcode coverage has no gaps.
-
-## 14. Deferred decisions
+## 13. Deferred decisions
 
 The following are intentionally deferred until profiling or a feature request
 provides evidence:
@@ -1098,7 +1032,7 @@ provides evidence:
 These features must not shape the first public API or add fields to every
 runtime object preemptively.
 
-## 15. Files that define the contract
+## 14. Files that define the contract
 
 - `Stilla LLIR Specification.md`: program image and frame/call contract
   (the three-cell header, the Itanium-style window overlap, the result `take`).
@@ -1110,5 +1044,3 @@ runtime object preemptively.
   `encode`/`decode` tables.
 - `llir_validate.zig`: executable load-time structural invariants.
 - `frontend_llir_normalize_tests.zig`: current frame-contract model.
-- `PLAN.md`: implementation tracking for the loader/interpreter split;
-  it is not normative.

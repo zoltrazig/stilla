@@ -22,7 +22,7 @@
 //!    enclosing function (reject self- and mutual recursion; build the
 //!    call graph once up front).
 //! 3. Call-site arguments 1:1 with the callee's parameters. A void-typed
-//!    parameter produces no call operand (phase3-cfg-lowering.md,
+//!    parameter produces no call operand (cfg-lowering.md,
 //!    Lowering rules), so such a callee is skipped rather than bound to
 //!    an invented value.
 //! 4. The callee's body must contain no `tailcall` terminator (a

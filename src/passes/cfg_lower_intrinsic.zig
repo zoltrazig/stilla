@@ -8,7 +8,7 @@
 //!
 //! - host-backed functions expand to a call to the existing `(module,
 //!   member)` host binding — the same `syscall` form as before the
-//!   migration (phase3-cfg-lowering.md, System calls for host bindings),
+//!   migration (cfg-lowering.md, System calls for host bindings),
 //!   emitted by `cfg_lower_call.lowerHostCall` verbatim, so direct-call
 //!   output stays byte-identical;
 //! - the `math` constants materialize their specified f32 bit patterns

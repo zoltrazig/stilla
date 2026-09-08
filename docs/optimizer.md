@@ -1,16 +1,16 @@
 # Optimizer — Tail Call Optimization and Mid-Level Rewrites
 
-> Status: **implemented** — Passes 7 and 8 in the frontend pipeline.
+> Status: **implemented**.
 > Normative language rules are cited from the Core and Runtime
-> specifications in [`spec/`](spec/) (tracking the v1.3 drafts).
+> specifications in [`spec/`](../spec/) (tracking the v1.3 drafts).
 > The AIR op inventory and data structures are authoritative in
-> [`spec/air.md`](spec/air.md) §4–§11 and `src/cfg.zig`.
+> [`spec/air.md`](../spec/air.md) and `src/cfg.zig`.
 > The ordered pass inventory is canonical in [passes.md](passes.md).
 
 ## Overview
 
 The optimizer is a fixed sequence of semantics-preserving CFG→CFG
-rewrites that runs after [Phase 3](phase3-cfg-lowering.md) lowering
+rewrites that runs after [cfg-lowering.md](cfg-lowering.md) lowering
 and before the runtime consumes the AIR. It is wired into
 `frontend.compile` behind `frontend.Options.optimize` (default off;
 the `stilla` executable hardcodes it on; code-only toggle, no CLI flag).
@@ -20,28 +20,27 @@ iteration to fixpoint** — so compile time stays near-linear.
 `frontend.Options.optimize_aggressive` (code-only, like `optimize`)
 requests bounded iteration instead: the sequence loops until a full
 iteration changes nothing (the printed text form is unchanged) or the
-compile-time cap `cfg_optimize.aggressive_max_iters` is reached
-(§8.10). The full air.md §12 validator (`cfg.validate`) runs before the
-sequence and after every rewrite *within each iteration*: an optimizer
-bug that violates structure, SSA, typing, or the ownership dataflow is
-a compile-time diagnostic in either mode. The single-pass default is
-byte-identical in both modes' shared path: `optimizeAggressive` with
-`max_iters = 1` is exactly the default single pass.
+compile-time cap `cfg_optimize.aggressive_max_iters` is reached. The
+air.md validator (`cfg.validate`) runs before the sequence and after
+every rewrite *within each iteration*: an optimizer bug that violates
+structure, SSA, typing, or the ownership dataflow is a compile-time
+diagnostic in either mode. The single-pass default is byte-identical in
+both modes' shared path: `optimizeAggressive` with `max_iters = 1` is
+exactly the default single pass.
 
 Constant folding, arithmetic simplification, block-local common
 subexpression elimination, and copy folding run **on-the-fly at each
-instruction's construction site** during [Phase 3](phase3-cfg-lowering.md)
-lowering (braun13cc.pdf §3.1). Two of those also exist as **standalone
-CFG rewrites** later in the Pass 8 sequence — `cfg_cse.zig` (module
-reference / member-load CSE, §8.1) and `cfg_copy_prop.zig` (copy
-propagation, §8.2) — because the construction-time forms are
+instruction's construction site** during CFG lowering
+(braun13cc §3.1). Two of those also exist as **standalone
+CFG rewrites** later in the sequence — `cfg_cse.zig` (module
+reference / member-load CSE) and `cfg_copy_prop.zig` (copy
+propagation) — because the construction-time forms are
 block-local, while the pass forms catch cross-lowering redundancy. The
-Pass 8 driver sequence is: **tail-call elimination (Pass 7), function
-inlining (§8.0), module/member CSE (§8.1), copy propagation (§8.2),
-partial redundancy elimination (§8.3), if-conversion (§8.4), dead-block
-elimination (§8.5), drop elision (§8.6), dead-instruction elimination
-(§8.7), jump threading (§8.8), phi simplification (§8.9)** — followed by
-the post-optimization drop-lowering pass (below). The ordered inventory
+driver sequence is: **tail-call elimination, function inlining,
+module/member CSE, copy propagation, partial redundancy elimination,
+if-conversion, dead-block elimination, drop elision, dead-instruction
+elimination, jump threading, phi simplification** — followed by the
+post-optimization drop-lowering pass (below). The ordered inventory
 with the driver entry is [passes.md](passes.md).
 
 ## The LLIR lowering boundary (separate from the CFG optimizer)
@@ -65,14 +64,14 @@ at construction and in `cfg_cse.zig`. No CSE runs on the typed ops in
 production — `typedOps` / `printTyped` are the inspection/test surface
 for what Layer A sees.
 
-## AIR validator (Pass 6.1)
+## AIR validator
 
 `src/passes/cfg_validate.zig` (re-exported as `cfg.validate` /
 `lower.validate`) is a schema-driven checker:
 
 - **structure** — blocks, terminators, and instruction sequences;
 - **SSA dominance** — every value use is dominated by its definition;
-- **arity and typing** — from `cfg.opInfo` (air.md §5);
+- **arity and typing** — from `cfg.opInfo` (air.md);
 - **edge-sensitive ownership dataflow** — `Available` / `Consumed` /
   `MaybeConsumed` over the CFG, per-edge phi inputs, atomic
   `unpack_*` / `split_list` consumption.
@@ -80,11 +79,11 @@ for what Layer A sees.
 The frontend runs it on every lowered program; the optimizer runs it
 before the sequence and after every rewrite.
 
-## Pass 7 — Tail call optimization
+## Tail call optimization
 
 `src/passes/cfg_tail_call.zig` (re-exported by `lower`) — a CFG→CFG
 rewrite of calls in tail position into frame-reusing jumps, so
-self-recursion becomes iteration. Runs first in the Pass 8 driver.
+self-recursion becomes iteration. Runs first in the driver.
 
 ### Tail-position detection
 
@@ -96,7 +95,7 @@ unique state afterwards and no armed cleanup token on the tail edge.
 
 Replace `call` + `ret` with a `j` back to the function's own entry
 block, re-binding the callee's parameters from the call arguments and
-splicing in phis for the reused frame's SSA values (air.md §14.7). The
+splicing in phis for the reused frame's SSA values (air.md). The
 chain drop is guarded:
 
 - an intermediate chain block (between the call block and the ret block)
@@ -109,25 +108,25 @@ chain drop is guarded:
 ### Ownership preservation
 
 The rewrite must not reorder any `drop` or observable effect: the
-returned value's destruction schedule (Runtime §6) is unchanged because
+returned value's destruction schedule (Runtime) is unchanged because
 the frame is reused; only direct `call`s to a known `IrFunc` are
 candidates (a call through a function *value* has no statically known
-target); v0.1 is **Copy-only**: loop-carried parameters are all Copy and
-a move-mode parameter never loops back through a phi (air.md §14.7) — it
-is instead expressed as the `tailcall` terminator (air.md §14.7.1), which
+target); the rewrite is **Copy-only**: loop-carried parameters are all
+Copy and a move-mode parameter never loops back through a phi (air.md)
+— it is instead expressed as the `tailcall` terminator (air.md), which
 carries move/unique state atomically into a reused frame, so the
 Copy-only limitation does not forbid `iter`-style unique-accumulator
 iteration, it only means a unique value never re-enters the loop as a
 phi.
 
-## Pass 8 — Mid-level optimizer driver
+## The optimizer driver
 
 `src/passes/cfg_optimize.zig` (re-exported by `lower`) — a driver that
 runs a fixed sequence of semantics-preserving CFG→CFG rewrites over the
-lowered CFG, after Pass 7 and before the runtime consumes it. Each
-sub-pass is one file in `src/passes/`; each rewrite must preserve
-observable behavior (Runtime §5) and the air.md §12 invariants, and the
-driver validates after every rewrite.
+lowered CFG, after tail-call elimination and before the runtime consumes
+it. Each sub-pass is one file in `src/passes/`; each rewrite must
+preserve observable behavior (Runtime) and the air.md invariants, and
+the driver validates after every rewrite.
 
 The exact order (`optimizeOnce`): **`tailCall` → `inlineCalls` → `cse` →
 `copyProp` → `pre` → `ifConvert` → `deadBlock` → `dropElide` →
@@ -135,24 +134,23 @@ The exact order (`optimizeOnce`): **`tailCall` → `inlineCalls` → `cse` →
 renumber (`cfg_inline.renumberPrintOrder`) so the canonical text form is
 a valid SSA order (copyProp and phiSimplify substitute values across
 blocks, which can leave a forward reference; the canonical text form
-(air.md §10) requires definitions to print before uses).
+(air.md) requires definitions to print before uses).
 
-### On-the-fly optimizations (phase 3, at construction)
+### On-the-fly optimizations (at construction)
 
 These run at each instruction's construction site in
 `cfg_lower_emit.zig`'s `emit`, handling the redundancy a single block of
 lowering produces. They are **complemented by** the two standalone CFG
-rewrites of the same family (§8.1 module/member CSE, §8.2 copy
-propagation), which catch what construction-time block-local folding
-cannot:
+rewrites of the same family (module/member CSE, copy propagation),
+which catch what construction-time block-local folding cannot:
 
 - **constant folding** — fold `arithmetic`/`bitwise`/`compare`/`logic`/`num_cast`
   ops whose operands are constant at their emit site (`tryFoldOp`,
   braun13cc Algorithm 3's §3.1); trapping integer `div`/`rem` cases stay
   unfolded (the float forms are total), while `float32 → int32` is total
-  (truncate toward zero, NaN→0, then saturate; Runtime §7.2); the
+  (truncate toward zero, NaN→0, then saturate; Runtime); the
   mathematically exact `int32_min % -1` folds to `0` — it never traps
-  (WebAssembly semantics, Runtime §7.2) — while the `int32_min / -1`
+  (WebAssembly semantics, Runtime) — while the `int32_min / -1`
   division-overflow case stays unfolded;
 - **arithmetic simplification** — integer identities only (`x−x→0`,
   `x+0→x`, `x·1→x`, `x·0→0`, `x/1→x`, `x%1→0`, plus the bitwise
@@ -161,13 +159,13 @@ cannot:
 - **block-local common subexpression elimination** — reuse an identical
   pure computation earlier in the same block at its emit site;
   block-local (the first occurrence dominates), Copy results only
-  (air.md §5.4), operands matched positionally (no commutativity); the
+  (air.md), operands matched positionally (no commutativity); the
   reused value is returned directly, so no `copy` is involved;
 - **copy folding** — a `move` of a Copy value lowers directly to the
-  value (a copy of a Copy value is the value, air.md §5.4), so no
+  value (a copy of a Copy value is the value, air.md), so no
   `copy` instructions reach the AIR from the frontend.
 
-### 8.0 Inlining
+### Inlining
 
 `src/passes/cfg_inline.zig` — the first sub-pass of the driver (after
 `tailCall`, before `cse`). Selected **direct** calls to a statically
@@ -180,14 +178,14 @@ return phi.
 Candidate rules:
 
 - **safety filters** — direct call to a statically known `IrFunc` only
-  (no function values, same as TCO, air.md §14.7); **non-recursive**:
+  (no function values, same as TCO, air.md); **non-recursive**:
   the candidate's call-graph path must not reach the enclosing function
   (self- and mutual recursion rejected; the call graph is built once up
   front); call-site arguments 1:1 with the callee's parameters (a
   void-typed parameter produces no call operand);
 - **one-shot by contract** — the spliced body's own call sites are not
-  re-scanned this round; `optimizeAggressive` never re-runs the inliner
-  (§8.10), because re-inlining a spliced *recursive* callee would keep
+  re-scanned this round; aggressive iteration never re-runs the
+  inliner, because re-inlining a spliced *recursive* callee would keep
   finding new call sites inside its own copies and grow the CFG without
   bound (fib.st measures 26 → 138 non-phi instructions over four
   iterations);
@@ -195,7 +193,7 @@ Candidate rules:
   absorb the duplicated redundancy, `dropElide`/drop lowering see the
   new drops, and `phiSimplify`/`jumpThread` clean the new blocks.
 
-### 8.1 Module/member CSE
+### Module/member CSE
 
 `src/passes/cfg_cse.zig` — local common subexpression elimination over
 **module references and member loads**: an identical `module_ref` earlier
@@ -207,37 +205,36 @@ Soundness: `module_ref` is a pure constant — the module handle is the
 same value on every reference, so an identical reference earlier in the
 block is reused. `load_member` reads a module slot; module storage is
 written only by `store_member` inside `@init` (cfg_validate rejects a
-store anywhere else, air.md §5.6), so a slot's value is stable for the
+store anywhere else, air.md), so a slot's value is stable for the
 life of a function — a repeated load of the same slot from the same
 module value is redundant unless a `store_member` intervenes, which
 clears the table. Only Copy results are shared, mirroring the
 on-the-fly rule: a Copy member read is a copy, an unique read is a
 borrowed view, and sharing a view across uses would change the
-destruction schedule (air.md §6.4). The rewrite is in-block — the
+destruction schedule (air.md). The rewrite is in-block — the
 canonical definition sits earlier in the same block, so it dominates
 the later value and every use — and values are renumbered in text order
-afterwards (air.md §10).
+afterwards (air.md).
 
-### 8.2 Copy propagation
+### Copy propagation
 
 `src/passes/cfg_copy_prop.zig` — replaces every `copy` of a Copy value by
 the value itself, so copy-of-copy chains collapse and a copied parameter
 that is directly returned passes the parameter through.
 
-A `copy` of a Copy value does nothing at runtime (Core §10.1 —
+A `copy` of a Copy value does nothing at runtime (Core —
 destruction is unobservable, and the ownership classification
 guarantees a Copy type never runs a user drop hook), so the result is
 interchangeable with the operand: every use of the result is rewritten
 to the operand and the copy is removed. The operand's definition
 dominates the copy's result, which dominates every use, so the rewrite
 is sound. Unique copies are never touched: their refcount/ownership
-transfer is observable (air.md §6.4). One pass over the blocks suffices
+transfer is observable (air.md). One pass over the blocks suffices
 (`rewriteUses` scans the whole function, so a copy processed early
 collapses uses in every block, including copies that later become chains
-of length one); values are renumbered in text order afterwards (air.md
-§10).
+of length one); values are renumbered in text order afterwards (air.md).
 
-### 8.3 Partial redundancy elimination
+### Partial redundancy elimination
 
 `src/passes/cfg_pre.zig` — rewrite a computation available on some —
 but not all — incoming edges of a join to a phi, inserting the
@@ -246,18 +243,18 @@ pure, non-trapping ops: the comparisons, the total unary ops (`not`,
 `neg`, `abs`, `clz`, `popcount`, `type_is`), the total wrapping
 arithmetic (`add`/`sub`/`mul`/`min`/`max` — integer forms wrap modulo
 2³²), the shifts (count masked to its low 5 bits), the bitwise ops,
-`num_cast` (casts never trap, Runtime §7.2), and the float forms of
+`num_cast` (casts never trap, Runtime), and the float forms of
 `div`/`rem` (IEEE-total: `x/0` is ±inf, `x%0` is NaN — the
 discriminator is the float result type). The integer `div`/`rem`
 forms trap on a zero divisor and stay excluded — hoisting a trapping
-op onto a skipped path would change observable behavior, Runtime §7.2
+op onto a skipped path would change observable behavior, Runtime
 — as do the schema-level trapping ops (`read_index`, `any_unpack_*`,
 `split_list`) and anything effectful or consuming. `concat` stays out:
 it allocates a fresh string, so moving it onto skipped paths changes
 allocation cost even though it is total. Copy results only, operands
 defined in a strict dominator of the join; the join's computation is
 replaced by the phi with the same result value, and values are
-renumbered in text order (air.md §10).
+renumbered in text order (air.md).
 
 `num_cast` availability needs one extra condition: `cfg.identical`
 compares only the operand, but a cast's *target type* lives on its
@@ -268,7 +265,7 @@ a `num_cast` against a predecessor's computation; the other candidates
 cannot hit this, because their opcode plus operand values fix the
 result type.
 
-### 8.4 If-conversion (branchless select)
+### If-conversion (branchless select)
 
 `src/passes/cfg_select.zig` — replace a *select diamond* — `br %c, B1,
 B2` where both arms hold only pure, non-consuming instructions and jump
@@ -281,37 +278,37 @@ instruction is pure and non-consuming (no effects, traps, or
 consumptions — a side effect must stay on its path, a trap the branch
 would have avoided, a `move`/`unpack` of a unique base its conditional
 destruction). The emptied arms become unreachable and are removed by
-§8.5 dead-block elimination, which follows in the driver sequence; the
+dead-block elimination, which follows in the driver sequence; the
 LLIR image of a `select` is `copy cond_reg, %cond` + `cmov dst, %a,
 %b` — the branchless alternative to the compare-and-branch plus the
 two edge copies, and the only producer/consumer of the condition
-register (`cond`, Instruction Set §3.1). Selects do not yet participate
+register (`cond`, Instruction Set). Selects do not yet participate
 in CSE (the CSE pass runs before it); merging identical selects across
 blocks is a follow-up.
 
-### 8.5 Dead-block elimination
+### Dead-block elimination
 
 `src/passes/cfg_dead_block.zig` — remove blocks unreachable from the
 entry; update phi incoming lists and predecessor sets accordingly
-(air.md §3). Also removes the emptied select-diamond arms of §8.4.
+(air.md). Also removes the emptied select-diamond arms of if-conversion.
 
-### 8.6 Drop elision
+### Drop elision
 
 `src/passes/cfg_drop_elide.zig` — remove a `drop` whose destruction is
 provably unobservable — the value is Copy, or already dead; must never
-remove a user `drop` hook that performs output (air.md §14) and never
-moves a destruction earlier than its prescribed point (air.md §6.4) — a
+remove a user `drop` hook that performs output (air.md) and never
+moves a destruction earlier than its prescribed point (air.md) — a
 type with a user hook is always classified unique, so only Copy drops are
 elided, and `cleanup_drop` / `cleanup_disarm` (whose token's payload is
-an unique owner) are never elided — v1 emits no cleanup tokens, so this
-guards text-form and validator input only.
+an unique owner) are never elided — the pipeline emits no cleanup
+tokens, so this guards text-form and validator input only.
 
-### 8.7 Dead-instruction elimination
+### Dead-instruction elimination
 
 `src/passes/cfg_dead_instr.zig` — iteratively remove unused Copy results from
 its explicit, conservative set of side-effect-free, non-consuming,
-non-trapping candidates (`num_cast` qualifies — casts never trap, Runtime
-§7.2; the guarded `read_payload` of a match arm whose payload is unused is
+non-trapping candidates (`num_cast` qualifies — casts never trap, Runtime;
+the guarded `read_payload` of a match arm whose payload is unused is
 the common corpus case; shifts and bitwise ops qualify — the shift count
 is masked to its low 5 bits and the bitwise ops work on raw patterns,
 neither ever traps). The `div`/`rem` exclusion is type-aware rather than
@@ -321,13 +318,13 @@ are total (IEEE: `x/0` is ±inf, `x%0` is NaN) and a dead float
 `div`/`rem` is removed. Calls, syscalls, consuming destructures,
 dynamically indexed `read_index` (traps), and phis are never candidates.
 Fixed projections and `tail` are also outside the candidate set without
-being classified as trapping — the audit (TODO.md) found no ownership
+being classified as trapping — the audit found no ownership
 impediment for Copy results (`created = .operand` means the Copy-result
 filter already excludes every unique-base view) and no lowering-cost
 hazard, but adoption is gated on a measured corpus case per the
 acceptance criteria; the corpus today produces none.
 
-### 8.8 Jump threading
+### Jump threading
 
 `src/passes/cfg_jump_thread.zig` — merge empty forwarding blocks (a
 block whose only op is an unconditional `j` to a single successor) into
@@ -337,27 +334,28 @@ collapse to their ultimate successor, cycles are left alone, and a
 candidate whose predecessor already targets the ultimate successor is
 skipped (no duplicate edges).
 
-### 8.9 Phi simplification
+### Phi simplification
 
 `src/passes/cfg_phi_simplify.zig` — remove single-incoming phis,
 identical-phis, and self-referential trivial phis (braun13cc Algorithm 3:
 `φ(v, vφ) → v`, with the user walk iterated to a fixed point; all-self
 phis are kept — the AIR has no undefined value), forwarding their
-operands; pairs with 8.8 (threading produces single-incoming phis).
+operands; pairs with jump threading (threading produces single-incoming
+phis).
 
-### 8.10 Optional fixpoint iteration (aggressive mode)
+### Aggressive fixpoint iteration
 
 `src/passes/cfg_optimize.zig`'s `optimizeAggressive(program, allocator,
-max_iters)` runs the Pass 7–8 sequence repeatedly — iteration 1 is the
-full fixed order of §8.0–8.9; each later iteration is the same order
-with the one-shot inliner (§8.0) skipped — until a full iteration
+max_iters)` runs the sequence repeatedly — iteration 1 is the
+full fixed order; each later iteration is the same order
+with the one-shot inliner skipped — until a full iteration
 produces a byte-identical printed text form (the fixpoint: no rewrite
 in the sequence changed anything) or `max_iters` iterations have run.
-The inliner is excluded from later iterations by contract (§8.0:
-re-running it on a spliced *recursive* callee keeps finding new call
+The inliner is excluded from later iterations by contract (re-running
+it on a spliced *recursive* callee keeps finding new call
 sites inside its own copies — the CFG grows without bound instead of
 converging). The remaining passes re-run over the same order with the
-same §6.1 validator after every rewrite; the loop always terminates at
+air.md validator after every rewrite; the loop always terminates at
 equality or the cap. Whether a later iteration shrinks, reshapes (PRE
 inserts edge computations, if-conversion trades phis for selects), or
 leaves a program alone is program-dependent, so "aggressive never worse
@@ -366,15 +364,15 @@ corpus (below), not by construction. The documented one-shot behaviors
 a later iteration does catch:
 
 - **jump-threading chains** — a chain collapsed in one pass may leave
-  one forwarding block behind (§8.8), which the next iteration's
-  threading removes;
+  one forwarding block behind, which the next iteration's threading
+  removes;
 - **dead blocks from late passes** — a block orphaned by a pass that
   runs after dead-block elimination (threading, phi simplification) is
-  removed by the next iteration's §8.5.
+  removed by the next iteration's dead-block elimination.
 
 `frontend.Options.optimize_aggressive` (default off) wires the loop
 into `frontend.compile` with the cap `cfg_optimize.aggressive_max_iters`
-(4). Every iteration is guarded by the §6.1 validator, so the mode
+(4). Every iteration is guarded by the air.md validator, so the mode
 cannot weaken the optimizer's invariant contract; it only spends more
 compile time. The corpus harness (Optimization harness, below) doubles
 as the never-worse
@@ -383,7 +381,7 @@ on the example corpus (text bytes, non-phi instructions, blocks).
 
 ### Drop lowering (post-optimization)
 
-`src/passes/cfg_lower_drop.zig` — after the Pass 8 sequence, expand every
+`src/passes/cfg_lower_drop.zig` — after the optimizer sequence, expand every
 `drop` the CFG can express into explicit operations at the drop's
 program point: a struct drop becomes its hook call (when declared) +
 `unpack_struct` + reverse-declaration-order field drops (recursively); a
@@ -393,9 +391,9 @@ drop becomes `read_tag` + a `switch` destroying the active variant's
 payload (payload-less variants destroy nothing). Only the drops that
 must dispatch dynamically stay single instructions: opaque host types
 (`host_drop`), `hostdata`, `list[T]`, and `any`. The expansion needs the
-phase-1 module graph (the AIR type environment is name-only) and runs in
+module graph (the AIR type environment is name-only) and runs in
 the frontend's optimize path, re-validated before the AIR text
-round-trip (air.md §6.4, §14).
+round-trip (air.md).
 
 ## Optimization harness
 
@@ -412,28 +410,28 @@ error, so the report is suppressed there to keep the log clean.
 
 | File | Role |
 | --- | --- |
-| `src/passes/cfg_optimize.zig` | Pass 8 driver — runs the full sequence |
-| `src/passes/cfg_tail_call.zig` | Pass 7 — tail call optimization |
-| `src/passes/cfg_inline.zig` | 8.0 — function inlining (one-shot, non-recursive direct calls) |
-| `src/passes/cfg_cse.zig` | 8.1 — module/member common subexpression elimination |
-| `src/passes/cfg_copy_prop.zig` | 8.2 — copy propagation |
-| `src/passes/cfg_pre.zig` | 8.3 — partial redundancy elimination |
-| `src/passes/cfg_select.zig` | 8.4 — if-conversion (branchless select) |
-| `src/passes/cfg_dead_block.zig` | 8.5 — dead-block elimination |
-| `src/passes/cfg_drop_elide.zig` | 8.6 — drop elision |
-| `src/passes/cfg_dead_instr.zig` | 8.7 — dead-instruction elimination |
-| `src/passes/cfg_jump_thread.zig` | 8.8 — jump threading |
-| `src/passes/cfg_phi_simplify.zig` | 8.9 — phi simplification |
+| `src/passes/cfg_optimize.zig` | the optimizer driver — runs the full sequence |
+| `src/passes/cfg_tail_call.zig` | tail call optimization |
+| `src/passes/cfg_inline.zig` | function inlining (one-shot, non-recursive direct calls) |
+| `src/passes/cfg_cse.zig` | module/member common subexpression elimination |
+| `src/passes/cfg_copy_prop.zig` | copy propagation |
+| `src/passes/cfg_pre.zig` | partial redundancy elimination |
+| `src/passes/cfg_select.zig` | if-conversion (branchless select) |
+| `src/passes/cfg_dead_block.zig` | dead-block elimination |
+| `src/passes/cfg_drop_elide.zig` | drop elision |
+| `src/passes/cfg_dead_instr.zig` | dead-instruction elimination |
+| `src/passes/cfg_jump_thread.zig` | jump threading |
+| `src/passes/cfg_phi_simplify.zig` | phi simplification |
 | `src/passes/cfg_lower_drop.zig` | post-optimization drop lowering (structural drop expansion) |
-| `src/passes/cfg_validate.zig` | AIR validator (Pass 6.1) — structure, SSA, typing, ownership |
+| `src/passes/cfg_validate.zig` | AIR validator — structure, SSA, typing, ownership |
 | `src/passes/cfg_lower_emit.zig` | On-the-fly optimizations at construction |
 
-## Relationship to other phases
+## Relationship to the pipeline
 
-- **Input:** the CFG produced by [Phase 3](phase3-cfg-lowering.md)
+- **Input:** the CFG produced by [cfg-lowering.md](cfg-lowering.md)
   lowering (`IrProgram` with `IrModule` / `IrFunc` / `BasicBlock` /
   `Value`);
-- **Validation:** the air.md §12 validator runs before the sequence and
+- **Validation:** the air.md validator runs before the sequence and
   after every rewrite;
 - **Output:** the optimized CFG consumed by the runtime for module
   instantiation and function execution. The ordered inventory is

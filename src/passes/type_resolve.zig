@@ -1,4 +1,4 @@
-//! Pass: type resolution (ast.Type → cfg.Type) — phase2-checker.md, Type resolution.
+//! Pass: type resolution (ast.Type → cfg.Type) — checker.md, Type resolution.
 //! In: `Resolve` view (arena + specifier → ModuleInfo map) and a `from`
 //! module. Out: a `cfg.Type` for a written `ast.Type`, module-member lookups
 //! for written names, alias chains to the underlying declaration, and the
@@ -260,7 +260,7 @@ pub fn followAlias(resolve: Resolve, from: *ModuleInfo, tm0: *TypeMember) ?*Type
     return null;
 }
 
-/// Resolve a syntactic type to an AIR-native type (phase2-checker.md, Type resolution).
+/// Resolve a syntactic type to an AIR-native type (checker.md, Type resolution).
 /// Transparent aliases expand and leave no node (Core §11.2); named
 /// struct/union references keep their written name (decl lookup and
 /// ownership defer to the graph). Returns null when a component cannot be

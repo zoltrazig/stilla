@@ -81,7 +81,7 @@ test "moduleinfo loads the entry module and orders modules by dependency" {
     defer t.deinit();
 
     try testing.expectEqual(@as(usize, 2), t.graph.modules.len);
-    // Dependencies before dependents (phase1-module-graph.md, Import-cycle detection): `calc` first.
+    // Dependencies before dependents (module-graph.md, Import-cycle detection): `calc` first.
     try testing.expectEqualStrings("calc", t.graph.modules[0].specifier);
     try testing.expectEqualStrings("use", t.graph.modules[1].specifier);
     try testing.expectEqualStrings("use", t.graph.entry.specifier);
@@ -90,7 +90,7 @@ test "moduleinfo loads the entry module and orders modules by dependency" {
 }
 
 test "moduleinfo resolves the stdbundle standard-library modules" {
-    // The embedded `std/` bundle (phase1-module-graph.md, Loading, parsing, and deduplication) is always resolvable,
+    // The embedded `std/` bundle (module-graph.md, Loading, parsing, and deduplication) is always resolvable,
     // before the caller's extra `standard_library` map (Runtime §2.6).
     var t = try buildGraph("app", &.{
         .{ "app", "const math = import(\"math\");\nfn main() -> void {}" },
@@ -203,7 +203,7 @@ test "moduleinfo builds member tables: values, types, using aliases" {
 
     const app = t.graph.module("app").?;
     // Value members: functions first, then module-value consts and
-    // ordinary consts (phase1-module-graph.md, Module-level information materializes funcs before consts,
+    // ordinary consts (module-graph.md, Module-level information materializes funcs before consts,
     // mirroring the generated module struct's member space).
     try testing.expectEqual(@as(usize, 4), app.values.len);
     try testing.expectEqualStrings("add", app.values[0].name.text);
@@ -761,7 +761,7 @@ test "moduleinfo resolveTypeName follows using aliases for local type members" {
     const tm = app.typeMember("Maybe").?;
     // The alias target is the named type `Option[int32]`; resolving it
     // through the using alias yields the AIR-native named reference
-    // (type arguments resolve in the lowering, phase2-checker.md, Type resolution).
+    // (type arguments resolve in the lowering, checker.md, Type resolution).
     const target = moduleinfo.resolveType(resolve, app, &tm.decl.alias.target).?;
     try testing.expectEqualStrings("builtin.Option", resolve.typeNameOf(target.named.id).?);
 }

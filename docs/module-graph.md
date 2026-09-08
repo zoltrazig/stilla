@@ -1,38 +1,38 @@
-# Phase 1 — Module Graph Construction and Module-Level Annotation
+# Module graph — construction and module-level annotation
 
-> Status: **implemented** — Pass 2 in the frontend pipeline.
+> Status: **implemented**.
 > Normative language rules are cited from the Core and Runtime
-> specifications in [`spec/`](spec/) (tracking the v1.3 drafts).
+> specifications in [`spec/`](../spec/) (tracking the v1.3 drafts).
 
 ## Goal
 
 Check and annotate module-level information for the current AST,
 recursively expand to dependent modules, detect cycles and sort.
-After this phase, all modules for the program have module-level
+After this stage, all modules for the program have module-level
 information computed.
 
 ## Module identity and specifier resolution
 
-Every source file defines exactly one module (Core §2.1). A module is
+Every source file defines exactly one module (Core). A module is
 identified by its **resolved specifier**; the string written in
-`import("specifier")` is the *written* specifier (Core §2.4).
+`import("specifier")` is the *written* specifier (Core).
 
-Resolution maps a written specifier to one of (Runtime §2.6):
+Resolution maps a written specifier to one of (Runtime):
 
 1. a Stilla source module — the file is loaded and parsed;
 2. a standard-library module — loaded like a source module, from the
    implementation's standard-library bundle;
 3. a host-provided module — no source is loaded; its interface is taken
    from the host interface registry as *declarations without definitions*
-   (see [Phase 3 — System calls for host bindings](phase3-cfg-lowering.md#system-calls-for-host-bindings)).
+   (see [cfg-lowering.md](cfg-lowering.md)).
 
 Resolution must be unambiguous before execution; ambiguity and unresolved
-specifiers are phase-1 diagnostics.
+specifiers are module-graph diagnostics.
 
 Resolution is **deduplicated by resolved specifier** — the same module is
-loaded at most once (Runtime §2.1). The frontend preserves module identity
+loaded at most once (Runtime). The frontend preserves module identity
 through statically known aliases (`const b = a;` where `a` is a
-module-valued const, Core §2.4 / Runtime §2.4): alias consts record the
+module-valued const, Core / Runtime): alias consts record the
 resolved module reference rather than creating a new module value.
 
 ## Loading, parsing, and deduplication
@@ -54,16 +54,16 @@ Modules already present in the graph (by resolved specifier) are never
 re-loaded — this is the frontend-side form of "instantiated at most once
 per context".
 
-The whole of phase 1 is driven by `moduleinfo.Builder.build`: load the
+The whole stage is driven by `moduleinfo.Builder.build`: load the
 entry → worklist-expand the transitive closure over import edges (each
 module loaded at most once) → `topo_sort` (cycle detection + reverse
 postorder) → `module_materialize.materialize` for every module in
 topological order → `module_check.checkModule` for every module →
 assemble the `ModuleGraph` (and pre-populate the nominal-type interner,
-air.md §11). The ordered inventory is canonical in
+air.md). The ordered inventory is canonical in
 [passes.md](passes.md).
 
-**Frontend cache** (PLAN item 3). When `frontend.Options.cache` is set,
+**Frontend cache**. When `frontend.Options.cache` is set,
 steps 1–2 above are skipped for unchanged modules: `FrontendCache`
 (`src/frontend_cache.zig`) keeps one entry per resolved specifier — the
 source's content hash plus the parsed `ast.Program` and `ast.Source`,
@@ -73,45 +73,45 @@ hash is a fast filter, the byte comparison is the correctness backstop)
 the module is registered against the cached parse; on a miss the module
 is parsed fresh (into the cache arena) and stored. A failed parse is
 never cached. The cached artifact is the parsed AST only: the member
-tables, module scan, and all phase-2/3 side tables are re-derived every
-compile, so a dependency change can never serve stale member data and
-`TypeId`s stay consistent with the fresh per-compile interner. Source ids
-are stable per specifier (a cached module keeps the id it was first
-stored with; fresh modules draw from the cache's monotonic counter), so
-spans resolve correctly across changing module sets. The cache carries a
-counting hook (`Stats.hits` / `Stats.parses`) for embedders measuring the
-lex/parse share of repeated compiles.
+tables, module scan, and all checker/CFG-lowering side tables are
+re-derived every compile, so a dependency change can never serve stale
+member data and `TypeId`s stay consistent with the fresh per-compile
+interner. Source ids are stable per specifier (a cached module keeps the
+id it was first stored with; fresh modules draw from the cache's
+monotonic counter), so spans resolve correctly across changing module
+sets. The cache carries a counting hook (`Stats.hits` / `Stats.parses`)
+for embedders measuring the lex/parse share of repeated compiles.
 
 ## Module-level information computed per module
 
-For each module, phase 1 computes and annotates everything that is
+For each module, this stage computes and annotates everything that is
 statically knowable **without analyzing function bodies**:
 
 - **type members** — `struct_def`, `union_def`, `opaque_def`, `type_def`
-  items with their generic parameter lists (Core §2.5: types are
-  compile-time members; Core §12.1). Each module gets a member table
+  items with their generic parameter lists (Core: types are
+  compile-time members). Each module gets a member table
   keyed by declared name. `opaque_def` is the host-backed opaque nominal
-  type of Core §11.8: no fields, no variants, unique by declaration,
+  type of Core: no fields, no variants, unique by declaration,
   legal only in standard-library / host-provided module interfaces.
 - **value members** — `const_def` names with their *declared* types (when
-  annotated) and `func_def` names with their *signatures* (Core §2.5).
-  Function signatures are resolved monomorphically (Core §6, §12.5);
+  annotated) and `func_def` names with their *signatures* (Core).
+  Function signatures are resolved monomorphically (Core);
   generic functions are recorded as templates, not value members
-  (Core §12.4). Phase 3 splits value members into the four AIR member
-  kinds (air.md §7): constants occupy storage slots, functions and
+  (Core). CFG lowering splits value members into the four AIR member
+  kinds (air.md): constants occupy storage slots, functions and
   module-valued constants are static references, and host bindings are
   syscall targets. Intrinsic members (below) expand during lowering and
-  occupy no AIR row (air.md §5.6).
+  occupy no AIR row (air.md).
 - **the generated module struct type** — each module is given a
   compiler-generated nominal struct type whose members are the module's
-  runtime value members (Core §2.1) — the source of the AIR member table
-  (air.md §7). This type is not nameable in source; it is the type of the
+  runtime value members (Core) — the source of the AIR member table
+  (air.md). This type is not nameable in source; it is the type of the
   value produced by `import(...)` and by module-valued const aliases.
 - **import edges** — every `import("specifier")` found in a module-level
-  `const` initializer (Core §2.2). Edges are kept in the order the
-  imports appear in source (declaration order, Runtime §2.3).
+  `const` initializer (Core). Edges are kept in the order the
+  imports appear in source (declaration order, Runtime).
 - **`using` aliases** — path aliases are resolved against names known at
-  module scope and annotated (Core §2.8); they are compile-time bindings,
+  module scope and annotated (Core); they are compile-time bindings,
   not module members.
 - **bundle origin** — whether the module came from the implementation's
   embedded standard-library bundle (`bundle_origin`; the only
@@ -120,12 +120,12 @@ statically knowable **without analyzing function bodies**:
   not spelling, decides classification: a *bodyless declaration of a
   bundle-origin module* is an **intrinsic** — expanded into ordinary AIR
   during source-to-AIR lowering, never dispatched as a host binding
-  (Intrinsics Specification §2).
+  (Intrinsics Specification).
 - **host bindings** — *non-bundle* members that have a *declaration and no
-  Stilla definition*: host-provided module members (Core §2.6, Runtime
-  §3.1), caller-supplied standard-library extensions, and user-module
-  bodyless declarations. These are flagged so phase 3 can lower calls to
-  them as system calls ([Phase 3 — System calls for host bindings](phase3-cfg-lowering.md#system-calls-for-host-bindings)); a
+  Stilla definition*: host-provided module members (Core, Runtime),
+  caller-supplied standard-library extensions, and user-module
+  bodyless declarations. These are flagged so CFG lowering can lower
+  calls to them as system calls ([cfg-lowering.md](cfg-lowering.md)); a
   same-spelled declaration outside the bundle never acquires intrinsic
   identity (source spoofing).
 
@@ -134,18 +134,18 @@ statically knowable **without analyzing function bodies**:
 Implemented in `src/passes/module_check.zig` (`module_check.checkModule`):
 
 - every `import(...)` appears only as a module-level `const` initializer,
-  and its argument is a string literal (Core §2.2, §2.4);
+  and its argument is a string literal (Core);
 - module-valued const initializers are `import(...)` or a statically known
-  module binding (Core §2.3) — a module value may not flow into local
+  module binding (Core) — a module value may not flow into local
   bindings, parameters, returns, or aggregates;
 - member names of the generated module struct are unique (module members
-  are struct members, Core §2.1); `using` aliases may shadow without
-  becoming members (Core §2.8);
+  are struct members, Core); `using` aliases may shadow without
+  becoming members (Core);
 - `import` cycles are rejected (see below).
 
 ## Recursive expansion
 
-Phase 1 is a worklist/DFS over imports starting from the entry module:
+This stage is a worklist/DFS over imports starting from the entry module:
 
 ```text
 pending = [entry]
@@ -162,7 +162,7 @@ bounded by the module count; each module is processed once.
 
 ## Import-cycle detection and topological sort
 
-Import cycles are rejected in Stilla v1.3 (Core §2.4, Runtime §2.6). The
+Import cycles are rejected in Stilla v1.3 (Core, Runtime). The
 frontend detects them with a classic three-color DFS over the import graph
 (`src/passes/topo_sort.zig`):
 
@@ -179,10 +179,10 @@ When the DFS completes, modules are collected in **reverse postorder**:
 a module appears **after** every module it imports, and **before** every
 module that imports it. This order:
 
-- makes every cross-module name/type lookup in phase 2 resolvable (a
+- makes every cross-module name/type lookup in the checker resolvable (a
   module's imported dependencies are already fully annotated);
 - is exactly the order the runtime instantiates modules (dependencies
-  before dependents, each at most once — Runtime §2.1, §2.3).
+  before dependents, each at most once — Runtime).
 
 Ordering is deterministic: ties (sibling modules) are broken by resolved
 specifier so the pipeline is reproducible.
@@ -199,23 +199,23 @@ a imports b imports c imports a" at the importing expression's span.
 > handled elsewhere: module-constant *initialization order* within a module
 > — an initializer may not transitively read a module constant declared
 > later, while function references are order-independent
-> (Core §5, §6.5 — checked in phase 2, see [Phase 2 — Checks enabled by annotation](phase2-checker.md#checks-enabled-by-annotation))
+> (Core — checked by the checker, see [checker.md](checker.md))
 > — and recursive *types*, which are legal only through indirection
-> (Core §18 — handled by type resolution).
+> (Core — handled by type resolution).
 
 ## Data structures
 
 ```zig
-/// How a written specifier resolved (Runtime §2.6).
+/// How a written specifier resolved (Runtime).
 const ModuleKind = enum { source, standard_library, host };
 
-/// One loaded module with its phase-1 annotation.
+/// One loaded module with its module-level annotation.
 pub const ModuleInfo = struct {
-    /// Resolved specifier; the graph key (Runtime §2.1).
+    /// Resolved specifier; the graph key (Runtime).
     specifier: module.Specifier,
     kind: ModuleKind,
     /// True only for the implementation's embedded `std/` bundle
-    /// (Intrinsics Specification §2): the origin mark that classifies
+    /// (Intrinsics Specification): the origin mark that classifies
     /// bodyless declarations as intrinsics. Caller-supplied
     /// standard-library extensions and user modules never carry it.
     bundle_origin: bool,
@@ -223,13 +223,13 @@ pub const ModuleInfo = struct {
     source: ?*const ast.Source,
     program: ?*const ast.Program,
 
-    /// The compiler-generated nominal struct type (Core §2.1): its
+    /// The compiler-generated nominal struct type (Core): its
     /// members are the module's runtime value members. There is no
     /// `typeinfo` module — resolved types are the AIR-native `cfg.Type`
-    /// (see [Phase 2 — Data structures](phase2-checker.md#data-structures)).
+    /// (see [checker.md](checker.md)).
     struct_type: *cfg.Type,
 
-    /// Dependency edges in declaration order (Runtime §2.3).
+    /// Dependency edges in declaration order (Runtime).
     imports: []*ModuleInfo,
     /// Topological rank: dependencies have strictly lower rank.
     order: u32,
@@ -237,16 +237,16 @@ pub const ModuleInfo = struct {
     // Member tables (all arena-owned).
     types: MemberTable,      // struct_def / union_def / type_def, with generic params
     values: MemberTable,     // const_def and monomorphic func_def signatures —
-                             // the source of the AIR member table (air.md §7)
+                             // the source of the AIR member table (air.md)
     templates: MemberTable,  // generic func_def / struct_def / union_def / alias
-    using_aliases: MemberTable, // resolved path aliases (Core §2.8)
+    using_aliases: MemberTable, // resolved path aliases (Core)
 
     /// Bodyless declarations *outside* the embedded bundle — host-provided
     /// module members, caller-supplied standard-library extensions, and
     /// user-module declarations. Bundle-origin bodyless declarations are
     /// intrinsics, expanded during lowering, and never appear here
-    /// (Intrinsics Specification §2). Phase 3 lowers calls to these as
-    /// system calls (phase 3 — System calls for host bindings).
+    /// (Intrinsics Specification). CFG lowering lowers calls to these as
+    /// system calls (cfg-lowering.md).
     host_bindings: []HostBinding,
 };
 
@@ -256,15 +256,15 @@ pub const HostBinding = struct {
     /// The declaration's resolved monomorphic signature.
     signature: *cfg.Type,
     /// Index of the binding in its module's member table (a `MemberId`,
-    /// air.md §7); stable, so the runtime can dispatch syscalls by
+    /// air.md); stable, so the runtime can dispatch syscalls by
     /// (module, member).
     member_index: u32,
     /// The host implementation, when registered.
     impl: ?*const anyopaque,
 };
 
-/// The result of phase 1: every module of the program, in dependency
-/// order, with module-level info computed.
+/// The result: every module of the program, in dependency order, with
+/// module-level info computed.
 pub const ModuleGraph = struct {
     modules: []*ModuleInfo,        // topological order
     by_specifier: std.StringHashMapUnmanaged(*ModuleInfo),
@@ -272,12 +272,12 @@ pub const ModuleGraph = struct {
 };
 ```
 
-## Phase-1 invariant
+## Invariant
 
-After phase 1, all modules for this program have module-level information
-computed. Cross-module member lookup — `calc.add`, `geometry.Point`,
-`std.math.sqrt` (Core §2.5, §2.7) — is fully decidable from the graph
-alone.
+After the module-graph stage, all modules for this program have
+module-level information computed. Cross-module member lookup —
+`calc.add`, `geometry.Point`, `std.math.sqrt` (Core) — is fully decidable
+from the graph alone.
 
 ## Implementation files
 
@@ -285,7 +285,7 @@ alone.
 | --- | --- |
 | `src/frontend.zig` | Pipeline driver; wires `Options.cache` / `Options.io` into the builder |
 | `src/frontend_cache.zig` | `FrontendCache`: per-module parsed-AST cache + counting hook |
-| `src/moduleinfo.zig` | Phase-1 driver `Builder.build` (load → expand → sort → materialize → check → assemble); `ModuleInfo`, `ModuleGraph` |
+| `src/moduleinfo.zig` | Stage driver `Builder.build` (load → expand → sort → materialize → check → assemble); `ModuleInfo`, `ModuleGraph` |
 | `src/passes/module_load.zig` | Specifier resolution; cache lookup/store around lex/parse; `RawModule` registration and scanner handoff |
 | `src/passes/module_scan.zig` | `RawModule` pre-scan: import and module-value consts, transitive module-value aliases |
 | `src/passes/topo_sort.zig` | Three-color DFS cycle detection and reverse postorder |
@@ -297,12 +297,12 @@ alone.
 
 ## Downstream consumers
 
-Phase 1 output is consumed by:
+The module graph is consumed by:
 
-- **[Phase 2](phase2-checker.md)** — iterates modules in topological
+- **[Checker](checker.md)** — iterates modules in topological
   order, resolving cross-module names against the module graph;
-- **[Phase 3](phase3-cfg-lowering.md)** — reads `ModuleInfo` for member
+- **[CFG lowering](cfg-lowering.md)** — reads `ModuleInfo` for member
   tables, host bindings, and the generated struct type;
 - **The runtime** — instantiates modules in topological order, each at
-  most once (Runtime §2.1, §2.3), using the init order recorded by
-  phase 3 ([Module init functions](phase3-cfg-lowering.md#module-init-functions)).
+  most once (Runtime), using the init order recorded during CFG
+  lowering.

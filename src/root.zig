@@ -16,10 +16,10 @@
 //!               parser and canonical printer (compile-time)
 //! - `checker` — type checker and AST annotator (compile-time). Current
 //!               status: name/type inference, ownership analysis including
-//!               conditional release (phase2-checker.md, Ownership analysis; Core §10.10),
+//!               conditional release (checker.md, Ownership analysis; Core §10.10),
 //!               generic specialization with monomorphized instances
-//!               (phase2-checker.md, Generic expansion), and the phase-2 consumer checks; the
-//!               remaining phase-2 checks are future work (phase2-checker.md)
+//!               (checker.md, Generic expansion), and the phase-2 consumer checks; the
+//!               remaining phase-2 checks are future work (checker.md)
 //! - `moduleinfo` — module graph construction (frontend Phase 1): member
 //!                tables, import resolution, cycle detection, topological
 //!                sort, type resolution

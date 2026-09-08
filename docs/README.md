@@ -10,18 +10,17 @@ specifications (the spec suite index is [spec/README.md](../spec/README.md)).
 | Document | Covers |
 | --- | --- |
 | [architecture.md](architecture.md) | end-to-end map: artifacts, pipeline, boundaries, host embedding |
-| [passes.md](passes.md) | canonical ordered inventory of every pass, with links to the detail documents |
-| [stilla-intro.md](stilla-intro.md) | the language and its design, for new readers |
+| [passes.md](passes.md) | ordered inventory of every pass, with links to the detail documents |
 
 ## Compiler pipeline
 
 | Document | Covers |
 | --- | --- |
-| [frontend.md](frontend.md) | the pipeline contract end to end: phases 1–3, optimizer, the LLIR backend stages |
-| [phase1-module-graph.md](phase1-module-graph.md) | Phase 1: module identity, resolution, loading, cycle detection, topo sort |
-| [phase2-checker.md](phase2-checker.md) | Phase 2: inference, generic expansion, ownership analysis, checks |
-| [phase3-cfg-lowering.md](phase3-cfg-lowering.md) | Phase 3: annotated AST → CFG AIR, destruction placement, module init functions, syscalls |
-| [optimizer.md](optimizer.md) | Passes 7–8: tail-call elimination, inlining, CSE, copy propagation, and the mid-level rewrites |
+| [frontend.md](frontend.md) | the pipeline contract end to end: module graph, checker, CFG lowering, the optimizer, drop lowering, the LLIR backend stages |
+| [module-graph.md](module-graph.md) | module identity, resolution, loading, cycle detection, topo sort |
+| [checker.md](checker.md) | inference, generic expansion, ownership analysis, checks |
+| [cfg-lowering.md](cfg-lowering.md) | annotated AST → CFG AIR, destruction placement, module init functions, syscalls |
+| [optimizer.md](optimizer.md) | tail-call elimination, inlining, CSE, copy propagation, and the mid-level rewrites |
 | [llir-typed.md](llir-typed.md) | the typed LLIR lowering layer (typed opcodes, typed-assembly surface) |
 
 ## Runtime and embedding
@@ -31,13 +30,29 @@ specifications (the spec suite index is [spec/README.md](../spec/README.md)).
 | [interpreter-vm.md](interpreter-vm.md) | the LLIR interpreter VM: image, execution loop, ownership, loading, public API |
 | [host-bindings.md](host-bindings.md) | the typed host-binding layer: comptime registry, signature checks, embedding |
 
+## Unimplemented proposals
+
+The following are design proposals, not descriptions of the built
+compiler; they are kept in this directory for review. Their documents
+are self-consistent and cross-reference the pipeline documents above
+without being indexed as implementation documentation.
+
+| Document | Covers |
+| --- | --- |
+| [hir.md](hir.md) | a proposed HIR stage between the checker and CFG lowering, plus a restricted SEG view (design proposal) |
+| [effects.md](effects.md) | a proposed effect-semantics model driving optimizer/SEG legality queries (design proposal) |
+
 ## Reading order
 
-New to the repository: [stilla-intro.md](stilla-intro.md) → [architecture.md](architecture.md) → [passes.md](passes.md), then follow the phase documents from the compiler row. Working on one area: start at [architecture.md](architecture.md) for the boundary, [passes.md](passes.md) for the pass order, and the matching detail document for depth.
+New to the repository: [architecture.md](architecture.md) →
+[passes.md](passes.md), then follow the pipeline documents from the
+compiler row. Working on one area: start at [architecture.md](architecture.md)
+for the boundary, [passes.md](passes.md) for the pass order, and the
+matching detail document for depth.
 
 ## Keeping this consistent
 
 The pass order and file inventory live in [passes.md](passes.md); the
-phase and optimizer documents link to it rather than restating the
+pipeline and optimizer documents link to it rather than restating the
 sequence. When a pass is added, renamed, or reordered, update
 [passes.md](passes.md) first, then the detail document.

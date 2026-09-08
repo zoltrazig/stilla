@@ -1,4 +1,4 @@
-//! Pass: type shape queries — phase2-checker.md, Type resolution.
+//! Pass: type shape queries — checker.md, Type resolution.
 //! In: `Resolve` view + `from` module + written type name or AIR-native
 //! `cfg.Type`. Out: the struct/union declaration behind a name, the index
 //! of a field or variant, and the structural ownership of a type.

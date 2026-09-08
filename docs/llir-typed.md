@@ -1,14 +1,13 @@
 # The typed LLIR lowering layer
 
-*Part of the lowering-boundary overhaul (docs/frontend.md §The typed
-lowering boundary, docs/optimizer.md §The LLIR lowering boundary).
+*Companion to [frontend.md](frontend.md) and [optimizer.md](optimizer.md).
 Status: the typed layer
 is wired into the emitter. `Builder.lowerLlir` walks the function with
 the body emitter: `emitArith` builds a `TypedOp` per arithmetic op
 inline and writes exactly one record per instruction — the typed
 opcode (`add.i32`/`shr.u64`/…) carries the full rep, computes at
-that width, and self-canonicalizes its result cell (Instruction Set
-§4). The record-level peepholes stay in llir_fusion.zig. The
+that width, and self-canonicalizes its result cell (Instruction Set).
+The record-level peepholes stay in llir_fusion.zig. The
 pre-expansion typed-form CSE is not wired — `typedOps` / `printTyped`
 are the inspection/test surface only.*
 
@@ -80,7 +79,7 @@ spelling.
 ## 4. The lowering table
 
 The typed opcode *is* the record. The spec's per-op semantics
-(`Stilla LLIR Instruction Set.md` §4) live in the opcode, not in an
+(`Stilla LLIR Instruction Set.md`) live in the opcode, not in an
 expansion:
 
 | typed operation | lowered records |
@@ -98,22 +97,21 @@ operand inside the rep's immediate window lowers as the immediate form
 multiply-accumulate peephole stays a record-level peephole
 (llir_fusion.zig).
 
-## 5. Migration status
+## 5. Status
 
-The migration is complete:
+The typed layer behind the emitter is wired:
 
-1. **done (v9)** — the typed op/value types behind the emitter and the
-   typed-assembly printer.
-2. **done (v10)** — the typed-integer opcode set: every integer
-   arithmetic/shift op became a four-member typed family
-   (`add.i32`/`add.u32`/`add.i64`/`add.u64`, …), `neg` a typed
-   integer family, and the `sext32`/`zext32` canonicalization opcodes
-   were removed (their E-type codes are reserved). The value-form
-   lattice, the staging-register sequences, and the budget's
-   sequence-shape derivation (`arithSeqCount`,
-   `fusedStagingReduction`) were deleted with them — one arithmetic
-   instruction is one record, and the budget counts records the
-   emitter writes directly.
-3. **not wired** — pre-expansion CSE of duplicate typed ops and
-   constant folding on the atomic form; `typedOps` / `printTyped`
-   remain the inspection/test surface for what Layer A sees.
+- **Wired** — the typed op/value types behind the emitter and the
+  typed-assembly printer; the typed-integer opcode set: every integer
+  arithmetic/shift op became a four-member typed family
+  (`add.i32`/`add.u32`/`add.i64`/`add.u64`, …), `neg` a typed
+  integer family, and the `sext32`/`zext32` canonicalization opcodes
+  were removed (their E-type codes are reserved). The value-form
+  lattice, the staging-register sequences, and the budget's
+  sequence-shape derivation (`arithSeqCount`,
+  `fusedStagingReduction`) were deleted with them — one arithmetic
+  instruction is one record, and the budget counts records the
+  emitter writes directly.
+- **Not wired** — pre-expansion CSE of duplicate typed ops and
+  constant folding on the atomic form; `typedOps` / `printTyped`
+  remain the inspection/test surface for what Layer A sees.

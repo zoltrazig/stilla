@@ -156,7 +156,7 @@ test "spec examples compile: Core 12 generics" {
 }
 
 test "frontend lowers only monomorphic functions: instances, not templates" {
-    // Core §12, phase2-checker.md, Generic expansion: the AIR carries one monomorphic function per
+    // Core §12, checker.md, Generic expansion: the AIR carries one monomorphic function per
     // used specialization (`{module}.{fn}.{id}`) with concrete signatures;
     // the unspecialized template never appears, and no `.param` type
     // survives. Calls target the instances; recursion inside a generic

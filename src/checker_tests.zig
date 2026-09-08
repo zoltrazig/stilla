@@ -1,7 +1,7 @@
 //! Test file: `checker` — the type checker / AST annotator (phase 2).
 //!
 //! Organization: the black-box suite is grouped by the four orthogonal
-//! semantic dimensions of phase 2 (phase2-checker.md, Test coverage — four
+//! semantic dimensions of phase 2 (checker.md, Test coverage — four
 //! orthogonal dimensions): a driver-annotation preamble (dimension 0 —
 //! host-binding bookkeeping the lowerer consumes), then dimension 1 type
 //! system, dimension 2 name binding, dimension 3 constraint checking, and
@@ -206,7 +206,7 @@ fn checkAppAgainstDep(dep: []const u8, app: []const u8) !CheckResult {
 
 // ---------------------------------------------------------------------------
 // checker — dimension 0: driver annotation contract
-// Host-binding detection (phase2-checker.md, Generic expansion): a function
+// Host-binding detection (checker.md, Generic expansion): a function
 // declaration without a Stilla body is flagged for phase 3 (which lowers its
 // calls to system calls); definitions — including bodies that are just a
 // trailing expression — are never flagged, and non-function module items are
@@ -240,7 +240,7 @@ test "checker flags host bindings and leaves definitions alone" {
 }
 
 test "checker flags generic host bindings and leaves bodies alone" {
-    // A generic declaration without a body is a host binding (phase3-cfg-lowering.md, System calls for host bindings)
+    // A generic declaration without a body is a host binding (cfg-lowering.md, System calls for host bindings)
     // binding too (`builtin.str[T]` etc., Runtime §4).
     var t = try checkText(
         \\fn str[T](value: T) -> str;
@@ -717,7 +717,7 @@ test "checker rejects an unspecialized generic function as a value" {
 }
 
 test "checker specializes a generic host binding without a body" {
-    // Host-binding instances have no body to expand (phase3-cfg-lowering.md, System calls for host bindings).
+    // Host-binding instances have no body to expand (cfg-lowering.md, System calls for host bindings).
     var t = try checkText(
         \\fn len[T](borrow xs: list[T]) -> int32;
         \\fn main() -> int32 { len([1, 2, 3]) }

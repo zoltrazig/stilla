@@ -1,5 +1,5 @@
 //! Pass: ownership analysis — conditional release and state merging
-//! (phase2-checker.md, Ownership analysis; Core §10.10). In: a `Frame` at the entry of a
+//! (checker.md, Ownership analysis; Core §10.10). In: a `Frame` at the entry of a
 //! conditional construct (if/else, match, short-circuit `and`/`or`, or a
 //! `for` loop) and the construct's evaluated branches. Out: the
 //! `BindingState.released` and `BindingState.maybe` transitions that mark

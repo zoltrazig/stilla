@@ -2,15 +2,14 @@
 
 How a Stilla host module — a specifier, a member table, and typed
 functions — is declared and bound to Zig or C. The Runtime spec's host
-contract (Runtime §3) and the `.st` interface sources remain normative.
+contract (Runtime) and the `.st` interface sources remain normative.
 
 ## 1. How host calls work
 
 A host binding is a bodyless `fn` declaration in a host module interface
 (`Sources.standard_library` text, e.g. `builtin`'s stdlib sources). The
 frontend lowers calls to it as `syscall` instructions carrying a symbolic
-`(module_symbol, member_symbol)` pair (phase3-cfg-lowering.md, "System
-calls for host bindings"). At runtime `hSyscall` resolves the pair against
+`(module_symbol, member_symbol)` pair ([cfg-lowering.md](cfg-lowering.md)). At runtime `hSyscall` resolves the pair against
 the **registry** — a comptime-built, sorted member table (§3, §4) — and
 calls the member's thunk with a resolved signature view and the decoded
 canonical cells:
@@ -55,8 +54,8 @@ Non-goals (out of scope today):
 - **Ownership transfer through typed glue.** `move` parameters, lists,
   unions, and retained/owned returns do not go through the typed layer;
   they use a raw-shaped member (`raw`, §3.3).
-- Async/reentrant hosts and host-held borrowed VM values (interpreter-vm.md
-  §9: synchronous host calls only).
+- Async/reentrant hosts and host-held borrowed VM values
+  ([interpreter-vm.md](interpreter-vm.md)).
 
 ## 3. API
 
@@ -312,7 +311,7 @@ const term = try stilla.interpreter.runProgram(arena, &built);
 The example then verifies the round trip: the run's `Termination` switch
 checks that `main`'s return equals the draws the host observed. The
 layered API this wraps (`frontend.compile`, `ArtifactBundle.build`,
-`runWithHostAndLoader` — interpreter-vm.md §11) stays available for
+`runWithHostAndLoader` — [interpreter-vm.md](interpreter-vm.md)) stays available for
 embedders who need finer control; on a compile failure the failed
 compilation comes back through the `&failed` out-param for its
 diagnostic.

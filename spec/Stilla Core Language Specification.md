@@ -583,6 +583,8 @@ It may not reference a later module constant.
 
 A module constant initializer must not transitively call a function that reads a module constant declared later than the initializer; such a program is rejected at compile time. This preserves the guarantee that module constants are read only after initialization (the Runtime specification).
 
+A call in an initializer whose target is not statically known (an indirect call or a host-provided callback) is treated under the worst-case assumption that it may read a later-declared module constant; the initializer is rejected unless the compiler proves the call cannot reach a reader of a later-declared constant, or the host embedding declares the callable's module-constant reads.
+
 A *Unique* non-module constant is owned by the module execution context. It cannot be explicitly moved or explicitly dropped by source code and is destroyed during normal module/context teardown (the Runtime specification).
 
 The initialization-order restriction applies symmetrically at teardown:
@@ -591,7 +593,11 @@ teardown destroys *Unique* constants in **reverse** declaration order
 constant's `drop` hook runs. A *Unique* module constant whose type defines a
 `drop` hook — the hook and every function it transitively calls — must
 not read a module constant declared later than the constant being
-destroyed; such a program is rejected at compile time.
+destroyed; such a program is rejected at compile time. A call inside the
+hook whose target is not statically known is treated under the same
+worst-case assumption unless the compiler proves it cannot reach such a
+reader, or the host embedding declares the callable's module-constant
+reads.
 
 ---
 

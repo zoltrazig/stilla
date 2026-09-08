@@ -26,38 +26,39 @@ same API.
 Stilla source (*.st)  +  host interfaces  +  embedded std/ bundle
     │
     ▼
-phase 1  module graph — moduleinfo.Builder.build (module_load → module_scan
-         → topo_sort → module_materialize → module_check)        [passes.md §Phase 1]
+module graph — moduleinfo.Builder.build (module_load → module_scan
+         → topo_sort → module_materialize → module_check)          [passes.md]
     ▼
-phase 2  checker — annotate every module, then validate every module
+checker — annotate every module, then validate every module
          (checker_annotate / checker_validate / checker_ownership,
-          monomorphize)                                            [passes.md §Phase 2]
+          monomorphize)                                             [passes.md]
     ▼
-phase 3  CFG lowering — lower.lowerProgram → cfg.IrProgram
+CFG lowering — lower.lowerProgram → cfg.IrProgram
          (cfg_lower_program / _module / _func / _expr / _control /
-          _call / _pattern / _path / _emit)                        [passes.md §Phase 3]
+          _call / _pattern / _path / _emit)                         [passes.md]
     ▼
-Pass 6.1  AIR validator (cfg_validate, air.md §12) on every lowered program
+AIR validator (cfg_validate, air.md) on every lowered program
     ▼
-Passes 7–8  mid-level optimizer — cfg_optimize.optimizeOnce:
+optimizer — cfg_optimize.optimizeOnce:
          tailCall → inline → cse → copyProp → pre → ifConvert →
          deadBlock → dropElide → deadInstr → jumpThread → phiSimplify
-         (aggressive: bounded fixpoint, optimizer.md §8.10)
+         (aggressive: bounded fixpoint, optimizer.md)
     ▼
 drop lowering — cfg_lower_drop expands statically-expandable drops
     ▼
-LLIR backend — cfg_lower_llir.Builder.lowerLlir (stage table in frontend.md §4)
+LLIR backend — cfg_lower_llir.Builder.lowerLlir (stage table in frontend.md)
          → llir_validate → llir_asm / llir_emit_bin / artifact_bundle
     ▼
 per-module LLIR artifacts  →  interpreter (loader + dispatch)  →  result
 ```
 
 `frontend.compile` (frontend.zig) is the one-call driver of the whole
-compile side: phase 1 → 2 → 3 → validation → optional optimization
-(single pass or bounded fixpoint) → drop lowering → re-validation and
-the canonical text round-trip. Everything the compile allocates lives in
-one arena that outlives the call; diagnostics follow first-error-wins
-unless the phase collects (lexer/parser/checker collect per-module).
+compile side: module graph → checker → CFG lowering → validation →
+optional optimization (single pass or bounded fixpoint) → drop lowering
+→ re-validation and the canonical text round-trip. Everything the
+compile allocates lives in one arena that outlives the call; diagnostics
+follow first-error-wins unless the stage collects (lexer/parser/checker
+collect per-module).
 
 ## Boundaries
 
@@ -90,7 +91,7 @@ supplies them.
 
 ## Where the documents live
 
-- **Compiler**: [frontend.md](frontend.md) (pipeline contract end to end), [passes.md](passes.md) (canonical pass order), [phase1-module-graph.md](phase1-module-graph.md), [phase2-checker.md](phase2-checker.md), [phase3-cfg-lowering.md](phase3-cfg-lowering.md), [optimizer.md](optimizer.md), [llir-typed.md](llir-typed.md).
+- **Compiler**: [frontend.md](frontend.md) (pipeline contract end to end), [passes.md](passes.md) (pass order), [module-graph.md](module-graph.md), [checker.md](checker.md), [cfg-lowering.md](cfg-lowering.md), [optimizer.md](optimizer.md), [llir-typed.md](llir-typed.md).
 - **Runtime & embedding**: [interpreter-vm.md](interpreter-vm.md), [host-bindings.md](host-bindings.md).
-- **Language**: [stilla-intro.md](stilla-intro.md).
+- **Unimplemented proposals** (kept for review, not descriptions of the built compiler): [hir.md](hir.md), [effects.md](effects.md).
 - **Normative specs**: `spec/` (see [spec/README.md](../spec/README.md)); the AIR op inventory and validator contract are authoritative in [../spec/air.md](../spec/air.md).

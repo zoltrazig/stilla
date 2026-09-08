@@ -865,7 +865,7 @@ fn checkInstr(
             // direct call the callee's signature gives the modes; a value
             // callee's function type carries them. A void-typed parameter
             // carries no observable value and produces no operand in the
-            // call (phase3-cfg-lowering.md, Lowering rules), so the mode mapping skips it — the
+            // call (cfg-lowering.md, Lowering rules), so the mode mapping skips it — the
             // lowering emits one operand per non-void parameter.
             const params = calleeParams(c);
             var pi: usize = 0;

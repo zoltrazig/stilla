@@ -1,4 +1,4 @@
-//! Pass: block-level annotation — phase2-checker.md, Cross-module name
+//! Pass: block-level annotation — checker.md, Cross-module name
 //! resolution, Expression inference and annotation tables, Generic
 //! expansion (specializes generic calls and `::[...]` value expressions
 //! into `FuncInstance`s via `monomorphize`), Ownership analysis
@@ -95,7 +95,7 @@ fn annotateItem(ck: *checker.Checker, frame: *Frame, item: *ast.ModuleItem) Chec
             try frame.ma.names.put(ck.alloc(), f.name.text, &f.name);
             // Generic templates are never checked unspecialized (Core
             // §12.4); each used specialization is expanded and checked
-            // under the concrete substitution (phase2-checker.md, Generic expansion).
+            // under the concrete substitution (checker.md, Generic expansion).
             if (f.body) |body| {
                 if (f.type_params.len == 0) try checkFuncBody(frame, f, body);
             }
@@ -234,7 +234,7 @@ fn checkBlock(frame: *Frame, b: *const ast.Block) CheckError!cfg.Type {
 
 fn checkLet(frame: *Frame, l: *const ast.LetStmt) CheckError!void {
     // Resolve the declared type eagerly so the validate pass can compare
-    // it against the initializer (phase2-checker.md, Checks enabled by annotation; Core §5); it is also the
+    // it against the initializer (checker.md, Checks enabled by annotation; Core §5); it is also the
     // initializer's goal type (Core §11), so an under-determined
     // construction fills its type arguments from it.
     var declared: ?cfg.Type = null;
@@ -573,11 +573,11 @@ fn checkArgsOwnership(frame: *Frame, c: *const ast.Call, arg_types: []const cfg.
 }
 
 // ---------------------------------------------------------------------------
-// Expression inference (phase2-checker.md, Expression inference)
+// Expression inference (checker.md, Expression inference)
 // ---------------------------------------------------------------------------
 
 /// Infer the type an expression produces, recording it in `expr_of`
-/// (phase2-checker.md, Expression inference). Returns null when the type is not inferable; the node
+/// (checker.md, Expression inference). Returns null when the type is not inferable; the node
 /// is still visited so every child's type is recorded.
 fn inferExpr(frame: *Frame, e: *const ast.Expr) CheckError!?cfg.Type {
     const t = try inferExprInner(frame, e);
@@ -1123,7 +1123,7 @@ fn inferConstructArgs(frame: *Frame, id: moduleinfo.TypeId, sc: ?*const ast.Stru
 }
 
 // ---------------------------------------------------------------------------
-// Calls (phase2-checker.md, Expression inference; Generic expansion)
+// Calls (checker.md, Expression inference; Generic expansion)
 // ---------------------------------------------------------------------------
 
 fn inferCall(frame: *Frame, c: *const ast.Call) CheckError!?cfg.Type {
@@ -1200,7 +1200,7 @@ fn inferCall(frame: *Frame, c: *const ast.Call) CheckError!?cfg.Type {
 }
 
 // ---------------------------------------------------------------------------
-// Generic expansion (phase2-checker.md, Generic expansion; Core §12)
+// Generic expansion (checker.md, Generic expansion; Core §12)
 // ---------------------------------------------------------------------------
 
 /// True when the call target is one of the StdLib members whose type
@@ -1284,7 +1284,7 @@ fn resolveSpecializeArgs(frame: *Frame, s: *const ast.Specialize) CheckError![]c
 /// generic function: type arguments from the explicit list or inferred
 /// from the argument types, a monomorphic signature, and — for Stilla
 /// bodies — a monomorphized clone checked under the concrete substitution
-/// (phase2-checker.md, Generic expansion). Host bindings get `mono = null` (phase3-cfg-lowering.md, System calls for host bindings).
+/// (checker.md, Generic expansion). Host bindings get `mono = null` (cfg-lowering.md, System calls for host bindings).
 fn specializeInstance(
     frame: *Frame,
     target: moduleinfo.PathTarget,
@@ -1327,7 +1327,7 @@ fn specializeInstance(
     }
 
     // Deduplicate per (declaration, type arguments): each specialization is
-    // expanded and checked exactly once (phase2-checker.md, Generic expansion).
+    // expanded and checked exactly once (checker.md, Generic expansion).
     for (ck.annotation.instances.items) |inst| {
         if (inst.decl != decl) continue;
         if (!typeArgsEqual(inst.type_args, type_args)) continue;
@@ -1374,7 +1374,7 @@ fn typeArgsEqual(a: []const cfg.Type, b: []const cfg.Type) bool {
 
 /// Check one monomorphized instance body under its concrete substitution:
 /// annotate it (against the defining module, so cross-module types resolve
-/// correctly) and run the checks on it (phase2-checker.md, Checks enabled by annotation). Unspecialized generic bodies
+/// correctly) and run the checks on it (checker.md, Checks enabled by annotation). Unspecialized generic bodies
 /// are never checked (Core §12.4).
 fn checkInstanceBody(ck: *checker.Checker, info: *ModuleInfo, ma: *ModuleAnnotation, f: *const ast.FuncDef) CheckError!void {
     const root = try ck.alloc().create(Scope);
@@ -1497,7 +1497,7 @@ fn moduleValueOf(frame: *Frame, object: *const ast.Expr) CheckError!?*ModuleInfo
 }
 
 // ---------------------------------------------------------------------------
-// Patterns (phase2-checker.md, Expression inference)
+// Patterns (checker.md, Expression inference)
 // ---------------------------------------------------------------------------
 
 /// Bind the names a pattern introduces, given the value type it matches.

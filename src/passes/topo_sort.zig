@@ -2,7 +2,7 @@
 //! In: a static node set with sorted edge lists (supplied by `src/moduleinfo.zig`).
 //! Out: node indexes in reverse postorder, or the offending cycle edge.
 //!
-//! The import-ordering algorithm of frontend Phase 1 (phase1-module-graph.md, Import-cycle detection,
+//! The import-ordering algorithm of frontend Phase 1 (module-graph.md, Import-cycle detection,
 //! Runtime §2.1, §2.3): cycle detection and topological sort over a static node set.
 //!
 //! A classic three-color DFS: **white** nodes are unvisited, **gray**
@@ -76,7 +76,7 @@ pub fn reversePostorder(
             top.child += 1;
             if (color[edge.dep] == 1) {
                 // Back edge into a gray node: a cycle. Recover the full
-                // path (phase1-module-graph.md, Import-cycle detection) by walking the DFS stack from the
+                // path (module-graph.md, Import-cycle detection) by walking the DFS stack from the
                 // target down to the stack top, then closing the loop:
                 // the stack holds gray nodes where each is the importer of
                 // the node above it, so `[target?..top] ++ [target]` is the
@@ -108,7 +108,7 @@ pub fn reversePostorder(
         }
     }
     // Postorder of a DFS over import edges lists every module after its
-    // imports, i.e. dependencies before dependents (phase1-module-graph.md, Import-cycle detection).
+    // imports, i.e. dependencies before dependents (module-graph.md, Import-cycle detection).
     return Result{ .order = try post.toOwnedSlice(allocator) };
 }
 

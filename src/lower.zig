@@ -1,4 +1,4 @@
-//! Annotated AST → AIR lowering — frontend Phase 3 (phase3-cfg-lowering.md,
+//! Annotated AST → AIR lowering — frontend Phase 3 (cfg-lowering.md,
 //! air.md §12).
 //!
 //! Phase 3 consumes the phase-1 module graph (with its module-level
@@ -6,7 +6,7 @@
 //! `@init` function plus one `IrFunc` per Stilla function, all host
 //! binding calls lowered to `syscall` instructions, ownership operations
 //! explicit (`move`/`copy`/`drop`), and destruction materialized in the
-//! CFG (phase3-cfg-lowering.md, Destruction placement; air.md §6.4).
+//! CFG (cfg-lowering.md, Destruction placement; air.md §6.4).
 //!
 //! This module is the phase-3 driver: the `Lowerer` context plus the
 //! per-pass logic in `src/passes/` (the `cfg_lower_*` passes, one file
@@ -127,7 +127,7 @@ pub const Lowerer = struct {
     resolve: moduleinfo.Resolve,
     /// The phase-2 annotation: per-module side tables (types, ownership,
     /// generic `FuncInstance`s) the lowering reads for concrete signatures
-    /// and instantiated types (phase2-checker.md, Data structures; frontend.md §2).
+    /// and instantiated types (checker.md, Data structures; frontend.md §2).
     ann: ?*checker.Annotation = null,
     /// Which module a module-typed SSA value refers to (`module_ref`
     /// values and module-valued member loads).
@@ -172,7 +172,7 @@ pub const Lowerer = struct {
 
     // No deinit: `module_of` is arena-owned.
 
-    /// The checker's annotated type of an expression (phase2-checker.md, Expression inference): the
+    /// The checker's annotated type of an expression (checker.md, Expression inference): the
     /// instantiated type of a construction, the resolved type of a use
     /// site. Null when the annotation is unavailable (or the expression
     /// was not annotated — e.g. inside an unspecialized generic template).

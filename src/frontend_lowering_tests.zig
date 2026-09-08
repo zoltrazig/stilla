@@ -39,7 +39,7 @@ test "frontend compiles a single module to AIR" {
     const program = c.program.?;
     // Two modules in phase-1 topological order: `app` and the `builtin`
     // stdbundle module it imports, which is loaded like any source module
-    // (phase1-module-graph.md, Data structures; air.md §11).
+    // (module-graph.md, Data structures; air.md §11).
     try testing.expectEqual(@as(usize, 2), program.modules.len);
     // app's @init plus its two function definitions; builtin contributes no
     // funcs because its init is null (nothing to evaluate, air.md §11).
@@ -925,7 +925,7 @@ test "iter.try_fold_with with an inline step lambda and a void context compiles"
 
 test "calling a function with a void parameter emits no operand" {
     // A `()` argument to a void-typed parameter produces no instruction
-    // operand (phase3-cfg-lowering.md, Lowering rules): the call's operand list carries one
+    // operand (cfg-lowering.md, Lowering rules): the call's operand list carries one
     // entry per non-void parameter, so the optimized AIR round-trips.
     var c = try compileOpt("app", &.{
         .{

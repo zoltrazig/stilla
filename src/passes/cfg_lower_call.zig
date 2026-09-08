@@ -38,7 +38,7 @@ pub fn lowerCall(self: *Lowerer, fs: *FuncState, e: *const ast.Call) LowerError!
                                 // expansion table; any other bodyless
                                 // declaration is a host binding — a system
                                 // call, never an in-AIR call
-                                // (phase3-cfg-lowering.md, System calls for host bindings).
+                                // (cfg-lowering.md, System calls for host bindings).
                                 if (target.module.isIntrinsic(target.vm)) {
                                     return try cfg_lower_intrinsic.expandIntrinsicCall(self, fs, e, target);
                                 }
@@ -75,7 +75,7 @@ pub fn lowerDirectCall(self: *Lowerer, fs: *FuncState, e: *const ast.Call, targe
         const expected = if (i < sig.params.len) sig.params[i].type_ else cfg.Type{ .primitive = .any };
         const a2 = try lowerCallArg(self, fs, av, mode, expected);
         try arg_types.append(self.arena, a2.type_);
-        // A void-typed argument carries no observable value (phase3-cfg-lowering.md,
+        // A void-typed argument carries no observable value (cfg-lowering.md,
         // Lowering rules; Pass 4.1): the lowering emits no operand for it —
         // `emitVoid`'s phantom id must never reach the text form (the
         // value has no table entry, so the printed `%4294967295` could
@@ -85,7 +85,7 @@ pub fn lowerDirectCall(self: *Lowerer, fs: *FuncState, e: *const ast.Call, targe
         try args.append(self.arena, a2);
     }
     // Generic signatures are specialized from the argument types
-    // (phase2-checker.md, Generic expansion) — or, for a generic call, taken from the checker's
+    // (checker.md, Generic expansion) — or, for a generic call, taken from the checker's
     // recorded `FuncInstance` signature, which honors explicit `::[...]`
     // arguments the argument types alone cannot express.
     const ret = try specializedRet(self, fs, e, vm.type_, arg_types.items);
@@ -169,7 +169,7 @@ pub fn specializedRet(self: *Lowerer, fs: *FuncState, e: *const ast.Call, sig: c
 }
 
 /// A call to a host binding: a `syscall` instruction carrying the
-/// resolved concrete signature (phase3-cfg-lowering.md, System calls for host bindings; air.md §8.2).
+/// resolved concrete signature (cfg-lowering.md, System calls for host bindings; air.md §8.2).
 pub fn lowerHostCall(self: *Lowerer, fs: *FuncState, e: *const ast.Call, target: moduleinfo.PathTarget) LowerError!?*cfg.Value {
     const vm = target.vm;
     const ha = (try lowerHostArgs(self, fs, e, vm.type_.function)) orelse return null;

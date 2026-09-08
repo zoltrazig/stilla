@@ -108,7 +108,7 @@ test "std bundle exposes exactly the StdLib §1 module set" {
 
 test "std bundle sources are non-empty intrinsic surfaces" {
     // Each embedded source is registered under its specifier; resolution
-    // loads them by that name (phase1-module-graph.md, Loading, parsing, and deduplication), and they are declaration
+    // loads them by that name (module-graph.md, Loading, parsing, and deduplication), and they are declaration
     // surfaces without a Stilla `module` header of their own.
     for (stdbundle.modules) |m| {
         try testing.expect(m.source.len > 0);
