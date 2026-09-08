@@ -28,7 +28,7 @@
 | # | 阶段 | 内容 | 状态 |
 | --- | --- | --- | --- |
 | S0 | 文档先行 | 声明 HIR 接缝与 pass 顺序；开 PROGRESS | done（本次提交） |
-| S1 | hir.zig 结构 | arena 句柄/容器 + 注册表骨架 + 白盒 | pending |
+| S1 | hir.zig 结构 | arena 句柄/容器 + 注册表骨架 + 白盒 | done（本次提交） |
 | S2 | 文本 printer/parser | 前缀括号文本、binder 确定性编号、round-trip | pending |
 | S3 | 结构 validator | hir.md §10.1 第一级 | pending |
 | S4 | AST→HIR builder | M1a 主件；CFG 行为不变 | pending |
@@ -50,13 +50,26 @@
 - [x] 新建本文件 PROGRESS.md。
 - 验收：docs-only；`zig build -fincremental test` 全绿。
 
-### S1 — hir.zig 结构（pending）
+### S1 — hir.zig 结构（done）
 
-- 目标：arena + 稠密句柄；ExprNode（op/ty/operands/regions 扁平切片）；Region/Binder
-  （mode）；Pattern/FullExpr；SemanticInfo（仅 ownership_view，无效果字段）；
-  core-op 注册表骨架（§7.1，无 seg/effect 字段）。
-- 文件：`hir.zig`（仿 cfg.zig：数据 + 再导出）；白盒测试在属主模块 `test{}`。
-- 验收：`zig build -fincremental test`；白盒：切片 append、句柄 fresh、结构构造。
+- [x] `hir.zig`（新建）：句柄（ExprId/RegionId/BinderId/PatternId/FullExprId/
+      ScopeId/SemanticInfoId/AttrSetId/OpId + Range）、Program 容器（实体 arena +
+      expr/region/binder 扁平缓冲 + append 助手 + 只读访问器）、ExprNode（泛型节点 +
+      typed `payload`：const/local/fn_ref/module_const/field/tag）、Region/Binder
+      （mode）、arm region 可选 `pattern`（文档化的布局选择，§5.4）、Pattern
+      （子模式按 PatternId 引用）、Scope/FullExpr 最小记录（无 cleanup 执行）、
+      SemanticInfo（**仅 ownership_view**，无效果字段）、OpRegistry（§7.1 22 个核心
+      opcode + §7.2 8 个 typed 样本行 + comptime validateRegistry 身份/形状检查）。
+- [x] `cfg.Type` 内联为节点/绑定类型（无 HIR 类型 interner——§3.8 Target 形式不做，
+      不建第二类型世界）；常量复用 `cfg.ConstValue`。
+- [x] root.zig 导出 `hir`（refAllDecls 纳入库测试）。
+- [x] 白盒 `test{}`（7 个）：句柄 fresh / 扁平 Range 跨增长稳定与有序、let init
+      在 binder region 之外（结构镜像 §5.3）、payload 具体值、pattern 绑定叶引用
+      arm region params、ownership views（0 = 默认 owned）、注册表身份/形状、typed
+      rep 映射 cfg.Type。**整树拒绝测试（捕获/DAG/作用域）归 S3，不在 S1。**
+- 验收：`zig build -fincremental test` 全绿（1019 tests 通过，含 hir 的 7 个——
+      以一次临时失败断言验证确被收集，随后移除）；`zig build -fincremental` 绿。
+- 栅栏：无 `EffectSummary` / `effect_transfer` / `seg_*` 标识符落盘。
 
 ### S2 — 文本 printer + parser（pending）
 
@@ -125,4 +138,5 @@
 
 | 日期 | 阶段 | 提交 | 说明 |
 | --- | --- | --- | --- |
-| 2026-09-08 | S0 | 本次 docs 提交 | 声明 M1a 接缝（passes.md/frontend.md/architecture.md/README.md）+ 开 PROGRESS |
+| 2026-09-08 | S0 | docs(hir) S0 提交 | 声明 M1a 接缝（passes.md/frontend.md/architecture.md/README.md）+ 开 PROGRESS |
+| 2026-09-08 | S1 | 本次 docs(hir) S1 提交 | hir.zig 数据骨架 + root.zig 导出 + 7 白盒测试；docs 措辞更新为「S1 数据已落地、阶段未接线」 |

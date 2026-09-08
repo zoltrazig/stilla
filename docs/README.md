@@ -46,9 +46,9 @@ without being indexed as implementation documentation.
 milestone** (hir.md §11): a structural, monomorphic HIR seam between the
 checker and CFG lowering with effect analysis disabled. The seam is
 registered as *planned* in [passes.md](passes.md) and
-[frontend.md](frontend.md); **no HIR code is wired** — the built pipeline
-still lowers the annotated AST straight to CFG AIR. effects.md remains a
-pure proposal.
+[frontend.md](frontend.md); the **S1 data structures exist** (`hir.zig`),
+but no HIR compiler stage is wired — the built pipeline still lowers the
+annotated AST straight to CFG AIR. effects.md remains a pure proposal.
 
 ## Reading order
 

@@ -60,8 +60,9 @@ what runs today. [hir.md](hir.md) §11 (M1a) registers a planned
 structural-HIR stage between the checker and CFG lowering — a
 semantics-preserving seam whose milestone acceptance is that the
 existing suites still pass with equivalent AIR (hir.md §10.3). The seam
-is not wired: no HIR code exists yet, and the CFG lowering keeps
-consuming the annotated AST directly. Target shape:
+is not wired: the S1 data structures exist (`hir.zig`), but no HIR
+compiler stage does — the CFG lowering keeps consuming the annotated
+AST directly. Target shape:
 
 ```text
 annotated AST  (monomorphic; all static checks passed)
@@ -219,8 +220,8 @@ implemented and covered by `zig build test`.
       (`hir.zig`), AST→HIR construction (`hir_build.zig`), structural
       validation (`hir_validate.zig`), and HIR→CFG lowering
       (`hir_lower.zig`) reusing the `lower.zig` / `cfg_lower_emit.zig`
-      machinery. Effect analysis disabled in this milestone; no HIR code
-      is wired yet.
+      machinery. Effect analysis disabled in this milestone; no HIR
+      compiler stage is wired yet.
 
 ### Backend: CFG → LLIR
 

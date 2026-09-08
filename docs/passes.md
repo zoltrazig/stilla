@@ -43,11 +43,13 @@ Detail: [checker.md](checker.md).
 
 ## HIR seam — planned, M1a (not implemented)
 
-> Status: **design target only.** No HIR code is wired; the checker's
-> output still feeds the CFG lowering directly (next section), and this
-> section documents the target order of [hir.md](hir.md) §11 M1a. When
-> the seam lands, the CFG lowering consumes HIR instead of the annotated
-> AST; the proposed files below are marked (planned) until then.
+> Status: **design target with S1 data structures landed.** No HIR
+> compiler stage is wired — the S1 data structures exist in `hir.zig`, but
+> the checker's output still feeds the CFG lowering directly (next
+> section), and this section documents the target order of
+> [hir.md](hir.md) §11 M1a. When the seam lands, the CFG lowering
+> consumes HIR instead of the annotated AST; the proposed files below are
+> marked (planned) until then.
 
 Target order: checker → AST→HIR construction → structural validation →
 HIR→CFG lowering (into today's block/value/drop machinery).

@@ -14,6 +14,9 @@
 //! - `parser`  — recursive-descent parser: token stream → AST (compile-time)
 //! - `cfg`     — the AIR (air.md): data structures plus the text-form
 //!               parser and canonical printer (compile-time)
+//! - `hir`     — the structural HIR (hir.md §3, M1a): arena + dense-handle
+//!               data structures for the seam between the checker and CFG
+//!               lowering. S1: data only, no stage wired.
 //! - `checker` — type checker and AST annotator (compile-time). Current
 //!               status: name/type inference, ownership analysis including
 //!               conditional release (checker.md, Ownership analysis; Core §10.10),
@@ -118,6 +121,7 @@ pub const cfg = @import("cfg.zig");
 pub const checker = @import("passes/checker.zig");
 pub const frontend = @import("frontend.zig");
 pub const frontend_cache = @import("frontend_cache.zig");
+pub const hir = @import("hir.zig");
 pub const host = @import("host.zig");
 pub const interpreter = @import("interpreter.zig");
 pub const vm_types = @import("vm_types.zig");
