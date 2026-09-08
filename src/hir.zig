@@ -634,6 +634,8 @@ pub const Parser = @import("passes/hir_parse.zig").Parser;
 pub const parseText = @import("passes/hir_parse.zig").parseText;
 // pi-lens-ignore: zls:unknown
 pub const print = @import("passes/hir_print.zig").print;
+// pi-lens-ignore: zls:unknown
+pub const validate = @import("passes/hir_validate.zig").validate;
 
 // ---------------------------------------------------------------------------
 // White-box tests (hir.md §10.2: owning module `test {}`)
@@ -877,8 +879,12 @@ test "registry: typed instances carry their scalar rep" {
 test "text passes are analyzed (forces hir_print/hir_parse analysis in test builds)" {
     const parse_text = @import("passes/hir_parse.zig").parseText;
     const print_text = @import("passes/hir_print.zig").print;
+    const validate_text = @import("passes/hir_validate.zig").validate;
     var p = try parse_text("fn (B0: i32) => mul.i32(%B0, 2i32)", .{});
     defer p.arena.deinit();
     const out = try print_text(&p.program, p.root, p.arena.allocator(), .{});
     try std.testing.expectEqualStrings("fn (B0: i32) => mul.i32(%B0, 2i32)", out);
+    // The parsed tree is structurally valid; hir_validate's own tests
+    // below only run because this reference forces the file's analysis.
+    try std.testing.expect((try validate_text(&p.program, p.root, p.arena.allocator())) == null);
 }

@@ -30,7 +30,7 @@
 | S0 | 文档先行 | 声明 HIR 接缝与 pass 顺序；开 PROGRESS | done（本次提交） |
 | S1 | hir.zig 结构 | arena 句柄/容器 + 注册表骨架 + 白盒 | done（本次提交） |
 | S2 | 文本 printer/parser | 前缀括号文本、binder 确定性编号、round-trip | done（本次提交） |
-| S3 | 结构 validator | hir.md §10.1 第一级 | pending |
+| S3 | 结构 validator | hir.md §10.1 第一级 | done（本次提交） |
 | S4 | AST→HIR builder | M1a 主件；CFG 行为不变 | pending |
 | S5 | HIR→CFG + 等价门禁 | toggle + 字节差分 | pending |
 | S6 | 全量覆盖 + 默认翻转 | 删除直降路径 | pending |
@@ -105,12 +105,50 @@
 - 发现 cfg 先例：AIR 文本成员用显式数字下标（`load_member %v, #3`）；hir §4.4 缩写形
   态与 token 集均未定义成员身份 → 按用户决策推迟，报错保护，S4 定成员文本表达。
 
-### S3 — 结构 validator（pending）
+### S3 — 结构 validator（done）
 
-- 文件：`hir_validate.zig`。
-- 校验：作用域 / init 排除 / 不捕获 / 树形无 DAG / 无重复 BinderId / full-expr 归属
-  （§10.1 第一级，效果分析关闭时）。
-- 验收：对 S2 解析结果与 S4 构建结果跑校验；恶意文本（越界引用、共享子树）被拒。
+- `passes/hir_validate.zig`（新建，`validate(program, root, allocator) !?[]const u8`，
+  cfg_validate 约定：null=通过，否则首违例消息）：**迭代**遍历（显式 worklist，天然
+  免疫深层恶意 arena 的栈溢出），从给定 root 校验可达树、不要求 arena 全可达（S4 多
+  函数 root 扩展点已在文件头注明）。
+- 校验项（对照 §10.1 第一级，效果分析关闭）：
+  - 边界先行：每个 expr/region/binder/pattern id 与 operand/region/param range 先查
+    界再索引，恶意 arena 不崩溃；
+  - 树形无 DAG（§3.7）：同一 ExprId 两次出现（共享子树 / 回环）即拒；region 唯一
+    属主；pattern 可跨 arm 共享但 pattern 环拒（0/1/2 状态 DFS）；
+  - 作用域（§5.3）：`local` 沿词法 region 祖先链解析，**λ region 即函数边界**（自身
+    params 可用、不可外穿 → 不捕获）；let init 在 let 所在 ctx 求值、天然够不着自己
+    的 region params → **init 排除结构性成立**；
+  - 无重复 BinderId：同一 binder 至多是一个 region 的 param（含同 region 内重复）；
+  - region/pattern 形状：let region 恰 1 个 binder、if region 0 个、pattern 只出现在
+    match arm；arm pattern 绑定叶（bind/type_test）与 arm region params **双射**；
+    无 pattern 的 arm 不得带 params；
+  - payload/op 配对（S1 注释点名的 S3 职责）+ descriptor operand/region 元数 +
+    op id 界；
+  - full_expr / sema 只查**归属界**（membership-only：FullExpr 在 M1a 是身份记录，
+    生命周期边界/清理登记序/跨边界改写是 SEG/lowering 层职责——不越权，无清理机制）。
+- 测试（属主 white-box，15 个）：§4.7 三 golden + §8.7 片段 parse 后通过；shadowing /
+  嵌套 let / if 有无 else / 空 λ 通过；**capture 文本可 parse、被 validator 拒**
+  （`fn (B0) => fn (B1) => %B0`——parse 不设 λ 边界，validator 设）；sibling arm
+  漏 binder 拒；DAG 共享 operand / 自环 / region 双属主拒；单 region 重复 binder 拒；
+  let init 引用自身 binder 拒；OOB id / range 越界（含 root 越界、operand id 不存、
+  range 超缓冲）拒；payload 错配 / 元数错拒；full_expr、sema 越界拒；arm pattern 与
+  params 失配拒；pattern 出现在非 arm region 拒；pattern 环拒；let/if region 参数数
+  规则拒。
+- 验收：`zig build test` 非增量全绿 exit=0（~1047 tests，含 hir_validate 的 15——
+  临时失败断言点名 `passes.hir_validate.test.*` 证明收集后移除）；`zig build
+  -fincremental test` 绿；`zig fmt --check src/` 绿。
+- 限制（记录在案）：full-expr 只查归属界；ownership/effect 数据流与 SEG 相关不变量
+  不在本档；S4 构建产物复验同入口。
+- 栅栏：无 `EffectSummary`/`effect_transfer`/`seg_*` 落盘。
+
+#### S3 过程记录（风险）
+
+- 首次 `zig build -fincremental test` 出现一次 ~15 分钟空转无输出（无新 test 二进制
+  产出）；重启后正常（~3 分钟编译 + 秒级测试）。原因未定，怀疑增量 listener 卡死；
+  后续轮次均正常，无代码关联证据。中途两轮编译错误为返回类型可选包/error-union
+  再包问题（`return self.fail(...)` 不隐式剥 error-union 包 optional；改为捕获后
+  `return msg;`），已记录。
 
 ### S4 — AST→HIR builder（pending）
 
@@ -169,3 +207,4 @@
 | 2026-09-08 | S0 | docs(hir) S0 提交 | 声明 M1a 接缝（passes.md/frontend.md/architecture.md/README.md）+ 开 PROGRESS |
 | 2026-09-08 | S1 | 本次 docs(hir) S1 提交 | hir.zig 数据骨架 + root.zig 导出 + 7 白盒测试；docs 措辞更新为「S1 数据已落地、阶段未接线」 |
 | 2026-09-08 | S2 | 本次 feat(hir) S2 提交 | passes/hir_parse.zig + hir_print.zig；hir.zig SerCtx/mul.i32/再导出/强制分析测试；§4.7/§8.7 golden round-trip + binder 重编号 + #refs 字典；成员身份文本推迟（用户批准） |
+| 2026-09-08 | S3 | 本次 feat(hir) S3 提交 | passes/hir_validate.zig 结构校验（§10.1 第一级）+ hir.zig 再导出/强制分析测试扩为三 pass；15 白盒测试（含 parse 可过、validator 必拒的 capture 文本）；验收 = 全套 ~1047 tests 绿 |
