@@ -55,6 +55,37 @@ invariant the next one relies on:
 | checker | annotated `ast.Program` per module | every expression, binding, and type use is annotated (name, type, ownership, expression); the program is fully monomorphic and statically correct |
 | CFG lowering | CFG-based `IrModule` / `IrFunc` | control flow and value flow are explicit; every host binding call is a system call; every intrinsic use is ordinary AIR |
 
+**Target, not implemented: the HIR seam.** The pipeline above is exactly
+what runs today. [hir.md](hir.md) §11 (M1a) registers a planned
+structural-HIR stage between the checker and CFG lowering — a
+semantics-preserving seam whose milestone acceptance is that the
+existing suites still pass with equivalent AIR (hir.md §10.3). The seam
+is not wired: no HIR code exists yet, and the CFG lowering keeps
+consuming the annotated AST directly. Target shape:
+
+```text
+annotated AST  (monomorphic; all static checks passed)
+    │
+    │  HIR construction   AST → canonical monomorphic HIR: binder/region/
+    │                     pattern normalization, full-expression fences;
+    │                     effect analysis disabled (M1a)
+    ▼
+canonical HIR
+    │
+    │  structural validation   scope / no-capture / tree shape (no DAG) /
+    │                          no duplicate BinderId / full-expr fence
+    ▼
+validated HIR
+    │
+    │  HIR → CFG lowering   into today's block/value/drop machinery;
+    │                       replaces the direct AST → CFG expression lowering
+    ▼
+CFG AIR  →  optimizer  →  drop lowering  →  LLIR backend  →  runtime
+```
+
+The staged pass order for the seam (build → validate → lower, plus the
+planned text form and test files) is registered in [passes.md](passes.md).
+
 ## 2. Inputs, outputs, and pipeline contract
 
 **Inputs**
@@ -149,8 +180,8 @@ Each stage has its own detailed document:
 The pipeline is implemented in **passes** — one pass file per concern
 under `src/passes/` (drivers re-exported through the owning top-level
 module). The complete ordered inventory lives in
-[passes.md](passes.md); every pass is implemented and covered by
-`zig build test`.
+[passes.md](passes.md); every pass of the **current** pipeline is
+implemented and covered by `zig build test`.
 
 - [x] **Lexer, parser, AST** (`src/lex.zig`, `src/parser.zig`,
       `src/ast.zig`).
@@ -182,6 +213,14 @@ module). The complete ordered inventory lives in
       boxes (`builtin#unbox` + contained drop), and unions (`read_tag` +
       `switch`); only opaque, `hostdata`, `list`, and `any` drops reach the
       runtime. Runs after the optimizer, before the final AIR round-trip.
+
+- [ ] **HIR seam (planned, M1a)** — canonical monomorphic HIR between the
+      checker and CFG lowering ([hir.md](hir.md) §11): data structures
+      (`hir.zig`), AST→HIR construction (`hir_build.zig`), structural
+      validation (`hir_validate.zig`), and HIR→CFG lowering
+      (`hir_lower.zig`) reusing the `lower.zig` / `cfg_lower_emit.zig`
+      machinery. Effect analysis disabled in this milestone; no HIR code
+      is wired yet.
 
 ### Backend: CFG → LLIR
 

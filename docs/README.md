@@ -42,6 +42,14 @@ without being indexed as implementation documentation.
 | [hir.md](hir.md) | a proposed HIR stage between the checker and CFG lowering, plus a restricted SEG view (design proposal) |
 | [effects.md](effects.md) | a proposed effect-semantics model driving optimizer/SEG legality queries (design proposal) |
 
+`hir.md` is also the registered implementation target for the **M1a
+milestone** (hir.md §11): a structural, monomorphic HIR seam between the
+checker and CFG lowering with effect analysis disabled. The seam is
+registered as *planned* in [passes.md](passes.md) and
+[frontend.md](frontend.md); **no HIR code is wired** — the built pipeline
+still lowers the annotated AST straight to CFG AIR. effects.md remains a
+pure proposal.
+
 ## Reading order
 
 New to the repository: [architecture.md](architecture.md) →

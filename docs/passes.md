@@ -41,6 +41,30 @@ Driver: `checker.Checker.check(graph)`. Sequence:
 
 Detail: [checker.md](checker.md).
 
+## HIR seam — planned, M1a (not implemented)
+
+> Status: **design target only.** No HIR code is wired; the checker's
+> output still feeds the CFG lowering directly (next section), and this
+> section documents the target order of [hir.md](hir.md) §11 M1a. When
+> the seam lands, the CFG lowering consumes HIR instead of the annotated
+> AST; the proposed files below are marked (planned) until then.
+
+Target order: checker → AST→HIR construction → structural validation →
+HIR→CFG lowering (into today's block/value/drop machinery).
+
+| Pass | File (planned) | Job (planned) |
+| --- | --- | --- |
+| build | `hir_build.zig` (data structures in `hir.zig`) | annotated AST + module graph → canonical monomorphic HIR: binder / region / pattern normalization, full-expression fences, ownership view carried over from the checker; effect analysis disabled (M1a) |
+| validate | `hir_validate.zig` | structural HIR invariants only: scope, no capture, tree shape (no DAG), no duplicate BinderId, full-expression fence (hir.md §10.1) |
+| lower | `hir_lower.zig` | HIR → CFG AIR, reusing the existing `lower.zig` / `cfg_lower_emit.zig` block, value, and drop mechanisms; replaces today's direct AST → CFG expression lowering |
+
+A planned canonical text form (`hir_print.zig` / `hir_parse.zig`,
+re-exported through `hir.zig`) mirrors `cfg_print` / `cfg_parse` for
+round-trip tests; black-box equivalence tests live in the planned
+`hir_tests.zig` (hir.md §10.2–§10.3).
+
+Detail: [hir.md](hir.md) (M1a; design document).
+
 ## CFG lowering (lower.zig)
 
 Driver: `lower.lowerProgram` (cfg_lower_program.zig). Sequence:
