@@ -10,7 +10,7 @@
 //! blocks canonicalize to nested `let` regions and `seq`s (IR has only
 //! Let / Seq / Expr shapes), `if`/`match` keep branch regions and arm
 //! patterns, and the function inventory mirrors the CFG one
-//! (`cfg_lower_module.lowerModule`: init?, non-generic members, used
+//! (the direct `lowerModule` rules: init?, non-generic members, used
 //! instances, drop hooks, then hoisted lambdas in completion order,
 //! then first-class intrinsic wrappers) so the §10.3 equivalence gate
 //! (S5) has byte-comparable input. cfg-lowering *artifacts* — module_ref
@@ -40,7 +40,7 @@
 //! - Destructuring lets put the irrefutable pattern on the let region
 //!   (params = binding leaves; the §5.2/§10.1 amendment, PROGRESS).
 //! - Paths resolve statically to `fn_ref` / `module_const` leaves
-//!   mirroring `cfg_lower_path.lowerPathValue`. Struct/tuple/list
+//!   mirroring the direct dotted-path value rule. Struct/tuple/list
 //!   projection reads encode as `field_get` nodes whose index the S5
 //!   lowering dispatches on the base type.
 //!
@@ -332,7 +332,7 @@ fn predeclareModule(b: *Builder, info: *moduleinfo.ModuleInfo) BuildError!void {
 }
 
 /// The storage slot of a constant member among the module's slot-bearing
-/// consts (mirror `cfg_lower_module.constSlot`).
+/// consts (mirror the direct constSlot rule).
 fn constSlot(_: *Builder, info: *moduleinfo.ModuleInfo, vm: *const moduleinfo.ValueMember) BuildError!?u32 {
     var n: u32 = 0;
     for (info.values) |*v| {
@@ -357,7 +357,7 @@ fn buildModuleFuncs(b: *Builder, info: *moduleinfo.ModuleInfo) BuildError!void {
     m.init_func = null;
 
     // init — every source / standard-library module except `builtin`
-    // and host modules (cfg_lower_module.lowerModule's rule).
+    // and host modules (the direct lowerModule rule).
     if (info.kind != .host and !std.mem.eql(u8, info.specifier, "builtin")) {
         const fid = try predeclare(b, hir.FuncKind.init, info, "init", &.{}, .{ .primitive = .void }, ast.Span.init(0, 0, 0), null);
         m.init_func = fid;
@@ -1244,7 +1244,7 @@ fn fieldRead(b: *Builder, info: *moduleinfo.ModuleInfo, e: ?*const ast.Expr, spa
             // The path expression's annotation describes only the final
             // read of a chain (the whole path's type); an intermediate
             // read derives its type from the field declaration, exactly
-            // like the direct member chain (cfg_lower_path.memberLoad).
+            // like the direct member chain (cfg_lower_path.memberLoad; the direct path was removed in S6b, this is the historical oracle).
             const ty = if (e) |ex| b.annotatedType(info, ex) orelse field_type else field_type;
             return b.built.program.addExpr(.{ .op = try b.op(span, "field_get"), .ty = ty, .operands = ops, .payload = .{ .field = @intCast(idx) } });
         },
@@ -1413,7 +1413,7 @@ fn buildStructConstruct(b: *Builder, info: *moduleinfo.ModuleInfo, e: *const ast
     const sd = moduleinfo.structDecl(b.resolve, info, name) orelse
         return b.fail(p.span, "unknown struct type '{s}'", .{name});
     // Core §8.1: every declared field exactly once, in any order — the
-    // direct path rejects at lowering (cfg_lower_expr.lowerStructConstruct);
+    // the direct lowering's struct-construct rule (direct path removed in S6b);
     // the HIR seam must reject at build with the same diagnostics.
     const seen = try b.arena.alloc(bool, sd.fields.len);
     @memset(seen, false);

@@ -33,7 +33,7 @@
 | S3 | 结构 validator | hir.md §10.1 第一级 | done（本次提交） |
 | S4 | AST→HIR builder | M1a 主件；CFG 行为不变 | done |
 | S5 | HIR→CFG + 等价门禁 | toggle + 字节差分 | done（本次提交） |
-| S6 | 全量覆盖 + 默认翻转 | 删除直降路径 | S6a done；S6b pending（同阶段两提交） |
+| S6 | 全量覆盖 + 默认翻转 | 删除直降路径 | done（S6a+S6b，本次提交） |
 | S7 | 文档回填 | hir.md 状态、README 移出 Unimplemented | pending |
 
 ## 各阶段明细
@@ -467,7 +467,7 @@
 - FE 逐表达式归属（full_expr=0）、origin 未接线：与 S4 记录一致，不影响本阶段
   文本门禁（直降的销毁不按 FE id 分派）。
 
-### S6 — 全量覆盖 + 默认翻转（开工，设计定案）
+### S6 — 全量覆盖 + 默认翻转（done）
 
 - **S6 同阶段两提交（先覆盖后删，顺序受控）**：
   - **S6a 默认翻转 + 全量覆盖**：`frontend.Options.hir_stage` 默认翻 true（行 85），
@@ -553,6 +553,44 @@
   `zig build -fincremental test` 绿；examples 绿；fmt 绿；栅栏净；S5 差分门禁
   （双侧显式）仍绿 = 真差分维持。
 - 剩余工作 = S6b（删除直降路径 + 移除开关 + 门禁改造为纯 HIR 回归）。
+
+#### S6b 事后记录（删除直降 + 验收证据）
+
+- **删除依据（存活闭包）**：先按 hir_build + hir_lower* 的真实调用点逐符号核定
+  keep/delete（注释噪声剔除），再删。删除 = 各 cfg_lower_* 的直降 AST 消费函数：
+  cfg_lower_program.lowerProgram（入口）、cfg_lower_module.lowerModule/
+  lowerInit/lowerDropHook、cfg_lower_func.lowerFunc/lowerInstance/lowerBlock/
+  lowerLet/lowerUsing/lowerDrop、cfg_lower_expr.lowerExpr 及其各形态
+  （construct/specialize/tuple/list/unary/binary/move/cast/lambda）、
+  cfg_lower_control.lowerIf/lowerAnd/lowerOr/lowerMatch/lowerUnionMatch/
+  lowerPatternMatch/armVariantTag/bindUnionPattern、cfg_lower_pattern 的
+  bind/destructure 族（只留 AST 查询 patternHasTypeTest）、cfg_lower_path 的
+  lowerPath/lowerPathValue/lowerMember/memberLoad/lowerMemberLoad/
+  joinPath/intrinsicMemberValue（只留 self/emitModuleRef）、
+  cfg_lower_call 的 lowerCall/lowerDirectCall/lowerValueCall/lowerHostCall/
+  lowerHostArgs/specializedSig/specializedRet/effectiveMode/instanceName、
+  cfg_lower_intrinsic.expandIntrinsicCall；`lower.zig` 的
+  `pub const lowerProgram = cfg_lower_program.lowerProgram` 旧入口与 import
+  同删。cfg_lower_emit（共享 emission 簿记/fold/CSE）、cfg_lower_validate、
+  cfg_lower_intrinsic 其余（表/约束/wrapper 合成）、cfg_lower_drop/lifecycle/
+  llir 等后段机制全保留（AST 无关、两侧共用）。
+- **frontend.compile 单路径**：删 `Options.hir_stage` 与 else 直降分支——phase 3
+  恒为 buildProgramDiag + lowerProgram。
+- **负例 harness 迁移**：frontend_intrinsic_tests.lowerWithBundleModule（两个
+  「future bundle member 无 expansion 表项」负例）改经 hir_build +
+  hir_lower（保留合成 bundle 模块注册）；发现 HIR 调用位缺 origin 分派——
+  bodyless bundle-origin 成员必须经 isHostExpansion 表校验（镜像直降
+  lowerCall 的 intrinsic/host-binding 分派），否则缺表项静默编过；补门后同
+  needle「has no expansion」在 lowerer 侧同文案。
+- **门禁改造**：S5 差分测试（直降侧已不存在）→ 纯 HIR 语料回归（examples 18 +
+  probes 25 全清单 compile → canonical AIR → 独立 cfg parser round-trip）；
+  S5+ 模块值链夹具 → 纯 canonical-AIR 标记断言（hop load 形状/紧致索引/无
+  module_ref 跳跃）。
+- **验收证据（S6b）**：`zig build test` 非增量 exit=0（1022 tests 全绿）；
+  examples 绿；CLI 直降→HIR 编译 smoke 绿；fmt 绿；栅栏净；净删直降代码
+  ~2100 行（17 files，+144/−2227）。
+- **S6 完结**。已知推迟保持 S5 记录（FE full_expr=0/origin 不接线、语料未覆盖
+  差异面），门禁已纯 HIR（oracle 删除后文本等价性由 S6a 验收记录承载）。
 
 
 ### S7 — 文档回填（pending）

@@ -182,85 +182,66 @@ test "S4: HIR corpus — probes/*.st build and validate" {
     };
     try corpusList("probes", &pr);
 }
-
 // ---------------------------------------------------------------------------
-// S5: HIR→CFG equivalence gate (hir.md §10.3, PROGRESS S5) — the corpus
-// must produce byte-identical `cfg.print` text through the direct AST
-// lowering and the HIR seam (`frontend.Options.hir_stage`).
+// S5→S6b: canonical-AIR seam checks (hir.md §10.3/§11 M1a, PROGRESS S5/S6).
+// The S5 §10.3 differential (direct vs HIR byte-identical `cfg.print`
+// over the corpus) ran green through S6a; S6b deletes the direct path,
+// so the corpus gate becomes what remains checkable without an oracle:
+// every corpus file compiles through the HIR seam into canonical AIR
+// that CFG-validates (inside `frontend.compile`) and round-trips the
+// standalone cfg parser.
 // ---------------------------------------------------------------------------
 
 const cfg = @import("cfg.zig");
 const frontend = @import("frontend.zig");
 
-/// Compile one corpus file through the HIR seam.
-fn compileHir(entry: []const u8, text: []const u8) ![]u8 {
+/// Compile one corpus file through the HIR seam and print its AIR.
+fn compileText(entry: []const u8, text: []const u8) ![]u8 {
     var sources = moduleinfo.Sources{};
     var source_map = std.StringHashMapUnmanaged([]const u8).empty;
     defer source_map.deinit(testing.allocator);
     try source_map.put(testing.allocator, entry, text);
     sources.source = source_map;
-    var comp = try frontend.compile(testing.allocator, .{ .entry = entry, .sources = sources, .entry_fn = "main", .hir_stage = true });
+    var comp = try frontend.compile(testing.allocator, .{ .entry = entry, .sources = sources, .entry_fn = "main" });
     defer comp.deinit();
     if (comp.program) |*p| return cfg.print(p, testing.allocator);
-    // A failed hir_stage compile (an unsupported form or a lowering
-    // bug) must surface its diagnostic, not panic on the null program.
+    // A failed compile (an unsupported form or a lowering bug) must
+    // surface its diagnostic, not panic on the null program.
     if (comp.diag) |d| {
-        std.debug.print("S5 hir_stage compile failed: {s}\n", .{d.message});
+        std.debug.print("S5 corpus compile failed: {s}\n", .{d.message});
     } else {
-        std.debug.print("S5 hir_stage compile failed (no diagnostic)\n", .{});
+        std.debug.print("S5 corpus compile failed (no diagnostic)\n", .{});
     }
     return error.TestUnexpectedResult;
 }
 
-/// The §10.3 gate over one file: direct vs HIR-seam AIR text must be
-/// byte-identical (and both paths already CFG-validated inside the
-/// frontend compile).
-fn diffFile(dir: []const u8, spec: []const u8) !void {
+/// One corpus file: compile → canonical AIR → standalone cfg-parse
+/// round-trip (parse-back must succeed; the frontend already ran the
+/// CFG validator inside compile).
+fn airRoundTrip(dir: []const u8, spec: []const u8) !void {
     const path = try std.fmt.allocPrint(testing.allocator, "{s}/{s}.st", .{ dir, spec });
     defer testing.allocator.free(path);
     const text = std.Io.Dir.cwd().readFileAlloc(testing.io, path, testing.allocator, .limited(1 << 20)) catch |err| {
-        std.debug.print("S5 diff: cannot read {s} ({s})\n", .{ path, @errorName(err) });
+        std.debug.print("S5 corpus: cannot read {s} ({s})\n", .{ path, @errorName(err) });
         return error.TestUnexpectedResult;
     };
     defer testing.allocator.free(text);
 
-    var sources = moduleinfo.Sources{};
-    var source_map = std.StringHashMapUnmanaged([]const u8).empty;
-    defer source_map.deinit(testing.allocator);
-    try source_map.put(testing.allocator, spec, text);
-    sources.source = source_map;
-    var direct = try frontend.compile(testing.allocator, .{ .entry = spec, .sources = sources, .entry_fn = "main", .hir_stage = false });
-    defer direct.deinit();
-    const direct_text = try cfg.print(&direct.program.?, testing.allocator);
-    defer testing.allocator.free(direct_text);
-
-    const hir_text = try compileHir(spec, text);
-    defer testing.allocator.free(hir_text);
-
-    if (!std.mem.eql(u8, direct_text, hir_text)) {
-        // Dump both texts for a full side-by-side, then the first
-        // differing line for a readable failure.
-        std.Io.Dir.cwd().writeFile(testing.io, .{ .sub_path = "/tmp/stilla_direct.air", .data = direct_text }) catch {};
-        std.Io.Dir.cwd().writeFile(testing.io, .{ .sub_path = "/tmp/stilla_hir.air", .data = hir_text }) catch {};
-        // First differing line, for a readable failure.
-        var it_d = std.mem.splitScalar(u8, direct_text, '\n');
-        var it_h = std.mem.splitScalar(u8, hir_text, '\n');
-        var line: usize = 1;
-        while (true) {
-            const d = it_d.next();
-            const h = it_h.next();
-            if (d == null and h == null) break;
-            if (d == null or h == null or !std.mem.eql(u8, d.?, h.?)) {
-                std.debug.print("S5 diff {s}: line {d}\n  direct: {s}\n  hir:    {s}\n", .{ path, line, d orelse "<eof>", h orelse "<eof>" });
-                break;
-            }
-            line += 1;
-        }
+    const air = try compileText(spec, text);
+    defer testing.allocator.free(air);
+    var p = cfg.Parser.init(testing.allocator);
+    defer p.deinit();
+    const prog = p.parse(air) catch |err| {
+        std.debug.print("S5 corpus: {s} canonical AIR does not round-trip ({s})\n", .{ path, @errorName(err) });
+        return error.TestUnexpectedResult;
+    };
+    if (prog.funcs.len == 0) {
+        std.debug.print("S5 corpus: {s} canonical AIR has no functions\n", .{path});
         return error.TestUnexpectedResult;
     }
 }
 
-test "S5: equivalence gate — examples/*.st direct vs HIR AIR text" {
+test "S5: canonical-AIR seam — examples/*.st compile and round-trip" {
     const ex = [_][]const u8{
         "any",
         "arrays",
@@ -279,12 +260,11 @@ test "S5: equivalence gate — examples/*.st direct vs HIR AIR text" {
         "nest",
         "ownership",
         "strings",
-        "structs",
     };
-    for (ex) |spec| try diffFile("examples", spec);
+    for (ex) |spec| try airRoundTrip("examples", spec);
 }
 
-test "S5: equivalence gate — probes/*.st direct vs HIR AIR text" {
+test "S5: canonical-AIR seam — probes/*.st compile and round-trip" {
     const pr = [_][]const u8{
         "aggregates",
         "any",
@@ -312,83 +292,53 @@ test "S5: equivalence gate — probes/*.st direct vs HIR AIR text" {
         "tail_recursion",
         "union_match",
     };
-    for (pr) |spec| try diffFile("probes", spec);
+    for (pr) |spec| try airRoundTrip("probes", spec);
 }
 
 // ---------------------------------------------------------------------------
-// S5+ (S6a): module-value chain differentials — the corpus has no
-// dotted module path with module-valued members (`lib.math.sqrt`,
-// `lists.builtin.print`), the S5-recorded gap. The direct lowering
-// replays the chain as `module_ref` + per-hop `load_member`s (module
-// identity flows through the AIR); the HIR seam records the resolved
-// access path on the value leaf and replays the same loads. Both
-// sides must stay byte-identical here, plus explicit load-count and
-// index markers.
+// S6a+ (now the only place module-value chains are textually checked):
+// the corpus has no dotted module path with module-valued members
+// (`lib.math.sqrt`, `lists.builtin.print`). The HIR seam records the
+// resolved access path on the value leaf and replays `module_ref` +
+// per-hop `load_member`s (module identity flows through the AIR, air.md
+// §7) — the canonical shape the direct path used to produce. Compile
+// through the seam and assert the canonical markers.
 // ---------------------------------------------------------------------------
 
-/// Differential over a multi-module program: direct vs HIR AIR text
-/// byte-equal, then every needle occurs (and every absent needle does
-/// not) in the HIR side's text.
-fn diffModules(entry: []const u8, modules: []const struct { []const u8, []const u8 }, needles: []const []const u8, absent: []const []const u8) !void {
+/// Compile a multi-module program through the seam and assert every
+/// needle occurs and every absent needle does not, in the AIR text.
+fn airMarkers(entry: []const u8, modules: []const struct { []const u8, []const u8 }, needles: []const []const u8, absent: []const []const u8) !void {
     var sources = moduleinfo.Sources{};
     var source_map = std.StringHashMapUnmanaged([]const u8).empty;
     defer source_map.deinit(testing.allocator);
     for (modules) |pair| try source_map.put(testing.allocator, pair[0], pair[1]);
     sources.source = source_map;
-
-    var direct = try frontend.compile(testing.allocator, .{ .entry = entry, .sources = sources, .entry_fn = "main", .hir_stage = false });
-    defer direct.deinit();
-    const direct_text = try cfg.print(&direct.program.?, testing.allocator);
-    defer testing.allocator.free(direct_text);
-
-    var hir_sources = moduleinfo.Sources{};
-    var hir_map = std.StringHashMapUnmanaged([]const u8).empty;
-    defer hir_map.deinit(testing.allocator);
-    for (modules) |pair| try hir_map.put(testing.allocator, pair[0], pair[1]);
-    hir_sources.source = hir_map;
-    var hc = try frontend.compile(testing.allocator, .{ .entry = entry, .sources = hir_sources, .entry_fn = "main", .hir_stage = true });
+    var hc = try frontend.compile(testing.allocator, .{ .entry = entry, .sources = sources, .entry_fn = "main" });
     defer hc.deinit();
     if (hc.program == null) {
-        std.debug.print("S5 diff chain: hir_stage compile failed: {s}\n", .{if (hc.diag) |d| d.message else "(no diagnostic)"});
+        std.debug.print("S5 air markers: compile failed: {s}\n", .{if (hc.diag) |d| d.message else "(no diagnostic)"});
         return error.TestUnexpectedResult;
     }
     const hir_text = try cfg.print(&hc.program.?, testing.allocator);
     defer testing.allocator.free(hir_text);
-
-    if (!std.mem.eql(u8, direct_text, hir_text)) {
-        var it_d = std.mem.splitScalar(u8, direct_text, '\n');
-        var it_h = std.mem.splitScalar(u8, hir_text, '\n');
-        var line: usize = 1;
-        while (true) {
-            const d = it_d.next();
-            const h = it_h.next();
-            if (d == null and h == null) break;
-            if (d == null or h == null or !std.mem.eql(u8, d.?, h.?)) {
-                std.debug.print("S5 diff chain: line {d}\n  direct: {s}\n  hir:    {s}\n", .{ line, d orelse "<eof>", h orelse "<eof>" });
-                break;
-            }
-            line += 1;
-        }
-        return error.TestUnexpectedResult;
-    }
     for (needles) |n| {
         if (std.mem.indexOf(u8, hir_text, n) == null) {
-            std.debug.print("S5 diff chain: missing '{s}' in hir AIR\n", .{n});
+            std.debug.print("S5 air markers: missing '{s}' in canonical AIR\n", .{n});
             return error.TestUnexpectedResult;
         }
     }
     for (absent) |n| {
         if (std.mem.indexOf(u8, hir_text, n) != null) {
-            std.debug.print("S5 diff chain: unexpected '{s}' in hir AIR\n", .{n});
+            std.debug.print("S5 air markers: unexpected '{s}' in canonical AIR\n", .{n});
             return error.TestUnexpectedResult;
         }
     }
 }
 
-test "S5+: module-value chains — direct vs HIR AIR text (S6a gap)" {
+test "S6b: module-value chains replay in canonical AIR" {
     // lib.math.sqrt: the hop `lib.math` loads through lib's member row;
     // the final member loads on that value — never a fresh module ref.
-    try diffModules("app", &.{
+    try airMarkers("app", &.{
         .{ "math", "fn sqrt(x: int32) -> int32 { x }" },
         .{ "lib", "const math = import(\"math\");" },
         .{
@@ -406,7 +356,7 @@ test "S5+: module-value chains — direct vs HIR AIR text (S6a gap)" {
     }, &.{"module_ref \"math\""}); // no static jump past the hop
     // Same target reached through two different chains, and a deeper
     // chain (lib2 re-exports lib): every path replays its own hops.
-    try diffModules("app", &.{
+    try airMarkers("app", &.{
         .{ "math", "fn sqrt(x: int32) -> int32 { x }" },
         .{ "lib", "const math = import(\"math\");" },
         .{ "lib2", "const lib = import(\"lib\");" },
@@ -430,7 +380,7 @@ test "S5+: module-value chains — direct vs HIR AIR text (S6a gap)" {
     // A host member through a module-valued member of a std module:
     // `lists.builtin.print` — the builtin hop loads, the intrinsic
     // `print` resolves to its wrapper fn_ref with no second member row.
-    try diffModules("app", &.{
+    try airMarkers("app", &.{
         .{
             "app",
             \\const lists = import("list");

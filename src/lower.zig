@@ -35,7 +35,6 @@ const ast = @import("ast.zig");
 const cfg = @import("cfg.zig");
 const checker = @import("passes/checker.zig");
 const moduleinfo = @import("moduleinfo.zig");
-const cfg_lower_program = @import("passes/cfg_lower_program.zig");
 const cfg_lower_drop = @import("passes/cfg_lower_drop.zig");
 const cfg_lower_llir = @import("passes/cfg_lower_llir.zig");
 const llir_alloc = @import("passes/llir_alloc.zig");
@@ -200,7 +199,6 @@ pub const Lowerer = struct {
 // Entry points (frontend.md §2, optimizer.md)
 // -----------------------------------------------------------------
 
-pub const lowerProgram = cfg_lower_program.lowerProgram;
 /// The CFG → LLIR lowering driver (`Builder.lowerLlir`): twelve named
 /// stages run in this fixed order; each has one named input/output
 /// contract (full table: frontend.md, "Backend: CFG → LLIR").

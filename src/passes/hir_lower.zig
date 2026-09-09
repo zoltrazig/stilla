@@ -136,7 +136,7 @@ pub fn lowerProgram(self: *Lowerer, built: *hir.BuiltProgram) LowerError!cfg.IrP
 /// Lower one module: `@init`, every function record in cfg emission
 /// order (the record table *is* that order — see hir_build's
 /// `buildModuleFuncs`), then slots and the member table, mirroring
-/// `cfg_lower_module.lowerModule` row for row.
+/// the direct `lowerModule` rules row for row.
 fn lowerModuleHir(self: *Lowerer, built: *hir.BuiltProgram, bm: *const hir.BuiltModule, info: *moduleinfo.ModuleInfo) LowerError!*cfg.IrModule {
     const m = try self.arena.create(cfg.IrModule);
     var funcs = std.ArrayList(*cfg.IrFunc).empty;

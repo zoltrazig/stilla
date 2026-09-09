@@ -18,6 +18,8 @@ const checker = @import("passes/checker.zig");
 const cfg_lower_llir = @import("passes/cfg_lower_llir.zig");
 const llir_validate = @import("passes/llir_validate.zig");
 const module_load = @import("passes/module_load.zig");
+const hir_build = @import("passes/hir_build.zig");
+const hir_lower = @import("passes/hir_lower.zig");
 const parser = @import("parser.zig");
 const cfg_lower_intrinsic = @import("passes/cfg_lower_intrinsic.zig");
 const testing = std.testing;
@@ -984,10 +986,25 @@ fn lowerWithBundleModule(app_source: []const u8, fut_source: []const u8, needle:
         else => return err,
     };
 
-    var lowerer = lower.Lowerer.init(arena, graph, "main", true, &ck.annotation);
-    _ = lower.lowerProgram(&lowerer) catch |err| switch (err) {
+    // S6b: the frontend lowers exclusively through the HIR seam — build
+    // the canonical HIR from the checker output, then lower it. The
+    // diagnostic may surface from either stage (builder or lowerer).
+    var bdiag: moduleinfo.Diag = undefined;
+    const built = hir_build.buildProgramDiag(arena, graph, &ck.annotation, &bdiag) catch |err| switch (err) {
         error.Diagnostic => {
-            try testing.expect(std.mem.indexOf(u8, lowerer.diag.?.message, needle) != null);
+            const msg = if (bdiag.message.len > 0) bdiag.message else "(HIR build failed)";
+            if (std.mem.indexOf(u8, msg, needle) == null) std.debug.print("bundle diag (build): {s}\n", .{msg});
+            try testing.expect(std.mem.indexOf(u8, msg, needle) != null);
+            return;
+        },
+        else => return err,
+    };
+    var lowerer = lower.Lowerer.init(arena, graph, "main", true, &ck.annotation);
+    _ = hir_lower.lowerProgram(&lowerer, built) catch |err| switch (err) {
+        error.Diagnostic => {
+            const msg = if (lowerer.diag) |d| d.message else "(lowering failed, no diagnostic)";
+            if (std.mem.indexOf(u8, msg, needle) == null) std.debug.print("bundle diag (lower): {s}\n", .{msg});
+            try testing.expect(std.mem.indexOf(u8, msg, needle) != null);
             return;
         },
         else => return err,

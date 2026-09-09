@@ -74,16 +74,6 @@ pub const Options = struct {
     /// Code-only toggle (no CLI flag), like `optimize`; the default
     /// keeps the single ordered pass and its near-linear compile time.
     optimize_aggressive: bool = false,
-    /// Route phase 3 through the HIR seam (docs/hir.md §11 M1a): the
-    /// Lower through the HIR seam (docs/hir.md §11 M1a): the checker
-    /// output is first built into the canonical monomorphic HIR
-    /// (`hir_build.buildProgramDiag`) and then lowered to the CFG AIR by
-    /// `hir_lower.lowerProgram` instead of the direct annotated-AST
-    /// lowering. Default true since S6a — the whole suite is the §10.3
-    /// coverage experiment (byte-identical AIR text against the direct
-    /// path over the corpus, PROGRESS S5/S6a). Code-only toggle (no CLI
-    /// flag); S6b removes the option and the direct path entirely.
-    hir_stage: bool = true,
 };
 
 /// The frontend's output: the arena, the phase-1 graph, and the phase-3
@@ -192,12 +182,12 @@ pub fn compile(allocator: std.mem.Allocator, options: Options) CompileError!Comp
         else => return err,
     };
 
-    // Phase 3: CFG lowering — directly from the annotated AST, or
-    // through the HIR seam (`hir_stage`, docs/hir.md §11 M1a): the
-    // checker output is built into the canonical monomorphic HIR and
-    // lowered from there. Both paths share the same `Lowerer` shape.
+    // Phase 3: CFG lowering through the HIR seam (docs/hir.md §11 M1a):
+    // the checker output is built into the canonical monomorphic HIR
+    // (`hir_build.buildProgramDiag`) and lowered from there. S6b removed
+    // the direct annotated-AST lowering and the `hir_stage` toggle.
     var lowerer = lower.Lowerer.init(arena_alloc, graph, options.entry_fn, options.entry_fn_explicit, &ck.annotation);
-    var program = if (options.hir_stage) blk: {
+    var program = blk: {
         var bdiag: moduleinfo.Diag = undefined;
         const built = hir_build.buildProgramDiag(arena_alloc, graph, &ck.annotation, &bdiag) catch |err| switch (err) {
             error.Diagnostic => {
@@ -218,14 +208,6 @@ pub fn compile(allocator: std.mem.Allocator, options: Options) CompileError!Comp
             },
             else => return err,
         };
-    } else lower.lowerProgram(&lowerer) catch |err| switch (err) {
-        error.Diagnostic => {
-            // Lowering stays first-error (a lowering bug is one error);
-            // wrap the single diagnostic in the collected form.
-            const diag = lowerer.diag orelse return error.Diagnostic;
-            return failed(arena, &.{diag}, graph, builder.loaded_sources.items);
-        },
-        else => return err,
     };
 
     // The air.md §13 validator runs on every lowered program (Pass 6.1):

@@ -326,7 +326,7 @@ fn moduleConst(c: *Ctx, fs: *FuncState, id: hir.ExprId) LowerError!?*cfg.Value {
 /// Replay a value leaf's resolved module access path: `module_ref` of
 /// the first hop's module, then one `load_member` per hop with module
 /// identity recorded on each result — the direct
-/// `cfg_lower_path.lowerPathValue` chain (air.md §7). Returns the last
+/// the direct dotted-path chain (air.md §7). Returns the last
 /// hop's value (module-typed, identity = the final member's module);
 /// null when the node carries no path.
 fn hopChain(c: *Ctx, fs: *FuncState, id: hir.ExprId) LowerError!?*cfg.Value {

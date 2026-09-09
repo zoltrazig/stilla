@@ -155,41 +155,6 @@ pub fn constBits(module_spec: []const u8, member: []const u8) ?u32 {
     return null;
 }
 
-/// Expand an intrinsic call (dispatched from `cfg_lower_call` when the
-/// callee is a bodyless bundle declaration). Host-backed entries reuse
-/// the host-binding lowering verbatim — evaluation order, parameter
-/// modes, ownership transfers, and the specialized signature riding on
-/// the syscall are unchanged (air.md §8.2/§9.3). `builtin.str` and
-/// `builtin.hash` additionally enforce the Runtime §4.2/§4.9
-/// supported-type constraint on the specialized signature before the
-/// syscall is emitted. No entry → compile error before canonical AIR
-/// (Intrinsics §3).
-pub fn expandIntrinsicCall(
-    self: *Lowerer,
-    fs: *FuncState,
-    e: *const ast.Call,
-    target: moduleinfo.PathTarget,
-) LowerError!?*cfg.Value {
-    const vm = target.vm;
-    if (!isHostExpansion(target.module.specifier, vm.name.text)) {
-        return self.fail(e.span, "intrinsic '{s}.{s}' has no expansion", .{ target.module.specifier, vm.name.text });
-    }
-    // The str/hash constraint needs the specialized signature, which the
-    // arguments determine — so this path lowers the arguments itself and
-    // shares the emission tail with `lowerHostCall` rather than
-    // double-lowering them.
-    if (isConstrainedMember(target.module.specifier, vm.name.text)) {
-        const ha = (try cfg_lower_call.lowerHostArgs(self, fs, e, vm.type_.function)) orelse return null;
-        const sig_fn = try cfg_lower_call.specializedSig(self, fs, e, vm.type_, ha.arg_types);
-        try checkStrHashSignature(self, e.span, vm.name.text, sig_fn);
-        return try cfg_lower_call.emitHostCall(self, fs, e.span, target.module.specifier, vm.name.text, ha.args, sig_fn);
-    }
-    return try cfg_lower_call.lowerHostCall(self, fs, e, target);
-}
-
-/// True when `(module, member)` is one of the members whose generic type
-/// argument is constrained to the Runtime §4.2/§4.9 supported set
-/// (`builtin.str` / `builtin.hash`).
 pub fn isConstrainedMember(module_spec: []const u8, member: []const u8) bool {
     return std.mem.eql(u8, module_spec, "builtin") and
         (std.mem.eql(u8, member, "str") or std.mem.eql(u8, member, "hash"));

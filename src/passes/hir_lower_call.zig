@@ -144,10 +144,20 @@ fn hostCall(c: *Ctx, fs: *FuncState, id: hir.ExprId, callee_node: hir.ExprNode, 
     }
     // The syscall carries the EFFECTIVE modes (a `move` declared
     // parameter relaxed to `plain` for a Copy argument passed without
-    // an explicit `move`) — mirror cfg_lower_call.effectiveSig, so the
+    // an explicit `move`) — mirror the direct effectiveSig rule, so the
     // runtime and validator see the call-site transfer (the box/unbox
     // contract depends on it).
     const eff_sig = cfg.FunctionType{ .params = eff_params.items, .ret = sig_fn.ret };
+    // Origin-based dispatch (mirror the direct call dispatch, Intrinsics
+    // §2): a bodyless bundle-origin member is an intrinsic and must have
+    // an explicit expansion entry — a member with no table entry (a
+    // future bundle member) fails before canonical AIR. Any other
+    // bodyless declaration is a host binding (a system call).
+    const vm = owner.valueMember(host.name) orelse
+        return self.fail(no_span, "host binding '{s}.{s}' vanished", .{ owner.specifier, host.name });
+    if (owner.isIntrinsic(vm) and !cfg_lower_intrinsic.isHostExpansion(owner.specifier, host.name)) {
+        return self.fail(no_span, "intrinsic '{s}.{s}' has no expansion", .{ owner.specifier, host.name });
+    }
     // Bundle-intrinsic expansions apply their constraint checks; every
     // host call lowers to the same `syscall` emission either way.
     if (cfg_lower_intrinsic.isHostExpansion(owner.specifier, host.name)) {
@@ -158,7 +168,7 @@ fn hostCall(c: *Ctx, fs: *FuncState, id: hir.ExprId, callee_node: hir.ExprNode, 
     return cfg_lower_call.emitHostCall(self, fs, no_span, owner.specifier, host.name, args.items, eff_sig);
 }
 
-/// The effective argument mode (cfg_lower_call.effectiveMode over HIR
+/// The effective argument mode (the direct effectiveMode rule over HIR
 /// shapes): only a *move-mode* parameter can change — a unique one is
 /// always moved; a Copy one moves iff the argument was written `move`.
 fn effectiveMode(declared: ast.ParamMode, moving: bool, t: cfg.Type) ast.ParamMode {
