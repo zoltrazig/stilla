@@ -14,14 +14,18 @@ a declaration and no definition) to system calls.
 
 ## Overview
 
-CFG lowering lowers the annotated, monomorphic AST into a CFG-based AIR:
-functions become directed graphs of basic blocks over typed values, with
-explicit ownership operations and control flow. It is the last frontend
-stage and the runtime's input. The AIR itself — 3-address code in SSA
-form — is specified authoritatively in [`spec/air.md`](../spec/air.md).
+CFG lowering lowers the canonical monomorphic HIR (the M1a seam,
+[hir.md](hir.md)) into a CFG-based AIR: functions become directed
+graphs of basic blocks over typed values, with explicit ownership
+operations and control flow. It is the last frontend stage and the
+runtime's input. The AIR itself — 3-address code in SSA form — is
+specified authoritatively in [`spec/air.md`](../spec/air.md).
 
-The lowerer is in `src/lower.zig` plus `src/passes/cfg_lower_*.zig`
-files, consuming the [checker.md](checker.md) annotation.
+The lowerer is `hir_lower.lowerProgram` in `src/passes/hir_lower.zig`
+driving the retained `src/lower.zig` + `src/passes/cfg_lower_*.zig`
+emission machinery; these helpers consume `Lowerer` and emit into the
+current block, using the [checker.md](checker.md) annotation facts
+carried over into the HIR.
 
 ## AIR model
 
@@ -69,9 +73,9 @@ The `BasicBlock` / `IrFunc` / `Value` shapes are defined in air.md
 
 ## Lowering rules
 
-Lowering is a recursive walk of the annotated AST over a builder that
-emits ops into the current block and introduces new blocks at control-flow
-points.
+Lowering is a recursive walk of the canonical HIR (hir_build / hir_lower)
+over a builder that emits ops into the current block and introduces new
+blocks at control-flow points.
 
 ### Literals and consts
 

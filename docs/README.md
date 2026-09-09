@@ -16,10 +16,11 @@ specifications (the spec suite index is [spec/README.md](../spec/README.md)).
 
 | Document | Covers |
 | --- | --- |
-| [frontend.md](frontend.md) | the pipeline contract end to end: module graph, checker, CFG lowering, the optimizer, drop lowering, the LLIR backend stages |
+| [frontend.md](frontend.md) | the pipeline contract end to end: module graph, checker, the HIR seam, CFG lowering, the optimizer, drop lowering, the LLIR backend stages |
 | [module-graph.md](module-graph.md) | module identity, resolution, loading, cycle detection, topo sort |
 | [checker.md](checker.md) | inference, generic expansion, ownership analysis, checks |
-| [cfg-lowering.md](cfg-lowering.md) | annotated AST → CFG AIR, destruction placement, module init functions, syscalls |
+| [hir.md](hir.md) | the canonical monomorphic HIR seam between the checker and CFG lowering: data structures, text form, structural invariants, HIR→CFG contract (M1a scope implemented; effect analysis and SEG remain proposals) |
+| [cfg-lowering.md](cfg-lowering.md) | the CFG AIR model and the HIR→CFG emission rules: destruction placement, module init functions, syscalls |
 | [optimizer.md](optimizer.md) | tail-call elimination, inlining, CSE, copy propagation, and the mid-level rewrites |
 | [llir-typed.md](llir-typed.md) | the typed LLIR lowering layer (typed opcodes, typed-assembly surface) |
 
@@ -39,16 +40,11 @@ without being indexed as implementation documentation.
 
 | Document | Covers |
 | --- | --- |
-| [hir.md](hir.md) | a proposed HIR stage between the checker and CFG lowering, plus a restricted SEG view (design proposal) |
 | [effects.md](effects.md) | a proposed effect-semantics model driving optimizer/SEG legality queries (design proposal) |
 
-`hir.md` is also the registered implementation target for the **M1a
-milestone** (hir.md §11): a structural, monomorphic HIR seam between the
-checker and CFG lowering with effect analysis disabled. The seam is
-registered as *planned* in [passes.md](passes.md) and
-[frontend.md](frontend.md); the **S1 data structures exist** (`hir.zig`),
-but no HIR compiler stage is wired — the built pipeline still lowers the
-annotated AST straight to CFG AIR. effects.md remains a pure proposal.
+`effects.md` remains a pure proposal; the HIR-side self-contained
+summary lives in [hir.md](hir.md) §6.2 (the effect *field* is absent
+from `SemanticInfo` in M1a — analysis disabled, hir.md §3.6).
 
 ## Reading order
 

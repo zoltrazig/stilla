@@ -34,7 +34,7 @@
 | S4 | AST→HIR builder | M1a 主件；CFG 行为不变 | done |
 | S5 | HIR→CFG + 等价门禁 | toggle + 字节差分 | done（本次提交） |
 | S6 | 全量覆盖 + 默认翻转 | 删除直降路径 | done（S6a+S6b，本次提交） |
-| S7 | 文档回填 | hir.md 状态、README 移出 Unimplemented | pending |
+| S7 | 文档回填 | hir.md 状态、README 移出 Unimplemented | done（本次提交） |
 
 ## 各阶段明细
 
@@ -592,12 +592,44 @@
 - **S6 完结**。已知推迟保持 S5 记录（FE full_expr=0/origin 不接线、语料未覆盖
   差异面），门禁已纯 HIR（oracle 删除后文本等价性由 S6a 验收记录承载）。
 
-
-### S7 — 文档回填（pending）
+### S7 — 文档回填（done）
 
 - hir.md 状态从「提案」改 implemented（M1a 范围）；passes.md / frontend.md 同步；
   docs/README.md 将 hir.md 移出 Unimplemented proposals。
 - 验收：docs 提交 + 全 suite 绿。
+
+#### S7 事后记录（本次提交）
+
+- **hir.md 状态翻转**：标题/Status 改「M1a implemented；M1b / M2（SEG）仍为
+  设计提案」；§1.1 直降痛点标注为「M1a 落地前的基线」；§2.3 边界更新（直降
+  已删，HIR 是唯一路径）；§10.2/§10.3 等价门禁措辞改纯 HIR 回归（S5 差分
+  门禁历史 + S6a 翻转验收 + S6b 删除后 AirRoundTrip）；§11 M1a 加交付记录
+  （净删 ~2100 行/17 files，+144/−2227）。
+- **效果字段补正（兑现 PROGRESS 风险表「效果字段表示」的回收承诺）**：
+  §3.6 的 `SemanticInfo` 框注 `effect` 为 M1b+，加 M1a 修订注记（不带 effect
+  字段、分析关闭）；§10.1 效果/求值序校验措辞同步（M1a 无摘要可比）；§11
+  M1a 段首删「只把效果字段带到 HIR」旧措辞。
+- **§11 重复段删除**：尾部「match 进 SEG / 再后」两段逐字重复，删较短重复块。
+- **passes.md**：HIR seam 节改 implemented（build/validate/lower + 文本形 +
+  hir_tests.zig），CFG lowering 节改「`hir_lower.lowerProgram` 驱动保留的
+  cfg_lower_* 发射机制」（program→type environment / module→constSlot /
+  function→newFuncState+coerceRet / expression→const/void/discard + 连线/
+  call/pattern/path 助手）；Orchestration 链加入 HIR。
+- **frontend.md**：§1 管线图 + stage 表插 HIR build/HIR→CFG 行；「Target, not
+  implemented」块改 implemented；§4 checklist `[ ]`→`[x]`（另删一处重复的旧
+  `[ ]` HIR seam 残留）；§5 Relationship 表加 HIR seam 行、CFG AIR 行改
+  「shared HIR→CFG emission helpers」。
+- **architecture.md**：管线图插 HIR seam；Boundaries 表 HIR 行改 implemented
+  （含 hir_lower_expr/control/call/pattern 与 hir_parse/hir_print）；CFG
+  lowering 行改「emission helpers driven by hir_lower」；frontend.compile
+  描述链更新。
+- **docs/README.md**：hir.md 移入 Compiler pipeline 表（cfg-lowering.md 行
+  改「CFG AIR 模型 + HIR→CFG 发射规则」）；Unimplemented proposals 只剩
+  effects.md（删除旧「M1a seam 注册为 planned / S1 数据结构存在但未接线」
+ 段落，尾部段落一并重写）。
+- **cfg-lowering.md**：Overview 与 lowering walk 措辞改 HIR 驱动（hir_build /
+  hir_lower），直降 AST 措辞移除。
+- 未改动的推迟项保持记录（S5/S6 已知推迟继续有效；effects.md 仍是纯提案）。
 
 ## 风险与未知（实施时注意）
 
@@ -626,3 +658,5 @@
 | 2026-09-08 | S3 修复 | fix(hir) S3 fix 提交 | 诊断消息改由调用方 allocator 分配（原为 scratch arena，返回即悬垂）+ 消息生命周期回归测试；pattern DFS 加深度上限 4096（越深诊断化，不栈溢出）；PROGRESS 措辞改准确 |
 | 2026-09-08 | S4 | 本次 feat(hir) S4 提交 | passes/hir_build.zig（AST→HIR，含 mono 体/实例/drop hook/λ 提升/intrinsic wrapper 转发体/路径落叶/`::[]` host 调用）；hir.zig 容器层 + registry ~130 typed 行 + ScalarRep{byte,bool,str} + serCtx 错误传播；S3 修订（let 不可反驳 pattern + checkIrrefutable + 无绑定 type-test 哨兵）；hir_tests.zig fib + examples//probes/ 全语料构建+逐根 validate；验收=全套绿 |
 | 2026-09-09 | S5 | 本次 feat(hir) S5 提交 | passes/hir_lower*.zig（HIR→CFG，expr/control/call/pattern 分片）；frontend.Options.hir_stage toggle + phase3 二选一；and/or 独立 core 行 + 文本形（§5.5/§7.1 补正）；S4 缺陷 ①–⑤ 修复；hir_tests.zig S5 差分门禁（examples 18 + probes 25 两路径 cfg.print 逐字节相等）；验收=全套 1053 tests 绿（门禁先行失败点名 maps/generic_aggregates）+ examples 绿 |
+| 2026-09-09 | S6 | 本次 feat(hir) S6a + refactor(hir) S6b 提交 | S6a：hir_stage 翻转默认 true（全套经 HIR 编译；实现侧修复 10 处、零测试放宽）；S6b：删直降路径 + 删 toggle（单路径 frontend.compile），门禁转纯 HIR 回归；净删 ~2100 行（17 files，+144/−2227）；验收=1022 tests 全绿 |
+| 2026-09-09 | S7 | 本次 docs(hir) S7 提交 | 文档回填：hir.md 状态改 M1a implemented（含 §3.6 效果字段补正、§11 交付记录、重复段删除）；passes/frontend/architecture 同步 HIR 已接线 + cfg_lower_* 角色更新；docs/README.md 移出 Unimplemented（只剩 effects.md）；cfg-lowering.md 措辞同步；验收=全套绿 |

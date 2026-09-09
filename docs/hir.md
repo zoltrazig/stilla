@@ -1,20 +1,23 @@
-# Stilla HIR — 规范形中间表示（设计提案）
+# Stilla HIR — 规范形中间表示
 
-> **Status：设计提案（尚未实现）。**
+> **Status：M1a implemented；M1b / M2（SEG）仍为设计提案。**
 >
 > 本文为编译前端定义一个规范形中间表示 HIR：binder/region 化的单态表达式
-> 树、registry 化的 op 语义、文本形式与受限 SEG 投影。文中数据结构与
-> pass 均为提案，未进入代码。配套文档：效果语义模型的权威定义见
-> [effects.md](effects.md)，本文 §6.2 只保留 HIR 侧的自含摘要。
+> 树、registry 化的 op 语义、文本形式与受限 SEG 投影。**M1a 范围（结构
+> HIR：AST→HIR 构建、§10.1 结构校验、HIR→CFG lowering）已随 S0–S6 落地，
+> 且 S6b 删除直降路径后 HIR 是前端唯一 lowering 路径**；§3–§7、§9、§10
+> 的 M1a 侧描述即已实现形态。效果基础设施（[effects.md](effects.md)，
+> §6.2 只保留 HIR 侧自含摘要）与 SEG（§8）仍是提案；文中「直降/落地前
+> 基线」措辞均为历史参照。实施记录见 PROGRESS.md。
 
 ## 1. 问题
 
-### 1.1 当前直降的痛点
+### 1.1 直降的痛点（M1a 落地前的基线）
 
-今天前端走：checker 在 AST 上完成名字解析、泛型展开
+M1a 落地前，前端走：checker 在 AST 上完成名字解析、泛型展开
 （monomorphization）与 ownership 注解；CFG lowering（`lower.lowerProgram`）把
 这份注解后的 monomorphic AST 直接生成 CFG AIR。直接 lowering 有几个绕不开
-的毛病：
+的毛病（S6b 已删除该直降路径，此处为设计动机与历史参照）：
 
 - AST 形状贴近源码（`using`、模块路径、泛型、source name 都还在），优化
   与 lowering 耦合在 CFG lowering 的 emit 路径里；
@@ -108,7 +111,7 @@ polymorphism。
 
 ### 2.3 与现状管线的边界
 
-现状管线（已实现，行为基线）没有中间规范形：
+M1a 落地前（行为基线）没有中间规范形，前端直降：
 
 ```text
 module graph → checker（AST 注解：名字/类型/ownership/monomorphization）
@@ -116,15 +119,18 @@ module graph → checker（AST 注解：名字/类型/ownership/monomorphization
     → optimizer → LLIR
 ```
 
-HIR 落在 checker 与 CFG lowering 之间，构成一个**兼容边界**，而不是对
-checker 或 CFG lowering 的重写：
+M1a 落地后（S6b 起）：checker 注解 → HIR 构建 → HIR→CFG lowering 是
+**唯一**前端路径，直降不再存在。HIR 落在 checker 与 CFG lowering 之间，
+构成一个**兼容边界**，而不是对 checker 或 CFG lowering 的重写：
 
 - **输入边界** — HIR 构建只消费 checker 的注解输出（已判决的名字解析、
   具体类型、ownership、monomorphize 后的单态体），原样搬移为 HIR 标注，
   不重新推理（静态结论搬移，见 §2.4）；
-- **输出边界** — 「HIR → CFG」按现有 CFG lowering 语义逐条对齐：同一输入
-  的 AST→HIR→CFG 与现在的直降 AST→CFG 产生语义等价的 AIR（等价门禁，
-  见 §10.3）。CFG 层的现有语义参照不因 HIR 引入而改变；
+- **输出边界** — 「HIR → CFG」按 CFG lowering 语义逐条对齐（§9）：
+  HIR→CFG 复用既有 block/value/drop 发射机制，CFG 层的语义参照不因 HIR
+  引入而改变。逐字节等价的证据：S5 差分门禁（当时直降与 HIR 两路径并存
+  `cfg.print` 相等）与 S6a 翻转验收；S6b 删除直降后门禁转为纯 HIR 回归
+  （见 §10.3）。
 - **范围边界** — 本文描述的 HIR 形态只做规范形（binder/region/pattern
   统一、full-expression 标注、效果摘要），覆盖全部现有语言形态，**不含
   SEG**。SEG（§8）是可选的受限优化视图，按两档范围划分（v1 规则子集与
@@ -326,11 +332,16 @@ registry 化只是把 switch 从代码移到一张更难验证的表。
 ```text
 SemanticInfo {
     ownership_view: OwnershipView,   // 值/视图状态（运行时可见）
-    effect:         EffectSummaryId, // 语义交互摘要（见 §6.2）
+    effect:         EffectSummaryId, // M1b+：语义交互摘要（见 §6.2）
 }
 
 OwnershipView = Owned | Borrowed | DestructionView
 ```
+
+> **M1a 修订（随 S4 落地，PROGRESS 风险表「效果字段表示」执行决定）**：
+> M1a 的 `SemanticInfo` **不带** `effect` 字段——效果分析关闭，
+> `ownership_view` 是唯一成员；`effect` 为 M1b 的加性扩展（代码注释同此
+> 约定；§6.2 的效果模型仍是设计描述）。
 
 语义按正交维度组织：`EvalPolicy`（在 op descriptor 上，非节点上）、
 `OperandUse`（operand 的 Read/Borrow/Consume）、`EffectSummary`（节点上
@@ -1364,9 +1375,8 @@ Monomorphic（或 SEG 优化后）的 HIR 落到现有 CFG AIR。原则：**把 
 - **view/ownership 数据流**：每个节点按 operand view 与 OperandUse 给出一致
   的 view；`move` 后源 dead；borrow 不外逃其 lifetime。
 - **效果与求值序**（分两级，对应 §11 的落地档）：**结构校验（M1a 起，
-  效果分析关闭时）**——节点摘要为合法占位 `Ready(Top)` 或与 descriptor
-  的 `effect_transfer` 一致即可；EvalPolicy 与结构一致（惰性 region 不在
-  未选中时求值）。**已启用分析校验（M1b 起）**——节点摘要须与
+  效果分析关闭时）**——M1a 节点不携带 effect 字段（§3.6），无摘要可比，
+  只验 EvalPolicy 与结构一致（惰性 region 不在未选中时求值）。**已启用分析校验（M1b 起）**——节点摘要须与
   `effect_transfer` 的递归汇总一致；与函数 SCC fixpoint 摘要一致的要求
   只在 SCC 推导启用（M2b）后生效。`Top` 是合法保守值：缺省 / 递归 / 未知
   目标摘要取 `Top` **不等于**与最精确 transfer 不一致的错误。不存派生
@@ -1381,8 +1391,8 @@ Monomorphic（或 SEG 优化后）的 HIR 落到现有 CFG AIR。原则：**把 
 按 AGENTS.md 的分区约定（白盒在属主模块 `test{}`，黑盒/跨模块在对应
 `*_tests.zig` 并由 root.zig 导入）：
 
-- HIR 构建与打印的白盒测试放属主模块；跨模块行为（AST→HIR→CFG 与现在
-  AST→CFG 的语义等价）放新的 `hir_tests.zig` 黑盒文件；
+- HIR 构建与打印的白盒测试放属主模块；跨模块行为（AST→HIR→CFG 的语义
+  等价回归，S6b 后为纯 HIR 回归）放 `hir_tests.zig` 黑盒文件；
 - 不要长在 frontend_tests.zig 里：HIR 相关覆盖放进 hir 自有套件；
 - SEG 相关测试放独立的 seg 套件，每规则一个定向用例 + 不变量断言
   （fresh binder、full-expr 不跨、无 effect 重复求值、无 borrow 进 island）。
@@ -1390,9 +1400,12 @@ Monomorphic（或 SEG 优化后）的 HIR 落到现有 CFG AIR。原则：**把 
 ### 10.3 语义等价回归
 
 - 无 SEG 的 monomorphic HIR 落地验收 = 现有全部 suite（`zig build test`）
-  不改语义地通过：同一输入，
-  AST→HIR→CFG 的 AIR 与现在 AST→CFG 的 AIR 等价（文本 round-trip 可比较
-  的输入先比；不可比的比解释执行结果）；
+  不改语义地通过。等价门禁的历史与现状：**S5 差分门禁**在直降与 HIR 两
+  路径并存时对 examples（18）+ probes（25）断言 `cfg.print` 逐字节相等；
+  **S6a** 翻转默认并修复实现侧差异后全 suite 经 HIR 编译通过（文本等价
+  证据由该验收记录承载）；**S6b** 删除直降路径后，门禁转为纯 HIR 回归
+  （`hir_tests.zig` 的 AirRoundTrip：examples + probes 编译 → canonical AIR
+  → 独立 cfg parser round-trip）；
 - 每个 SEG 规则用例同时验证「rewrite 后校验通过」与「求值次数/销毁顺序
   不变」——后者靠 §8.4 的准入限定，不由校验器单独保证。
 
@@ -1407,12 +1420,17 @@ Monomorphic（或 SEG 优化后）的 HIR 落到现有 CFG AIR。原则：**把 
 **M1a — 结构 HIR（monomorphic、无 SEG、无效果分析）**：以现有 checker
 注解为输入，覆盖**全部现有语言形态**：AST → HIR（规范形：
 binder/region/pattern 统一、full-expression 标注、OpDescriptor 骨架、
-SemanticInfo 携带 ownership view）→ HIR→CFG lowering。本档**不实现任何
-效果分析**：`SemanticInfo.effect` 允许 `Ready(Top)` 占位或分析关闭，
-无 effect-based 优化；§10.1 只跑结构校验。验收 = §10.3 的语义等价门禁
-（现有 suite 全绿 + AIR 文本/解释执行等价）——**本档唯一验收是证明 HIR
-是 semantics-preserving frontend seam**；等价门禁稳定后，SEG 与效果优化
-才有意义。SEG 不在此档内。
+SemanticInfo 携带 ownership view）→ HIR→CFG lowering。**不携带 effect
+字段**（§3.6 修订：效果分析关闭，`effect` 是 M1b 的加性扩展），无
+effect-based 优化；§10.1 只跑结构校验。
+
+> **M1a 交付记录（S0–S6）**：结构 HIR 已实现并成为唯一前端路径——S6a
+> 翻转 `hir_stage` 默认 true（全 suite 1022 测试经 HIR 编译，实现侧
+> 修复 10 处、零测试放宽），S6b 删除直降路径与 toggle（净删直降代码
+> ~2100 行，17 files，+144/−2227）。验收 = §10.3：现有 suite 全绿 +
+> AIR 文本等价（S5 差分门禁）+ S6a 翻转验收 + S6b 删除后纯 HIR 回归。
+> SEG 与效果优化不在此档内；本档唯一验收是证明 HIR 是
+> semantics-preserving frontend seam。
 
 **M1b — 效果基础设施**：落地 effects.md §14 的最小效果模型（MayTrap 含
 panic、MayDiverge、nondeterministic、`Host(resource, Read/Write)`、
@@ -1444,16 +1462,6 @@ panic、MayDiverge、nondeterministic、`Host(resource, Read/Write)`、
   替换 checker 特设分析。
 - **match 进 SEG**：Copy-only、known variant → let；验证架构在更大语言
   面上成立（并入 M2a 或紧随其后）。
-
-**再后**（后续方向，超出上述范围，随实现需求另行定义）：
-
-- Unique / consuming / borrowed 情形进 SEG（需线性等式系统）；
-- 「先建 Typed HIR 再特化」的 Target 形态（monomorphization / ownership
-  检查在 HIR 上完成）；
-- SEG 从可选变为默认，并测编译时间预算。
-
-**match 进 SEG**：Copy-only、known variant → let；验证架构在更大语言
-面上成立。
 
 **再后**（后续方向，超出上述范围，随实现需求另行定义）：
 
