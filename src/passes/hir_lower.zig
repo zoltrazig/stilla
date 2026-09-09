@@ -269,10 +269,30 @@ fn lowerFuncRecord(self: *Lowerer, built: *hir.BuiltProgram, info: *moduleinfo.M
             try args.append(self.arena, local.value);
         }
         const sig = cfg.FunctionType{ .params = rec.params, .ret = dupType(self, rec.ret) };
-        _ = try cfg_lower_call.emitSyscall(self, &fs, no_span, try cfg_lower_intrinsic.syscallTarget(self, no_span, hinfo.specifier, host.name), args.items, sig);
-        // A never-returning expansion traps inside the wrapper; a
-        // completing one falls through to a bare ret (void ret type).
-        if (fs.cur != null) try cfg_lower_emit.setTerminator(self, &fs, .{ .ret = null });
+        // The str/hash supported-type constraint applies to the wrapper
+        // too — mirror `cfg_lower_intrinsic.intrinsicFnRef`, which checks
+        // before synthesizing (Runtime §4.2/§4.9): a wrapper would carry
+        // a signature the host cannot serve.
+        if (cfg_lower_intrinsic.isConstrainedMember(hinfo.specifier, host.name)) {
+            try cfg_lower_intrinsic.checkStrHashSignature(self, no_span, host.name, sig);
+        }
+        const result = try cfg_lower_call.emitSyscall(self, &fs, no_span, try cfg_lower_intrinsic.syscallTarget(self, no_span, hinfo.specifier, host.name), args.items, sig);
+        // Return shape mirrors the direct `synthIntrinsicFunc`: the
+        // syscall result is returned (a wrapper carries the concrete
+        // specialized signature — no any coercion, no scope), a void
+        // result falls through to a bare ret, and a never-returning
+        // expansion (e.g. `panic`) traps inside the wrapper.
+        if (result) |r| {
+            if (cfg_lower_emit.isVoid(r.type_)) {
+                try cfg_lower_emit.setTerminator(self, &fs, .{ .ret = null });
+            } else {
+                cfg_lower_emit.markConsumed(self, &fs, r);
+                try cfg_lower_emit.cleanupDisable(self, &fs, r.span, r);
+                try cfg_lower_emit.setTerminator(self, &fs, .{ .ret = r });
+            }
+        } else if (fs.cur != null) {
+            try cfg_lower_emit.setTerminator(self, &fs, .{ .ret = null });
+        }
         return cfg_lower_validate.finishFunc(self, &fs);
     }
 

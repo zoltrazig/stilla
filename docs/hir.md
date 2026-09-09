@@ -1054,6 +1054,22 @@ alias 在进 SEG **之前**彻底展开：SEG 中不出现 `UserId` 与 `int32` 
 只处理真正的 struct 值。HIR 因此干净很多——但要按 §6.5 保留 module init 语义，不能把
 `fn_ref`/`module_const` 当无初始化依赖的裸指针。
 
+> **M1a 修订（随 S6a 落地；§4.8 文本不承载）**：dotted 模块值路径穿过
+> **module-valued 成员**时（`lib.math.sqrt`——`math` 是 `lib` 的 module 值成员，
+> 语料无 ≥3 段路径，S5 门禁未覆盖），直降 `cfg_lower_path.lowerPathValue`
+> 逐段重放 `module_ref` + 每 hop 一次 `load_member`（module 身份经 AIR 传递，
+> air.md §7），**不是**静态跳到最终模块。HIR 在值位叶（fn_ref/module_const/const）
+> 记录**已解析访问路径** `ExprNode.access_hops`（有序的中间 module 值成员：
+> 属主模块索引 + 成员名；首 hop 的模块即基座 `module_ref` 所指），HIR→CFG
+> 依序重放同款 `load_member` 并把 module_of 记到每个结果上；最终成员的行在链尾
+> 值上装载，**绝不新发**最终模块的 `module_ref`。调用位不受影响（直降直接调用
+> 按 qname，无行装载）。结构校验限制 path 只挂 const/fn_ref/module_const 叶；
+> 文本形式不携带 hop 身份（printer 显式拒绝，绝不静默丢弃）。
+>
+> **M1a 修订（随 S6a 落地；§7.2 typed 行补齐）**：`byte` 无算术（checker 拒），
+> 唯一数值运算是比较，经 u32 家族降级；typed 行补 `lt/le/gt/ge.byte` 四行
+> （eq/ne.byte 已在 S4 登记），套件 byte 比较缺行即报未注册。
+
 ## 8. SEG 桥与重写合法性
 
 ### 8.1 Island 模型与准入谓词

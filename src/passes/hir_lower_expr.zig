@@ -67,6 +67,10 @@ fn exprInner(c: *Ctx, fs: *FuncState, id: hir.ExprId) LowerError!?*cfg.Value {
     const ops = c.operands(id);
 
     if (is(name, "const")) {
+        // A chain-reached constant (e.g. `m.sub.math.pi`): the access
+        // path's loads replay first, exactly like the direct lowering;
+        // the constant value itself needs no base.
+        _ = try hopChain(c, fs, id);
         return switch (n.ty) {
             .primitive => |p| if (p == .void) cfg_lower_expr.emitVoid(self, fs, no_span) else cfg_lower_expr.emitConst(self, fs, no_span, n.payload.const_value, n.ty),
             else => cfg_lower_expr.emitConst(self, fs, no_span, n.payload.const_value, n.ty),
@@ -205,22 +209,30 @@ pub fn fnRef(c: *Ctx, fs: *FuncState, id: hir.ExprId, callee_ctx: bool) LowerErr
     const self = c.self;
     const built = c.built;
     const n = c.node(id);
+    // A leaf reached through module-valued member chains replays them
+    // first (the direct lowerPathValue sequence); the final member's
+    // load — when there is one — uses the chain's last value as its
+    // base instead of a fresh module reference.
+    const base = try hopChain(c, fs, id);
     switch (n.payload.func) {
         .func => |fid| {
             const rec = &built.funcs.items[fid];
             switch (rec.kind) {
-                .lambda, .instance => {
-                    // A λ or a used generic specialization is a
-                    // standalone module function referenced by name —
-                    // the direct path's `fn_ref` of the hoisted λ /
-                    // of the mono instance (the direct
-                    // `lowerSpecialize`: `{module}.{fn}.{id}`). No
-                    // member row exists for an instance (the generic
-                    // member's row is null), so only true members
-                    // load below.
+                .lambda, .instance, .intrinsic => {
+                    // A λ, a used generic specialization, or a
+                    // first-class intrinsic wrapper is a standalone
+                    // module function referenced by name — the direct
+                    // path's `fn_ref` of the hoisted λ / of the mono
+                    // instance (the direct `lowerSpecialize`:
+                    // `{module}.{fn}.{id}`) / of the synthesized
+                    // intrinsic wrapper (`intrinsicFnRef`). No member
+                    // row exists for an instance (the generic member's
+                    // row is null) or an intrinsic wrapper (its
+                    // `{member}.intrinsic.{N}` suffix is not a source
+                    // member name), so only true members load below.
                     return cfg_lower_emit.emit(self, fs, no_span, .{ .fn_ref = rec.name }, n.ty);
                 },
-                else => return memberValueRef(c, fs, built, rec),
+                else => return memberValueRef(c, fs, built, rec, base),
             }
         },
         .host => |hid| {
@@ -228,7 +240,7 @@ pub fn fnRef(c: *Ctx, fs: *FuncState, id: hir.ExprId, callee_ctx: bool) LowerErr
             const owner = self.graph.modules[host.module];
             const vm = owner.valueMember(host.name) orelse
                 return self.fail(no_span, "host binding '{s}.{s}' vanished", .{ owner.specifier, host.name });
-            const mod_ref = (try cfg_lower_path.emitModuleRef(self, fs, no_span, owner.specifier)) orelse return null;
+            const mod_ref = base orelse (try cfg_lower_path.emitModuleRef(self, fs, no_span, owner.specifier)) orelse return null;
             return memberLoadHir(c, fs, mod_ref, owner, vm);
         },
     }
@@ -236,8 +248,12 @@ pub fn fnRef(c: *Ctx, fs: *FuncState, id: hir.ExprId, callee_ctx: bool) LowerErr
 
 /// The value-position form of a member/instance function reference:
 /// `module_ref` (+ `load_member`), with the direct lowering's
-/// self-module caching for the function's own module.
-fn memberValueRef(c: *Ctx, fs: *FuncState, built: *hir.BuiltProgram, rec: *const hir.FuncRecord) LowerError!?*cfg.Value {
+/// self-module caching for the function's own module. `base` is the
+/// replay of the node's module access path (when the leaf was reached
+/// through module-valued member chains): the final member's row loads
+/// on it — never on a fresh module reference — so the AIR chain
+/// carries the module identity exactly like the direct lowering.
+fn memberValueRef(c: *Ctx, fs: *FuncState, built: *hir.BuiltProgram, rec: *const hir.FuncRecord, base: ?*cfg.Value) LowerError!?*cfg.Value {
     _ = built;
     const self = c.self;
     const owner = self.graph.modules[rec.module];
@@ -246,7 +262,7 @@ fn memberValueRef(c: *Ctx, fs: *FuncState, built: *hir.BuiltProgram, rec: *const
     if (owner.isIntrinsic(vm)) {
         return cfg_lower_intrinsic.intrinsicFnRef(self, fs, no_span, owner, vm, null);
     }
-    const mod_ref = try moduleRefFor(c, fs, owner);
+    const mod_ref = base orelse (try moduleRefFor(c, fs, owner));
     return memberLoadHir(c, fs, mod_ref, owner, vm);
 }
 
@@ -291,6 +307,7 @@ fn moduleConst(c: *Ctx, fs: *FuncState, id: hir.ExprId) LowerError!?*cfg.Value {
     const owner = self.graph.modules[rec.module];
     const vm = owner.valueMember(rec.name) orelse
         return self.fail(no_span, "constant '{s}' vanished", .{rec.name});
+    const base = try hopChain(c, fs, id);
     if (owner.isIntrinsic(vm)) {
         const bits = cfg_lower_intrinsic.constBits(owner.specifier, vm.name.text) orelse
             return self.fail(no_span, "intrinsic '{s}.{s}' has no expansion", .{ owner.specifier, vm.name.text });
@@ -298,11 +315,39 @@ fn moduleConst(c: *Ctx, fs: *FuncState, id: hir.ExprId) LowerError!?*cfg.Value {
         return cfg_lower_expr.emitConst(self, fs, no_span, .{ .float = v }, vm.type_);
     }
     if (rec.module_spec) |spec| {
-        // Module-valued: the reference itself is the value.
-        return cfg_lower_path.emitModuleRef(self, fs, no_span, spec);
+        // Module-valued: the reference itself is the value — a leaf
+        // under a chain ends at the chain's last hop value.
+        return base orelse cfg_lower_path.emitModuleRef(self, fs, no_span, spec);
     }
-    const mod_ref = try moduleRefFor(c, fs, owner);
+    const mod_ref = base orelse (try moduleRefFor(c, fs, owner));
     return memberLoadHir(c, fs, mod_ref, owner, vm);
+}
+
+/// Replay a value leaf's resolved module access path: `module_ref` of
+/// the first hop's module, then one `load_member` per hop with module
+/// identity recorded on each result — the direct
+/// `cfg_lower_path.lowerPathValue` chain (air.md §7). Returns the last
+/// hop's value (module-typed, identity = the final member's module);
+/// null when the node carries no path.
+fn hopChain(c: *Ctx, fs: *FuncState, id: hir.ExprId) LowerError!?*cfg.Value {
+    const hops = c.node(id).access_hops;
+    if (hops.len == 0) return null;
+    const self = c.self;
+    const start = self.graph.modules[hops[0].module];
+    var cur = (try cfg_lower_path.emitModuleRef(self, fs, no_span, start.specifier)) orelse return null;
+    for (hops) |h| {
+        const owner = self.graph.modules[h.module];
+        const vm = owner.valueMember(h.name) orelse
+            return self.fail(no_span, "module '{s}' has no member '{s}'", .{ owner.specifier, h.name });
+        const member = owner.airMemberIndex(vm) orelse
+            return self.fail(no_span, "member '{s}' is not in the canonical member table", .{vm.name.text});
+        const v = try cfg_lower_emit.emit(self, fs, no_span, .{ .load_member = .{ .module = cur, .member = member } }, vm.type_);
+        cur = v orelse return null;
+        if (vm.module_spec) |spec| {
+            if (self.graph.module(spec)) |target| try self.module_of.put(self.arena, cur, target);
+        }
+    }
+    return cur;
 }
 
 /// A `let` node: the init (wrapped), the binder pack/pattern rules of

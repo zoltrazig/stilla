@@ -160,6 +160,27 @@ pub const ExprNode = struct {
     full_expr: FullExprId = 0,
     origin: SourceOriginId = no_origin,
     payload: Payload = .none,
+    /// Resolved access path for a value leaf reached through a dotted
+    /// module chain with module-valued members (e.g. `lib.math.sqrt`):
+    /// the ordered *intermediate* module-valued members, each as its
+    /// owning module index (into the graph's module list) and member
+    /// name. The first hop's module is the module the base `module_ref`
+    /// names; the final member stays in the payload (fn_ref /
+    /// module_const / const). Only value-position leaves under a ≥1-hop
+    /// dotted module path carry hops; everything else stays empty
+    /// (hir.md §7.4). Lowering replays the chain as a `module_ref` plus
+    /// per-hop `load_member`s exactly like the direct
+    /// `cfg_lower_path.lowerPathValue` (module identity flows through
+    /// the loaded values).
+    access_hops: []const AccessHop = &.{},
+};
+
+/// One hop of a resolved module access path (see `ExprNode.access_hops`).
+pub const AccessHop = struct {
+    /// The hop member's owning module (index into the built module list).
+    module: u32,
+    /// The module-valued member name within that module.
+    name: []const u8,
 };
 
 /// Op-specific data for ops whose identity is not carried by operands
@@ -450,6 +471,13 @@ const typed_descriptors = [_]OpDescriptor{
     .{ .name = "bxor.u64", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .u64 },
     .{ .name = "eq.byte", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .byte },
     .{ .name = "ne.byte", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .byte },
+    // `byte` has no arithmetic (checker-rejected); its only numeric ops
+    // are the comparisons, which lower through the u32 family at the
+    // typed stage (the byte value occupies one host cell).
+    .{ .name = "lt.byte", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .byte },
+    .{ .name = "le.byte", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .byte },
+    .{ .name = "gt.byte", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .byte },
+    .{ .name = "ge.byte", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .byte },
     .{ .name = "eq.i32", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .i32 },
     .{ .name = "eq.u32", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .u32 },
     .{ .name = "eq.i64", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .i64 },
@@ -701,6 +729,13 @@ pub const Program = struct {
     /// Accessors — always re-derived from the live buffers.
     pub fn node(self: *const Program, id: ExprId) ExprNode {
         return self.exprs.items[id];
+    }
+
+    /// Set the resolved module access path on an already-added leaf
+    /// (fn_ref / module_const / const reached through module-valued
+    /// member chains).
+    pub fn setAccessHops(self: *Program, id: ExprId, hops: []const AccessHop) void {
+        self.exprs.items[id].access_hops = hops;
     }
 
     pub fn region(self: *const Program, id: RegionId) Region {

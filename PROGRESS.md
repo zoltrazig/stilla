@@ -33,7 +33,7 @@
 | S3 | 结构 validator | hir.md §10.1 第一级 | done（本次提交） |
 | S4 | AST→HIR builder | M1a 主件；CFG 行为不变 | done |
 | S5 | HIR→CFG + 等价门禁 | toggle + 字节差分 | done（本次提交） |
-| S6 | 全量覆盖 + 默认翻转 | 删除直降路径 | pending |
+| S6 | 全量覆盖 + 默认翻转 | 删除直降路径 | S6a done；S6b pending（同阶段两提交） |
 | S7 | 文档回填 | hir.md 状态、README 移出 Unimplemented | pending |
 
 ## 各阶段明细
@@ -467,13 +467,93 @@
 - FE 逐表达式归属（full_expr=0）、origin 未接线：与 S4 记录一致，不影响本阶段
   文本门禁（直降的销毁不按 FE id 分派）。
 
-### S6 — 全量覆盖 + 默认翻转（pending）
+### S6 — 全量覆盖 + 默认翻转（开工，设计定案）
 
-- 覆盖：泛型实例/mono、match pattern、move/borrow/drop、any 打包、list pattern、
-  intrinsic、host binding syscall、@init。
-- 删除直降路径；开关翻默认 true 后移除。
-- 验收：删除前以 probes/ + examples/ + std 语料跑开关 on/off 差分（输出相等）作
-  最终等价基线，再删；suite（含 llir/解释器）、examples 绿。
+- **S6 同阶段两提交（先覆盖后删，顺序受控）**：
+  - **S6a 默认翻转 + 全量覆盖**：`frontend.Options.hir_stage` 默认翻 true（行 85），
+    全 suite 经 HIR 编译——套件内联源是比语料大得多的覆盖面（frontend_*/host/
+    panic/interpreter/llir 各 suite 数百个内联程序 + golden）；逐失败修复至默认翻转
+    下全绿。提交 S6a。
+  - **S6b 删除直降路径 + 移除开关**：frontend.compile 单路径、删 Options.hir_stage；
+    直降 AST 消费函数按存活依赖闭包删除（见「删除依据」）；差分门禁改造为纯 HIR
+    回归（直降侧已不存在，差分成为自比较即删）；提交 S6b。
+- **harness 先行修复（防静默 HIR-vs-HIR）**：差分门禁两侧显式传
+  `.hir_stage = false` / `.hir_stage = true`——默认翻转后若直降侧仍缺省，门禁自
+  比较仍绿但证伪力归零；显式后门禁保持真差分直到 S6b 移除选项。
+- **负例迁移**：`frontend_intrinsic_tests.lowerWithBundleModule`（直接
+  lower.Lowerer + 断言 lowerer.diag needle，对 bundle 表缺口的负例）改经
+  `hir_build.buildProgramDiag` + `hir_lower.lowerProgram`——保留自定义 module
+  注册；builder 诊断与 lowerer 诊断分层，needly 断言逐条核验（不预设消息不变，
+  差异需查明是表述还是语义）。
+- **覆盖实验即翻转**：默认翻转下全绿 = 全部 inline/磁盘源经 HIR 且文本与直降一致
+  （golden 未松）；std 7 模块是否全部实际触发由实验决定（传递闭包 ≠ 覆盖）；S5
+  记录推迟项（裸块表达式销毁位、using 值别名 owns、copy 可移 scrutinee moving 标志）
+  套件暴露即修（补编码或加夹具），不支持情形显式失败，绝不回退 AST；
+  full_expr=0 / origin 不接线维持（S5 记录：直降销毁不按 FE id 分派）。
+- **删除依据（非文件名推断）**：先跑存活引用闭包——hir_build + hir_lower* 导入
+  集 + 余下 callers/tests 各自引用什么；只删**无存活引用**的直降 AST 消费函数；
+  共享 emission/type-env/intrinsic/validate/drop/lifecycle/llir 机制全部保留；
+  `lower.zig:203 pub const lowerProgram = cfg_lower_program.lowerProgram` 旧入口
+  与 obsolete 状态查全引用后删；不做无关文件合并。删前**真 on/off 基线**（含新增
+  回归夹具），保留直降 golden 产出作为 oracle 迁移到 HIR 侧测试。
+- **验收（S6a）**：默认翻转（toggle 仍在、门禁双显式）下 `zig build test` 非增量
+  全绿；examples 绿；无诊断或文本语义断言被放松。
+- **验收（S6b）**：删除后全套绿 + examples 绿 + fmt 绿 + 栅栏净；S5 差分门禁替换
+  为纯 HIR 语料构建+validate 回归（直降 oracle 已无用武之地，如实记录）。
+- **S6 完结 = S6a + S6b 均验收**；PROGRESS 记录实际覆盖面与剩余限制；暂停，
+  不自动进 S7。
+
+#### S6a 事后记录（默认翻转 + 修复回环 + 验收证据）
+
+- **harness 先行**：S5 差分门禁两侧显式 `.hir_stage = false/true`（防默认翻转后
+  HIR-vs-HIR 自比较）——翻转后门禁仍真差分。
+- **默认翻转即穷举**：`frontend.Options.hir_stage` 默认 true 后，全 suite（22 个
+  test 二进制、1022 tests：frontend_*/host/panic/interpreter/llir 各 suite 的
+  内联源 + golden）全部经 HIR 编译——比 43 个 .st 语料大得多的覆盖实验。
+- **修复回环**（每处先红后绿，全部实现侧修复，**测试零修改零放松**）：
+  ① struct 构造缺字段/重复/opaque-host 校验未镜像直降（`P{x:1}` 缺 y 直闯
+  construct 段 OOB 0xAAAA…）→ buildStructConstruct 补 seen/missing/opaque
+  （与 cfg_lower_expr 同序同文）；
+  ② 值位 intrinsic 包装记录（kind=.intrinsic）被 fnRef 送进 memberValueRef
+  成员装载 → 「vanished」——wrapper 是独立模块函数（转发体），与 λ/instance
+  同路直接 `fn_ref rec.name`；
+  ③ `counter.next(counter)`（struct 字段持 fn 的调用）resolvePathCallee 把
+  local 基座当模块解析 → 「does not name a module」——补 local 基座成员链分支；
+  ④ match type-test 嵌套/缺 wildcard 校验缺失（`(int32 n, str s)` 臂）→
+  buildMatch 镜像直降 whole-arm + wildcard 规则（同一 message）；
+  ⑤ **wrapper 转发体丢返回值**：.intrinsic 分支无条件裸 ret（注释错误地称
+  ret 是 void）——sqrt/str::[T] 包装运行时返回垃圾；镜像
+  synthIntrinsicFunc 的 ret 形状（结果 markConsumed+cleanupDisable+ret；
+  void 裸 ret；never trap）；
+  ⑥ str/hash **wrapper 路径**缺约束检查（call 路径已有）→ .intrinsic 记录
+  lowering 前 isConstrainedMember+checkStrHashSignature（wrapper 签名宿主
+  serve 不了即拒）；
+  ⑦ **syscall 参数有效模式**：hir hostCall 用声明模式而非直降 effectiveSig——
+  Copy 参数未显式 move 时 move 声明不降 plain（box/unbox 契约）→ 修复 llir
+  2.10 `.plain/.move` 断言 + 解释器 Copy-box 「unbox: not a box」运行时 panic
+  （同一根因：首读即释放）；
+  ⑧ **中间 field_get 错套整条路径 annotation**：`h.file.fd` 中 `h.file` 被
+  标成 int32 → 「cannot access a member of this value」（advisor 预警的
+  回归面）；fieldRead 的 annotation 仅末段生效，中间段从字段声明推导（镜像
+  直降 memberLoad）——异构嵌套字段链暴露于优化器 does-not-CSE-unique 测试；
+  ⑨ `lt/le/gt/ge.byte` 四行未登记（byte 无算术仅比较，经 u32 家族降级）→
+  补 typed 行（hir.md §7.2 注记）；
+  ⑩ **模块值链 hop 丢失**（S5 已记录的表述缺口，advisor 定案）——dotted
+  模块值路径（`lib.math.sqrt`、`lists.builtin.print`）被静态解析到最终模块，
+  AIR 缺中间 module-valued 成员的 `load_member` 链（直降逐步携带 module 身份，
+  air.md §7）→ `ExprNode.access_hops`（已解析路径记录：中间成员=属主模块
+  索引+名字，挂值位叶 const/fn_ref/module_const），hir_lower hopChain 重放
+  `module_ref` + 逐 hop `load_member` + module_of 记录，末段行在链尾值上装载
+  绝不新发 module_ref；hir_validate 限叶 op（模块索引界在 lowering 侧查）；
+  hir_print 显式拒（hop 无文本形，绝不静默丢）；新增多模块差分夹具
+  （lib.math.sqrt / lib2 深链同目标双路径 / lists.builtin.print #6）。
+- **新增/扩展测试**：`hir_tests.zig` S5+ 多模块链差分（above）；无其它测试文件
+  改动（实现对齐使原 golden 全过）。
+- **验收证据（S6a）**：`zig build test` 非增量 exit=0（1022 tests 全绿）；
+  `zig build -fincremental test` 绿；examples 绿；fmt 绿；栅栏净；S5 差分门禁
+  （双侧显式）仍绿 = 真差分维持。
+- 剩余工作 = S6b（删除直降路径 + 移除开关 + 门禁改造为纯 HIR 回归）。
+
 
 ### S7 — 文档回填（pending）
 

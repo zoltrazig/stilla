@@ -54,6 +54,7 @@ const hir = @import("stilla").hir;
 const moduleinfo = @import("stilla").moduleinfo;
 const checker = @import("stilla").checker;
 const type_resolve = @import("type_resolve.zig");
+const cfg_lower_pattern = @import("cfg_lower_pattern.zig");
 
 pub const BuildError = error{ OutOfMemory, Diagnostic };
 
@@ -1227,7 +1228,7 @@ fn resolveModuleChain(b: *Builder, info: *moduleinfo.ModuleInfo, ex: *const ast.
 
 /// One field/element read: index by declaration (struct) or position
 /// (tuple); S5 dispatches on the base type.
-fn fieldRead(b: *Builder, info: *moduleinfo.ModuleInfo, e: *const ast.Expr, span: ast.Span, base: hir.ExprId, bt: cfg.Type, name: []const u8) BuildError!hir.ExprId {
+fn fieldRead(b: *Builder, info: *moduleinfo.ModuleInfo, e: ?*const ast.Expr, span: ast.Span, base: hir.ExprId, bt: cfg.Type, name: []const u8) BuildError!hir.ExprId {
     const ops = try b.built.program.addOperands(&.{base});
     switch (bt) {
         .named => |td| {
@@ -1240,13 +1241,18 @@ fn fieldRead(b: *Builder, info: *moduleinfo.ModuleInfo, e: *const ast.Expr, span
             const resolved = moduleinfo.resolveType(b.resolve, info, &sd.fields[idx].type_) orelse
                 return b.fail(span, "cannot resolve field type", .{});
             const field_type = type_resolve.substParams(b.arena, sd.type_params, td.args, resolved);
-            return b.built.program.addExpr(.{ .op = try b.op(span, "field_get"), .ty = b.annotatedType(info, e) orelse field_type, .operands = ops, .payload = .{ .field = @intCast(idx) } });
+            // The path expression's annotation describes only the final
+            // read of a chain (the whole path's type); an intermediate
+            // read derives its type from the field declaration, exactly
+            // like the direct member chain (cfg_lower_path.memberLoad).
+            const ty = if (e) |ex| b.annotatedType(info, ex) orelse field_type else field_type;
+            return b.built.program.addExpr(.{ .op = try b.op(span, "field_get"), .ty = ty, .operands = ops, .payload = .{ .field = @intCast(idx) } });
         },
         .tuple => |elems| {
             const idx = std.fmt.parseInt(usize, name, 10) catch
                 return b.fail(span, "tuple elements are indexed numerically", .{});
             if (idx >= elems.len) return b.fail(span, "tuple element #{d} out of range", .{idx});
-            return b.built.program.addExpr(.{ .op = try b.op(span, "field_get"), .ty = b.annotatedType(info, e) orelse elems[idx], .operands = ops, .payload = .{ .field = @intCast(idx) } });
+            return b.built.program.addExpr(.{ .op = try b.op(span, "field_get"), .ty = if (e) |ex| b.annotatedType(info, ex) orelse elems[idx] else elems[idx], .operands = ops, .payload = .{ .field = @intCast(idx) } });
         },
         else => return b.fail(span, "cannot access a member of this value", .{}),
     }
@@ -1288,8 +1294,11 @@ fn buildPathValue(b: *Builder, info: *moduleinfo.ModuleInfo, e: *const ast.Expr,
         const bind_ty = b.built.program.binders.items[bind].ty;
         var cur = try localNode(b, info, bind);
         var cur_ty = bind_ty;
-        for (path[1..]) |seg| {
-            cur = try fieldRead(b, info, e, seg.span, cur, cur_ty, seg.text);
+        for (path[1..], 0..) |seg, i| {
+            // Only the final read of the chain carries the path's
+            // annotation (see fieldRead).
+            const ann_e: ?*const ast.Expr = if (i == path.len - 2) e else null;
+            cur = try fieldRead(b, info, ann_e, seg.span, cur, cur_ty, seg.text);
             cur_ty = b.built.program.node(cur).ty;
         }
         return cur;
@@ -1298,11 +1307,19 @@ fn buildPathValue(b: *Builder, info: *moduleinfo.ModuleInfo, e: *const ast.Expr,
         return b.fail(path[0].span, "'{s}' does not name a module", .{path[0].text});
     var mod = b.graph.module(spec) orelse
         return b.fail(path[0].span, "module '{s}' is not loaded", .{spec});
+    // Intermediate segments chain through module-valued members; the
+    // resolved path records each hop (owning module, member name) so
+    // the lowering replays the chain as `module_ref` + per-hop
+    // `load_member`s exactly like the direct `lowerPathValue` — module
+    // identity flows through the AIR loads, never a static jump to the
+    // final module.
+    var hops = std.ArrayList(hir.AccessHop).empty;
     var k: usize = 1;
     while (k < path.len - 1) : (k += 1) {
         const vm = mod.valueMember(path[k].text) orelse
             return b.fail(path[k].span, "module '{s}' has no member '{s}'", .{ mod.specifier, path[k].text });
         if (vm.module_spec) |mspec| {
+            try hops.append(b.arena, .{ .module = try b.modIdx(mod.specifier), .name = path[k].text });
             mod = b.graph.module(mspec) orelse
                 return b.fail(path[k].span, "module '{s}' is not loaded", .{mspec});
         } else {
@@ -1310,7 +1327,9 @@ fn buildPathValue(b: *Builder, info: *moduleinfo.ModuleInfo, e: *const ast.Expr,
         }
     }
     const tail = path[path.len - 1];
-    return memberLeaf(b, info, mod.specifier, tail.text, tail.span, true);
+    const leaf = try memberLeaf(b, info, mod.specifier, tail.text, tail.span, true);
+    if (hops.items.len > 0) b.built.program.setAccessHops(leaf, hops.items);
+    return leaf;
 }
 
 fn joinPath(b: *Builder, path: []const ast.Ident) BuildError![]const u8 {
@@ -1386,8 +1405,18 @@ fn cfgIntrinsicConstBits(module_spec: []const u8, member: []const u8) ?u32 {
 
 fn buildStructConstruct(b: *Builder, info: *moduleinfo.ModuleInfo, e: *const ast.Expr, p: *const ast.PathExpr, sc: *const ast.StructConstruct) BuildError!hir.ExprId {
     const name = try joinPath(b, p.path);
+    // A host-backed opaque nominal type has no fields and no Stilla-side
+    // construction (Core §11.8) — mirror cfg_lower_expr's rejection.
+    if (moduleinfo.opaqueDecl(b.resolve, info, name) != null) {
+        return b.fail(p.span, "opaque host type '{s}' cannot be constructed in source (Core §11.8)", .{name});
+    }
     const sd = moduleinfo.structDecl(b.resolve, info, name) orelse
         return b.fail(p.span, "unknown struct type '{s}'", .{name});
+    // Core §8.1: every declared field exactly once, in any order — the
+    // direct path rejects at lowering (cfg_lower_expr.lowerStructConstruct);
+    // the HIR seam must reject at build with the same diagnostics.
+    const seen = try b.arena.alloc(bool, sd.fields.len);
+    @memset(seen, false);
     // Evaluate field values in *written* order; the struct node carries
     // them in declaration order (member identity). When the written
     // order differs, the values are bound to temp binders first (a let
@@ -1398,8 +1427,13 @@ fn buildStructConstruct(b: *Builder, info: *moduleinfo.ModuleInfo, e: *const ast
     for (sc.fields) |*f| {
         const idx = moduleinfo.fieldIndex(sd, f.name.text) orelse
             return b.fail(f.name.span, "struct '{s}' has no field '{s}'", .{ name, f.name.text });
+        if (seen[idx]) return b.fail(f.name.span, "duplicate field '{s}'", .{f.name.text});
+        seen[idx] = true;
         try written.append(b.arena, try buildExpr(b, info, f.value));
         try written_idx.append(b.arena, idx);
+    }
+    for (sd.fields, 0..) |f, i| {
+        if (!seen[i]) return b.fail(p.span, "missing field '{s}' in '{s}'", .{ f.name.text, name });
     }
     var permuted = false;
     for (written_idx.items, 0..) |idx, wpos| {
@@ -1513,7 +1547,7 @@ fn buildCall(b: *Builder, info: *moduleinfo.ModuleInfo, e: *const ast.Expr, c: *
         if (ex.* == .specialize) {
             callee = try specializeCalleeLeaf(b, info, &ex.specialize, c.span);
         } else if (ex.* == .path) {
-            callee = try resolvePathCallee(b, info, &ex.path, c.span, &callee_ty);
+            callee = try resolvePathCallee(b, info, ex, c.span, &callee_ty);
         } else {
             callee = try buildExpr(b, info, c.callee);
         }
@@ -1542,11 +1576,28 @@ fn buildCall(b: *Builder, info: *moduleinfo.ModuleInfo, e: *const ast.Expr, c: *
 /// function (non-generic member / host / intrinsic → `memberLeaf`; a
 /// bodyful generic must be instance-keyed by the annotation's
 /// `call_of`), or a function-value callee (local / alias).
-fn resolvePathCallee(b: *Builder, info: *moduleinfo.ModuleInfo, p: *const ast.PathExpr, span: ast.Span, callee_ty: *?cfg.Type) BuildError!hir.ExprId {
+fn resolvePathCallee(b: *Builder, info: *moduleinfo.ModuleInfo, e: *const ast.Expr, span: ast.Span, callee_ty: *?cfg.Type) BuildError!hir.ExprId {
+    const p: *const ast.PathExpr = &e.path;
     const path = p.path;
     var owner = info;
-    if (path.len == 1 and b.lookup(path[0].text) != null) {
-        return localCallee(b, info, path[0]);
+    if (b.lookup(path[0].text) != null) {
+        if (path.len == 1) return localCallee(b, info, path[0]);
+        // A member chain on a local base (Core 6.1: `counter.next(...)`
+        // — a function-valued struct field called through its holder):
+        // a value callee built exactly like `buildPathValue`'s local
+        // chain (annotations on the original callee expression). The
+        // lowering emits the member load then an indirect call.
+        var cur = try localNode(b, info, b.lookup(path[0].text).?);
+        var cur_ty = b.built.program.node(cur).ty;
+        for (path[1..], 0..) |seg, i| {
+            // Only the final read of the chain carries the path's
+            // annotation (see fieldRead).
+            const ann_e: ?*const ast.Expr = if (i == path.len - 2) e else null;
+            cur = try fieldRead(b, info, ann_e, seg.span, cur, cur_ty, seg.text);
+            cur_ty = b.built.program.node(cur).ty;
+        }
+        callee_ty.* = cur_ty;
+        return cur;
     }
     if (path.len > 1) {
         const spec = info.module_values.get(path[0].text) orelse b.aliasModule(path[0].text) orelse
@@ -1734,6 +1785,33 @@ fn buildMatch(b: *Builder, info: *moduleinfo.ModuleInfo, e: *const ast.Expr, m: 
     const scrut_ty = b.built.program.node(scrut).ty;
     const moving = isMoveExpr(m.scrutinee);
     const ops = try b.built.program.addOperands(&.{scrut});
+    // Type-test arms over an 'any' scrutinee — mirror cfg_lower_control's
+    // lowerPatternMatch rules: at least one type test anywhere demands a
+    // wildcard arm, and a type test nested under a tuple/list/struct arm
+    // would recover a payload without a preceding `type_is` test, so only
+    // whole-arm type tests are allowed (Core §14.7).
+    var has_type_test = false;
+    for (m.arms) |*arm| {
+        if (cfg_lower_pattern.patternHasTypeTest(&arm.pattern)) {
+            has_type_test = true;
+            break;
+        }
+    }
+    if (has_type_test) {
+        var has_wildcard = false;
+        for (m.arms) |*arm| if (arm.pattern == .wildcard) {
+            has_wildcard = true;
+            break;
+        };
+        if (!has_wildcard) {
+            return b.fail(m.span, "a match over an 'any' value with type-test patterns must include a wildcard '_' arm", .{});
+        }
+        for (m.arms) |*arm| {
+            if (arm.pattern != .type_test and cfg_lower_pattern.patternHasTypeTest(&arm.pattern)) {
+                return b.fail(arm.span, "a type-test pattern must be the whole arm of a match", .{});
+            }
+        }
+    }
     var reg_ids = std.ArrayList(hir.RegionId).empty;
     var arm_tys = std.ArrayList(cfg.Type).empty;
     for (m.arms) |*arm| {

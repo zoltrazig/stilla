@@ -339,6 +339,10 @@ fn constNo(numbers: *const RefNumbers, id: hir.ConstId) !u32 {
 /// an if there must be parenthesized so the `else` binds correctly.
 fn printExpr(p: *Printer, program: *const hir.Program, id: hir.ExprId, numbers: *const RefNumbers, _: bool) PrintError!void {
     const n = program.node(id);
+    // A chain-reached value leaf (a module access path through
+    // module-valued members, hir.md §7.4) has no text form carrying the
+    // hop identities — printing errors, never silently drops the hops.
+    if (n.access_hops.len > 0) return PrintError.NotSerializable;
     const op_name = hir.registry.get(n.op).name;
     if (std.mem.eql(u8, op_name, "local")) {
         const bid = n.payload.binder;

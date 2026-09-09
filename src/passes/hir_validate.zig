@@ -199,6 +199,19 @@ const Validator = struct {
             return self.fail("expr {d} (op {s}) carries a .{s} payload; expected .{s}", .{ fr.id, name, @tagName(tag), @tagName(want) });
         }
 
+        // A resolved module access path (chain-reached value leaves,
+        // hir.md §7.4) pairs with the leaf ops that carry member
+        // identity — never with an interior or non-leaf node. Hop
+        // module indexes are checked at lowering (the validator has no
+        // module table; the lowering fails cleanly out of range).
+        if (e.access_hops.len > 0 and
+            !std.mem.eql(u8, name, "const") and
+            !std.mem.eql(u8, name, "fn_ref") and
+            !std.mem.eql(u8, name, "module_const"))
+        {
+            return self.fail("expr {d} (op {s}) carries a module access path; only const/fn_ref/module_const leaves may", .{ fr.id, name });
+        }
+
         // Operand range bounds, then shape arity.
         const buf = self.program.expr_buffer.items;
         const ops = e.operands;

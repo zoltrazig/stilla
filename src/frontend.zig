@@ -75,14 +75,15 @@ pub const Options = struct {
     /// keeps the single ordered pass and its near-linear compile time.
     optimize_aggressive: bool = false,
     /// Route phase 3 through the HIR seam (docs/hir.md §11 M1a): the
-    /// checker output is first built into the canonical monomorphic HIR
+    /// Lower through the HIR seam (docs/hir.md §11 M1a): the checker
+    /// output is first built into the canonical monomorphic HIR
     /// (`hir_build.buildProgramDiag`) and then lowered to the CFG AIR by
     /// `hir_lower.lowerProgram` instead of the direct annotated-AST
-    /// lowering. Default false — the HIR path's M1a acceptance is the
-    /// §10.3 semantic-equivalence gate: byte-identical AIR text against
-    /// the direct path over the corpus (PROGRESS S5). Code-only toggle
-    /// (no CLI flag).
-    hir_stage: bool = false,
+    /// lowering. Default true since S6a — the whole suite is the §10.3
+    /// coverage experiment (byte-identical AIR text against the direct
+    /// path over the corpus, PROGRESS S5/S6a). Code-only toggle (no CLI
+    /// flag); S6b removes the option and the direct path entirely.
+    hir_stage: bool = true,
 };
 
 /// The frontend's output: the arena, the phase-1 graph, and the phase-3

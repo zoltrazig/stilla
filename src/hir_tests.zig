@@ -229,7 +229,7 @@ fn diffFile(dir: []const u8, spec: []const u8) !void {
     defer source_map.deinit(testing.allocator);
     try source_map.put(testing.allocator, spec, text);
     sources.source = source_map;
-    var direct = try frontend.compile(testing.allocator, .{ .entry = spec, .sources = sources, .entry_fn = "main" });
+    var direct = try frontend.compile(testing.allocator, .{ .entry = spec, .sources = sources, .entry_fn = "main", .hir_stage = false });
     defer direct.deinit();
     const direct_text = try cfg.print(&direct.program.?, testing.allocator);
     defer testing.allocator.free(direct_text);
@@ -313,4 +313,132 @@ test "S5: equivalence gate — probes/*.st direct vs HIR AIR text" {
         "union_match",
     };
     for (pr) |spec| try diffFile("probes", spec);
+}
+
+// ---------------------------------------------------------------------------
+// S5+ (S6a): module-value chain differentials — the corpus has no
+// dotted module path with module-valued members (`lib.math.sqrt`,
+// `lists.builtin.print`), the S5-recorded gap. The direct lowering
+// replays the chain as `module_ref` + per-hop `load_member`s (module
+// identity flows through the AIR); the HIR seam records the resolved
+// access path on the value leaf and replays the same loads. Both
+// sides must stay byte-identical here, plus explicit load-count and
+// index markers.
+// ---------------------------------------------------------------------------
+
+/// Differential over a multi-module program: direct vs HIR AIR text
+/// byte-equal, then every needle occurs (and every absent needle does
+/// not) in the HIR side's text.
+fn diffModules(entry: []const u8, modules: []const struct { []const u8, []const u8 }, needles: []const []const u8, absent: []const []const u8) !void {
+    var sources = moduleinfo.Sources{};
+    var source_map = std.StringHashMapUnmanaged([]const u8).empty;
+    defer source_map.deinit(testing.allocator);
+    for (modules) |pair| try source_map.put(testing.allocator, pair[0], pair[1]);
+    sources.source = source_map;
+
+    var direct = try frontend.compile(testing.allocator, .{ .entry = entry, .sources = sources, .entry_fn = "main", .hir_stage = false });
+    defer direct.deinit();
+    const direct_text = try cfg.print(&direct.program.?, testing.allocator);
+    defer testing.allocator.free(direct_text);
+
+    var hir_sources = moduleinfo.Sources{};
+    var hir_map = std.StringHashMapUnmanaged([]const u8).empty;
+    defer hir_map.deinit(testing.allocator);
+    for (modules) |pair| try hir_map.put(testing.allocator, pair[0], pair[1]);
+    hir_sources.source = hir_map;
+    var hc = try frontend.compile(testing.allocator, .{ .entry = entry, .sources = hir_sources, .entry_fn = "main", .hir_stage = true });
+    defer hc.deinit();
+    if (hc.program == null) {
+        std.debug.print("S5 diff chain: hir_stage compile failed: {s}\n", .{if (hc.diag) |d| d.message else "(no diagnostic)"});
+        return error.TestUnexpectedResult;
+    }
+    const hir_text = try cfg.print(&hc.program.?, testing.allocator);
+    defer testing.allocator.free(hir_text);
+
+    if (!std.mem.eql(u8, direct_text, hir_text)) {
+        var it_d = std.mem.splitScalar(u8, direct_text, '\n');
+        var it_h = std.mem.splitScalar(u8, hir_text, '\n');
+        var line: usize = 1;
+        while (true) {
+            const d = it_d.next();
+            const h = it_h.next();
+            if (d == null and h == null) break;
+            if (d == null or h == null or !std.mem.eql(u8, d.?, h.?)) {
+                std.debug.print("S5 diff chain: line {d}\n  direct: {s}\n  hir:    {s}\n", .{ line, d orelse "<eof>", h orelse "<eof>" });
+                break;
+            }
+            line += 1;
+        }
+        return error.TestUnexpectedResult;
+    }
+    for (needles) |n| {
+        if (std.mem.indexOf(u8, hir_text, n) == null) {
+            std.debug.print("S5 diff chain: missing '{s}' in hir AIR\n", .{n});
+            return error.TestUnexpectedResult;
+        }
+    }
+    for (absent) |n| {
+        if (std.mem.indexOf(u8, hir_text, n) != null) {
+            std.debug.print("S5 diff chain: unexpected '{s}' in hir AIR\n", .{n});
+            return error.TestUnexpectedResult;
+        }
+    }
+}
+
+test "S5+: module-value chains — direct vs HIR AIR text (S6a gap)" {
+    // lib.math.sqrt: the hop `lib.math` loads through lib's member row;
+    // the final member loads on that value — never a fresh module ref.
+    try diffModules("app", &.{
+        .{ "math", "fn sqrt(x: int32) -> int32 { x }" },
+        .{ "lib", "const math = import(\"math\");" },
+        .{
+            "app",
+            \\const lib = import("lib");
+            \\fn main() -> void {
+            \\    let s = lib.math.sqrt;
+            \\    let r = s(4);
+            \\}
+        },
+    }, &.{
+        "module \"lib\"",
+        "load_member %0, #0", // lib.math (module value row)
+        "load_member %1, #0", // math.sqrt on the loaded module value
+    }, &.{"module_ref \"math\""}); // no static jump past the hop
+    // Same target reached through two different chains, and a deeper
+    // chain (lib2 re-exports lib): every path replays its own hops.
+    try diffModules("app", &.{
+        .{ "math", "fn sqrt(x: int32) -> int32 { x }" },
+        .{ "lib", "const math = import(\"math\");" },
+        .{ "lib2", "const lib = import(\"lib\");" },
+        .{
+            "app",
+            \\const lib = import("lib");
+            \\const lib2 = import("lib2");
+            \\fn main() -> void {
+            \\    let a = lib.math.sqrt;
+            \\    let b = lib2.lib.math.sqrt;
+            \\    let c = lib.math.sqrt;
+            \\}
+        },
+    }, &.{
+        "load_member %0, #0", // app.lib
+        "load_member %0, #0", // lib.math (via lib)
+        "load_member %0, #0", // lib2.lib
+        "load_member %0, #0", // lib.math (via lib2.lib)
+        "load_member %0, #0", // app.lib (second use, fresh path)
+    }, &.{});
+    // A host member through a module-valued member of a std module:
+    // `lists.builtin.print` — the builtin hop loads, the intrinsic
+    // `print` resolves to its wrapper fn_ref with no second member row.
+    try diffModules("app", &.{
+        .{
+            "app",
+            \\const lists = import("list");
+            \\fn take(f: fn(str) -> void) -> void { f("hi") }
+            \\fn main() -> void { take(lists.builtin.print) }
+        },
+    }, &.{
+        "load_member %0, #6", // list.builtin (compacted canonical index)
+        "fn_ref @app.print.intrinsic.0",
+    }, &.{"load_member %0, #8"});
 }

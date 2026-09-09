@@ -130,16 +130,24 @@ fn hostCall(c: *Ctx, fs: *FuncState, id: hir.ExprId, callee_node: hir.ExprNode, 
     const sig_fn = callee_node.ty.function;
     // Effective modes: move when the argument is a `move` node (the
     // checker's rule, recorded structurally by the builder).
+    var eff_params = std.ArrayList(cfg.Param).empty;
     var args = std.ArrayList(*cfg.Value).empty;
     for (sig_fn.params, 0..) |p, i| {
         const arg_id = ops[1 + i];
         const moving = std.mem.eql(u8, c.opName(arg_id), "move");
         const v = (try hir_lower_expr.expr(c, fs, arg_id)) orelse return null;
         const mode: ast.ParamMode = effectiveMode(p.mode, moving, v.type_);
+        try eff_params.append(self.arena, .{ .span = p.span, .name = p.name, .mode = mode, .type_ = p.type_ });
         const arg = try cfg_lower_call.lowerCallArg(self, fs, v, mode, p.type_);
         if (arg.type_ == .primitive and arg.type_.primitive == .void) continue; // void args emit no operand
         try args.append(self.arena, arg);
     }
+    // The syscall carries the EFFECTIVE modes (a `move` declared
+    // parameter relaxed to `plain` for a Copy argument passed without
+    // an explicit `move`) — mirror cfg_lower_call.effectiveSig, so the
+    // runtime and validator see the call-site transfer (the box/unbox
+    // contract depends on it).
+    const eff_sig = cfg.FunctionType{ .params = eff_params.items, .ret = sig_fn.ret };
     // Bundle-intrinsic expansions apply their constraint checks; every
     // host call lowers to the same `syscall` emission either way.
     if (cfg_lower_intrinsic.isHostExpansion(owner.specifier, host.name)) {
@@ -147,7 +155,7 @@ fn hostCall(c: *Ctx, fs: *FuncState, id: hir.ExprId, callee_node: hir.ExprNode, 
             try cfg_lower_intrinsic.checkStrHashSignature(self, no_span, host.name, sig_fn);
         }
     }
-    return cfg_lower_call.emitHostCall(self, fs, no_span, owner.specifier, host.name, args.items, sig_fn);
+    return cfg_lower_call.emitHostCall(self, fs, no_span, owner.specifier, host.name, args.items, eff_sig);
 }
 
 /// The effective argument mode (cfg_lower_call.effectiveMode over HIR
