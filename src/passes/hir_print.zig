@@ -399,16 +399,18 @@ fn printExpr(p: *Printer, program: *const hir.Program, id: hir.ExprId, numbers: 
         try printExpr(p, program, r.root, numbers, false);
         return;
     }
-    if (std.mem.eql(u8, op_name, "if")) {
+    if (std.mem.eql(u8, op_name, "if") or std.mem.eql(u8, op_name, "and") or std.mem.eql(u8, op_name, "or")) {
         const ops = program.operands(id);
-        try p.put("if ");
+        try p.put(op_name);
+        try p.put(" ");
         try printExpr(p, program, ops[0], numbers, false);
         try p.put(" then ");
         const regs = program.regionsOf(id);
         try printBranch(p, program, regs[0], numbers);
         const else_r = program.region(regs[1]);
         if (elseIsVoid(program, else_r.root)) {
-            // Missing else is the default void branch.
+            // Missing else is the default void branch (if only; and/or
+            // always carry a const-bool side branch).
         } else {
             try p.put(" else ");
             try printBranch(p, program, regs[1], numbers);
@@ -481,7 +483,10 @@ fn printMode(p: *Printer, mode: hir.BinderMode) PrintError!void {
 /// An if branch: parenthesize when the branch root is itself an if.
 fn printBranch(p: *Printer, program: *const hir.Program, rid: hir.RegionId, numbers: *const RefNumbers) PrintError!void {
     const r = program.region(rid);
-    if (std.mem.eql(u8, hir.registry.get(program.node(r.root).op).name, "if")) {
+    const root_op = hir.registry.get(program.node(r.root).op).name;
+    // A control node as a branch root must be parenthesized so `then` /
+    // `else` bind correctly (if, and the and/or short-circuit rows).
+    if (std.mem.eql(u8, root_op, "if") or std.mem.eql(u8, root_op, "and") or std.mem.eql(u8, root_op, "or")) {
         try p.put("(");
         try printExpr(p, program, r.root, numbers, false);
         try p.put(")");

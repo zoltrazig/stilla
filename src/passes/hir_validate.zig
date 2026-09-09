@@ -52,6 +52,8 @@ const cfg = @import("stilla").cfg;
 const lambda_op = hir.opId("lambda").?;
 const let_op = hir.opId("let").?;
 const if_op = hir.opId("if").?;
+const and_op = hir.opId("and").?;
+const or_op = hir.opId("or").?;
 const match_op = hir.opId("match").?;
 
 /// Validate the tree reachable from `root`. Returns null when valid,
@@ -335,8 +337,8 @@ const Validator = struct {
             }
         } else {
             if (r.pattern != null) return self.fail("region {d} (op {s}) carries a pattern; only match arms and destructuring lets do (hir.md §5.4)", .{ fr.id, self.opName(fr.owner) });
-            if (fr.owner == if_op and params.len != 0) {
-                return self.fail("if region {d} must not carry binders", .{fr.id});
+            if ((fr.owner == if_op or fr.owner == and_op or fr.owner == or_op) and params.len != 0) {
+                return self.fail("control region {d} must not carry binders", .{fr.id});
             }
         }
 

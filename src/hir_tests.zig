@@ -182,3 +182,135 @@ test "S4: HIR corpus — probes/*.st build and validate" {
     };
     try corpusList("probes", &pr);
 }
+
+// ---------------------------------------------------------------------------
+// S5: HIR→CFG equivalence gate (hir.md §10.3, PROGRESS S5) — the corpus
+// must produce byte-identical `cfg.print` text through the direct AST
+// lowering and the HIR seam (`frontend.Options.hir_stage`).
+// ---------------------------------------------------------------------------
+
+const cfg = @import("cfg.zig");
+const frontend = @import("frontend.zig");
+
+/// Compile one corpus file through the HIR seam.
+fn compileHir(entry: []const u8, text: []const u8) ![]u8 {
+    var sources = moduleinfo.Sources{};
+    var source_map = std.StringHashMapUnmanaged([]const u8).empty;
+    defer source_map.deinit(testing.allocator);
+    try source_map.put(testing.allocator, entry, text);
+    sources.source = source_map;
+    var comp = try frontend.compile(testing.allocator, .{ .entry = entry, .sources = sources, .entry_fn = "main", .hir_stage = true });
+    defer comp.deinit();
+    if (comp.program) |*p| return cfg.print(p, testing.allocator);
+    // A failed hir_stage compile (an unsupported form or a lowering
+    // bug) must surface its diagnostic, not panic on the null program.
+    if (comp.diag) |d| {
+        std.debug.print("S5 hir_stage compile failed: {s}\n", .{d.message});
+    } else {
+        std.debug.print("S5 hir_stage compile failed (no diagnostic)\n", .{});
+    }
+    return error.TestUnexpectedResult;
+}
+
+/// The §10.3 gate over one file: direct vs HIR-seam AIR text must be
+/// byte-identical (and both paths already CFG-validated inside the
+/// frontend compile).
+fn diffFile(dir: []const u8, spec: []const u8) !void {
+    const path = try std.fmt.allocPrint(testing.allocator, "{s}/{s}.st", .{ dir, spec });
+    defer testing.allocator.free(path);
+    const text = std.Io.Dir.cwd().readFileAlloc(testing.io, path, testing.allocator, .limited(1 << 20)) catch |err| {
+        std.debug.print("S5 diff: cannot read {s} ({s})\n", .{ path, @errorName(err) });
+        return error.TestUnexpectedResult;
+    };
+    defer testing.allocator.free(text);
+
+    var sources = moduleinfo.Sources{};
+    var source_map = std.StringHashMapUnmanaged([]const u8).empty;
+    defer source_map.deinit(testing.allocator);
+    try source_map.put(testing.allocator, spec, text);
+    sources.source = source_map;
+    var direct = try frontend.compile(testing.allocator, .{ .entry = spec, .sources = sources, .entry_fn = "main" });
+    defer direct.deinit();
+    const direct_text = try cfg.print(&direct.program.?, testing.allocator);
+    defer testing.allocator.free(direct_text);
+
+    const hir_text = try compileHir(spec, text);
+    defer testing.allocator.free(hir_text);
+
+    if (!std.mem.eql(u8, direct_text, hir_text)) {
+        // Dump both texts for a full side-by-side, then the first
+        // differing line for a readable failure.
+        std.Io.Dir.cwd().writeFile(testing.io, .{ .sub_path = "/tmp/stilla_direct.air", .data = direct_text }) catch {};
+        std.Io.Dir.cwd().writeFile(testing.io, .{ .sub_path = "/tmp/stilla_hir.air", .data = hir_text }) catch {};
+        // First differing line, for a readable failure.
+        var it_d = std.mem.splitScalar(u8, direct_text, '\n');
+        var it_h = std.mem.splitScalar(u8, hir_text, '\n');
+        var line: usize = 1;
+        while (true) {
+            const d = it_d.next();
+            const h = it_h.next();
+            if (d == null and h == null) break;
+            if (d == null or h == null or !std.mem.eql(u8, d.?, h.?)) {
+                std.debug.print("S5 diff {s}: line {d}\n  direct: {s}\n  hir:    {s}\n", .{ path, line, d orelse "<eof>", h orelse "<eof>" });
+                break;
+            }
+            line += 1;
+        }
+        return error.TestUnexpectedResult;
+    }
+}
+
+test "S5: equivalence gate — examples/*.st direct vs HIR AIR text" {
+    const ex = [_][]const u8{
+        "any",
+        "arrays",
+        "basics",
+        "box",
+        "fib",
+        "fib_tail_call",
+        "floats",
+        "fold",
+        "functions",
+        "generics",
+        "madd",
+        "maps",
+        "match",
+        "minmax",
+        "nest",
+        "ownership",
+        "strings",
+        "structs",
+    };
+    for (ex) |spec| try diffFile("examples", spec);
+}
+
+test "S5: equivalence gate — probes/*.st direct vs HIR AIR text" {
+    const pr = [_][]const u8{
+        "aggregates",
+        "any",
+        "box",
+        "branch",
+        "calls",
+        "casts",
+        "cli_panic",
+        "cli_run",
+        "comparisons",
+        "constants",
+        "control_flow",
+        "fusion",
+        "generic",
+        "generic_aggregates",
+        "immediates",
+        "integer_bits",
+        "lifecycle",
+        "list_match",
+        "numeric",
+        "ownership",
+        "patterns",
+        "short_circuit",
+        "strings",
+        "tail_recursion",
+        "union_match",
+    };
+    for (pr) |spec| try diffFile("probes", spec);
+}

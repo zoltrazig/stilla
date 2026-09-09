@@ -154,7 +154,7 @@ fn findFunc(funcs: []*cfg.IrFunc, name: []const u8) ?*cfg.IrFunc {
 /// members (static references), void-typed constants, and intrinsic
 /// constants (materialized at use sites, air.md §5.6) occupy no
 /// storage; `null` when `vm` is not a slot-bearing const.
-fn constSlot(info: *moduleinfo.ModuleInfo, vm: *const moduleinfo.ValueMember) ?u32 {
+pub fn constSlot(info: *moduleinfo.ModuleInfo, vm: *const moduleinfo.ValueMember) ?u32 {
     var n: u32 = 0;
     for (info.values) |*v| {
         if (v == vm) {

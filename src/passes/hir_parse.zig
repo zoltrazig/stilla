@@ -660,7 +660,9 @@ pub const Parser = struct {
         const w = self.wordToken() orelse return self.fail("expected expression");
         if (std.mem.eql(u8, w, "let")) return self.parseLet();
         if (std.mem.eql(u8, w, "fn")) return self.parseLambda();
-        if (std.mem.eql(u8, w, "if")) return self.parseIf();
+        if (std.mem.eql(u8, w, "if")) return self.parseControl(try self.opId("if"));
+        if (std.mem.eql(u8, w, "and")) return self.parseControl(try self.opId("and"));
+        if (std.mem.eql(u8, w, "or")) return self.parseControl(try self.opId("or"));
         if (std.mem.eql(u8, w, "match")) return self.parseMatch();
         if (std.mem.eql(u8, w, "call")) return self.parseCall();
         if (std.mem.eql(u8, w, "panic")) {
@@ -870,7 +872,11 @@ pub const Parser = struct {
 
     /// `if c then t (else e)?` — cond operand + two no-param regions. A
     /// missing else is a void branch (synthesized const void root).
-    fn parseIf(self: *Parser) ParseError!hir.ExprId {
+    /// `if <cond> then <body> [else <body>]` and the same-shaped
+    /// `and`/`or` short-circuit rows (§5.5/§7.1: and/or carry their own
+    /// rows; both branches are always present in their text).
+    fn parseControl(self: *Parser, op: hir.OpId) ParseError!hir.ExprId {
+        const desc = hir.registry.get(op);
         const cond = try self.parseExpr();
         try self.expectWord("then");
         const then_body = try self.parseExpr();
@@ -881,15 +887,17 @@ pub const Parser = struct {
             _ = self.advance();
             _ = self.advance();
             else_root = try self.parseExpr();
-        } else {
+        } else if (std.mem.eql(u8, desc.name, "if")) {
             else_root = try self.litConst(.void, .void);
+        } else {
+            return self.fail("a short-circuit node requires an else branch");
         }
         const then_reg = try self.program.addRegion(&.{}, then_body, null);
         const else_reg = try self.program.addRegion(&.{}, else_root, null);
         const regions = try self.program.addRegions(&.{ then_reg, else_reg });
         const operands = try self.program.addOperands(&.{cond});
         return self.program.addExpr(.{
-            .op = try self.opId("if"),
+            .op = op,
             .ty = self.program.node(then_body).ty,
             .operands = operands,
             .regions = regions,

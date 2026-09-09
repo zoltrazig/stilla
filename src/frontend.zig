@@ -19,6 +19,8 @@ const frontend_cache = @import("frontend_cache.zig");
 const lower = @import("lower.zig");
 const moduleinfo = @import("moduleinfo.zig");
 const checker = @import("passes/checker.zig");
+const hir_build = @import("passes/hir_build.zig");
+const hir_lower = @import("passes/hir_lower.zig");
 const cfg_optimize = @import("passes/cfg_optimize.zig");
 const cfg_parse = @import("passes/cfg_parse.zig");
 
@@ -72,6 +74,15 @@ pub const Options = struct {
     /// Code-only toggle (no CLI flag), like `optimize`; the default
     /// keeps the single ordered pass and its near-linear compile time.
     optimize_aggressive: bool = false,
+    /// Route phase 3 through the HIR seam (docs/hir.md §11 M1a): the
+    /// checker output is first built into the canonical monomorphic HIR
+    /// (`hir_build.buildProgramDiag`) and then lowered to the CFG AIR by
+    /// `hir_lower.lowerProgram` instead of the direct annotated-AST
+    /// lowering. Default false — the HIR path's M1a acceptance is the
+    /// §10.3 semantic-equivalence gate: byte-identical AIR text against
+    /// the direct path over the corpus (PROGRESS S5). Code-only toggle
+    /// (no CLI flag).
+    hir_stage: bool = false,
 };
 
 /// The frontend's output: the arena, the phase-1 graph, and the phase-3
@@ -180,9 +191,33 @@ pub fn compile(allocator: std.mem.Allocator, options: Options) CompileError!Comp
         else => return err,
     };
 
-    // Phase 3: CFG lowering.
+    // Phase 3: CFG lowering — directly from the annotated AST, or
+    // through the HIR seam (`hir_stage`, docs/hir.md §11 M1a): the
+    // checker output is built into the canonical monomorphic HIR and
+    // lowered from there. Both paths share the same `Lowerer` shape.
     var lowerer = lower.Lowerer.init(arena_alloc, graph, options.entry_fn, options.entry_fn_explicit, &ck.annotation);
-    var program = lower.lowerProgram(&lowerer) catch |err| switch (err) {
+    var program = if (options.hir_stage) blk: {
+        var bdiag: moduleinfo.Diag = undefined;
+        const built = hir_build.buildProgramDiag(arena_alloc, graph, &ck.annotation, &bdiag) catch |err| switch (err) {
+            error.Diagnostic => {
+                const diag = if (bdiag.message.len > 0) bdiag else moduleinfo.Diag{
+                    .span = ast.Span.init(0, 0, 0),
+                    .message = "HIR build failed",
+                };
+                return failed(arena, &.{diag}, graph, builder.loaded_sources.items);
+            },
+            else => return err,
+        };
+        break :blk hir_lower.lowerProgram(&lowerer, built) catch |err| switch (err) {
+            error.Diagnostic => {
+                // Lowering stays first-error; wrap the single diagnostic
+                // in the collected form.
+                const diag = lowerer.diag orelse return error.Diagnostic;
+                return failed(arena, &.{diag}, graph, builder.loaded_sources.items);
+            },
+            else => return err,
+        };
+    } else lower.lowerProgram(&lowerer) catch |err| switch (err) {
         error.Diagnostic => {
             // Lowering stays first-error (a lowering bug is one error);
             // wrap the single diagnostic in the collected form.

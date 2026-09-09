@@ -63,7 +63,7 @@ pub fn lowerProgram(self: *Lowerer) LowerError!cfg.IrProgram {
 /// type from the program alone. Generic templates are included (a raw
 /// template reference stays addressable) with deferred ownership;
 /// aliases expand and leave no entry.
-fn collectTypeEnv(self: *Lowerer) LowerError![]cfg.TypeDecl {
+pub fn collectTypeEnv(self: *Lowerer) LowerError![]cfg.TypeDecl {
     const count = self.graph.type_interner.to_name.items.len;
     const decls = try self.arena.alloc(cfg.TypeDecl, count);
     for (decls) |*d| d.* = .{ .unknown = "" }; // defensive: every id is filled below

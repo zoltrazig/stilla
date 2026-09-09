@@ -768,6 +768,14 @@ EvalPolicy =
 - EvalPolicy 是**语言语义**，与 effects 正交：可交换是可证明的派生事实
   （`reorderable`），默认语义仍保持 LTR（§6.2）。
 
+> **M1a 实施修订（随 S5 落地）**：`and`/`or` 在 §7.1 登记为独立 control 行
+> （`ShortCircuit`，1 operand + 2 regions，与 `if` 同构），不再编码为
+> `if (lhs) { rhs } else { false }` 形状。原因：HIR→CFG lowering 的等价格门
+> （§10.3）要求 `and`/`or` 复刻直降的短路菱形结构（`rhs`/`false_` 块与 join），
+> 与 `if`（`then`/`else` 块）不是同构的 CFG 发射；且源码 `if c {x} else
+> {false}` 与 and 形状在 HIR 中不可区分，猜形不可取（§12 认可门禁驱动的表述
+> 缺口补正）。
+
 ### 5.6 full-expression 栅栏
 
 Unique 临时量在所属 full expression 结束时销毁、反向创建序（Runtime；Types & Ownership；Core 定义 full expression）。因此：
@@ -988,6 +996,7 @@ let Bk: ty = v in body  →  body
 | function | `lambda` | 参数 region（不捕获，见 §5.3） |
 | function | `call` | callee + 有序 operands（LTR） |
 | control | `if` | cond + 两个惰性 region |
+| control | `and` / `or` | 短路分支：cond + 两个惰性 region（与 `if` 同构；M1a 修订：保留为独立行而非 `if` 简写，见 §5.5 注） |
 | control | `match` | scrutinee + arm regions（pattern binders 见 §5.4） |
 | aggregate | `struct_make` | nominal 构造 |
 | aggregate | `field_get` | 字段读取（view 传播见 §6.4） |

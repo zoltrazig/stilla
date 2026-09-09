@@ -31,8 +31,8 @@
 | S1 | hir.zig 结构 | arena 句柄/容器 + 注册表骨架 + 白盒 | done（本次提交） |
 | S2 | 文本 printer/parser | 前缀括号文本、binder 确定性编号、round-trip | done（本次提交） |
 | S3 | 结构 validator | hir.md §10.1 第一级 | done（本次提交） |
-| S4 | AST→HIR builder | M1a 主件；CFG 行为不变 | pending |
-| S5 | HIR→CFG + 等价门禁 | toggle + 字节差分 | pending |
+| S4 | AST→HIR builder | M1a 主件；CFG 行为不变 | done |
+| S5 | HIR→CFG + 等价门禁 | toggle + 字节差分 | done（本次提交） |
 | S6 | 全量覆盖 + 默认翻转 | 删除直降路径 | pending |
 | S7 | 文档回填 | hir.md 状态、README 移出 Unimplemented | pending |
 
@@ -308,16 +308,164 @@
   validate；`std/` 体经传递闭包一并构建。白盒（arena/registry 级）测试在
   hir_build.zig / hir.zig。
 
-### S5 — HIR→CFG + 等价门禁（pending）
+### S5 — HIR→CFG + 等价门禁（done）
 
 - 目标：新 lowering 驱动，复用 lower.zig / FuncState / cfg_lower_emit 的
   block/value/drop 机制；code-only 开关 `frontend.Options.hir_stage`（默认 false），
   frontend.compile phase3 二选一。
-- 文件：`hir_lower.zig`（逐 HirFunc → cfg.IrFunc；内部再分 expr/control/call/pattern，
-  复用或适配 cfg_lower_pattern）；`hir_tests.zig` 并导入 root.zig。
-- 验收：同源 `compileText` 与 `compileText(…, .hir_stage = true)` → `irText` 逐字节
-  相等；不可比时 `--run` 输出相等；`zig build run -- examples/fib.st` 开关前后
-  stdout 一致；suite + `zig build -fincremental examples` 绿。
+- 文件：`hir_lower.zig`（逐 HirFunc → cfg.IrFunc；内部再分 expr/control/call/pattern）；
+  `hir_tests.zig` 差分套件并导入 root.zig。
+- 验收：同源两路径（直降 vs hir_stage）→ `cfg.print` 文本**逐字节相等**（irText 即
+  cfg.print；两路径共享同一 graph/checker 产物）；suite 全绿；
+  `zig build -fincremental examples` 绿。字节相等已覆盖 `--run` 等价（AIR 同源，
+  解释执行必然同输出；CLI 无开关，stdout 一致性由 examples 直降路径维持）。
+
+#### S5 设计定案（doc-before-code，本阶段开工时）
+
+- **开关与接线**：`frontend.Options.hir_stage: bool = false`；compile phase3：
+  hir_stage → `hir_build.buildProgramDiag` + `hir_lower.lowerProgram(lowerer, built)`
+  → cfg.IrProgram；否则直降。失败路径沿用现有 lowerer.diag 惯例（buildProgram 的
+  diag 包装成 compile 的 failed 形态）。`Lowerer` 复用同一类型（arena/graph/ann/
+  entry/全局计数器字段）。HIR 路径不消费 ann 的逐表达式表（all resolved in HIR）。
+- **文件结构**：`passes/hir_lower.zig`（驱动：lowerProgram/lowerModule/lowerFunc）
+  - `hir_lower_expr.zig`（表达式分派/let/seq/模块叶）+ `hir_lower_control.zig`
+  （if/and/or/match，makeJoinPhi 复用 cfg_lower_control）+ `hir_lower_call.zig`
+  （调用分派）+ `hir_lower_pattern.zig`（arm 测试与绑定）——按 cfg 的 one-pass-per-
+  file 惯例分片，不用单巨文件。lowerModuleHir 复刻 `cfg_lower_module.lowerModule`
+  的 member 表（airMemberIndex）/slots/init 规则（同一 moduleinfo 数据 + 同名
+  逻辑），按模块 `funcs` 序（等价于 `order` 排序）逐记录 lowerFunc；`types` 直接
+  用 `built.types`；entry 选择复刻 cfg_lower_program（qualifiedName 扫描）。
+- **复用面（仅 AST 无关的现役机制；只有真正 AST 无关的才提 pub）**：
+  `cfg_lower_emit` 全簿记（emit/newValue/bindLocal/lookupLocal/exitScope/
+  dropCreatedRange/emitDrop/emitUnpack/emitBorrowVariant/beginCond/condLiveness/
+  restoreCond/joinMaybeFlags/newBlock/setTerminator/newPhi/fmtBlockName）、
+  `cfg_lower_func.newFuncState`/coerceRet、`cfg_lower_expr.emitVoid`/emitConst/
+  float32Literal、`cfg_lower_call.lowerCallArg`/emitCall/emitSyscall/emitHostCall、
+  `cfg_lower_control.makeJoinPhi`、`cfg_lower_validate.finishFunc`、
+  `cfg_lower_intrinsic`（isHostExpansion/constBits/syscallTarget/
+  intrinsicSyscallTarget；`checkStrHashSignature`/`isConstrainedMember` 由私有提
+  pub——两者本就 AST 无关）。这些调用点蕴含的 on-the-fly 折叠/拷贝消除/CSE 在
+  emit 内部，调用序相同即文本相同。
+- **转录面（AST 形状相关，按 HIR 形状复刻直降）**：
+  - 表达式分派按 op 行名做（const/local/fn_ref/module_const/field_get/
+    struct_make/variant_make/tuple_make/list_make/move/num_cast/any_cast/
+    neg.*/not.bool/算术比较族——行名后缀直接对应 cfg.Op，节点 ty 即结果类型；
+    const 注意 void 类型 → `emitVoid` 幻影（直降 `()` 同规则），float 已由 S4 窄化）。
+  - **FE 边界（修正：不等同「树即递归结构」；let/seq 不包）**：dropCreatedRange
+    只挂在**直降的 lowerExpr 递归点**上——每个真表达式节点的操作数（含 let
+    init、call 的 callee/args、if 的 cond、match 的 scrutinee、field 基）、
+    match arm 体、if-else 区域根的非块形状。**let/seq 节点永不包栅栏**：它们是
+    语句/块形状，直降在那里没有 lowerExpr 递归点，块由调用方 scope + exitScope
+    收尾（直降 lowerBlock 同款）。门禁验证（maps.st）证明：若把整棵 let 子树
+    （解构 let 的续体嵌套余下整块）包进 dropCreatedRange，会销毁直降不销毁的
+    **未绑定** created 临时量——解构 let 的整值基座（叶子是借用视图，基座无人
+    绑定、直降不发任何 CFG drop，销毁留给 LLIR lifecycle）——逐字节差分即败。
+    对普通标识绑定「包与 exitScope 等价」成立（created 即绑定，同位置同序），
+    但那是巧合，规则不依赖它。
+  - **作用域（修正：不按根形状猜）**：λ 体与 if-then 区域无条件推 scope；else 区域
+    与 match arm 体：直降除块 else/块 arm 外不经 lowerBlock——按区域根是否为
+    let/seq 推 scope，空/单表达式块跳过 scope 字节不变（有绑定的块必根于 let/seq，
+    可证等价），如实记录该推断与证明。
+  - **seq**：除末操作数外每个操作数求值后立即 `discardValue`（直降 buildStmts 的
+    位置一致性——`let _ = e` 的立即销毁、语句表达式销毁位置都靠这条）。
+  - **let**：单 binder → 复刻 lowerLet（declared any → pack；绑定 owns 由值状态
+    决定）；region pattern（解构 let）→ 绑语义由 pattern 形状驱动。绑定经
+    BinderId→`*lower.Local` 映射（函数内一表），无名字；bindLocal 用惰性名（不查
+    lookupLocal）。
+  - **调用分派（修正：不把一切 fn_ref 当 direct call）**：call 首位操作数为
+    fn_ref 且记录 kind ∈ {member, instance} → **direct call by qname**（record
+    签名即模式/期望）；fn_ref 记录 kind ∈ {λ, intrinsic} 或 local 或其他表达式 →
+    **value call**（直降 lambda 字面量调用 = fn_ref 值 + 间接调用同型；过
+    specializeSignature 复刻——具体签名原样返回）；fn_ref(host) → **syscall**（经
+    isHostExpansion/constrained 检查，sig=callee 叶的 function 型，call_of 情形叶
+    ty=实例签名，其余非泛型已具体，**不在 hir_lower 再特化**）。arg 的
+    effectiveMode 按 HIR 节点形状判断（`move` 节点 ≡ 直降 isMoveExpr，括号已消解）。
+    **值位成员函数**（fn_ref 不作为 call 首位操作数出现时）= 模块引用 +
+    `load_member`（直降 lowerPathValue 同款；调用位/值位按「是否 call 首位操作数」
+    结构区分，无语法歧义）。**intrinsic 包装转发体**（kind=intrinsic 记录）：**裸
+    参数转发**——不跑 effectiveMode/打包/any 物化，syscall 直带记录签名（复刻
+    synthIntrinsicFunc；void 参数跳过同款）。
+  - **if / match**：if 复刻 lowerIf；match 按 scrut 的 named→types 表判 union；
+    union match 复刻 lowerUnionMatch（read_tag/cover/live/arm{i} 块名/switch/ move
+    消费于 beginCond 前/arm 绑）；pattern match 复刻 lowerPatternMatch（armTest
+    Count/hasArmTest/emitArmTest 的 HIR 形状版：literal→eq、type_test→type_is、
+    list→`list#len` syscall+逐项 eq；fallthrough 规则同直降；arm 绑含
+    unpack_struct/unpack_tuple/split_list/read_*/tail/any_unpack 按 pattern 形状
+    与 base_owned 分派；字段/载荷类型经 `built.types` 的 TypeDecl 布局 +
+    substParams）。
+  - **module_const**：owner==self → `selfModuleRef`（函数级缓存复刻）否则
+    emitModuleRef(owner)；`airMemberIndex` load_member（含 module-valued 成员的
+    module_of 记录）；intrinsic const 已由 S4 构建期物化（直降同款无模块引用）。
+  - **and/or——M1a 表述缺口补正（本阶段定案）**：S4 把 `and`/`or` 编码为 if 结点，
+    但直降 lowerAnd/lowerOr 与 lowerIf 的块名/结构不同（`rhs`/`false_`/`true_` vs
+    `then`/`else`），if 形状无法字节复刻；且真实源码 `if c {x} else {false}` 与
+    and 形状不可区分，猜形不可取。**修订：登记 `and`/`or` 两个 core 行**（class
+    .control、operands .one、regions .two、policy **.short_circuit**（与 §5.5 同名，
+    语义即短路），与 if 同构）——buildBinary 直发 and/or 结点；hir_print/
+    hir_parse 加同构文本形（`and <lhs> then {rhs} else {f}`）；hir_validate 区域
+    规则并入；hir.md §5.5/§7.1 注记修订（policy 表述对齐 .short_circuit）。
+- **随本阶段修订的 S4 缺陷（评审发现，逐条修 + 回归）**：① synthIntrinsicRoot
+  从包装名 `{using}.{member}.intrinsic.{N}` 反解 member 实际解出 "intrinsic"——
+  改为 `intrinsicWrapperFnRef` 合成时直接把 HostBindingId 传入根构建，绝不反解
+  生成名；② buildLambda 的 `defer …append() catch {}` 吞 OOM——改体构建成功后
+  的显式 fallible append（顺序不变：completion 序）；③ buildConstInit 的 λ 命名
+  用 rec.key，而直降的 init 函数名是 "init"（init 内 λ 命名 `init.lambda{N}`）——
+  改 fn_name="init"，加 const-init-含-λ 的差分夹具；④ memberLeaf 对固有函数成员
+  在**值位**应合成包装（直降 intrinsicFnRef），调用位保持 host 叶——调用位/值位
+  分开构造；⑤ constSlot 对照直降：S4 的 `c.init != null` 附加条件对合法程序等价
+  （无 init 的非常量成员不存在），记录。
+- **等效面（门禁驱动迭代）**：语料逐文件差分，第一处差异即停；修复回环按需补正
+  HIR（§12 认可）。已核查的语料事实：无 ≥3 段成员路径；`using` 仅模块级类型别名
+  （值/模块别名分支无语料覆盖——记录、不声称）；无裸块表达式；成员函数作为值
+  传递无语料——已部分覆盖：generic_aggregates 覆盖**instance 值位**（fn_ref mono
+  名）；**非泛型成员函数值位**（module_ref+load_member 行）仍无语料，如实记录，门禁
+  暴露即修；copy 值 move
+  scrutinee 无语料（moving 标志差异面无覆盖）。这些推迟项逐条记录，门禁暴露即修；
+  不支持的情形**显式失败**，绝不回退 AST。
+- **验收**：同源两路径（直降 vs hir_stage）→ `cfg.print` 文本逐字节相等（两路径
+  compile 内部均跑 CFG validate 与 AIR round-trip）；suite 全绿；
+  `zig build -fincremental examples` 绿。字节相等已覆盖 `--run` 等价（AIR 同源，
+  解释执行必然同输出；CLI 无开关，stdout 一致性由 examples 直降路径维持）。
+- **过程风险**：与 S4 同教训（大文件整写/行索引替换；编辑脚本断言）；增量挂起
+  偶发（重启）。差分测试先行失败时点名 corpus 文件名。
+
+#### S5 事后记录（门禁驱动修复 + 验收证据）
+
+- 交付：`passes/hir_lower.zig`（驱动：lowerProgram/lowerModule/lowerFunc +
+  `rootIsBlockShaped`）＋ `hir_lower_expr.zig`（表达式分派/let/seq/模块叶/fn_ref）
+  ＋ `hir_lower_control.zig`（if/and/or/match）＋ `hir_lower_call.zig`（调用分派）
+  ＋ `hir_lower_pattern.zig`（arm 测试与绑）——按 cfg 惯例 one-pass-per-file；
+  `frontend.Options.hir_stage`（默认 false）与 frontend.compile phase3 二选一接线；
+  `hir_tests.zig` 差分套件（examples 18 + probes 25 全清单，与 S4 语料清单一致）。
+- 门禁驱动的修复回环（每处差分先行失败，逐条修 + 回归）：
+  ① **let/seq 包裹栅栏过宽（examples/maps.st 首差）**——整棵 let 子树的栅栏
+  dropCreatedRange 掉解构 let 的整值基座（直降不销毁未绑定 created 临时量，销毁
+  归 LLIR lifecycle）；修复= let/seq 节点不挂包裹栅栏（见上「FE 边界」表述修订）。
+  ② **值位 instance 记录错走成员装载（probes/generic_aggregates.st）**——
+  `let specialized = identity::[int32];` 值位专化：直降 lowerSpecialize 发
+  `fn_ref {module}.{fn}.{id}`（mono 实例函数名）；instance 记录没有成员行（泛型
+  成员行 function=null），原一律 load_member 即「vanished」。修复= instance 与 λ
+  同路：值位 fn_ref rec.name。
+  ③ **差分 harness 崩溃（probes 首测）**——hir_stage compile 失败时 program==null，
+  compileHir 的 `.?` 直接 panic；改表面 diag 后失败可读（"S5 hir_stage compile
+  failed: …"）。
+- 验收证据：`zig build test`（非增量）exit=0 全绿（1053 tests，含 S5 两个差分门禁：
+  首启两测试先失败点名 maps.st/generic_aggregates.st 证明收集）；
+  `zig build -fincremental test` 全绿；`zig build -fincremental examples` 绿；
+  `zig fmt --check src/` 绿；无 debug print；栅栏净（EffectSummary/effect_transfer/
+  seg_* = 0）。
+- 等价门禁的表述缺口补正（记录，随 S5 提交）：`and`/`or` 两个 core 行（§5.5/
+  §7.1 注记修订入 hir.md）——直降的短路菱形（rhs/false_/true_ 块名）与 if
+  （then/else）非同构，且源码 if 形状与 and 不可区分，猜形不可取；
+  hir_build/print/parse/validate 加同构文本形与区域规则（见「and/or」bullet）。
+
+#### S5 已知推迟（如实记录，门禁未覆盖）
+
+- 上述语料未覆盖的差异面（裸块表达式销毁位、using 值别名 owns、copy 可移 scrutinee
+  的 moving 标志）——HIR 当前编码不足以字节区分处已列明（设计定案「等效面」），S6
+  全量覆盖时若语料出现再补编码；不支持的情形显式失败，不回退 AST。
+- FE 逐表达式归属（full_expr=0）、origin 未接线：与 S4 记录一致，不影响本阶段
+  文本门禁（直降的销毁不按 FE id 分派）。
 
 ### S6 — 全量覆盖 + 默认翻转（pending）
 
@@ -359,3 +507,4 @@
 | 2026-09-08 | S3 | 本次 feat(hir) S3 提交 | passes/hir_validate.zig 结构校验（§10.1 第一级）+ hir.zig 再导出/强制分析测试扩为三 pass；15 白盒测试（含 parse 可过、validator 必拒的 capture 文本）；验收 = 全套 ~1047 tests 绿 |
 | 2026-09-08 | S3 修复 | fix(hir) S3 fix 提交 | 诊断消息改由调用方 allocator 分配（原为 scratch arena，返回即悬垂）+ 消息生命周期回归测试；pattern DFS 加深度上限 4096（越深诊断化，不栈溢出）；PROGRESS 措辞改准确 |
 | 2026-09-08 | S4 | 本次 feat(hir) S4 提交 | passes/hir_build.zig（AST→HIR，含 mono 体/实例/drop hook/λ 提升/intrinsic wrapper 转发体/路径落叶/`::[]` host 调用）；hir.zig 容器层 + registry ~130 typed 行 + ScalarRep{byte,bool,str} + serCtx 错误传播；S3 修订（let 不可反驳 pattern + checkIrrefutable + 无绑定 type-test 哨兵）；hir_tests.zig fib + examples//probes/ 全语料构建+逐根 validate；验收=全套绿 |
+| 2026-09-09 | S5 | 本次 feat(hir) S5 提交 | passes/hir_lower*.zig（HIR→CFG，expr/control/call/pattern 分片）；frontend.Options.hir_stage toggle + phase3 二选一；and/or 独立 core 行 + 文本形（§5.5/§7.1 补正）；S4 缺陷 ①–⑤ 修复；hir_tests.zig S5 差分门禁（examples 18 + probes 25 两路径 cfg.print 逐字节相等）；验收=全套 1053 tests 绿（门禁先行失败点名 maps/generic_aggregates）+ examples 绿 |

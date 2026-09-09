@@ -190,7 +190,7 @@ pub fn expandIntrinsicCall(
 /// True when `(module, member)` is one of the members whose generic type
 /// argument is constrained to the Runtime §4.2/§4.9 supported set
 /// (`builtin.str` / `builtin.hash`).
-fn isConstrainedMember(module_spec: []const u8, member: []const u8) bool {
+pub fn isConstrainedMember(module_spec: []const u8, member: []const u8) bool {
     return std.mem.eql(u8, module_spec, "builtin") and
         (std.mem.eql(u8, member, "str") or std.mem.eql(u8, member, "hash"));
 }
@@ -216,7 +216,7 @@ fn isSupportedStrHashType(t: cfg.Type) bool {
 /// both expansion entry points (direct call and first-class wrapper
 /// synthesis), so an unsupported specialization fails before canonical
 /// AIR (Intrinsics §3 — the host cannot serve the expansion).
-fn checkStrHashSignature(self: *Lowerer, span: ast.Span, member: []const u8, ft: cfg.FunctionType) LowerError!void {
+pub fn checkStrHashSignature(self: *Lowerer, span: ast.Span, member: []const u8, ft: cfg.FunctionType) LowerError!void {
     if (ft.params.len != 1) {
         return self.fail(span, "intrinsic 'builtin.{s}' takes exactly one argument", .{member});
     }

@@ -527,7 +527,7 @@ fn buildConstInit(b: *Builder, cid: hir.ConstId) BuildError!void {
         b.env_depth = saved_env;
         b.alias_depth = saved_alias;
     }
-    b.fn_name = rec.key;
+    b.fn_name = "init";
     b.env_depth = @intCast(b.scopes.items.len);
     b.alias_depth = @intCast(b.module_aliases.items.len);
     try b.pushScope();
@@ -674,7 +674,7 @@ fn buildUsing(b: *Builder, info: *moduleinfo.ModuleInfo, u: *const ast.UsingDecl
         },
         .value => |*mr| {
             // Bind once: a let leaf whose value is the member.
-            const leaf = try memberLeaf(b, info, mr.module, mr.name, u.span);
+            const leaf = try memberLeaf(b, info, mr.module, mr.name, u.span, true);
             return letChain(b, info, u.span, &.{.{ .name = alias.text }}, leaf, stmts, i + 1, result);
         },
         .type => return buildStmts(b, info, stmts, i + 1, result),
@@ -1080,13 +1080,13 @@ fn buildBinary(b: *Builder, info: *moduleinfo.ModuleInfo, bin: *const ast.Binary
         const lhs = try buildExpr(b, info, bin.lhs);
         const rhs = try buildExpr(b, info, bin.rhs);
         const f = try b.built.program.addExpr(.{ .op = try b.op(bin.span, "const"), .ty = .{ .primitive = .bool }, .payload = .{ .const_value = .{ .bool = false } } });
-        return ifNode(b, bin.span, lhs, rhs, f);
+        return controlNode(b, bin.span, "and", lhs, rhs, f);
     }
     if (bin.op == .or_) {
         const lhs = try buildExpr(b, info, bin.lhs);
         const rhs = try buildExpr(b, info, bin.rhs);
         const t = try b.built.program.addExpr(.{ .op = try b.op(bin.span, "const"), .ty = .{ .primitive = .bool }, .payload = .{ .const_value = .{ .bool = true } } });
-        return ifNode(b, bin.span, lhs, t, rhs);
+        return controlNode(b, bin.span, "or", lhs, t, rhs);
     }
     const lhs = try buildExpr(b, info, bin.lhs);
     const rhs = try buildExpr(b, info, bin.rhs);
@@ -1134,13 +1134,20 @@ fn buildBinary(b: *Builder, info: *moduleinfo.ModuleInfo, bin: *const ast.Binary
 
 /// `ifNode(cond, then, else)`: two regions rooted at the branch values.
 fn ifNode(b: *Builder, span: ast.Span, cond: hir.ExprId, then: hir.ExprId, else_: hir.ExprId) BuildError!hir.ExprId {
+    return controlNode(b, span, "if", cond, then, else_);
+}
+
+/// One control node with two regions (`if`, or the `and`/`or` short-circuit
+/// rows — the §5.5/§7.1 amendment: and/or keep their own rows so the
+/// HIR→CFG lowering can reproduce the reference short-circuit diamond).
+fn controlNode(b: *Builder, span: ast.Span, op_name: []const u8, cond: hir.ExprId, then: hir.ExprId, else_: hir.ExprId) BuildError!hir.ExprId {
     const ops = try b.built.program.addOperands(&.{cond});
     const rt = try b.built.program.addRegion(&.{}, then, null);
     const re = try b.built.program.addRegion(&.{}, else_, null);
     const regs = try b.built.program.addRegions(&.{ rt, re });
     const tty = b.built.program.node(then).ty;
     const ety = b.built.program.node(else_).ty;
-    return b.built.program.addExpr(.{ .op = try b.op(span, "if"), .ty = unifyJoin(tty, ety), .operands = ops, .regions = regs });
+    return b.built.program.addExpr(.{ .op = try b.op(span, op_name), .ty = unifyJoin(tty, ety), .operands = ops, .regions = regs });
 }
 
 /// The join type of two branch values: never contributes nothing; equal
@@ -1161,7 +1168,12 @@ fn buildMove(b: *Builder, info: *moduleinfo.ModuleInfo, m: *const ast.MoveExpr) 
     }
     const local = try localNode(b, info, bind);
     const ty = b.built.program.binders.items[bind].ty;
-    if (!typeIsUnique(b, info, ty)) return local; // Copy `move` = a read
+    // Always wrap: the lowering distinguishes unique (`move_`) from
+    // Copy (`copy`) by the binder's type, and the syntactic `move`
+    // matters even for Copy binders — `(move c) as T` on an `any`-typed
+    // Copy unpacks with `any_unpack_move`, and a Copy-typed scrutinee
+    // of `match (move c)` destructures atomically. Dropping the wrapper
+    // here would lose that distinction (S5 amendment).
     const ops = try b.built.program.addOperands(&.{local});
     return b.built.program.addExpr(.{ .op = try b.op(m.span, "move"), .ty = ty, .operands = ops });
 }
@@ -1178,7 +1190,7 @@ fn buildCast(b: *Builder, info: *moduleinfo.ModuleInfo, c: *const ast.Cast) Buil
 fn buildMember(b: *Builder, info: *moduleinfo.ModuleInfo, e: *const ast.Expr, m: *const ast.Member) BuildError!hir.ExprId {
     if (resolveModuleChain(b, info, m.object)) |spec| {
         const mod = b.graph.module(spec) orelse return b.fail(m.span, "module '{s}' is not loaded", .{spec});
-        return memberLeaf(b, info, mod.specifier, m.name.text, m.span);
+        return memberLeaf(b, info, mod.specifier, m.name.text, m.span, true);
     }
     const base = try buildExpr(b, info, m.object);
     const bt = b.built.program.node(base).ty;
@@ -1261,11 +1273,11 @@ fn buildPathValue(b: *Builder, info: *moduleinfo.ModuleInfo, e: *const ast.Expr,
             return b.fail(path[0].span, "module value '{s}' has no runtime value", .{n});
         }
         if (info.valueMember(n) != null) {
-            return memberLeaf(b, info, info.specifier, n, path[0].span);
+            return memberLeaf(b, info, info.specifier, n, path[0].span, true);
         }
         if (info.alias(n)) |a| {
             return switch (a.target) {
-                .value => |mr| memberLeaf(b, info, mr.module, mr.name, path[0].span),
+                .value => |mr| memberLeaf(b, info, mr.module, mr.name, path[0].span, true),
                 .module => b.fail(path[0].span, "module value '{s}' has no runtime value", .{n}),
                 .type => b.fail(path[0].span, "'{s}' is a type, not a value", .{n}),
             };
@@ -1298,7 +1310,7 @@ fn buildPathValue(b: *Builder, info: *moduleinfo.ModuleInfo, e: *const ast.Expr,
         }
     }
     const tail = path[path.len - 1];
-    return memberLeaf(b, info, mod.specifier, tail.text, tail.span);
+    return memberLeaf(b, info, mod.specifier, tail.text, tail.span, true);
 }
 
 fn joinPath(b: *Builder, path: []const ast.Ident) BuildError![]const u8 {
@@ -1313,7 +1325,12 @@ fn joinPath(b: *Builder, path: []const ast.Ident) BuildError![]const u8 {
 /// The value leaf of a module member: a function → `fn_ref` (member
 /// record or host binding); a const → `module_const` (or materialized
 /// intrinsic constant). Module-valued members have no runtime value.
-fn memberLeaf(b: *Builder, _: *moduleinfo.ModuleInfo, specifier: []const u8, name: []const u8, span: ast.Span) BuildError!hir.ExprId {
+/// `value_pos` distinguishes *value-position* uses (a bare intrinsic
+/// function member synthesizes its first-class wrapper, mirroring
+/// `cfg_lower_intrinsic.intrinsicFnRef`) from *call-position* leaves
+/// (the call lowers to the inline expansion — syscall — at S5; the
+/// leaf stays a host fn_ref).
+fn memberLeaf(b: *Builder, info: *moduleinfo.ModuleInfo, specifier: []const u8, name: []const u8, span: ast.Span, value_pos: bool) BuildError!hir.ExprId {
     const owner = b.graph.module(specifier) orelse
         return b.fail(span, "module '{s}' is not loaded", .{specifier});
     const vm = owner.valueMember(name) orelse
@@ -1338,6 +1355,14 @@ fn memberLeaf(b: *Builder, _: *moduleinfo.ModuleInfo, specifier: []const u8, nam
                     return b.fail(span, "function '{s}' has no record", .{key});
                 const rec = b.built.funcs.items[fid];
                 return b.built.program.addExpr(.{ .op = try b.op(span, "fn_ref"), .ty = try b.funcType(rec.params, rec.ret), .payload = .{ .func = .{ .func = fid } } });
+            }
+            // Bodyless member: a host binding or a bundle intrinsic.
+            // A *bare value use* of an intrinsic function member
+            // synthesizes the first-class wrapper (the direct path's
+            // `intrinsicFnRef`); call-position leaves keep the host
+            // fn_ref (S5 lowers the call to the inline expansion).
+            if (owner.isIntrinsic(vm) and value_pos) {
+                return intrinsicWrapperFnRef(b, info, span, owner, vm, null);
             }
             const key = try b.qualified(specifier, name);
             const hid = b.host_ids.get(key) orelse
@@ -1454,8 +1479,11 @@ fn buildLambda(b: *Builder, info: *moduleinfo.ModuleInfo, lam: *const ast.Lambda
     }
     const ret = try b.resolveType(info, &lam.ret);
     const fid = try predeclare(b, hir.FuncKind.lambda, info, name, params, ret, lam.span, lam.body);
-    defer b.pending_lambdas.append(b.arena, fid) catch {};
     try buildFuncBody(b, fid);
+    // Completion order: the record joins the module's pending list only
+    // after its body is fully built (its own nested λs appended first).
+    // Fallible — an OOM here must propagate, not be swallowed.
+    try b.pending_lambdas.append(b.arena, fid);
     return b.built.program.addExpr(.{ .op = try b.op(lam.span, "fn_ref"), .ty = try b.funcType(params, ret), .payload = .{ .func = .{ .func = fid } } });
 }
 fn buildCall(b: *Builder, info: *moduleinfo.ModuleInfo, e: *const ast.Expr, c: *const ast.Call) BuildError!hir.ExprId {
@@ -1545,7 +1573,7 @@ fn resolvePathCallee(b: *Builder, info: *moduleinfo.ModuleInfo, p: *const ast.Pa
     switch (vm.decl) {
         .func => |f| {
             if (f.body == null or f.type_params.len == 0) {
-                const leaf = try memberLeaf(b, info, owner.specifier, tail.text, span);
+                const leaf = try memberLeaf(b, info, owner.specifier, tail.text, span, false);
                 callee_ty.* = vm.type_;
                 return leaf;
             }
@@ -1561,7 +1589,7 @@ fn localCallee(b: *Builder, info: *moduleinfo.ModuleInfo, id: ast.Ident) BuildEr
     if (b.lookup(id.text)) |bind| return localNode(b, info, bind);
     if (info.alias(id.text)) |a| {
         switch (a.target) {
-            .value => |mr| return memberLeaf(b, info, mr.module, mr.name, id.span),
+            .value => |mr| return memberLeaf(b, info, mr.module, mr.name, id.span, false),
             .module => {},
             .type => {},
         }
@@ -1618,7 +1646,7 @@ fn specializeCalleeLeaf(b: *Builder, info: *moduleinfo.ModuleInfo, s: *const ast
         },
         .const_ => return b.fail(s.span, "cannot specialize a constant", .{}),
     }
-    return memberLeaf(b, info, mod.specifier, tail.text, span);
+    return memberLeaf(b, info, mod.specifier, tail.text, span, false);
 }
 
 fn intrinsicWrapperFnRef(b: *Builder, info: *moduleinfo.ModuleInfo, span: ast.Span, owner: *moduleinfo.ModuleInfo, vm: *const moduleinfo.ValueMember, spec: ?*checker.FuncInstance) BuildError!hir.ExprId {
@@ -1647,8 +1675,12 @@ fn intrinsicWrapperFnRef(b: *Builder, info: *moduleinfo.ModuleInfo, span: ast.Sp
     try b.pending_wrappers.append(b.arena, fid);
     // The wrapper's body forwards its parameters into the (module,
     // member) syscall target: `call(host-leaf, params…)`. The record's
-    // body is a `lambda` region like every other function.
-    b.built.funcs.items[fid].root = try synthIntrinsicRoot(b, fid);
+    // body is a `lambda` region like every other function. The host
+    // leaf is the intrinsic member's own host record — passed by id,
+    // never recovered from the generated name.
+    const hid = b.host_ids.get(try b.qualified(owner.specifier, vm.name.text)) orelse
+        return b.fail(span, "intrinsic '{s}.{s}' has no host record", .{ owner.specifier, vm.name.text });
+    b.built.funcs.items[fid].root = try synthIntrinsicRoot(b, fid, hid);
     return b.built.program.addExpr(.{ .op = try b.op(span, "fn_ref"), .ty = sig, .payload = .{ .func = .{ .func = fid } } });
 }
 
@@ -1656,30 +1688,9 @@ fn intrinsicWrapperFnRef(b: *Builder, info: *moduleinfo.ModuleInfo, span: ast.Sp
 /// bound by mode, then a `call` of the intrinsic's (module, member)
 /// syscall target with each parameter as an argument (mirror
 /// `cfg_lower_intrinsic.synthIntrinsicFunc`; S5 emits the syscall).
-fn synthIntrinsicRoot(b: *Builder, fid: hir.FuncId) BuildError!hir.ExprId {
+fn synthIntrinsicRoot(b: *Builder, fid: hir.FuncId, hid: hir.HostBindingId) BuildError!hir.ExprId {
     const rec = b.built.funcs.items[fid];
     const info = b.graph.modules[rec.module];
-    // The syscall target is the intrinsic member of its declaring
-    // module — recover (module, member) from the record name
-    // `{using}.{member}.intrinsic.{N}`.
-    const seg = std.mem.lastIndexOfScalar(u8, rec.name, '.') orelse return b.fail(ast.Span.init(0, 0, 0), "bad wrapper name", .{});
-    const prefix = rec.name[0..seg];
-    const dot = std.mem.lastIndexOfScalar(u8, prefix, '.') orelse return b.fail(ast.Span.init(0, 0, 0), "bad wrapper name", .{});
-    const member = prefix[dot + 1 ..];
-    // The host record of the member (host ids are keyed by member
-    // name across loaded modules; the wrapper forwards to the module
-    // that declares the member).
-    var host: ?hir.HostBindingId = null;
-    for (b.built.hosts.items, 0..) |h, hi| {
-        if (std.mem.eql(u8, h.name, member)) {
-            // Intrinsic wrappers forward to bundle members; prefer the
-            // host whose module is not the using module unless only the
-            // using module carries it.
-            host = @intCast(hi);
-            break;
-        }
-    }
-    const hid = host orelse return b.fail(ast.Span.init(0, 0, 0), "intrinsic '{s}' has no host record", .{member});
     const host_rec = b.built.hosts.items[hid];
     var binder_ids = std.ArrayList(hir.BinderId).empty;
     var args = std.ArrayList(hir.ExprId).empty;

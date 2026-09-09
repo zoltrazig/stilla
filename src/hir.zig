@@ -368,6 +368,8 @@ const core_descriptors = [_]OpDescriptor{
     .{ .name = "lambda", .class = .function, .operands = .none, .regions = .one, .policy = .region },
     .{ .name = "call", .class = .function, .operands = .callee_and_args, .regions = .none, .policy = .strict_ltr },
     .{ .name = "if", .class = .control, .operands = .one, .regions = .two, .policy = .branch },
+    .{ .name = "and", .class = .control, .operands = .one, .regions = .two, .policy = .short_circuit },
+    .{ .name = "or", .class = .control, .operands = .one, .regions = .two, .policy = .short_circuit },
     .{ .name = "match", .class = .control, .operands = .one, .regions = .arms, .policy = .match },
     .{ .name = "struct_make", .class = .aggregate, .operands = .list, .regions = .none, .policy = .strict_ltr },
     .{ .name = "field_get", .class = .aggregate, .operands = .one, .regions = .none, .policy = .strict_ltr },
