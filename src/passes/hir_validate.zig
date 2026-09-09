@@ -55,8 +55,16 @@ const if_op = hir.opId("if").?;
 const match_op = hir.opId("match").?;
 
 /// Validate the tree reachable from `root`. Returns null when valid,
-/// otherwise a first-violation message allocated from `allocator`
-/// (cfg_validate convention).
+/// otherwise a first-violation message allocated from `allocator` and
+/// owned by the caller (cfg_validate convention): free it with
+/// `allocator`, or pass an arena and let the arena free it.
+///
+/// Scratch state (marks, worklist) lives in a child arena freed before
+/// this returns — only the message escapes, from `allocator`. The
+/// expr/region walk is iterative (unbounded arena depth is safe);
+/// pattern subtrees are depth-capped (see `checkPatternTree`) so a
+/// crafted chain fails with a diagnostic instead of overflowing the
+/// stack.
 pub fn validate(program: *const hir.Program, root: hir.ExprId, allocator: std.mem.Allocator) !?[]const u8 {
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
@@ -65,6 +73,7 @@ pub fn validate(program: *const hir.Program, root: hir.ExprId, allocator: std.me
     var v = Validator{
         .program = program,
         .arena = a,
+        .diag = allocator,
         .expr_done = try a.alloc(bool, program.exprs.items.len),
         .region_done = try a.alloc(bool, program.regions.items.len),
         .pat_state = try a.alloc(u8, program.patterns.items.len),
@@ -94,9 +103,18 @@ pub fn validate(program: *const hir.Program, root: hir.ExprId, allocator: std.me
 /// Region-id sentinel for "no region" (binder declared nowhere yet).
 const no_region: hir.RegionId = std.math.maxInt(hir.RegionId);
 
+/// Pattern nesting cap for the recursive pattern walk (see
+/// `checkPatternTree`): source pattern depth is tiny; only a crafted
+/// arena can approach this.
+const pattern_depth_cap: u32 = 4096;
+
 const Validator = struct {
     program: *const hir.Program,
+    /// Scratch allocator (child arena, freed at validate()'s return).
     arena: std.mem.Allocator,
+    /// The caller's allocator — where the returned diagnostic is
+    /// allocated, so the message outlives the scratch arena.
+    diag: std.mem.Allocator,
 
     // Marks, sized to the arenas at validate() time.
     expr_done: []bool,
@@ -131,9 +149,11 @@ const Validator = struct {
     // -- reporting ----------------------------------------------------------
 
     fn fail(self: *const Validator, comptime fmt: []const u8, args: anytype) !?[]const u8 {
-        // Capture first: a plain value may be implicitly wrapped into the
-        // optional payload on return; an error union may not.
-        const msg = try std.fmt.allocPrint(self.arena, fmt, args);
+        // Allocate from the *caller's* allocator, never from the scratch
+        // arena: the scratch arena is freed before the caller reads the
+        // returned message. A plain value may be implicitly wrapped into
+        // the optional payload on return; an error union may not.
+        const msg = try std.fmt.allocPrint(self.diag, fmt, args);
         return msg;
     }
 
@@ -267,7 +287,7 @@ const Validator = struct {
             const pattern = r.pattern;
             if (pattern) |pat| {
                 var leaves: std.ArrayListUnmanaged(hir.BinderId) = .empty;
-                if (try self.checkPatternTree(pat, &leaves)) |m| return m;
+                if (try self.checkPatternTree(pat, &leaves, 0)) |m| return m;
                 if (leaves.items.len != params.len) {
                     return self.fail("arm region {d} pattern binds {d} binder(s); the region declares {d} param(s)", .{ fr.id, leaves.items.len, params.len });
                 }
@@ -332,7 +352,14 @@ const Validator = struct {
     /// referencing one pattern id) are legal for leaf-free patterns;
     /// a shared subtree that binds names is rejected downstream by the
     /// per-arm bijection (the binder can only be one arm's param).
-    fn checkPatternTree(self: *Validator, pid: hir.PatternId, leaves: *std.ArrayListUnmanaged(hir.BinderId)) !?[]const u8 {
+    /// Walk one pattern tree, recording its binding leaves. Depth-capped:
+    /// the walk is recursive (cycles are caught by the 0/1/2 state, so
+    /// recursion depth equals the longest *cycle-free* nesting chain, which
+    /// only a crafted arena can make arbitrarily deep) — past the cap a
+    /// crafted chain fails with a diagnostic instead of overflowing the
+    /// stack.
+    fn checkPatternTree(self: *Validator, pid: hir.PatternId, leaves: *std.ArrayListUnmanaged(hir.BinderId), depth: u32) !?[]const u8 {
+        if (depth > pattern_depth_cap) return self.fail("pattern nesting exceeds {d} levels", .{pattern_depth_cap});
         const n_patterns = self.program.patterns.items.len;
         if (pid >= n_patterns) return self.fail("pattern {d} out of range ({d} patterns)", .{ pid, n_patterns });
         switch (self.pat_state[pid]) {
@@ -353,25 +380,25 @@ const Validator = struct {
             },
             .tuple => |kids| {
                 for (kids) |k| {
-                    if (try self.checkPatternTree(k, leaves)) |m| return m;
+                    if (try self.checkPatternTree(k, leaves, depth + 1)) |m| return m;
                 }
             },
             .list => |l| {
                 for (l.elems) |k| {
-                    if (try self.checkPatternTree(k, leaves)) |m| return m;
+                    if (try self.checkPatternTree(k, leaves, depth + 1)) |m| return m;
                 }
                 if (l.rest) |k| {
-                    if (try self.checkPatternTree(k, leaves)) |m| return m;
+                    if (try self.checkPatternTree(k, leaves, depth + 1)) |m| return m;
                 }
             },
             .struct_ => |s| {
                 for (s.fields) |f| {
-                    if (try self.checkPatternTree(f.pat, leaves)) |m| return m;
+                    if (try self.checkPatternTree(f.pat, leaves, depth + 1)) |m| return m;
                 }
             },
             .variant => |v| {
                 if (v.payload) |k| {
-                    if (try self.checkPatternTree(k, leaves)) |m| return m;
+                    if (try self.checkPatternTree(k, leaves, depth + 1)) |m| return m;
                 }
             },
             .wildcard, .literal => {},
@@ -706,6 +733,26 @@ test "let and if regions carry the documented param counts" {
     const m2 = try validate(&p, if_id, arena.allocator());
     const msg2 = m2 orelse return error.TestUnexpectedResult;
     try t.expect(std.mem.indexOf(u8, msg2, "must not carry binders") != null);
+}
+
+test "the returned violation message is caller-owned (allocated from the caller's allocator)" {
+    // Regression: messages were once allocated in the validator's own
+    // scratch arena, freed before the caller read them (use-after-free
+    // that arena reuse happened to mask). With std.testing.allocator as
+    // the caller allocator the returned slice must be live and must be
+    // freed by the caller; anything else leaks or dangles.
+    var arena = std.heap.ArenaAllocator.init(t.allocator);
+    defer arena.deinit();
+    var p = (try fresh(arena.allocator())).prog;
+    // A const with a `.func` payload: rejected with a payload message.
+    _ = try p.addExpr(.{ .op = op_const, .ty = ty_int, .payload = .{ .func = .{ .func = 0 } } });
+    const m = (try validate(&p, 0, t.allocator)) orelse return error.TestUnexpectedResult;
+    defer t.allocator.free(m);
+    try t.expect(std.mem.indexOf(u8, m, "payload") != null);
+    // A valid program yields null and no allocation survives.
+    var q = (try fresh(arena.allocator())).prog;
+    const ok = try q.addExpr(.{ .op = op_const, .ty = ty_int, .payload = .{ .const_value = .{ .int = 1 } } });
+    try t.expect((try validate(&q, ok, t.allocator)) == null);
 }
 
 // -- fixtures ---------------------------------------------------------------

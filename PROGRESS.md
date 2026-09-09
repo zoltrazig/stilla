@@ -97,6 +97,19 @@
   `passes.hir_print.test.*` 证明收集）；`zig build -fincremental` 绿。
 - 栅栏：无 `EffectSummary`/`effect_transfer`/`seg_*` 落盘。
 
+#### S3 事后修复（评审发现，随 S4 一起提交）
+
+- **诊断消息生命周期缺陷**：`validate` 原先把返回消息分配在函数内部 scratch 子
+  arena，`validate` 返回即释放——调用方读取的是悬垂内存（arena 复用恰好掩盖）。
+  修复：`fail()` 改从**调用方 allocator** 分配返回消息，子 arena 只做 scratch
+  （marks/worklist）；API 文档写明消息归调用方所有、按 cfg_validate 惯例释放；
+  新增回归测试用 `std.testing.allocator` 作调用方 allocator，验证消息存活、内容
+  可读、正确释放（泄漏检测器兜底）。
+- **pattern 深度未设防**：`checkPatternTree` 是递归 DFS（环由 0/1/2 状态捕获，
+  递归深度=最长无环链）。「免疫深层恶意 arena」只对 expr/region 迭代 walk 成立；
+  pattern 侧加 4096 层深度上限，越深返回诊断而非栈溢出。PROGRESS 的迭代主张
+  相应改为：expr/region walk 迭代无界安全；pattern 子树深度封顶（诊断化）。
+
 #### S2 取舍与风险（记录）
 
 - refs 跨 invocation 字节稳定依赖 SerCtx stable key（同 ctx 内已稳定）；接真实 module
@@ -141,6 +154,19 @@
 - 限制（记录在案）：full-expr 只查归属界；ownership/effect 数据流与 SEG 相关不变量
   不在本档；S4 构建产物复验同入口。
 - 栅栏：无 `EffectSummary`/`effect_transfer`/`seg_*` 落盘。
+
+#### S3 事后修复（评审发现，随 S4 一起提交）
+
+- **诊断消息生命周期缺陷**：`validate` 原先把返回消息分配在函数内部 scratch 子
+  arena，`validate` 返回即释放——调用方读取的是悬垂内存（arena 复用恰好掩盖）。
+  修复：`fail()` 改从**调用方 allocator** 分配返回消息，子 arena 只做 scratch
+  （marks/worklist）；API 文档写明消息归调用方所有、按 cfg_validate 惯例释放；
+  新增回归测试用 `std.testing.allocator` 作调用方 allocator，验证消息存活、内容
+  可读、正确释放（泄漏检测器兜底）。
+- **pattern 深度未设防**：`checkPatternTree` 是递归 DFS（环由 0/1/2 状态捕获，
+  递归深度=最长无环链）。「免疫深层恶意 arena」只对 expr/region 迭代 walk 成立；
+  pattern 侧加 4096 层深度上限，越深返回诊断而非栈溢出。PROGRESS 的迭代主张
+  相应改为：expr/region walk 迭代无界安全；pattern 子树深度封顶（诊断化）。
 
 #### S3 过程记录（风险）
 
@@ -208,3 +234,4 @@
 | 2026-09-08 | S1 | 本次 docs(hir) S1 提交 | hir.zig 数据骨架 + root.zig 导出 + 7 白盒测试；docs 措辞更新为「S1 数据已落地、阶段未接线」 |
 | 2026-09-08 | S2 | 本次 feat(hir) S2 提交 | passes/hir_parse.zig + hir_print.zig；hir.zig SerCtx/mul.i32/再导出/强制分析测试；§4.7/§8.7 golden round-trip + binder 重编号 + #refs 字典；成员身份文本推迟（用户批准） |
 | 2026-09-08 | S3 | 本次 feat(hir) S3 提交 | passes/hir_validate.zig 结构校验（§10.1 第一级）+ hir.zig 再导出/强制分析测试扩为三 pass；15 白盒测试（含 parse 可过、validator 必拒的 capture 文本）；验收 = 全套 ~1047 tests 绿 |
+| 2026-09-08 | S3 修复 | fix(hir) S3 fix 提交 | 诊断消息改由调用方 allocator 分配（原为 scratch arena，返回即悬垂）+ 消息生命周期回归测试；pattern DFS 加深度上限 4096（越深诊断化，不栈溢出）；PROGRESS 措辞改准确 |
