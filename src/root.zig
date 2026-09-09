@@ -157,6 +157,7 @@ test {
     // Language Specification's example programs.
     _ = @import("grammar_spec_tests.zig");
     _ = @import("checker_tests.zig");
+    _ = @import("hir_tests.zig");
     _ = @import("host_tests.zig");
     _ = @import("stdbundle_tests.zig");
     _ = @import("vm_instr.zig");

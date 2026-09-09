@@ -282,7 +282,12 @@ const Validator = struct {
             self.binder_owner[b] = fr.id;
         }
 
-        // Region kind rules + pattern ⇄ params (hir.md §5.4).
+        // Region kind rules + pattern ⇄ params (hir.md §5.4). Match-arm
+        // regions keep their patterns; let regions may carry an
+        // *irrefutable* destructuring pattern whose binding leaves are
+        // the params (the §5.2 amendment: destructuring lets). A plain
+        // identifier let is a pattern-less region with exactly one
+        // param.
         if (fr.owner == match_op) {
             const pattern = r.pattern;
             if (pattern) |pat| {
@@ -304,11 +309,32 @@ const Validator = struct {
             } else if (params.len != 0) {
                 return self.fail("arm region {d} declares {d} param(s) but has no pattern", .{ fr.id, params.len });
             }
-        } else {
-            if (r.pattern != null) return self.fail("region {d} (op {s}) carries a pattern; only match arms do (hir.md §5.4)", .{ fr.id, self.opName(fr.owner) });
-            if (fr.owner == let_op and params.len != 1) {
+        } else if (fr.owner == let_op) {
+            if (r.pattern) |pat| {
+                // Destructuring let: the pattern must be irrefutable
+                // (literal / variant / type-test arms are refutable and
+                // belong only to match arms).
+                if (try self.checkIrrefutable(pat, 0)) |m| return m;
+                var leaves: std.ArrayListUnmanaged(hir.BinderId) = .empty;
+                if (try self.checkPatternTree(pat, &leaves, 0)) |m| return m;
+                if (leaves.items.len != params.len) {
+                    return self.fail("let region {d} pattern binds {d} binder(s); the region declares {d} param(s)", .{ fr.id, leaves.items.len, params.len });
+                }
+                for (leaves.items) |b| {
+                    var found = false;
+                    for (params) |p| {
+                        if (p == b) {
+                            found = true;
+                            break;
+                        }
+                    }
+                    if (!found) return self.fail("let region {d} pattern binds binder {d}, which is not one of its params", .{ fr.id, b });
+                }
+            } else if (params.len != 1) {
                 return self.fail("let region {d} must carry exactly one binder; it declares {d}", .{ fr.id, params.len });
             }
+        } else {
+            if (r.pattern != null) return self.fail("region {d} (op {s}) carries a pattern; only match arms and destructuring lets do (hir.md §5.4)", .{ fr.id, self.opName(fr.owner) });
             if (fr.owner == if_op and params.len != 0) {
                 return self.fail("if region {d} must not carry binders", .{fr.id});
             }
@@ -344,6 +370,33 @@ const Validator = struct {
         return false;
     }
 
+    /// True when the pattern subtree at `pid` is *irrefutable* (hir.md
+    /// §5.2 amendment): only wildcard / binding leaves / tuple / struct /
+    /// list shapes. Literal, variant, and type-test patterns are
+    /// refutable and belong only to match arms. Recursion is bounded by
+    /// the same cap as the pattern walk (a crafted cycle fails cleanly).
+    fn checkIrrefutable(self: *const Validator, pid: hir.PatternId, depth: u32) !?[]const u8 {
+        if (depth > pattern_depth_cap) return self.fail("pattern nesting exceeds {d} levels", .{pattern_depth_cap});
+        if (pid >= self.program.patterns.items.len) return self.fail("pattern {d} out of range", .{pid});
+        switch (self.program.patterns.items[pid]) {
+            .wildcard, .bind => return null,
+            .type_test => return self.fail("a type-test pattern is refutable; only match arms may carry one", .{}),
+            .literal => return self.fail("a literal pattern is refutable; only match arms may carry one", .{}),
+            .variant => return self.fail("a variant pattern is refutable; only match arms may carry one", .{}),
+            .tuple => |kids| {
+                for (kids) |k| if (try self.checkIrrefutable(k, depth + 1)) |m| return m;
+            },
+            .list => |l| {
+                for (l.elems) |k| if (try self.checkIrrefutable(k, depth + 1)) |m| return m;
+                if (l.rest) |k| if (try self.checkIrrefutable(k, depth + 1)) |m| return m;
+            },
+            .struct_ => |st| {
+                for (st.fields) |f| if (try self.checkIrrefutable(f.pat, depth + 1)) |m| return m;
+            },
+        }
+        return null;
+    }
+
     // -- patterns -----------------------------------------------------------
 
     /// Walk one pattern tree, appending every binding leaf (`.bind`,
@@ -375,6 +428,10 @@ const Validator = struct {
                 try leaves.append(self.arena, b);
             },
             .type_test => |tt| {
+                // A binding-less type test (`int32 => …` matching an
+                // `any` by tag) carries the no-binder sentinel and binds
+                // nothing.
+                if (tt.bind == std.math.maxInt(hir.BinderId)) return null;
                 if (tt.bind >= self.program.binders.items.len) return self.fail("pattern {d} binds binder {d} out of range", .{ pid, tt.bind });
                 try leaves.append(self.arena, tt.bind);
             },

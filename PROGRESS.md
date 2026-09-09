@@ -176,14 +176,137 @@
   再包问题（`return self.fail(...)` 不隐式剥 error-union 包 optional；改为捕获后
   `return msg;`），已记录。
 
-### S4 — AST→HIR builder（pending）
+### S4 — AST→HIR builder（done）
 
-- 目标：消费 module graph + checker.Annotation（含 mono 体）→ 逐 module 的
-  `hir.Program`：函数 / 实例 / drop hook / @init 体；路径解析为 fn_ref / module_const；
-  lambda 与 intrinsic wrapper 提升（复刻 cfg_lower_func / cfg_lower_intrinsic 的
-  命名与次序）；full-expr 标注；ownership_view 搬移。
-- 文件：`hir_build.zig`（数据在 hir.zig）；入口 `buildProgram(graph, &ck.annotation)`。
-- 验收：probes/、examples/ 语料构建无 validator 报错；全 suite 绿（本阶段无 CFG 影响）。
+- 交付：`passes/hir_build.zig`（~1900 行，`hir_build.buildProgram` /
+  `buildProgramDiag`）——消费 module graph + checker.Annotation（含 mono 体），
+  把全语料构建为规范形 HIR；`hir.zig` 加程序级容器（`BuiltProgram` /
+  `BuiltModule` / `FuncRecord{kind, order}` / `ConstRecord` / `HostRecord` +
+  SerCtx 接真实表）；registry 扩为 ~130 个 typed 行（算术/比较/位/逻辑/字符串/
+  byte 家族，ScalarRep 加 byte/bool/str——§7.2 注明的"随 builder 补齐"）；
+  `hir_tests.zig`（root.zig 挂接）fib + **examples/ + probes/ 全语料**构建并
+  逐根跑 S3 validator（确定性 manifest + 磁盘读取，同 `zig build examples`）。
+- 验收证据：`zig build test`（非增量）全绿 exit=0；`zig build -fincremental
+  test` 全绿；语料测试的收集性由早期失败运行点名
+  `hir_tests.test.S4: HIR corpus — …` 证明；`zig fmt --check src/` 绿；
+  无 debug print、栅栏净（EffectSummary/effect_transfer/seg_* = 0）。
+
+#### S4 设计定案与编码契约（评审迭代后）
+
+- **源级规范树**（hir.md §5.2）：block→let 嵌套 / seq，if/match 保分支 region
+  与 arm pattern；cfg 专属产物（module_ref 值、@init store 序列、pack/coerce、
+  copy 插入、drop 布置、cleanup、SSA/phi）不在此层（S5 从 checker 态再派生）。
+- **清单/命名/次序复刻 cfg**：init? → 非泛型成员 → 实例 → drop hook →
+  λ（completion 序）→ intrinsic wrapper（creation 序）；预声明让前向/递归引用
+  先解析（`func_ids`/`const_ids`/`host_ids` 名字表）；λ 计数器先于体（pre-order
+  命名），记录 completion 后入列；wrapper 程序级缓存（owner, slot, spec）。
+  记录带 `order`（模块内 cfg 序位置），S5 重排序即可。
+- **路径解析落叶**：fn_ref（成员/实例/host binding/intrinsic wrapper）/
+  module_const（const 成员；intrinsic const 位模式物化）。host 表含宿主绑定与
+  bundle intrinsic（call 位 vs 值位的 wrapper/syscall 分派留 S5）。
+- **`::[]` 调用**（`array.get::[T]` 等 host/intrinsic）：无 call_of 行时按
+  member 直接落 host 叶（镜像 cfg 的 intrinsic expansion 路径）。
+- **λ 提升**：语料首个 first-class intrinsic wrapper 亦合成**可执行转发体**
+  （`synthIntrinsicRoot`：参数按 mode 绑定 + `call` 宿主叶——与 cfg
+  `synthIntrinsicFunc` 同形；此前记录 root 未定义，已修）。
+- **语义保序修正**（评审驱动）：struct 构造按**书写序**求值、按声明序承载
+  ——书写≠声明序时先 let 绑临时再构造；调用先构建 callee 再 args（λ/wrapper
+  发现序对齐 cfg）；const init 于成员体**之前**构建（cfg 的 lowerInit 最先跑）。
+- **注解身份根因修复**：`Block.result` 曾**按值**传递导致 block 尾表达式
+  的注解（类型 / call_of / spec_of / 构造类型）全部丢失——`buildStmts` 链改
+  传 `?*const ast.Expr`（指向原 AST）。删掉据此引入的 `instanceByArgs`
+  签名猜测回退（参数类型无法钉死只出现在返回位的类型参数）；缺 call_of 即
+  显式失败。
+- **`using`**：模块值 alias→环境名（无运行时值）；值成员 alias→let 叶（bind
+  一次）；块级 alias 续体索引修正为 i+1。
+- **查表隔离**：`lookup` 受 `env_depth` 约束（函数体不得见调用方 local）；
+  块级 module alias 受 `alias_depth` 约束。
+- **S3 修订（§5.2 修订随 S4 提交）**：let region 可携带**不可反驳** pattern
+  （多叶解构；params=绑定叶）；validator 加 `checkIrrefutable`（literal/
+  variant/type-test 可反驳，仍只属 match arm）；无绑定 type-test 用
+  maxInt 哨兵并在 validator/叶扫描中跳过。
+- **注册表/S2 已知限制（记录）**：typed 比较行（eq.i32 等）结果应为 bool，
+  S2 打印/解析的结果类型再推导尚未按行元数据区分（打印需显式 `: ty` 注解
+  ——打印器本来就会对无法自推的节点补注解，但"比较→bool"未被行携带；
+  S5/S2 后续给 typed 行补 result-bool 元数据）。
+- **FE / origin / 销毁作用域（如实记录，非本档承诺）**：节点 `full_expr`
+  目前统一为默认 0（未做逐表达式 FE 归属）；`origin` 未接线；binding→scope
+  关联与销毁作用域留 S5（这些在 PROGRESS"明确推迟"与 hir.md §5.6 一致——
+  FE 计划不是可执行销毁计划）。若评审认为 S4 必须携带逐表达式 FE 标注，另行
+  扩展。
+- **模块范围含 hoisted**：`BuiltModule.funcs` 覆盖该模块全部记录（含 λ/
+  wrapper），`order` 给出 cfg 序位置。
+
+#### S4 过程记录（风险）
+
+- 长尾构建期多次出现内容重复/结构损坏（编辑脚本拼接失误），曾导致函数级
+  重复定义与函数体拼接错乱；最终以头部 + 重新生成尾部（单拷贝）+ 字节级
+  去重脚本修复。教训：大文件重构用整文件重写或行级索引替换，避免多层
+  python 字符串拼接。
+- 增量 listener 偶发空转一次（与 S3 观察同型，重启恢复）。
+- 语料测试从磁盘读 probes//examples/（manifest 固定列举），与
+  `zig build examples` 同依赖仓库布局；文件缺失=显式失败。
+
+#### S4 设计决定（评审定案 + 本阶段编码契约）
+
+- **HIR = 源级规范化树，不是 CFG 指令树**（hir.md §5.2：block→let 嵌套，
+  IR 只有 Let/Seq/Expr 三种形状）。cfg 专属产物（module_ref 值、pack-at-let、
+  copy 插入、drop 布置、cleanup、join phi、SSA）**不在 S4 编码**，留给 S5 从
+  checker 绑定态再派生；HIR 只携带让 S5 无需重建 AST、无需再推断的
+  结构/解析/视图事实。与 cfg 输出的逐字节差异归 S5 的 diff 迭代（§12 认可
+  「等价门禁暴露表述缺口再补」）。
+- **容器**（hir.zig 新增 `BuiltProgram`/`BuiltModule` 记录层，`hir.Program`
+  保持每 module 节点仓）：程序级全局 funcs/consts/hosts 记录表 + 每 module
+  （specifier、节点仓、func 记录 range、init/成员/实例/hook/lambda/wrapper
+  顺序编排、module-const 记录）——清单顺序复刻 `cfg_lower_module.lowerModule`
+  （init? → 非泛型函数成员 → 实例 → drop hook → 提升的 lambda → intrinsic
+  wrapper）；FuncId/ConstId/HostBindingId = builder 分配的程序级稠密 id，
+  SerCtx 由真实 module 表接线（types 用 graph 的 cfg.TypeDecl 布局同构表）。
+- **编解码关键约定**：
+  - 路径解析到最终目标：成员链静态走穿（module 值 / using / import），落
+    `fn_ref`（函数/实例/host binding/intrinsic wrapper）或 `module_const`
+    （const 成员，含 module 值）。名字解析顺序镜像 `cfg_lower_path.lowerPathValue`：
+    local → module value → 自身成员 → using alias。
+  - `if` 无 else = else region 根为 void 字面量（S2 文本约定）。
+  - `and`/`or` 编码为 `if` 形状（保短路 provenance，S5 可复现同款
+    br-diamond）；`match (move s)` 消费性由 arm payload binder 的
+    `.move` mode 表达；identifier 整值 catch-all arm 绑整个 scrutinee。
+  - `let` 解构（`let (a,b)=e`，语料 8 处）：S3 定 let region 单 binder +
+    pattern 只在 match arm —— 不放松 S3；把多叶不可反驳解构规范成
+    **单 arm 的 match**（scrutinee=init 值,irrefutable pattern 在 arm
+    region 上,arm body=原 let 的续体）？——评审后改为：let 保持单 binder
+    （绑整个 init 值），续体内按需要以 field/tuple/list 投影节点取分量。
+    投影用 `field_get`（payload.field=索引；S5 依 base 类型分派 struct
+    field vs tuple 元素 vs list 元素读，对应 cfg read_field/read_tuple/
+    read_index 决策在 S5，因为索引+类型即全信息）。绑定叶只出现在 match
+    arm 的 region pattern；纯标识 let 用单 binder。详见 hir_build 内
+    `destructureLet`。
+  - tuple 元素成员读 `t.0`（语料 26 处）同上投影节点。
+  - full_expr：每个「函数体顶层与 λ 体、if/match arm 体、let 续体根」的
+    求值产生处打 FE 边界 id（含跨构造的临时量归属按求值序）；
+    S4 先只在构造 API 层面提供 addFullExpr 归属点（全 FE 清理注册留 S5，
+    hir.md §5.6 明确销毁计划不在 HIR）。
+  - ownership_view：helper 依 cfg.Type ownership + 上下文
+    （borrow param / non-consuming match 视图 / unique 源）派生，
+    记入 SemanticInfo（默认 owned）。
+  - `using`（块级/模块级）：模块值 alias → 环境名字（非运行时值）；
+    值成员 alias → 归约成 let 绑一个 fn_ref/module_const 叶（保留 cfg
+    的 load-once-at-using 语义）。
+- **Registry 扩展**（数据编辑，§7.2 注明随 S4 补齐）：为语料算术家族补
+  typed 行：sub/rem/min/max/abs?/neg?/not?/shl/shr/band/bor/bxor/
+  eq/ne/lt/le/gt/ge（i32/u32/i64/u64 视 cfg 语义）、f32/f64 四则与比较、
+  concat（str）、neg/not 归 core？——行名与 §7.1 不冲突（§7.1 是语义核心，
+  全算术家族明示随 S4 落），typed 行取 cfg 3-address 语义对应。core 22 行
+  不动（除非显式向 hir.md 提修订，本阶段不新增 core op）。
+- **明确推迟/不编码（记录，S5 的 diff 面）**：module_ref 值、@init 的
+  store_member 序列（S4 只在 module 记录里登记 const 及其 init 表达式根，
+  S5 决定存储与初始化函数形态）、drop 布置与 cleanup、pack 物化（let/返回/
+  join 边的 any 打包）、coerceRet、copy 插入、块内线性化的值表。
+- 语料测试机制：`hir_tests.zig`（root.zig 挂接）用磁盘读取 probes/、
+  examples/ 各 `.st`（确定性枚举；文件缺失 = 显式失败，不静默跳过；与
+  `zig build examples` 同依赖仓库布局）单文件编译 + HIR 构建 + 逐根
+  validate；`std/` 体经传递闭包一并构建。白盒（arena/registry 级）测试在
+  hir_build.zig / hir.zig。
 
 ### S5 — HIR→CFG + 等价门禁（pending）
 
@@ -235,3 +358,4 @@
 | 2026-09-08 | S2 | 本次 feat(hir) S2 提交 | passes/hir_parse.zig + hir_print.zig；hir.zig SerCtx/mul.i32/再导出/强制分析测试；§4.7/§8.7 golden round-trip + binder 重编号 + #refs 字典；成员身份文本推迟（用户批准） |
 | 2026-09-08 | S3 | 本次 feat(hir) S3 提交 | passes/hir_validate.zig 结构校验（§10.1 第一级）+ hir.zig 再导出/强制分析测试扩为三 pass；15 白盒测试（含 parse 可过、validator 必拒的 capture 文本）；验收 = 全套 ~1047 tests 绿 |
 | 2026-09-08 | S3 修复 | fix(hir) S3 fix 提交 | 诊断消息改由调用方 allocator 分配（原为 scratch arena，返回即悬垂）+ 消息生命周期回归测试；pattern DFS 加深度上限 4096（越深诊断化，不栈溢出）；PROGRESS 措辞改准确 |
+| 2026-09-08 | S4 | 本次 feat(hir) S4 提交 | passes/hir_build.zig（AST→HIR，含 mono 体/实例/drop hook/λ 提升/intrinsic wrapper 转发体/路径落叶/`::[]` host 调用）；hir.zig 容器层 + registry ~130 typed 行 + ScalarRep{byte,bool,str} + serCtx 错误传播；S3 修订（let 不可反驳 pattern + checkIrrefutable + 无绑定 type-test 哨兵）；hir_tests.zig fib + examples//probes/ 全语料构建+逐根 validate；验收=全套绿 |

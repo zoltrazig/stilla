@@ -133,9 +133,12 @@ pub const Region = struct {
     /// up to the nearest function/λ boundary (hir.md §5.3).
     params: Range = .{},
     root: ExprId,
-    /// Match *arm* regions only: the destructuring pattern whose binding
-    /// leaves reference this region's params (hir.md §5.4). Null for
-    /// every other region kind (let continuation, λ body, if branches).
+    /// Match *arm* regions and destructuring `let` regions only: the
+    /// destructuring pattern whose binding leaves reference this
+    /// region's params (hir.md §5.4; destructuring lets carry
+    /// *irrefutable* patterns only, §5.2 amendment). Null for every
+    /// other region kind (plain identifier let continuation, λ body,
+    /// if branches).
     pattern: ?PatternId = null,
 };
 
@@ -255,21 +258,27 @@ pub const Pattern = union(enum) {
 /// The scalar rep of a typed (rep-parameterized) opcode (hir.md §7.2):
 /// written as the opcode suffix (`add.i32`), same short names as LLIR.
 pub const ScalarRep = enum {
+    byte,
     i32,
     i64,
     u32,
     u64,
     f32,
     f64,
+    bool,
+    str,
 
     pub fn toCfgType(self: ScalarRep) cfg.Type {
         return .{ .primitive = switch (self) {
+            .byte => .byte,
             .i32 => .int32,
             .i64 => .int64,
             .u32 => .uint32,
             .u64 => .uint64,
             .f32 => .float32,
             .f64 => .float64,
+            .bool => .bool,
+            .str => .str,
         } };
     }
 };
@@ -362,7 +371,7 @@ const core_descriptors = [_]OpDescriptor{
     .{ .name = "match", .class = .control, .operands = .one, .regions = .arms, .policy = .match },
     .{ .name = "struct_make", .class = .aggregate, .operands = .list, .regions = .none, .policy = .strict_ltr },
     .{ .name = "field_get", .class = .aggregate, .operands = .one, .regions = .none, .policy = .strict_ltr },
-    .{ .name = "variant_make", .class = .aggregate, .operands = .one, .regions = .none, .policy = .strict_ltr },
+    .{ .name = "variant_make", .class = .aggregate, .operands = .list, .regions = .none, .policy = .strict_ltr },
     .{ .name = "tuple_make", .class = .aggregate, .operands = .list, .regions = .none, .policy = .strict_ltr },
     .{ .name = "list_make", .class = .aggregate, .operands = .list, .regions = .none, .policy = .strict_ltr },
     .{ .name = "move", .class = .ownership, .operands = .one, .regions = .none, .policy = .strict_ltr },
@@ -388,6 +397,113 @@ const typed_descriptors = [_]OpDescriptor{
     .{ .name = "mul.i32", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .i32 },
     .{ .name = "add.f32", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .f32 },
     .{ .name = "add.f64", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .f64 },
+    .{ .name = "sub.i32", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .i32 },
+    .{ .name = "sub.u32", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .u32 },
+    .{ .name = "sub.i64", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .i64 },
+    .{ .name = "sub.u64", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .u64 },
+    .{ .name = "sub.f32", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .f32 },
+    .{ .name = "sub.f64", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .f64 },
+    .{ .name = "mul.u32", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .u32 },
+    .{ .name = "mul.i64", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .i64 },
+    .{ .name = "mul.u64", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .u64 },
+    .{ .name = "mul.f32", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .f32 },
+    .{ .name = "mul.f64", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .f64 },
+    .{ .name = "div.u32", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .u32 },
+    .{ .name = "div.i64", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .i64 },
+    .{ .name = "div.f32", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .f32 },
+    .{ .name = "div.f64", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .f64 },
+    .{ .name = "rem.i32", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .i32 },
+    .{ .name = "rem.u32", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .u32 },
+    .{ .name = "rem.i64", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .i64 },
+    .{ .name = "rem.u64", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .u64 },
+    .{ .name = "rem.f32", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .f32 },
+    .{ .name = "rem.f64", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .f64 },
+    .{ .name = "min.i32", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .i32 },
+    .{ .name = "min.u32", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .u32 },
+    .{ .name = "min.f32", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .f32 },
+    .{ .name = "min.f64", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .f64 },
+    .{ .name = "max.i32", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .i32 },
+    .{ .name = "max.u32", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .u32 },
+    .{ .name = "max.f32", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .f32 },
+    .{ .name = "max.f64", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .f64 },
+    .{ .name = "shl.i32", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .i32 },
+    .{ .name = "shl.u32", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .u32 },
+    .{ .name = "shl.i64", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .i64 },
+    .{ .name = "shl.u64", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .u64 },
+    .{ .name = "shr.i32", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .i32 },
+    .{ .name = "shr.u32", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .u32 },
+    .{ .name = "shr.i64", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .i64 },
+    .{ .name = "shr.u64", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .u64 },
+    .{ .name = "band.i32", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .i32 },
+    .{ .name = "band.u32", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .u32 },
+    .{ .name = "band.i64", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .i64 },
+    .{ .name = "band.u64", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .u64 },
+    .{ .name = "bor.i32", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .i32 },
+    .{ .name = "bor.u32", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .u32 },
+    .{ .name = "bor.i64", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .i64 },
+    .{ .name = "bor.u64", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .u64 },
+    .{ .name = "bxor.i32", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .i32 },
+    .{ .name = "bxor.u32", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .u32 },
+    .{ .name = "bxor.i64", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .i64 },
+    .{ .name = "bxor.u64", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .u64 },
+    .{ .name = "eq.byte", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .byte },
+    .{ .name = "ne.byte", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .byte },
+    .{ .name = "eq.i32", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .i32 },
+    .{ .name = "eq.u32", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .u32 },
+    .{ .name = "eq.i64", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .i64 },
+    .{ .name = "eq.u64", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .u64 },
+    .{ .name = "eq.f32", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .f32 },
+    .{ .name = "eq.f64", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .f64 },
+    .{ .name = "eq.bool", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .bool },
+    .{ .name = "eq.str", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .str },
+    .{ .name = "ne.i32", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .i32 },
+    .{ .name = "ne.u32", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .u32 },
+    .{ .name = "ne.i64", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .i64 },
+    .{ .name = "ne.u64", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .u64 },
+    .{ .name = "ne.f32", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .f32 },
+    .{ .name = "ne.f64", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .f64 },
+    .{ .name = "ne.bool", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .bool },
+    .{ .name = "ne.str", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .str },
+    .{ .name = "lt.i32", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .i32 },
+    .{ .name = "lt.u32", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .u32 },
+    .{ .name = "lt.i64", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .i64 },
+    .{ .name = "lt.u64", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .u64 },
+    .{ .name = "lt.f32", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .f32 },
+    .{ .name = "lt.f64", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .f64 },
+    .{ .name = "le.i32", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .i32 },
+    .{ .name = "le.u32", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .u32 },
+    .{ .name = "le.i64", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .i64 },
+    .{ .name = "le.u64", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .u64 },
+    .{ .name = "le.f32", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .f32 },
+    .{ .name = "le.f64", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .f64 },
+    .{ .name = "gt.i32", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .i32 },
+    .{ .name = "gt.u32", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .u32 },
+    .{ .name = "gt.i64", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .i64 },
+    .{ .name = "gt.u64", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .u64 },
+    .{ .name = "gt.f32", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .f32 },
+    .{ .name = "gt.f64", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .f64 },
+    .{ .name = "ge.i32", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .i32 },
+    .{ .name = "ge.u32", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .u32 },
+    .{ .name = "ge.i64", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .i64 },
+    .{ .name = "ge.u64", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .u64 },
+    .{ .name = "ge.f32", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .f32 },
+    .{ .name = "ge.f64", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .f64 },
+    .{ .name = "neg.i32", .class = .numeric, .operands = .one, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .i32 },
+    .{ .name = "neg.u32", .class = .numeric, .operands = .one, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .u32 },
+    .{ .name = "neg.i64", .class = .numeric, .operands = .one, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .i64 },
+    .{ .name = "neg.u64", .class = .numeric, .operands = .one, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .u64 },
+    .{ .name = "neg.f32", .class = .numeric, .operands = .one, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .f32 },
+    .{ .name = "neg.f64", .class = .numeric, .operands = .one, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .f64 },
+    .{ .name = "abs.i32", .class = .numeric, .operands = .one, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .i32 },
+    .{ .name = "abs.u32", .class = .numeric, .operands = .one, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .u32 },
+    .{ .name = "abs.f32", .class = .numeric, .operands = .one, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .f32 },
+    .{ .name = "abs.f64", .class = .numeric, .operands = .one, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .f64 },
+    .{ .name = "clz.i32", .class = .numeric, .operands = .one, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .i32 },
+    .{ .name = "clz.u32", .class = .numeric, .operands = .one, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .u32 },
+    .{ .name = "popcount.i32", .class = .numeric, .operands = .one, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .i32 },
+    .{ .name = "popcount.u32", .class = .numeric, .operands = .one, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .u32 },
+    .{ .name = "concat.str", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .str },
+    .{ .name = "not.bool", .class = .numeric, .operands = .one, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .bool },
 };
 
 /// The single identity table (hir.md §3.5): core and typed entries share
@@ -623,11 +739,164 @@ pub const Program = struct {
 };
 
 // ---------------------------------------------------------------------------
+// Built-program container (hir.md §3.2 container role for a whole compile)
+// ---------------------------------------------------------------------------
+//
+// The AST→HIR builder (S4, `passes/hir_build.zig`) consumes the module
+// graph + checker annotation and produces one `BuiltProgram`: a single
+// node store (`Program`, shared by every module of the compile) plus
+// program-level record tables for the function inventory, module
+// constants, and host bindings, ordered exactly like the current CFG
+// lowering's per-module function list (`cfg_lower_module.lowerModule`:
+// init?, non-generic function members, used instances, drop hooks, then
+// hoisted lambdas in creation order, then intrinsic wrappers). Function
+// bodies live as `lambda`-shaped region trees: `FuncRecord.root` is a
+// `lambda` node whose region carries the function's params and whose
+// root is the body — the same shape the canonical text form prints as
+// `fn (B0..) => …`, so every binder reference in a body resolves
+// through its own region (no capture is structural).
+//
+// Numeric ids (FuncId / ConstId / HostBindingId) are *this table's*
+// dense indices — the "module graph's / checker's own" spaces of
+// hir.md §3.5, assigned by the builder so a forward or recursive
+// reference resolves before the referencing body is built. Reference
+// ids are independent of cfg emission order; the emission-order
+// contract lives in the record order itself.
+
+/// What kind of function a `FuncRecord` is (drives cfg emission later;
+/// also documented naming conventions, see hir_build.zig).
+/// init: the module init (`{spec}.init` record; cfg emits it per
+/// module even when empty, except host modules and `builtin`).
+pub const FuncKind = enum {
+    init,
+    member, // {spec}.{fn}
+    instance, // {spec}.{fn}.{id}
+    drop_hook, // {spec}.{Type}.drop
+    lambda, // {spec}.{fn}[.lambda{outer}].lambda{N} (chain of the enclosing name)
+    intrinsic, // {using-spec}.{member}.intrinsic.{N}
+};
+
+/// One built function: its qualified cfg-style name, kind, owning
+/// module (index into `BuiltProgram.modules`), signature, body root,
+/// and source span of the declaration.
+pub const FuncRecord = struct {
+    name: []const u8,
+    kind: FuncKind,
+    module: u32,
+    /// Function type: params (name/mode/type) + return type. Types are
+    /// resolved `cfg.Type`s; names are the written param names (used by
+    /// the builder for lookup only).
+    params: []cfg.Param,
+    ret: cfg.Type,
+    /// The body: a `lambda` node whose region params are the function's
+    /// params (id 0.. are dense in this program).
+    root: ExprId,
+    /// The source span of the declaration (function name / λ / drop
+    /// decl); `ast.Span` is imported via cfg.ast — keep span light.
+    span_start: u32 = 0,
+    span_end: u32 = 0,
+    /// Emission position within the owning module: the index in the
+    /// cfg-order function list (init, members, instances, hooks, then
+    /// hoisted lambdas in completion order, then intrinsic wrappers).
+    /// The `funcs` table itself is append-ordered (predeclared records
+    /// first, hoisted records as discovered), so S5 re-orders a
+    /// module's records by this field to match the direct lowering.
+    order: u32 = 0,
+};
+
+/// One module constant member: identity (name, owning module), resolved
+/// type, whether it carries an initializer (host bindings / module
+/// values have none or are static), and the module it resolves to when
+/// module-valued (`import` / alias of one).
+pub const ConstRecord = struct {
+    name: []const u8,
+    module: u32,
+    type_: cfg.Type,
+    /// Index of this module's const in `BuiltProgram.consts` (dense).
+    key: []const u8, // stable key for the text refs dictionary
+    /// Non-null when the const has a Stilla initializer expression
+    /// (its HIR root lives in the shared node store). Null for
+    /// bodyless consts and module-valued consts.
+    init: ?ExprId,
+    /// Resolved specifier when module-valued (import or alias).
+    module_spec: ?[]const u8 = null,
+    /// Whether this const occupies a module storage slot (mirrors
+    /// `cfg_lower_module.constSlot`: not intrinsic, not module-valued,
+    /// not void).
+    slot: ?u32 = null,
+};
+
+/// One module's built form: its specifier and the ranges of its
+/// functions/constants in the program-wide tables.
+pub const BuiltModule = struct {
+    specifier: []const u8,
+    /// Range into `BuiltProgram.funcs` (the records this module owns,
+    /// in cfg emission order — init first when present).
+    funcs: Range = .{},
+    /// Range into `BuiltProgram.consts`.
+    consts: Range = .{},
+    /// Index of the module-init record in `funcs`, when one exists.
+    init_func: ?FuncId = null,
+};
+
+/// The builder's output for one whole compile: one shared node store
+/// plus the record tables and the per-module inventory.
+pub const BuiltProgram = struct {
+    arena: std.mem.Allocator,
+    program: Program,
+    modules: std.ArrayListUnmanaged(BuiltModule) = .empty,
+    funcs: std.ArrayListUnmanaged(FuncRecord) = .empty,
+    consts: std.ArrayListUnmanaged(ConstRecord) = .empty,
+    hosts: std.ArrayListUnmanaged(HostRecord) = .empty,
+    /// cfg.TypeDecl layout table indexed by cfg.TypeId — the real
+    /// nominal-type side table (same shape the SerCtx printer/parser
+    /// consume; cfg.TypeId is the ground truth for `.named` types).
+    types: []cfg.TypeDecl = &.{},
+
+    /// Convenience: the serialization context over this built program's
+    /// real tables. Call only after the build is complete (no further
+    /// `funcs` appends): entries reference arena-allocated copies of
+    /// each record's return type, and `consts`/`hosts`/`types` come from
+    /// the frozen tables.
+    pub fn serCtx(self: *const BuiltProgram) !SerCtx {
+        const rets = try self.arena.alloc(cfg.Type, self.funcs.items.len);
+        for (self.funcs.items, 0..) |f, i| rets[i] = f.ret;
+        var funcs = std.ArrayList(SerCtx.FuncDecl).empty;
+        for (self.funcs.items, 0..) |f, i| {
+            try funcs.append(self.arena, .{ .key = f.name, .type_ = .{ .function = .{ .params = f.params, .ret = &rets[i] } } });
+        }
+        var consts = std.ArrayList(SerCtx.ConstDecl).empty;
+        for (self.consts.items) |c| {
+            try consts.append(self.arena, .{ .key = c.key, .type_ = c.type_ });
+        }
+        var hosts = std.ArrayList(SerCtx.HostDecl).empty;
+        for (self.hosts.items) |h| {
+            try hosts.append(self.arena, .{ .key = h.key, .type_ = h.signature });
+        }
+        return .{
+            .types = self.types,
+            .funcs = funcs.items,
+            .consts = consts.items,
+            .hosts = hosts.items,
+        };
+    }
+};
+
+/// One host binding (bodyless declaration outside the embedded bundle):
+/// the (module, member) pair that names the syscall target and the
+/// declared signature. Indexed by HostBindingId.
+pub const HostRecord = struct {
+    module: u32,
+    name: []const u8,
+    signature: cfg.Type,
+    key: []const u8,
+};
+
+// ---------------------------------------------------------------------------
 // Text form: canonical printer and parser — implemented in src/passes/
 // (hir_parse.zig, hir_print.zig); re-exported here so `hir.print` and
 // `hir.parseText` keep working for tests and dumps (hir.md §4).
 // ---------------------------------------------------------------------------
-
 pub const ParseError = @import("passes/hir_parse.zig").ParseError;
 pub const Diag = @import("passes/hir_parse.zig").Diag;
 pub const Parser = @import("passes/hir_parse.zig").Parser;

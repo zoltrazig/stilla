@@ -685,6 +685,13 @@ let B0: i32 = call(fnref F0) in
 IR 里只有 `Let / Seq / Expr` 三种形状，没有 statement IR。这与 SEG 的
 `bind`/`var` 几乎同构（§8）。
 
+**解构 let（M1a 修订，PROGRESS "S4 设计决定"）**：`let (a, b) = e` 这类多叶
+不可反驳解构保持为 `let` region —— region 的 `params` 是 pattern 的绑定叶，
+`Region.pattern` 记录不可反驳的 pattern 形状（与 match arm 同机制，仅允许
+不可反驳形态：wildcard / bind / tuple / struct / list；literal、variant、
+type-test 可反驳，只属于 match arm）。纯标识 `let x = e` 仍是原来的
+单 binder、无 pattern 形式。
+
 ### 5.3 Region 的作用域规则
 
 - **可见性**：region 的 params 在其 `root` 子树内可见；内层 region 的
