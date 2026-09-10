@@ -46,7 +46,9 @@ Detail: [checker.md](checker.md).
 > Status: **implemented.** The checker's annotated output is built into the
 > canonical monomorphic HIR and lowered from there to CFG AIR; this is the
 > only frontend lowering path (S6b removed the direct annotated-AST
-> lowering and the `hir_stage` toggle). Files: `hir_build.zig`, `hir_validate.zig`,
+> lowering and the `hir_stage` toggle). Files: `hir_build.zig`
+> (+ `hir_build_block` / `hir_build_expr` / `hir_build_path` / `hir_build_call` /
+> `hir_build_control` / `hir_build_pattern`), `hir_validate.zig`,
 > `hir_lower.zig`. Effect analysis is disabled in this milestone, so
 > `SemanticInfo` carries no effect field.
 
@@ -55,7 +57,7 @@ HIR→CFG lowering (into today's block/value/drop machinery).
 
 | Pass | File | Job |
 | --- | --- | --- |
-| build | `hir_build.zig` (data structures in `hir.zig`) | annotated AST + module graph → canonical monomorphic HIR: binder / region / pattern normalization, full-expression fences, ownership view carried over from the checker; effect analysis disabled (M1a) |
+| build | `hir_build.zig` + `hir_build_block` / `_expr` / `_path` / `_call` / `_control` / `_pattern` (data structures in `hir.zig`) | annotated AST + module graph → canonical monomorphic HIR: binder / region / pattern normalization, full-expression fences, ownership view carried over from the checker; effect analysis disabled (M1a) |
 | validate | `hir_validate.zig` | structural HIR invariants only: scope, no capture, tree shape (no DAG), no duplicate BinderId, full-expression fence (hir.md §10.1) |
 | lower | `hir_lower.zig` | HIR → CFG AIR, reusing the existing `lower.zig` / `cfg_lower_emit.zig` block, value, and drop mechanisms; replaced the direct AST → CFG expression lowering (S6b) |
 
