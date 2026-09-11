@@ -1,15 +1,15 @@
 //! The Stilla frontend compiler: Stilla source → AIR (air.md text
-//! form), the symbolic LLIR assembly with `--emit-asm` (5.1), or the
-//! LLIR binary (bytecode) with `--emit-bin <file>` (6.3) — or, with
-//! `--run`, an interpreter: a source file compiles and runs, an input
-//! starting with the LLIR magic loads via `readBin` and runs from its
-//! header entry id.
+//! form), the canonical HIR text with `--emit-hir` (hir.md §4), the
+//! symbolic LLIR assembly with `--emit-asm` (5.1), or the LLIR binary
+//! (bytecode) with `--emit-bin <file>` (6.3) — or, with `--run`, an
+//! interpreter: a source file compiles and runs, an input starting with
+//! the LLIR magic loads via `readBin` and runs from its header entry id.
 //!
 //! Usage:
 //!
 //!     stilla [--output <file>] [--module <spec>]
 //!            [--entry-fn <name> | --no-entry-fn]
-//!            [--emit-asm | --emit-bin <file> | --run] <input>
+//!            [--emit-hir | --emit-asm | --emit-bin <file> | --run] <input>
 //!
 //! `--run` exit codes: 0 normal termination, 1 Stilla panic (the owned
 //! message goes to stderr), 2 load/compile error.
@@ -29,23 +29,29 @@ const usage =
     \\usage: stilla [options] <input>
     \\
     \\Compile a Stilla source module and print its AIR (air.md text form) —
-    \\or, with --emit-asm, the symbolic LLIR assembly (5.3), or with
-    \\--emit-bin <file>, the LLIR binary (bytecode, 6.3); `<input>` is the
-    \\source file or a binary produced by --emit-bin. With --run, compile
-    \\(or load) and execute.
+    \\or, with --emit-hir, the canonical HIR text (hir.md §4), or with
+    \\--emit-asm, the symbolic LLIR assembly (5.3), or with --emit-bin
+    \\<file>, the LLIR binary (bytecode, 6.3); `<input>` is the source file
+    \\or a binary produced by --emit-bin. With --run, compile (or load) and
+    \\execute.
     \\Options precede the input
     \\file (Unix convention): option parsing stops at the first positional
     \\argument, and a literal `--` ends it explicitly.
     \\
     \\options:
     \\  --output <file>   write the output to <file> instead of stdout
+    \\  --emit-hir        emit the canonical HIR text (hir.md §4) instead
+    \\                    of the AIR; mutually exclusive with --emit-asm,
+    \\                    --emit-bin, and --run
     \\  --emit-asm        emit the LLIR assembly (symbolic) instead of
     \\                    the AIR (5.1)
     \\  --emit-bin <file> emit the LLIR binary (bytecode) to <file> (6.3);
-    \\                    mutually exclusive with --emit-asm and --output
+    \\                    mutually exclusive with --emit-hir, --emit-asm
+    \\                    and --output
     \\  --run             compile (or load, for an input starting with the
     \\                    LLIR magic) and execute; mutually exclusive with
-    \\                    --emit-asm, --emit-bin, --output, --no-entry-fn
+    \\                    --emit-hir, --emit-asm, --emit-bin, --output,
+    \\                    --no-entry-fn
     \\  --module <spec>   module specifier for the entry source (default: the
     \\                    input file's stem, e.g. app.st -> "app")
     \\  --entry-fn <name> entry function to mark (default: "main")
@@ -68,9 +74,14 @@ const Options = struct {
     /// True when `--emit-asm` was given: print the symbolic LLIR
     /// assembly (5.3) instead of the AIR (5.1, passes/llir_asm.zig).
     emit_asm: bool = false,
+    /// True when `--emit-hir` was given: print the canonical HIR text
+    /// (hir.md §4) instead of the AIR. Mutually exclusive with the other
+    /// emission modes, which lower past the HIR seam.
+    emit_hir: bool = false,
     /// The `--emit-bin <file>` target: write the LLIR binary (bytecode,
     /// 6.1) to <file> instead of any text output. Mutually exclusive with
-    /// `--emit-asm` and `--output` (the flag carries its own file).
+    /// `--emit-hir`, `--emit-asm`, and `--output` (the flag carries its
+    /// own file).
     emit_bin: ?[]const u8 = null,
     /// True when `--run` was given: compile (or load a binary) and
     /// execute. Mutually exclusive with the emission flags.
@@ -130,7 +141,10 @@ fn run(io: std.Io, gpa: std.mem.Allocator, args: []const []const u8) u8 {
             };
             return 0;
         }
-        const out = renderProgram(arena, opts, program, compilation) catch return 1;
+        const out = if (opts.emit_hir)
+            renderHir(io, gpa, arena, compilation) orelse return 1
+        else
+            renderProgram(arena, opts, program, compilation) catch return 1;
         if (opts.output) |path| {
             std.Io.Dir.cwd().writeFile(io, .{ .sub_path = path, .data = out }) catch |err| {
                 errPrint(io, gpa, "stilla: cannot write '{s}': {s}\n", .{ path, @errorName(err) }) catch {};
@@ -334,6 +348,78 @@ fn renderProgram(
     return out.items;
 }
 
+/// Build the canonical HIR text dump for the compiled program (hir.md
+/// §4, `--emit-hir`): one `// @<module>.<name>` label line per function
+/// of the arena-retained `hir.BuiltProgram`, followed by the canonical
+/// text of that function's root expression. The dump is a multi-root
+/// inspection surface, not one parseable HIR expression. Pure: it writes
+/// no sink, so a failure leaves every destination untouched.
+/// `hir.print`'s S2 boundary rejects the nodes whose text cannot carry
+/// member identity (`struct_make` / `field_get` / `variant_make`, module
+/// access chains): on that error `failed_label` names the offending
+/// function and the whole dump is abandoned — never a silently degraded
+/// or partial output.
+fn renderHirBuffer(
+    arena: std.mem.Allocator,
+    compilation: stilla.frontend.Compilation,
+    failed_label: *?[]const u8,
+) error{ OutOfMemory, NotSerializable }![]const u8 {
+    const built = compilation.hir orelse return &.{};
+    const ctx = try built.serCtx();
+    // Build the whole buffer before either sink writes it (the same
+    // content contract as renderProgram).
+    var out = std.ArrayList(u8).empty;
+    for (built.funcs.items) |f| {
+        const spec = built.modules.items[f.module].specifier;
+        // Function names are module-qualified already for members,
+        // instances, and drop hooks (`app.add`, `app.Point.drop`), but
+        // the module init is the bare `init`: qualify only the unqualified
+        // ones so no label reads `app.app.add`.
+        const qualified = f.name.len > spec.len and std.mem.startsWith(u8, f.name, spec) and f.name[spec.len] == '.';
+        const label = if (qualified)
+            f.name
+        else
+            try std.fmt.allocPrint(arena, "{s}.{s}", .{ spec, f.name });
+        try out.appendSlice(arena, "// @");
+        try out.appendSlice(arena, label);
+        try out.append(arena, '\n');
+        const text = stilla.hir.print(&built.program, f.root, arena, ctx) catch |err| switch (err) {
+            error.NotSerializable => {
+                failed_label.* = label;
+                return error.NotSerializable;
+            },
+            error.OutOfMemory => return error.OutOfMemory,
+        };
+        try out.appendSlice(arena, text);
+        try out.append(arena, '\n');
+    }
+    return out.items;
+}
+
+/// The `--emit-hir` sink: render the dump and report a serialization
+/// failure (with the offending function) on stderr; null means exit 1
+/// and nothing written.
+fn renderHir(
+    io: std.Io,
+    gpa: std.mem.Allocator,
+    arena: std.mem.Allocator,
+    compilation: stilla.frontend.Compilation,
+) ?[]const u8 {
+    if (compilation.hir == null) {
+        errPrint(io, gpa, "stilla: no HIR available\n", .{}) catch {};
+        return null;
+    }
+    var failed_label: ?[]const u8 = null;
+    return renderHirBuffer(arena, compilation, &failed_label) catch |err| {
+        if (err == error.NotSerializable) {
+            errPrint(io, gpa, "stilla: cannot print HIR for '@{s}': NotSerializable\n", .{failed_label orelse "?"}) catch {};
+        } else {
+            errPrint(io, gpa, "stilla: cannot render HIR: {s}\n", .{@errorName(err)}) catch {};
+        }
+        return null;
+    };
+}
+
 /// Produce the LLIR binary (bytecode) for the compiled program (6.1):
 /// lower the CFG to the frozen image and serialize it with
 /// `lower.emitBinWithEntry`, so the header records the resolved entry
@@ -383,6 +469,8 @@ fn parseArgs(io: std.Io, gpa: std.mem.Allocator, args: []const []const u8) !?Opt
             opts.entry_fn_explicit = true;
         } else if (parse_options and std.mem.eql(u8, a, "--no-entry-fn")) {
             opts.entry_fn = null;
+        } else if (parse_options and std.mem.eql(u8, a, "--emit-hir")) {
+            opts.emit_hir = true;
         } else if (parse_options and std.mem.eql(u8, a, "--emit-asm")) {
             opts.emit_asm = true;
         } else if (parse_options and std.mem.eql(u8, a, "--run")) {
@@ -418,6 +506,12 @@ fn parseArgs(io: std.Io, gpa: std.mem.Allocator, args: []const []const u8) !?Opt
     if (opts.emit_bin != null and opts.emit_asm) {
         return argErr(io, gpa, "--emit-bin cannot be combined with --emit-asm");
     }
+    if (opts.emit_bin != null and opts.emit_hir) {
+        return argErr(io, gpa, "--emit-bin cannot be combined with --emit-hir");
+    }
+    if (opts.emit_hir and opts.emit_asm) {
+        return argErr(io, gpa, "--emit-hir cannot be combined with --emit-asm");
+    }
     if (opts.emit_bin != null and opts.output != null) {
         return argErr(io, gpa, "--emit-bin carries its own output file; it cannot be combined with --output");
     }
@@ -425,6 +519,9 @@ fn parseArgs(io: std.Io, gpa: std.mem.Allocator, args: []const []const u8) !?Opt
     // entry id (D3), so the no-entry mode has nothing to run.
     if (opts.run and opts.emit_asm) {
         return argErr(io, gpa, "--run cannot be combined with --emit-asm");
+    }
+    if (opts.run and opts.emit_hir) {
+        return argErr(io, gpa, "--run cannot be combined with --emit-hir");
     }
     if (opts.run and opts.emit_bin != null) {
         return argErr(io, gpa, "--run cannot be combined with --emit-bin");
@@ -703,6 +800,79 @@ test "run --output writes the AIR (default mode) to the file" {
     // default (non-asm) mode is unaffected by the new flag.
     try testing.expect(std.mem.indexOf(u8, out, "=== source: module \"app\" ===") != null);
     try testing.expect(std.mem.indexOf(u8, out, "LLIR assembly") == null);
+}
+
+test "parseArgs --emit-hir sets the HIR mode; defaults off" {
+    var o1 = (try parseArgs(std.Io.failing, testing.allocator, &.{ "stilla", "--emit-hir", "app.st" })).?;
+    defer o1.search_dirs.deinit(testing.allocator);
+    try testing.expect(o1.emit_hir);
+    try testing.expect(!o1.emit_asm);
+    try testing.expect(o1.emit_bin == null);
+
+    var o2 = (try parseArgs(std.Io.failing, testing.allocator, &.{ "stilla", "app.st" })).?;
+    defer o2.search_dirs.deinit(testing.allocator);
+    try testing.expect(!o2.emit_hir);
+}
+
+test "parseArgs --emit-hir conflicts with the other emission modes" {
+    try testing.expectError(error.InputOutput, parseArgs(std.Io.failing, testing.allocator, &.{ "stilla", "--emit-hir", "--emit-asm", "app.st" }));
+    try testing.expectError(error.InputOutput, parseArgs(std.Io.failing, testing.allocator, &.{ "stilla", "--emit-hir", "--emit-bin", "a.bc", "app.st" }));
+    try testing.expectError(error.InputOutput, parseArgs(std.Io.failing, testing.allocator, &.{ "stilla", "--emit-hir", "--run", "app.st" }));
+}
+
+// The `--emit-hir` path writes the same buffer to stdout or --output, so
+// the file sink (never the fd-1 protocol pipe) is fully exercised here:
+// parse -> read source -> compile (through the HIR seam) -> render the
+// canonical HIR dump -> write the file.
+test "run --emit-hir --output writes the canonical HIR dump to the file" {
+    const src_name = "4.10_emit_hir_probe.st";
+    const out_name = "4.10_emit_hir_probe.hir";
+    defer std.Io.Dir.cwd().deleteFile(testing.io, src_name) catch {};
+    defer std.Io.Dir.cwd().deleteFile(testing.io, out_name) catch {};
+
+    try std.Io.Dir.cwd().writeFile(testing.io, .{ .sub_path = src_name, .data =
+        \\fn add(a: int32, b: int32) -> int32 { a + b }
+        \\fn main() -> int32 { add(1, 2) }
+    });
+
+    try testing.expectEqual(@as(u8, 0), run(testing.io, testing.allocator, &.{ "stilla", "--emit-hir", "--module", "app", "--output", out_name, src_name }));
+
+    const out = try std.Io.Dir.cwd().readFileAlloc(testing.io, out_name, testing.allocator, .limited(1 << 20));
+    defer testing.allocator.free(out);
+    // One label line per function, with the module-qualified name.
+    try testing.expect(std.mem.indexOf(u8, out, "// @app.add\n") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "// @app.main\n") != null);
+    // The canonical HIR body, and a real SerCtx refs dictionary for the
+    // call target (stable key, not a numeric id).
+    try testing.expect(std.mem.indexOf(u8, out, "fn (B0: i32, B1: i32) => add.i32(%B0, %B1)") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "#refs: F0 = app.add") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "call(fnref F0, 1i32, 2i32)") != null);
+    // Not the AIR default mode's source decoration.
+    try testing.expect(std.mem.indexOf(u8, out, "=== source: module") == null);
+}
+
+test "renderHirBuffer rejects an unserializable function and names it" {
+    // field_get has no S2 text form (hir.md §4.10). Rendering is pure, so
+    // this runs in-process without touching the test-runner's fd-1
+    // `--listen` protocol pipe; the CLI maps the same null/error into
+    // exit 1 *before* either sink writes (main.run's `orelse return 1`).
+    var sources = stilla.moduleinfo.Sources{};
+    var smap = std.StringHashMapUnmanaged([]const u8).empty;
+    defer smap.deinit(testing.allocator);
+    try smap.put(testing.allocator, "app",
+        \\struct P { x: int32; }
+        \\fn main() -> int32 {
+        \\    let p = P { x: 1 };
+        \\    p.x
+        \\}
+    );
+    sources.source = smap;
+    var compilation = try stilla.frontend.compile(testing.allocator, .{ .entry = "app", .sources = sources, .entry_fn = "main", .optimize = true });
+    defer compilation.deinit();
+
+    var failed_label: ?[]const u8 = null;
+    try testing.expectError(error.NotSerializable, renderHirBuffer(compilation.arena.allocator(), compilation, &failed_label));
+    try testing.expectEqualStrings("app.main", failed_label.?);
 }
 
 test "parseArgs --emit-bin sets the binary target; defaults off" {

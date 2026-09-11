@@ -158,6 +158,22 @@ pub fn build(b: *std.Build) void {
     asm_probe.expectStdOutMatch(".block $madd.poly.entry");
     test_step.dependOn(&asm_probe.step);
 
+    // `--emit-hir` probes: the fd-1 sink of the canonical HIR dump (the
+    // `--output` file sink is covered in `src/main.zig`), and the exit-1
+    // path for a function whose text carries no member identity yet
+    // (hir.md §4.10 — `field_get` in probes/aggregates.st).
+    const hir_probe = b.addRunArtifact(exe);
+    hir_probe.addArgs(&.{ "--emit-hir", "probes/numeric.st" });
+    hir_probe.expectStdOutMatch("// @numeric.i32_ops\n");
+    test_step.dependOn(&hir_probe.step);
+
+    const hir_fail_probe = b.addRunArtifact(exe);
+    hir_fail_probe.addArgs(&.{ "--emit-hir", "probes/aggregates.st" });
+    hir_fail_probe.expectExitCode(1);
+    hir_fail_probe.expectStdOutEqual("");
+    hir_fail_probe.expectStdErrMatch("NotSerializable");
+    test_step.dependOn(&hir_fail_probe.step);
+
     // 13 M5 `--run` probes: the `--run` stdout sink is the fd-1 path that
     // cannot run in the `zig build test` process (the test-runner's
     // `--listen` protocol pipe — see the note in `src/main.zig`), so the

@@ -19,6 +19,7 @@ const frontend_cache = @import("frontend_cache.zig");
 const lower = @import("lower.zig");
 const moduleinfo = @import("moduleinfo.zig");
 const checker = @import("passes/checker.zig");
+const hir = @import("hir.zig");
 const hir_build = @import("passes/hir_build.zig");
 const hir_lower = @import("passes/hir_lower.zig");
 const cfg_optimize = @import("passes/cfg_optimize.zig");
@@ -90,6 +91,11 @@ pub const Compilation = struct {
     arena: *std.heap.ArenaAllocator,
     graph: ?*moduleinfo.ModuleGraph,
     program: ?cfg.IrProgram = null,
+    /// The canonical monomorphic HIR the checker's annotated output was
+    /// built into before CFG lowering (hir.md §3, §11). Arena-owned by
+    /// this compilation; null on a failed compile. The CLI's `--emit-hir`
+    /// dump reads it through `hir.BuiltProgram.serCtx` + `hir.print`.
+    hir: ?*hir.BuiltProgram = null,
     /// Every diagnostic the failing phase collected, in source order
     /// (arena-owned; present even when `graph` is null).
     diags: []const moduleinfo.Diag = &.{},
@@ -187,6 +193,7 @@ pub fn compile(allocator: std.mem.Allocator, options: Options) CompileError!Comp
     // (`hir_build.buildProgramDiag`) and lowered from there. S6b removed
     // the direct annotated-AST lowering and the `hir_stage` toggle.
     var lowerer = lower.Lowerer.init(arena_alloc, graph, options.entry_fn, options.entry_fn_explicit, &ck.annotation);
+    var built_hir: ?*hir.BuiltProgram = null;
     var program = blk: {
         var bdiag: moduleinfo.Diag = undefined;
         const built = hir_build.buildProgramDiag(arena_alloc, graph, &ck.annotation, &bdiag) catch |err| switch (err) {
@@ -199,6 +206,7 @@ pub fn compile(allocator: std.mem.Allocator, options: Options) CompileError!Comp
             },
             else => return err,
         };
+        built_hir = built;
         break :blk hir_lower.lowerProgram(&lowerer, built) catch |err| switch (err) {
             error.Diagnostic => {
                 // Lowering stays first-error; wrap the single diagnostic
@@ -283,6 +291,7 @@ pub fn compile(allocator: std.mem.Allocator, options: Options) CompileError!Comp
         .arena = arena,
         .graph = graph,
         .program = program,
+        .hir = built_hir,
         .sources = builder.loaded_sources.items,
     };
 }

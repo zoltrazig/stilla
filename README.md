@@ -27,6 +27,9 @@ and the trailing section lists what the code and docs still mark open.
   classification (`moduleinfo` + `passes/module_*`)
 - [x] **Type checker** — inference, ownership analysis with conditional
   release and state merging, generic monomorphization, `any`/union/tuple/list
+- [x] **HIR seam** — checker output built into the canonical monomorphic HIR
+  (`hir_build`) and lowered from there (`hir_lower`); canonical text
+  printer/parser for round-trip checks ([hir.md](docs/hir.md))
 - [x] **CFG lowering** — control flow, `match`/patterns, field paths, calls,
   intrinsic (`builtin`) expansion, destruction placement, module init
   functions, syscalls
@@ -61,8 +64,9 @@ and the trailing section lists what the code and docs still mark open.
   `VmLoadedData`/`VmRuntimeState` split, `artifact_bundle` build-once/run-many
 - [x] **Embedding** — `frontend.compile` + `runWithHostAndLoader`,
   `examples/embed/random_demo.zig`, `libstilla.a` static library
-- [x] **CLI** — compile to AIR / LLIR assembly / LLIR binary; `--run` (source
-  or self-contained binary); `--module`/`--entry-fn`/`--no-entry-fn`/`-I`
+- [x] **CLI** — compile to canonical HIR / CFG AIR / LLIR assembly / LLIR
+  binary; `--run` (source or self-contained binary);
+  `--module`/`--entry-fn`/`--no-entry-fn`/`-I`
 
 **Standard library (embedded `std/` source)**
 
@@ -180,12 +184,35 @@ module "app" {
 }
 ```
 
+With `--emit-hir` the compiler instead prints the canonical HIR it built
+before CFG lowering ([hir.md](docs/hir.md) §4): one
+`// @<module>.<name>`-labeled, canonical-text root expression per
+function. The dump is a concatenation of roots, not a single parseable
+HIR expression, and it is an inspection surface whose printer still
+rejects the few node forms with no member-carrying text (below).
+
+```sh
+zig-out/bin/stilla --emit-hir app.st
+```
+
+```text
+// @app.init
+fn () => void
+// @app.main
+fn () => 42i32
+```
+
 Options: `--output <file>`, `--module <spec>`, `--entry-fn <name>` /
-`--no-entry-fn`, `-I <dir>`, and the emission modes `--emit-asm`,
+`--no-entry-fn`, `-I <dir>`, and the emission modes `--emit-hir` (the
+canonical HIR text form, [hir.md](docs/hir.md) §4), `--emit-asm`,
 `--emit-bin <file>`, and `--run` (compile and execute). Diagnostics are
 `<file>:<line>:<col>: error: <message>`. The pipeline and the LLIR
 backend it lowers to are documented in [frontend.md](docs/frontend.md)
-and [interpreter-vm.md](docs/interpreter-vm.md).
+and [interpreter-vm.md](docs/interpreter-vm.md). `--emit-hir` fails loudly
+rather than degrade: the printer's S2 boundary still rejects
+`struct_make`/`field_get`/`variant_make` and module access chains, so a
+program using them reports the offending function and exits 1 with no
+output written.
 
 ## Using the library
 

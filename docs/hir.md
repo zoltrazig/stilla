@@ -649,6 +649,15 @@ pattern 绑定（例 2 的 `B1`）也按该顺序参与编号。绑定声明写�
   golden / 双向 round-trip 测试放 hir 自有套件与独立的 seg 套件（§10.2）。
 - 规范文本是 §8.7 这类示例与 SEG 抽取结果的**可比面**；示例段落逐步改用本节语法，
   不再用散落的不一致示意。
+- **CLI 转储（`--emit-hir`）**：`stilla --emit-hir` 把编译期构建的 HIR 按
+  canonical 文本打印到 stdout（或 `--output <file>`），每个函数根表达式前加一行
+  `// @<module>.<name>` 注释标注。注释无语义，整份转储是多个根表达式的拼接，
+  **不是**单个可解析的 HIR 表达式。`--emit-hir` 与 `--emit-asm` / `--emit-bin` /
+  `--run` 互斥；与 `--output` / `--no-entry-fn` 可同用。
+- 文本形式尚未覆盖的节点会让转储失败：§4.4 的 `struct_make` / `field_get` /
+  `variant_make` 与 §7.4 的模块访问链没有可携带成员身份的正交文本，printer
+  报 `NotSerializable`。此时 CLI 报出函数名与错误并以退出码 1 结束，**绝不**静默
+  降级或输出半截文件（§4.1「无歧义」原则）。
 
 ## 5. 绑定、作用域与控制流语义
 
