@@ -22,6 +22,7 @@ const checker = @import("passes/checker.zig");
 const hir = @import("hir.zig");
 const hir_build = @import("passes/hir_build.zig");
 const hir_effects = @import("passes/hir_effects.zig");
+const effects = @import("effects.zig");
 const hir_seg = @import("passes/hir_seg.zig");
 const hir_simplify = @import("passes/hir_simplify.zig");
 const hir_lower = @import("passes/hir_lower.zig");
@@ -49,6 +50,17 @@ pub const Options = struct {
     /// `sources.search_dirs`; null in embeddings that supply every module
     /// as in-memory text.
     io: ?std.Io = null,
+    /// Host effect declarations, keyed by the binding's stable
+    /// `<module>.<member>` symbol (effects.md §13). A binding with no
+    /// declaration is the full `Top`; a declaration is honoured only when
+    /// it attests `StillaExecution.forbidden`, otherwise it is still
+    /// `Top`. The embedding must be using the same contract at run time:
+    /// these declarations are trusted, and `host_top` — the one value
+    /// that omits `Read(ModuleConst)` — is only sound for a binding that
+    /// really cannot execute Stilla code. Symbols that name no binding in
+    /// this program are ignored (a declaration set describes an
+    /// embedding, not one program). Caller-owned.
+    host_decls: []const effects.HostDecl = &.{},
     /// Optional per-module frontend cache (PLAN item 3): when set,
     /// repeated `compile` calls reuse each unchanged module's parsed
     /// `ast.Program`/`ast.Source` from the cache's arena, skipping
@@ -159,7 +171,7 @@ fn failed(
 /// annotations must be `ready` and a sound over-approximation. Used after
 /// an in-place HIR transform (M2b consumers, SEG). Returns null or the
 /// diagnostic to report.
-fn revalidateHir(arena_alloc: std.mem.Allocator, graph: *moduleinfo.ModuleGraph, built: *hir.BuiltProgram) CompileError!?moduleinfo.Diag {
+fn revalidateHir(arena_alloc: std.mem.Allocator, graph: *moduleinfo.ModuleGraph, built: *hir.BuiltProgram, host_decls: []const effects.HostDecl) CompileError!?moduleinfo.Diag {
     for (built.funcs.items) |rec| {
         if (hir.validate(&built.program, rec.root, arena_alloc) catch return error.OutOfMemory) |msg| {
             return moduleinfo.Diag{ .span = ast.Span.init(0, 0, 0), .message = msg };
@@ -171,7 +183,7 @@ fn revalidateHir(arena_alloc: std.mem.Allocator, graph: *moduleinfo.ModuleGraph,
             return moduleinfo.Diag{ .span = ast.Span.init(0, 0, 0), .message = msg };
         }
     }
-    var an = hir_effects.Analysis.init(arena_alloc, built, .{ .graph = graph }) catch return error.OutOfMemory;
+    var an = hir_effects.Analysis.init(arena_alloc, built, .{ .graph = graph, .host_decls = host_decls }) catch return error.OutOfMemory;
     an.analyze() catch return error.OutOfMemory;
     if (an.validate(arena_alloc) catch return error.OutOfMemory) |msg| {
         return moduleinfo.Diag{ .span = ast.Span.init(0, 0, 0), .message = msg };
@@ -265,7 +277,7 @@ pub fn compile(allocator: std.mem.Allocator, options: Options) CompileError!Comp
                 return failed(arena, &.{.{ .span = ast.Span.init(0, 0, 0), .message = msg }}, graph, builder.loaded_sources.items);
             }
         }
-        var effect_analysis = hir_effects.Analysis.init(arena_alloc, built, .{ .graph = graph }) catch return error.OutOfMemory;
+        var effect_analysis = hir_effects.Analysis.init(arena_alloc, built, .{ .graph = graph, .host_decls = options.host_decls }) catch return error.OutOfMemory;
         effect_analysis.analyze() catch return error.OutOfMemory;
         if (effect_analysis.validate(arena_alloc) catch return error.OutOfMemory) |msg| {
             return failed(arena, &.{.{
@@ -288,8 +300,8 @@ pub fn compile(allocator: std.mem.Allocator, options: Options) CompileError!Comp
             // M2b effect-driven consumers (hir.md §11): dead-let +
             // selective A-Normal Form, then re-validate structure and
             // effects on the rewritten program (hir.md §2.4).
-            _ = hir_simplify.optimize(arena_alloc, built, .{ .graph = graph }) catch return error.OutOfMemory;
-            if (revalidateHir(arena_alloc, graph, built) catch return error.OutOfMemory) |diag| {
+            _ = hir_simplify.optimize(arena_alloc, built, .{ .graph = graph, .host_decls = options.host_decls }) catch return error.OutOfMemory;
+            if (revalidateHir(arena_alloc, graph, built, options.host_decls) catch return error.OutOfMemory) |diag| {
                 return failed(arena, &.{diag}, graph, builder.loaded_sources.items);
             }
         }
@@ -298,8 +310,8 @@ pub fn compile(allocator: std.mem.Allocator, options: Options) CompileError!Comp
             // effect analysis, then re-validate structure and effects on
             // the rewritten program (hir.md §2.4 — a transform may not
             // assume the pre-rewrite static conclusions still hold).
-            _ = hir_seg.optimize(arena_alloc, built, .{ .graph = graph }) catch return error.OutOfMemory;
-            if (revalidateHir(arena_alloc, graph, built) catch return error.OutOfMemory) |diag| {
+            _ = hir_seg.optimize(arena_alloc, built, .{ .graph = graph, .host_decls = options.host_decls }) catch return error.OutOfMemory;
+            if (revalidateHir(arena_alloc, graph, built, options.host_decls) catch return error.OutOfMemory) |diag| {
                 return failed(arena, &.{diag}, graph, builder.loaded_sources.items);
             }
         }

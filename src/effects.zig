@@ -69,12 +69,12 @@ pub const EffectResource = union(enum) {
     runtime: RuntimeDomainId,
     extension: Extension,
     /// Any host/extension resource, but **not** a Stilla `ModuleConst`
-    /// (docs/effects.md §13): the conservative summary of a host binding
-    /// with no declared metadata. A host call cannot name a Stilla
-    /// module constant (module storage is runtime-private), so this
-    /// stands in for the missing `host` metadata without forcing the
-    /// module-const dependency rules of §7 to reject every host call.
-    /// Genuinely unknown Stilla targets still use `top`.
+    /// (docs/effects.md §13). It appears only in a binding whose embedding
+    /// attests `StillaExecution.forbidden` — attests, that is, that the
+    /// binding executes no Stilla code and so cannot reach a module
+    /// constant. A binding with *no* declaration is the full `top`
+    /// (module-const read wildcard included), and so are genuinely
+    /// unknown Stilla targets.
     host_any,
     top,
 
@@ -294,9 +294,12 @@ pub const may_trap: Summary = .{ .accesses = .{}, .may_trap = true, .may_diverge
 pub const may_diverge: Summary = .{ .accesses = .{}, .may_trap = false, .may_diverge = true, .nondeterministic = false };
 /// `(All, true, true, true)`.
 pub const top: Summary = .{ .accesses = AccessSet.top, .may_trap = true, .may_diverge = true, .nondeterministic = true };
-/// The conservative summary of a host binding with no declared metadata
-/// (docs/effects.md §13): every host resource is touched, but no Stilla
-/// `ModuleConst` is. Missing *Stilla* targets use `top` instead.
+/// Every host resource is touched, but no Stilla `ModuleConst` is
+/// (docs/effects.md §13). It is a *declaration value*: available only for
+/// a binding whose embedding attests `StillaExecution.forbidden`, i.e.
+/// attests the binding executes no Stilla code and therefore cannot reach
+/// a module constant. A host binding with no declaration is the full
+/// `top`; missing *Stilla* targets also use `top`.
 pub const host_top: Summary = .{
     .accesses = .{ .accesses = &.{
         .{ .resource = .host_any, .mode = .read },
@@ -561,14 +564,120 @@ const AccessSetCtx = struct {
 pub const HostEffects = struct {
     entries: []const Entry = &.{},
 
-    pub const Entry = struct { host: HostBindingId, summary: Summary };
+    pub const Entry = struct {
+        host: HostBindingId,
+        summary: Summary,
+        /// docs/effects.md §13. Defaults to `unknown`, so an entry that
+        /// declares only resources/traps still gets the full `top` — it
+        /// has not established that the binding cannot execute Stilla
+        /// code.
+        stilla_execution: StillaExecution = .unknown,
+
+        /// The summary actually used for this binding (docs/effects.md
+        /// §13): the declared one only under an explicit `forbidden`
+        /// attestation, otherwise the full `top`.
+        pub fn effectiveSummary(self: Entry) Summary {
+            return switch (self.stilla_execution) {
+                .forbidden => self.summary,
+                .may_execute, .unknown => top,
+            };
+        }
+    };
 
     pub fn lookup(self: HostEffects, host_id: HostBindingId) ?Summary {
         for (self.entries) |e| {
-            if (e.host == host_id) return e.summary;
+            if (e.host == host_id) return e.effectiveSummary();
         }
         return null;
     }
+
+    /// Resolve symbol-keyed ABI declarations (`HostDecl`) against the
+    /// bindings a program actually has. Unknown symbols are *ignored*, not
+    /// an error: a declaration set describes an embedding, not one program.
+    pub fn resolve(
+        arena: std.mem.Allocator,
+        decls: []const HostDecl,
+        bindings: []const HostDeclKey,
+    ) std.mem.Allocator.Error!HostEffects {
+        if (decls.len == 0) return .{};
+        var entries = std.ArrayListUnmanaged(Entry).empty;
+        for (decls) |d| {
+            for (bindings) |b| {
+                if (!std.mem.eql(u8, b.key, d.key)) continue;
+                try entries.append(arena, .{
+                    .host = b.id,
+                    .summary = d.summary,
+                    .stilla_execution = d.stilla_execution,
+                });
+            }
+        }
+        return consolidate(arena, entries.items);
+    }
+
+    /// Fold declarations of the same binding into one entry, *order
+    /// independently*: the attestation survives only when every
+    /// declaration for that binding is `forbidden`, and the summaries are
+    /// joined. A contradiction (`forbidden` vs `may_execute`) therefore
+    /// degrades to the full `top`, rather than depending on which
+    /// declaration happened to come first.
+    pub fn consolidate(arena: std.mem.Allocator, entries: []const Entry) std.mem.Allocator.Error!HostEffects {
+        var out = std.ArrayListUnmanaged(Entry).empty;
+        for (entries, 0..) |e, i| {
+            var already = false;
+            for (out.items) |o| {
+                if (o.host == e.host) already = true;
+            }
+            if (already) continue;
+            var summary = e.summary;
+            var exec: StillaExecution = if (e.stilla_execution == .forbidden) .forbidden else .unknown;
+            for (entries[i + 1 ..]) |later| {
+                if (later.host != e.host) continue;
+                summary = try join(arena, summary, later.summary);
+                if (later.stilla_execution != .forbidden) exec = .unknown;
+            }
+            try out.append(arena, .{ .host = e.host, .summary = summary, .stilla_execution = exec });
+        }
+        return .{ .entries = out.items };
+    }
+};
+
+/// A host binding's stable identity for the embedding ABI: the qualified
+/// `<module specifier>.<member>` symbol, plus the dense id the HIR builder
+/// assigned. The symbol is the *key*; the id is a resolution result.
+pub const HostDeclKey = struct { key: []const u8, id: HostBindingId };
+
+/// An embedding-side host declaration (docs/effects.md §13), keyed by the
+/// stable qualified symbol — the ABI form of the `HostBindingId`-keyed
+/// `HostEffects` (ids are assigned by the HIR builder, so only in-tree
+/// code can use that form). Declares the *single* `EffectSummary`; there
+/// is no second, overlapping read-set fact.
+pub const HostDecl = struct {
+    key: []const u8,
+    summary: Summary,
+    stilla_execution: StillaExecution = .unknown,
+};
+
+/// Whether a host binding may execute Stilla code (docs/effects.md §13).
+/// It is a *trusted declaration*, not a compiler inference: a host binding
+/// is arbitrary embedder code handed a live VM context, so the compiler
+/// cannot prove the property from the runtime API surface (the docs list
+/// async/reentrant hosts as a *non-goal*, which is scope, not a
+/// guarantee). Missing or unspecified is `unknown`.
+pub const StillaExecution = enum {
+    /// The embedding claims nothing; treated as `may_execute`.
+    unknown,
+    /// The binding may execute Stilla code — a callable passed at this
+    /// call, one stored by an earlier call, or any other channel back
+    /// into the VM. v1 has no callback-parameterized instantiation, so
+    /// this yields the full `top`: every resource, `may_trap`,
+    /// `may_diverge`, `Q`, *and* the module-const read wildcard. An
+    /// unknown callback must cover all of those, not merely add reads.
+    may_execute,
+    /// The embedding attests the binding executes no Stilla code at all.
+    /// Only then is the declared summary used verbatim — so only then is
+    /// `host_top` (every host resource, but no `Read(ModuleConst)`)
+    /// available as a declaration value.
+    forbidden,
 };
 
 /// Resource-domain declarations (docs/effects.md §5.5–§5.6): `stable`
@@ -912,10 +1021,79 @@ test "effects: Pending is not a pure proof" {
     try testing.expectEqual(pure_id, ready.readyId().?);
 }
 
-test "effects: host metadata defaults to Top when undeclared" {
-    const reg = HostEffects{ .entries = &.{.{ .host = 7, .summary = may_trap }} };
-    try testing.expect(reg.lookup(7).?.eql(may_trap));
-    try testing.expect(reg.lookup(8) == null);
+test "effects: host metadata defaults to Top when undeclared (docs/effects.md §13)" {
+    // An entry that declares only a summary has *not* established that
+    // the binding cannot execute Stilla code, so it is `unknown` and gets
+    // the full `top` — declared summary and all.
+    const undeclared = HostEffects{ .entries = &.{.{ .host = 7, .summary = may_trap }} };
+    try testing.expect(undeclared.lookup(7).?.eql(top));
+    try testing.expect(undeclared.lookup(8) == null);
+
+    // Only an explicit `forbidden` attestation lets the declared summary
+    // through — that is what makes `host_top` (no module-const read)
+    // available at all.
+    const attested = HostEffects{ .entries = &.{
+        .{ .host = 7, .summary = host_top, .stilla_execution = .forbidden },
+    } };
+    try testing.expect(attested.lookup(7).?.eql(host_top));
+    try testing.expect(!attested.lookup(7).?.eql(top));
+
+    // `may_execute` covers everything an unknown callback can do, not just
+    // the reads: resources, trap, diverge, Q and the read wildcard.
+    const reentrant = HostEffects{ .entries = &.{
+        .{ .host = 7, .summary = pure, .stilla_execution = .may_execute },
+    } };
+    try testing.expect(reentrant.lookup(7).?.eql(top));
+}
+
+test "effects: symbol-keyed host declarations resolve against program bindings" {
+    // docs/effects.md §13: the ABI form is keyed by the stable
+    // `<module>.<member>` symbol; resolution maps it to the dense id the
+    // HIR builder assigned. An unknown symbol is ignored (a declaration
+    // set describes an embedding, not one program).
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const bindings = [_]HostDeclKey{
+        .{ .key = "builtin.print", .id = 3 },
+        .{ .key = "builtin.str", .id = 4 },
+    };
+    const decls = [_]HostDecl{
+        .{ .key = "builtin.print", .summary = host_top, .stilla_execution = .forbidden },
+        .{ .key = "builtin.str", .summary = host_top, .stilla_execution = .forbidden },
+        .{ .key = "other.module", .summary = pure, .stilla_execution = .forbidden },
+    };
+    const resolved = try HostEffects.resolve(arena.allocator(), &decls, &bindings);
+    try testing.expectEqual(@as(usize, 2), resolved.entries.len);
+    try testing.expect(resolved.lookup(3).?.eql(host_top));
+    try testing.expect(resolved.lookup(4).?.eql(host_top));
+
+    // Contradictory declarations for one binding degrade to `unknown`
+    // (hence `top`) *regardless of order* — never "last one wins".
+    const one = [_]HostDeclKey{.{ .key = "builtin.print", .id = 3 }};
+    const forked = [_][2]HostDecl{
+        .{
+            .{ .key = "builtin.print", .summary = host_top, .stilla_execution = .forbidden },
+            .{ .key = "builtin.print", .summary = pure, .stilla_execution = .may_execute },
+        },
+        .{
+            .{ .key = "builtin.print", .summary = pure, .stilla_execution = .may_execute },
+            .{ .key = "builtin.print", .summary = host_top, .stilla_execution = .forbidden },
+        },
+    };
+    for (forked) |d| {
+        const r = try HostEffects.resolve(arena.allocator(), &d, &one);
+        try testing.expectEqual(@as(usize, 1), r.entries.len);
+        try testing.expect(r.lookup(3).?.eql(top));
+    }
+
+    // Agreeing duplicates join their summaries and keep the attestation.
+    const agreed = [_]HostDecl{
+        .{ .key = "builtin.print", .summary = may_trap, .stilla_execution = .forbidden },
+        .{ .key = "builtin.print", .summary = pure, .stilla_execution = .forbidden },
+    };
+    const joined = try HostEffects.resolve(arena.allocator(), &agreed, &one);
+    try testing.expectEqual(@as(usize, 1), joined.entries.len);
+    try testing.expect(joined.lookup(3).?.eql(may_trap));
 }
 
 test "effects: conflict rules and stable domains" {

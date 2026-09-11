@@ -40,6 +40,7 @@ const cfg = @import("stilla").cfg;
 const hir = @import("stilla").hir;
 const moduleinfo = @import("stilla").moduleinfo;
 const hir_effects = @import("hir_effects.zig");
+const effects = @import("stilla").effects;
 
 pub const Error = std.mem.Allocator.Error;
 
@@ -56,6 +57,11 @@ pub const Config = struct {
     /// The module graph, for the ownership class of generic named types
     /// (same role as in `hir_effects.Config`).
     graph: ?*moduleinfo.ModuleGraph = null,
+    /// Embedding host declarations (docs/effects.md §13), passed through
+    /// to every internal `hir_effects.Analysis` so the rewrite rounds and
+    /// the caller's final re-validation use one effect environment. The
+    /// ambient default would be `Top` and silently block optimizations.
+    host_decls: []const effects.HostDecl = &.{},
     /// Bound on analysis → rewrite rounds (each round re-derives effects).
     max_iterations: u32 = 8,
 };
@@ -69,7 +75,7 @@ pub fn optimize(arena: std.mem.Allocator, built: *hir.BuiltProgram, config: Conf
     var stats = Stats{};
     var iter: u32 = 0;
     while (iter < config.max_iterations) : (iter += 1) {
-        var analysis = try hir_effects.Analysis.init(arena, built, .{ .graph = config.graph });
+        var analysis = try hir_effects.Analysis.init(arena, built, .{ .graph = config.graph, .host_decls = config.host_decls });
         try analysis.analyze();
         var rw = Rewriter{ .arena = arena, .built = built, .analysis = &analysis };
         const changed = try rw.run();

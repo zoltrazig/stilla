@@ -29,16 +29,16 @@ and the trailing section lists what the code and docs still mark open.
   release and state merging, generic monomorphization, `any`/union/tuple/list
 - [x] **HIR seam** — checker output built into the canonical monomorphic HIR
   (`hir_build`), structurally validated, annotated with effect summaries
-  (`hir_effects` / `effects`, M1b), and lowered from there (`hir_lower`);
+  (`hir_effects` / `effects`), and lowered from there (`hir_lower`);
   canonical text printer/parser for round-trip checks
   ([hir.md](docs/hir.md), [effects.md](docs/effects.md))
 - [x] **Effect model** — resource/control `EffectSummary` lattice,
-  `effect_transfer`, direct-call function summaries, `OperandUse`, the
-  cleanup-aware legality queries (`discardable` / `duplicable` /
-  `isSegSafe` …) and per-node annotation validation (M1b infrastructure;
-  the general no-`switch(op)` consumer passes remain open,
-  [effects.md](docs/effects.md))
-- [x] **SEG v1 (M2a)** — registry `seg` encoding facet, recursive island
+  `effect_transfer`, function-summary SCC least fixpoint, `OperandUse`,
+  the cleanup-aware legality queries (`discardable` / `duplicable` /
+  `isSegSafe` …), per-node annotation validation, precise `drop_effect(T)`,
+  and the summary-driven module-const init/teardown check
+  ([effects.md](docs/effects.md))
+- [x] **SEG v1** — registry `seg` encoding facet, recursive island
   admission over `isSegSafe`, and four rule groups (β→let boundary
   rewrite, let simplification, typed constant folding, integer algebra)
   with minimal-node-cost extraction and post-rewrite effect
@@ -80,7 +80,7 @@ and the trailing section lists what the code and docs still mark open.
   `examples/embed/random_demo.zig`, `libstilla.a` static library
 - [x] **CLI** — compile to canonical HIR / CFG AIR / LLIR assembly / LLIR
   binary; `--run` (source or self-contained binary);
-  `--module`/`--entry-fn`/`--no-entry-fn`/`-I`; `--seg` (optional M2a SEG)
+  `--module`/`--entry-fn`/`--no-entry-fn`/`-I`; `--seg` (optional SEG)
 
 **Standard library (embedded `std/` source)**
 
@@ -108,6 +108,10 @@ and the trailing section lists what the code and docs still mark open.
 - [ ] Inferred tuple/list elements can still carry a module value; §2.3 not
   closed for container positions (checker.md)
 - [ ] Only the Zig API is public for embedding — no C header yet
+- [ ] HIR / effect-model follow-ups (match-into-SEG, host ABI metadata
+  wiring, `CleanupFootprint`, indirect-call narrowing, effectful β) are
+  tracked with dependencies and acceptance criteria in
+  [docs/todo.md](docs/todo.md)
 
 ## What is Stilla?
 
@@ -217,7 +221,7 @@ fn () => 42i32
 ```
 
 Options: `--output <file>`, `--module <spec>`, `--entry-fn <name>` /
-`--no-entry-fn`, `-I <dir>`, `--seg` (run the M2a SEG pass,
+`--no-entry-fn`, `-I <dir>`, `--seg` (run the SEG pass,
 [hir.md](docs/hir.md) §11; off by default), and the emission modes
 `--emit-hir` (the canonical HIR text form, [hir.md](docs/hir.md) §4),
 `--emit-asm`, `--emit-bin <file>`, and `--run` (compile and execute).

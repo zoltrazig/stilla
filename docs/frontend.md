@@ -41,7 +41,7 @@ annotated AST  (monomorphic; all static checks passed)
     │  HIR build   annotated AST → canonical monomorphic HIR (binder /
     │              region / pattern normalization, full-expression fences;
     │              ownership view carried over from the checker;
-    │              `SemanticInfo.effect` starts pending, hir.md §11 M1a)
+    │              `SemanticInfo.effect` starts pending)
     ▼
 canonical HIR
     │
@@ -51,13 +51,13 @@ canonical HIR
     │                   SCC least fixpoint; publish interned `ready`
     │                   EffectSummary per node and validate them; then the
     │                   summary-driven module-const init/teardown check
-    │                   (hir.md §10.1 level two, effects.md §7/§14 M1b+M2b)
+    │                   (hir.md §10.1 level two, effects.md §7/§14)
     ▼
 annotated HIR
     │
-    │  [optional] M2b consumers  dead-let + selective A-Normal Form
+    │  [optional] effect consumers  dead-let + selective A-Normal Form
     │              (derived `isDiscardable` / `canFloatAsTree`; `--simplify`)
-    │  [optional] M2a SEG        pure-Copy island rewrites (`--seg`)
+    │  [optional] SEG v1         pure-Copy island rewrites (`--seg`)
     │              each re-runs structural + effect validation (hir.md §2.4)
     ▼
     │  HIR→CFG lowering  CFG AIR generation
@@ -79,21 +79,20 @@ invariant the next one relies on:
 | HIR effects | interned `EffectSummary` per reachable node (`ready`) | every node's summary is a sound over-approximation of its `effect_transfer` derivation (function summaries by the SCC least fixpoint); no node is left `pending` (hir.md §10.1 level two, effects.md §14); the module-const init/teardown rules hold over the summaries + `drop_effect` chain (effects.md §7) |
 | HIR→CFG lowering | CFG-based `IrModule` / `IrFunc` | control flow and value flow are explicit; every host binding call is a system call; every intrinsic use is ordinary AIR |
 
-**The HIR seam (implemented, M1a + M1b + M2a + M2b).** Between the checker and CFG
+**The HIR seam (implemented).** Between the checker and CFG
 lowering sits the canonical monomorphic HIR seam of
-[hir.md](hir.md) §11: a semantics-preserving stage whose milestone
-acceptance is that the existing suites still pass with equivalent AIR
+[hir.md](hir.md) §11: a semantics-preserving stage whose acceptance is
+that the existing suites still pass with equivalent AIR
 (hir.md §10.3). The seam is wired as the **only** frontend lowering
-path — S6b removed the direct annotated-AST lowering and the
-`hir_stage` toggle. M1b adds the effect infrastructure
-([effects.md](effects.md) §14): the lattice/transfer/query model lives
-in `src/effects.zig`, the HIR integration in
-`src/passes/hir_effects.zig`, and both run in the compile pipeline. M2b
-adds the function-summary SCC least fixpoint, the precise `drop_effect`
+path — the direct annotated-AST lowering and the `hir_stage` toggle
+were removed. The effect infrastructure
+([effects.md](effects.md) §14) — the lattice/transfer/query model in
+`src/effects.zig` and the HIR integration in
+`src/passes/hir_effects.zig` — runs in the compile pipeline, including
+the function-summary SCC least fixpoint, the precise `drop_effect`
 chain, the summary-driven module-const init/teardown check, and the
 opt-in dead-let / selective-A-Normal-Form consumers
-(`src/passes/hir_simplify.zig`); M2a adds the opt-in SEG pass
-(`src/passes/hir_seg.zig`).
+(`src/passes/hir_simplify.zig`) and SEG pass (`src/passes/hir_seg.zig`).
 Shape:
 
 ```text
@@ -116,7 +115,7 @@ validated HIR
     ▼
 annotated HIR
     │
-    │  [optional] M2b consumers / M2a SEG   in-place rewrites, then a
+    │  [optional] effect consumers / SEG    in-place rewrites, then a
     │                                       fresh structural + effect pass
     ▼
     │  HIR → CFG lowering   into today's block/value/drop machinery;
@@ -237,19 +236,19 @@ implemented and covered by `zig build test`.
       `src/passes/checker.zig` + `checker_annotate.zig` +
       `checker_validate.zig` + `checker_ownership.zig` +
       `src/passes/monomorphize.zig`).
-- [x] **HIR seam (implemented, M1a + M1b)** — canonical monomorphic HIR
+- [x] **HIR seam (implemented)** — canonical monomorphic HIR
       between the checker and CFG lowering ([hir.md](hir.md) §11): data
       structures (`src/hir.zig`), AST→HIR construction (`hir_build.zig`),
       structural validation (`hir_validate.zig`), the effect model
       (`src/effects.zig`) with its HIR analysis and queries
-      (`hir_effects.zig`, [effects.md](effects.md) §14 M1b), and HIR→CFG
+      (`hir_effects.zig`, [effects.md](effects.md) §14), and HIR→CFG
       lowering (`hir_lower.zig` + `hir_lower_expr.zig` /
       `hir_lower_control.zig` / `hir_lower_call.zig` /
       `hir_lower_pattern.zig`) reusing the `lower.zig` / `cfg_lower_*`
       emission machinery. The compile pipeline runs build → structural
       validation → effect analysis + annotation validation → lowering.
       This is the only lowering path — the direct annotated-AST lowering
-      was removed (S6b).
+      was removed.
 - [x] **CFG lowering** (`src/cfg.zig`,
       `src/passes/cfg_lex.zig`, `src/passes/cfg_parse.zig`,
       `src/passes/cfg_print.zig`, `src/lower.zig` +
@@ -355,7 +354,7 @@ against the module's own test block.
 | lex / parse | `src/lex.zig`, `src/parser.zig` (+ grammars under `src/parse/`); tokens → `ast.Program` per file |
 | module graph | `src/frontend.zig` (pipeline driver), `src/moduleinfo.zig` (`ModuleInfo`, `ModuleGraph`, resolver, cycle detection, topo sort), `src/passes/type_resolve.zig`, `src/stdbundle.zig` + `std/bundle.zig` (embedded stdlib) |
 | checker | `src/passes/checker.zig` (stage driver), `checker_annotate.zig` (name resolution, inference, binding states), `checker_validate.zig` (the checks), `checker_ownership.zig` (conditional-release state merging, Types & Ownership), `src/passes/monomorphize.zig` (generic expansion) — resolved types are `cfg.Type` |
-| HIR seam | `src/hir.zig` (binder/region/pattern nodes, `OpDescriptor` semantics rows, `SemanticInfo` with `effect`), `src/effects.zig` (the effect lattice/interners/registries, re-exported by `root`), `src/passes/hir_build.zig` + `hir_build_block` / `_expr` / `_path` / `_call` / `_control` / `_pattern` (AST → HIR, incl. mono bodies / instances / drop hooks / λ lifting / intrinsic wrapper forwarding bodies; split by concern like `hir_lower`), `hir_validate.zig` (structural invariants, hir.md §10.1 first level), `hir_effects.zig` (M1b: `effect_transfer`, direct-call function summaries, cleanup gate, derived queries, annotation + validation), `hir_lower.zig` + `hir_lower_expr/control/call/pattern.zig` (HIR → CFG, split per the cfg convention), `src/passes/hir_parse.zig` + `hir_print.zig` (canonical text form, re-exported by `hir`) — the only frontend lowering path — `src/lower.zig` + `src/passes/cfg_lower_*.zig` supply the retained emission helpers |
+| HIR seam | `src/hir.zig` (binder/region/pattern nodes, `OpDescriptor` semantics rows, `SemanticInfo` with `effect`), `src/effects.zig` (the effect lattice/interners/registries, re-exported by `root`), `src/passes/hir_build.zig` + `hir_build_block` / `_expr` / `_path` / `_call` / `_control` / `_pattern` (AST → HIR, incl. mono bodies / instances / drop hooks / λ lifting / intrinsic wrapper forwarding bodies; split by concern like `hir_lower`), `hir_validate.zig` (structural invariants, hir.md §10.1 first level), `hir_effects.zig` (`effect_transfer`, function-summary SCC fixpoint, cleanup gate, derived queries, annotation + validation), `hir_lower.zig` + `hir_lower_expr/control/call/pattern.zig` (HIR → CFG, split per the cfg convention), `src/passes/hir_parse.zig` + `hir_print.zig` (canonical text form, re-exported by `hir`) — the only frontend lowering path — `src/lower.zig` + `src/passes/cfg_lower_*.zig` supply the retained emission helpers |
 | CFG AIR | `src/cfg.zig` (op schema `opInfo`, types, `IrProgram`), `src/passes/cfg_lex.zig` + `cfg_parse.zig` + `cfg_print.zig` (AIR text form, re-exported by `cfg`), `src/lower.zig` + `src/passes/cfg_lower_*.zig` (shared HIR→CFG emission helpers; destruction placement, module init functions), `src/host.zig` (stdlib host implementations as plain functions; dispatch is the member-table registry in `src/interpreter_host.zig`, typed bindings in `src/host_bind.zig`) |
 | optimizer + validator | `src/passes/cfg_optimize.zig` (+ `cfg_tail_call`, `cfg_pre`, `cfg_select`, `cfg_dead_instr`, `cfg_dead_block`, `cfg_drop_elide`, `cfg_jump_thread`, `cfg_phi_simplify`) and `src/passes/cfg_validate.zig` (the air.md validator); on-the-fly constant folding, arithmetic simplification, CSE, and copy propagation in `cfg_lower_emit.zig` |
 | drop lowering | `src/passes/cfg_lower_drop.zig` — post-optimization expansion of statically-expandable `drop`s (struct/tuple/box/union) into explicit CFG operations; only opaque, `hostdata`, `list`, and `any` drops remain single instructions. Wired into `frontend.zig`'s optimize path after the optimizer, re-validated before the AIR text round-trip |

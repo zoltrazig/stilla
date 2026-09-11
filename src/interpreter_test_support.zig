@@ -15,6 +15,7 @@ const vm_types = @import("vm_types.zig");
 const interpreter = @import("interpreter.zig");
 const vm_dispatch = @import("interpreter_dispatch.zig");
 const frontend = @import("frontend.zig");
+const effects = @import("effects.zig");
 const moduleinfo = @import("moduleinfo.zig");
 const cfg_lower_llir = @import("passes/cfg_lower_llir.zig");
 const llir_validate = @import("passes/llir_validate.zig");
@@ -61,6 +62,24 @@ pub fn load(text: []const u8, optimize: bool) !Loaded {
 /// equivalence tests compare SEG-on vs SEG-off execution. The M2b
 /// consumers toggle (`simplify`) rides the same way.
 pub fn loadOpts(text: []const u8, optimize: bool, seg: bool, simplify: bool) !Loaded {
+    return loadFull(text, optimize, seg, simplify, &.{});
+}
+
+/// `load` with embedding host declarations (docs/effects.md §13). Needed by
+/// the tests whose program reaches a host call from a module-constant
+/// init/teardown chain: with no declaration such a call is the full `Top`
+/// and §7 rejects, so the test must explicitly attest `forbidden`.
+pub fn loadDecls(text: []const u8, host_decls: []const effects.HostDecl) !Loaded {
+    return loadFull(text, false, false, false, host_decls);
+}
+
+pub fn loadFull(
+    text: []const u8,
+    optimize: bool,
+    seg: bool,
+    simplify: bool,
+    host_decls: []const effects.HostDecl,
+) !Loaded {
     var sources = moduleinfo.Sources{};
     var smap = std.StringHashMapUnmanaged([]const u8).empty;
     try smap.put(testing.allocator, "app", text);
@@ -73,6 +92,7 @@ pub fn loadOpts(text: []const u8, optimize: bool, seg: bool, simplify: bool) !Lo
         .optimize = optimize,
         .seg = seg,
         .simplify = simplify,
+        .host_decls = host_decls,
     });
     errdefer compilation.deinit();
     const program = &(compilation.program orelse {
@@ -111,6 +131,37 @@ pub fn loadOpts(text: []const u8, optimize: bool, seg: bool, simplify: bool) !Lo
         .fids = fids,
     };
 }
+
+/// Compile through the frontend only (docs/effects.md §13 tests). The
+/// `load` path logs
+/// a compile diagnostic through `std.log.err`, which the test runner
+/// counts as a failure — a test that *expects* a diagnostic must assert
+/// on `Compilation.diag` instead.
+pub fn compileFrontend(text: []const u8, host_decls: []const effects.HostDecl) !frontend.Compilation {
+    var sources = moduleinfo.Sources{};
+    var smap = std.StringHashMapUnmanaged([]const u8).empty;
+    try smap.put(testing.allocator, "app", text);
+    defer smap.deinit(testing.allocator);
+    sources.source = smap;
+    return frontend.compile(testing.allocator, .{
+        .entry = "app",
+        .sources = sources,
+        .entry_fn = "main",
+        .host_decls = host_decls,
+    });
+}
+
+/// Host declarations for the tests that run a program through the default
+/// host *and* reach a host call from a module-constant init/teardown chain
+/// (docs/effects.md §13). This is the *test embedding's* promise, scoped to
+/// the two members its reviewed adapters actually intercept — `print`
+/// (`CaptureAdapter` / the lifecycle `Adapter`) and `str` (the intrinsic
+/// wrapper) — not a claim about `builtin` in general. Keys naming members a
+/// given program lacks are ignored.
+pub const builtin_host_decls = [_]effects.HostDecl{
+    .{ .key = "builtin.print", .summary = effects.host_top, .stilla_execution = .forbidden },
+    .{ .key = "builtin.str", .summary = effects.host_top, .stilla_execution = .forbidden },
+};
 
 /// A capturing print adapter shared by the M2 module tests: intercepts
 /// `builtin.print` into a buffer, delegates everything else to the

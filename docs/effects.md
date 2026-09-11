@@ -1,22 +1,12 @@
 # Stilla Effects System — 语义交互摘要模型
 
-> **Status：M1b（效果基础设施）与 M2b（摘要化消费者）已实现；§13 的
-> host ABI metadata 接线仍为设计提案。**
->
-> 本文为编译前端与优化器定义一个内部的**效果语义模型**（effect
-> semantics model）：用一个统一的结构描述「一个表达式求值时，与表达式
-> 之外的语义状态发生了哪些交互」，并用它替换当前散落在各 pass 里的
-> 特判规则（求值顺序、trap/panic、host 调用、module constant 依赖、
-> drop、函数调用摘要、SEG 准入）。**§5 的格与 §10–§11 的查询门已随
-> M1b 落地（`effects.zig` / `hir_effects.zig`，见 hir.md §11 M1b 交付
-> 记录）**；§6 的 `effect_transfer`、§10.1 的派生查询、§11 的 cleanup
-> 门亦已实现。**M2b 已落地**：§12 的三个消费者判定（dead-let /
-> selective ANF / SEG-safe）已由派生查询驱动、无 `switch(op)` 合法性特判，
-> §8.2 的函数 SCC least fixpoint 与 §7 的 module-const 初始化/teardown 检查
-> 已实现（`hir_effects.zig` / `passes/hir_simplify.zig` / `passes/hir_seg.zig`，
-> 见 hir.md §11 M2b 交付记录）；§11.1 的精确 `drop_effect(T)` 全链（字段/
-> 容器/递归 hook）已随 teardown 检查落地。仍为提案的是 §13 的 host ABI
-> metadata 接线与 §9.2 的间接调用目标收窄（§14「再后」项）。
+> **Status：效果模型与三个消费者已实现。** 本文定义编译前端与优化器的
+> 内部效果语义模型，统一 trap/panic、host 调用、module-const 依赖、drop、
+> 函数摘要与 SEG 准入的合法性判定，替代 `switch(op)` 特判（求值序是独立
+> 语言约束，优化合法性由 EvalPolicy、ownership 与效果摘要共同判定）。已实现
+> 固定乘积格与派生查询、函数摘要 SCC least fixpoint、精确 `drop_effect(T)`、
+> module-const 检查，以及 dead-let / selective ANF（`--simplify`，默认关）与
+> SEG v1（`--seg`，默认关）。保守边界与未落地项见 §14 与 [todo.md](todo.md)。
 >
 > 配套文档：使用该模型的中间表示（HIR）设计见 [hir.md](hir.md)；本文自含
 > 效果模型所需的全部定义，不依赖其章节细节。两者的重叠概念（求值序、
@@ -594,11 +584,11 @@ teardown 期间运行并读模块常量，与 hook 本体同一危害类。因�
     要求 D 在逆序销毁 schedule 中晚于 C 被销毁（即尚未销毁）
 ```
 
-**M2b 已闭合**：`Analysis.checkModuleDependencies` 以
-`drop_effect(type(C))` 全链为对象（`hir_effects.zig`）；旧的
-（checker_validate.zig 的 `InitOrder`）只走查类型直 hook 及其传递调用，
-其注释自认容器元素携带 drop hook（如 `list[File]` 常量）未走查——
-以完整 `drop_effect` 链判定即闭合该缺口。实现选择：未知读集（来自
+检查由 `Analysis.checkModuleDependencies` 执行，以
+`drop_effect(type(C))` 全链为对象（`hir_effects.zig`），取代了
+checker_validate.zig 的 AST 级 `InitOrder` walk——后者只走查类型直
+hook 及其传递调用，容器元素携带的 drop hook（如 `list[File]` 常量）
+未走查，完整 `drop_effect` 链闭合了该缺口。实现选择：未知读集（来自
 间接调用/模块链的 read 通配）在 **nominal** 类型上保守拒绝；
 `any`/`hostdata`/未解析 named 的 drop_effect 本身为 `Top`，其通配
 不对应具体常量、无归因，退回与旧 walker 相同的「不归因」位置。
@@ -876,9 +866,9 @@ let-unused  : MayDiscard(init) → 引擎自动要求 discardable(init)
 
 `(fn(x) { x + 1 })(host.read())` 整体仍不能进纯 term 的 equality
 saturation——但 β 本身不删除、不复制、不重排 `arg`，契约证明后**可**
-允许 effectful 实参；那是单独验证后再放开的方向（§14 再后）。**v1 仍
-保守**：只对 Copy 且 discardable 的实参、cleanup-free 的单表达式 λ 体
-提供 β 契约实例，λ 体 FE 到调用点 FE 的映射逐条显式声明（hir.md §8.4），
+允许 effectful 实参；那是单独验证后再放开的方向（见
+[todo.md](todo.md)）。**v1 仍保守**：只对 Copy 且 discardable 的实参、cleanup-free
+的单表达式 λ 体提供 β 契约实例，λ 体 FE 到调用点 FE 的映射逐条显式声明（hir.md §8.4），
 不作为 v1 行为宣传。
 
 ### 10.5 实现形态（Zig）
@@ -955,20 +945,21 @@ const MovementContext = struct {
 签名作废：EvalPolicy 是 **parent + operand 位置**的属性，不是 `a` / `b`
 的自身属性，二元签名无法消费「EvalPolicy 允许」。
 
-> **M1b 实施记录**：实际落地的 descriptor 形状与上面的 sketch 是语义等价
-> 映射（`OpDescriptor` 定义见 [hir.md](hir.md) §3.5 的 M1b 修订）：
-> `operand_uses` 拆为 `uses`（`UsePolicy`，含 `operand_capability` /
-> `callee_params` / `static_list`）加可选显式 `operand_uses` 切片；
-> `infer_effects` 拆为 `own_effect`（op 自身摘要）加 `transfer`
-> （`TransferKind` 数据标签，由 `hir_effects.compute` 单一函数按标签组合
-> operand / region / callee）；`seg` 在 M1b 落为 `hasSegEncoding`（恒
-> false），`result_policy` 由既有 capability/view 数据承担。三者必填、
-> 无默认值（省略即编译错误）。`EffectSummary` 同样无字段默认值，
-> `pure`/`top`/`bottom`/`may_trap` 是唯一构造点。公开查询面的实现形态：
-> `isIntrinsicallySpeculatable` 除 total / 无可观察 / 无 `Q` 外还要求
-> cleanup 证明与递归 ownership 门；`canSwapOperands` 组合父节点 operand
-> 位、full-expression 边界、两 operand 的 cleanup/ownership 与
-> `orderCompatible`；`canMove` 本档不暴露（FE/lifetime 路径事实未建模）。
+实际落地的 descriptor 形状与上面的 sketch 是语义等价映射
+（`OpDescriptor` 定义见 [hir.md](hir.md) §3.5）：`operand_uses` 拆为
+`uses`（`UsePolicy`，含 `operand_capability` / `callee_params` /
+`static_list`）加可选显式 `operand_uses` 切片；`infer_effects` 拆为
+`own_effect`（op 自身摘要）加 `transfer`（`TransferKind` 数据标签，由
+`hir_effects.compute` 单一函数按标签组合 operand / region / callee）；
+`seg` 是 registry 上的可选 SEG 编码 facet，`result_policy` 由既有
+capability/view 数据承担。`uses`/`own_effect`/`transfer` 必填、无默认值
+（省略即编译错误）。`EffectSummary` 同样无字段默认值，
+`pure`/`top`/`bottom`/`may_trap` 是唯一构造点。公开查询面：
+`isIntrinsicallySpeculatable` 除 total / 无可观察 / 无 `Q` 外还要求
+cleanup 证明与递归 ownership 门；`canSwapOperands` 组合父节点 operand
+位、full-expression 边界、两 operand 的 cleanup/ownership 与
+`orderCompatible`；`canMove` 尚未暴露（FE/lifetime 路径事实未建模，
+暴露恒 false 的入口无意义）。
 
 ## 11. 完整销毁的可观察性
 
@@ -1101,10 +1092,9 @@ discardable(ctx, expr)   // 内部组合 total、observable_effect_free 与
 ## 12. 效果驱动的前端变换
 
 这套模型的三个首要消费者。它们共同点是：**合法性全部来自派生查询，任何
-一个都没有 `switch(op)` 特判**。三者均已落地（M2a 的 SEG-safe 与 M2b 的
-dead-let / selective ANF；见 hir.md §11 交付记录）：dead-let 与 ANF 在
-`passes/hir_simplify.zig`（`--simplify`），SEG 准入在 `passes/hir_seg.zig`
-（`--seg`）。
+一个都没有 `switch(op)` 特判**。dead-let 与 selective ANF 在
+`passes/hir_simplify.zig`（`--simplify`，默认关），SEG 准入在
+`passes/hir_seg.zig`（`--seg`，默认关）。
 
 ### 12.1 Selective A-Normal Form
 
@@ -1181,6 +1171,15 @@ isSegSafe，由 §10.4 的契约门准入——两类重写共用本模型，但
 
 ## 13. Host 接口 metadata（embedding ABI）
 
+> **Status：声明入口与重入契约已落地；其余 embedding ABI 项尚未实现。**
+> **已实现**：`StillaExecution` 三态、符号键声明（`effects.HostDecl` /
+> `HostEffects.resolve` / `consolidate`）、`frontend.Options.host_decls`
+> 贯穿初始分析 / SEG / selective ANF / `revalidateHir`，以及分析内局部
+> host 语义注册表（`stable`/`disjoint`）。**未实现**：运行时侧的契约
+> 匹配校验（编译器无法验证 embedding 真的不重入）、host_bind typed
+> registry 的自动声明接线、符号→`ConstId` 的宿主侧序列化工具，以及
+> `EffectEnvironmentFingerprint` 缓存指纹。落地项见 [todo.md](todo.md)。
+
 host 是 Stilla 的核心目标（host binding 实现完全由 host 提供；stdlib
 intrinsic 由编译器展开，Intrinsics Spec）。编译器侧模块元数据
 可扩展：
@@ -1188,52 +1187,107 @@ intrinsic 由编译器展开，Intrinsics Spec）。编译器侧模块元数据
 ```text
 HostFunctionDescriptor {
     signature
-    effects: EffectSummary      // 声明方提供的语义契约
+    effects:          EffectSummary     // 资源 / 控制契约（单一事实；读也在这里）
+    stilla_execution: StillaExecution   // 是否可能执行 Stilla 代码
 }
 ```
 
 ```text
-math.sqrt:      effects = {}
-os.open:        effects = { ReadWrite(Host.OS) + Allocate(Host.FileSystem) + MayTrap }
-builtin.print:  effects = { Write(Host.Output) }
-clock.now:      effects = { Read(Host.Clock), nondeterministic }
-unknown host:   effects = TOP
+StillaExecution = Forbidden | MayExecute | Unknown   // 缺失 = Unknown
 ```
+
+```text
+math.sqrt:      effects = {},              stilla_execution = Forbidden
+os.open:        effects = { ReadWrite(Host.OS) + Allocate(Host.FileSystem) + MayTrap },
+                stilla_execution = Forbidden
+builtin.print:  effects = { Write(Host.Output) }, stilla_execution = Forbidden
+clock.now:      effects = { Read(Host.Clock), nondeterministic }
+unknown host:   Top                        // 无声明
+```
+
+无 `stilla_execution` 的声明等价于 `Unknown`，其 `effects` 实际不生效
+（仍取 `Top`）——所以上表每一条精确声明都必须带 `Forbidden`。
 
 立场：
 
 - host 声明是**受信的语义契约**（host 与编译器约定），不是编译器自动
-  验证出的 purity；错误声明是 host 的 bug，编译器按契约优化。
-- 缺失 metadata 默认 **TOP**，安全优先（M2b 细化：缺失 host metadata 取
-  `host_top`，见下）。这作为 embedding ABI metadata，
-  **不进 Stilla source syntax**；现成的扩展点是 host_bind 的 typed
-  registry。
-- **M2b 细化（`host_top`）**：缺失 metadata 的 host 调用取
-  `effects.host_top` =（每 mode 的 `host_any` 资源 + `may_trap` +
-  `may_diverge` + `Q`）。它覆盖任意 host/extension 资源
-  （`isObservableEffectFree` 与 `conflictOf` 均对其保守），但**不携带
-  `Read(ModuleConst)`**——host 代码无法命名 Stilla 模块常量（module
-  storage 是运行时私有的），否则 §7 的 module-const 检查会把每个含 host
-  调用的程序都判违规。真正未知的 **Stilla** 目标（间接调用、模块链）仍取
-  完整 `top`（含 read 通配），在 §7 检查里保守拒绝。完整 embedding ABI
-  接线（把 host 声明送入 `frontend.Options`）仍是 §14「再后」第 3 项。
-- 声明必须覆盖该 host 函数**可能执行的任何 Stilla 代码**：接受 Stilla
-  回调（同步调用、存储后重入、转交另一 host）的 host 函数，其摘要须含
-  回调可能产生的全部交互与发散——host 自身逻辑纯不能证明整次调用纯。
-  回调内容静态未知时默认 `Top`；按传入 callable 的 effect_bound 实例化
-  的「回调参数化摘要」留待后续（§15）。
+  验证出的 purity；错误声明是 host 的 bug，编译器按契约优化。这作为
+  embedding ABI metadata，**不进 Stilla source syntax**；扩展点是 host_bind
+  的 typed registry。
+- **缺失声明默认取完整 `top`**（含 read 通配、`may_trap`、`may_diverge`、
+  `Q`）。缺失元数据不构成任何证据，尤其不构成「不会执行 Stilla 代码」的
+  证据（见「重入契约」）。
 - **读的可观察性是声明项**：默认域/op 的 `Read` 视为**非可观察**（结果未
   使用时允许删除，Q 不阻断 discard，§10.1）；宿主把「读本身有可观察后
   果」的访问（清读寄存器、消费式读、atime 更新）声明为 `Write` 或可观察
   读，编译器不替宿主假定「读可观察」或「读不可观察」。
 
-**缓存指纹（EffectEnvironmentFingerprint）。** effect metadata 参与编译
-缓存键：host 语义 registry 的 generation/版本、effect-domain 注册表、
-overlap/disjoint 声明与 `stable` 声明，整体折叠为一个
-`EffectEnvironmentFingerprint` 进入 module cache / incremental compilation
-key。否则 `host.foo` 的声明从 `Pure` 改成 `Write(OS)` 后，旧缓存里按
-`Pure` 优化的代码会变得 unsound——指纹随声明集合变化即失效，阻断此类
-复用。
+### 重入契约（host 与模块常量）
+
+**问题。** `host_top` 剔除 `Read(ModuleConst)`，所以它的 soundness 完全
+取决于一句话：这个 host binding 不会执行 Stilla 代码。编译器证明不了这
+件事——host binding 是 embedding 的任意代码（`HostCall.invoke` 拿到的
+就是活的 VM 上下文；连 `builtin.print` 的输出 sink 都是 embedding 提供
+的 `PrintHook`），而 interpreter-vm.md / host-bindings.md §2 把「异步 /
+重入 host 调用」列在**当前范围之外**只是范围，不是「永远不会发生」的
+保证。所以它是一个**受信声明**，不是编译器推出来的事实。
+
+```text
+StillaExecution = Forbidden | MayExecute | Unknown
+```
+
+- **`Unknown`（缺失声明的默认）与 `MayExecute` 都取完整 `top`。** 未知
+  回调要覆盖的是**全部**效果，不只是读集：资源、`may_trap`、
+  `may_diverge`、`Q`、以及 `Read(ModuleConst)` 通配。于是 §7 的
+  module-const 检查按「可能读任意较晚常量」拒绝。
+- **只有显式 `Forbidden` 才让声明逐字生效。** embedding 认证该 binding
+  「不执行任何 Stilla 代码」时，声明的 `EffectSummary` 才被直接使用——
+  也只有这时 `host_top`（每 mode 的 `host_any` + trap/diverge/`Q`、
+  **不含** `Read(ModuleConst)`）才可以作为声明值。`Forbidden` 的语义要
+  覆盖「执行相关 Stilla 代码的**所有**通道」，不只是调用当前实参。
+- **单一事实。** 读集就是 `EffectSummary` 里的 `Read(ModuleConst)`
+  （`ModuleConst` 是 §5.2 的原生资源），**不另设**与之语义重叠的独立读
+  集字段。ABI 层只需要一个**稳定符号键**——`<模块限定名>.<成员名>`——
+  作为序列化形式：`effects.HostDecl` 按符号声明，编译会话开始时经
+  `HostEffects.resolve` 解析成 `HostBindingId`（builder 分配的稠密 id，
+  只有白盒代码能直接用），符号指不到 binding 的声明被忽略（一份声明集
+  描述的是 embedding，不是某个程序）。
+- **编译与运行必须用同一份契约。** 这些声明是受信的，`host_top` 只对
+  真的不重入的 binding 成立；embedding 采用「禁止重入」的运行时配置，
+  就同时提供这些 `Forbidden` 声明。**编译器不校验运行时是否真的遵守**
+  （它看不到 host 代码）——所以这不是 runtime 侧的重入设计，只是一份
+  编译器消费的受信声明。
+- **重复/矛盾的声明。** 同一 binding 的多条声明**顺序无关**地合并：只有
+  全部为 `Forbidden` 才保留担保，摘要取 join；出现 `Forbidden` 与
+  `MayExecute` 矛盾则降为 `Unknown`（即 `Top`），不采用「后来者胜」。
+
+**兼容成本。** 严格默认会拒绝原本合法的程序：模块常量的销毁链里带日志
+（`drop(t) { builtin.print(...) }`）属于这一类。迁移方式是让 embedding
+（含测试的默认 host）显式声明 `builtin.*` 为 `Forbidden`，而不是把默认
+放宽——默认放宽就回到了「未证明当已保证」。
+
+**待决（见 [todo.md](todo.md)）。**
+
+- **回调参数化摘要**：调用点若能证明传入 callable 的有限目标集，
+  `MayExecute` 的摘要可精化为 `own ⊔ ⨆ effect_bound(target_i)`；
+  保存后触发的调用必须在**实际触发阶段**归因效果，不能只记在注册调用
+  上。v1 不做。
+- **metadata 不是执行许可。** 即使将来声明 `MayExecute`，允许 host 真正
+  重入还需要运行时的安全设计（栈/帧、借用值生命周期、重入期间的模块
+  状态），声明只描述后果，不开启能力。
+
+**缓存指纹（EffectEnvironmentFingerprint）。** 若将来缓存**解析之后**的
+结果（语义 side table、摘要、或 lower/优化产物），effect metadata 必须
+进入该缓存键：host 语义 registry 的 generation/版本、effect-domain
+注册表、overlap/disjoint 与 `stable` 声明、以及**本次的 host 声明集合**，
+整体折叠为一个 `EffectEnvironmentFingerprint`。否则 `host.foo` 的声明从
+`Pure` 改成 `Write(OS)` 后，旧缓存里按 `Pure` 优化的代码会变得 unsound。
+
+**今天不阻塞。** 现有 `frontend_cache.zig` 只缓存**解析产物**
+（`ast.Program` / `ast.Source`，按内容 hash + 逐字节比对校验），member
+表与 phase-2/3 的所有 side table **每次编译都重新推导**——所以声明改变
+不会命中陈旧的效果结论，指纹是为「缓存 phase-2/3 结果」预留的前置条件，
+不是现有缓存的漏洞。
 
 ## 14. 模型范围与验收
 
@@ -1249,89 +1303,58 @@ MayTrap（含 panic）+ MayDiverge + nondeterministic
 
 用它驱动三个 pass：**dead-let、selective ANF、SEG-safe**。
 
-**落地档位映射（与 [hir.md](hir.md) §11 对齐）**：本节的**最小范围 + MVP
-前置条件 = M1b（效果基础设施）**。在 hir.md 的档位里，M1a 落地结构 HIR
-（不含 effect 字段），M1b 以加性扩展带上 `SemanticInfo.effect` 并落地本
-节的格 / 查询门 / 基础效果行。三个消费者 pass（dead-let / selective ANF /
-SEG-safe）与函数 SCC fixpoint、module-const 检查属 **M2**：M1b 只验收基础
-设施与查询门本身，「三个 pass 无 `switch(op)` 特判」的验收在 M2b 执行。
-函数摘要的 SCC least fixpoint（§8.2）不在 M1b——M1b 内递归函数摘要一律
-保守 `Top`。
+**当前实现**（模型 `effects.zig`，HIR 集成 `hir_effects.zig`）：
 
-> **M1b 实施记录**：模型落在 `src/effects.zig`，HIR 集成落在
-> `src/passes/hir_effects.zig`（均见 hir.md §11 M1b 交付记录）。相对于
-> 本节最小范围的实现选择：① `drop_effect(T)` 只做 Copy → `{}`、其余 →
-> `Top`（精确结构/hook 摘要在“再后”第 1 项）；② cleanup 走本节允许的
-> cleanup-free MVP 路径：对已求值子树递归证明全部类型 Copy、无非借用
-> Unique 绑定、无 `drop`，否则 cleanup 贡献 `Top`（未建模的
-> destructor/FE 清理失败关闭）； `CleanupFootprint` token 登记未由当前
-> builder 填充，空注册表视为未建模、不作证明；③ 间接调用/缺失函数摘要/
-> 缺失 host metadata 均取 `Top`；host metadata 通过分析局部注册表测试，
-> 未接 embedding ABI；④ `stable` 域与 `disjoint` 对按本节 §5.5/§5.6
-> 实现，未声明的不同资源对按冲突处理；⑤ §10.5 的 `canMove` 未暴露
-> （FE/lifetime 路径事实未建模，expose 一个恒 false 的入口无意义）；
-> `canSwapOperands` 组合父节点 operand 位、full-expression 边界、两个
-> operand 的 cleanup/ownership 门，再经 `orderCompatible`（资源冲突、
-> trap/diverge 顺序、`Q`）——摘要相等本身不放行任何交换；
-> ⑥ **隐藏操作审计**（本档不建模但可能
-> 有非 pure 行为者一律 `Top`/`MayTrap`）：值位置模块链叶子
-> （`ExprNode.access_hops` 非空）取 `Top`——lowering 会重放
-> `module_ref` + `load_member`（hir.md §7.4），模块加载/初始化的效果面
-> 本档不建模；`let`/`match` 的 pattern 在 HIR 里没有节点，transfer 显式
-> 序列化其效果：只有 list pattern 非 total（元素访问 lowering 为
-> 边界检查的 `read_index`/`split_list`，均为 `cfg` `may_trap`），其余
-> pattern 类别（wildcard/bind/literal/tuple/struct/variant/type_test）
-> 为 total；⑦ **查询组合**（§10.1 强约束「缺一不可」）：
-> `observableEffectFree` 对任一模的**通配/未知资源**（含 `Read(Top)`）
-> 返回 false；`isIntrinsicallySpeculatable` 除 total / 无可观察 / 无 `Q`
-> 外还要求 cleanup 证明与递归 ownership 门；`orderCompatible` 拒绝两个
-> 可能失败的位（失败顺序可观察，§5.6），`Q` 位除「同一 stable 域读对」
-> 外一律拒绝（§5.5）；`ownershipGate` 递归 operand，嵌套
-> `move`/borrow 不得逃逸；注解校验先清 per-node memo 再重算摘要，故校验
-> 是同逻辑的新推导（能拒绝被篗改/过期的注解并定位到过期的调用者）。
->
-> **M2a 实施记录（SEG-safe 消费者）**：SEG v1 落在 `src/passes/hir_seg.zig`
-> （见 hir.md §11 M2a 交付记录），由 `frontend.Options.seg` / `--seg` 开启，
-> 默认关。准入完全由派生查询驱动：island 成员 = registry 的 `seg`
-> 非空 ∧ `isSegSafe` ∧ 每个 operand / region body 同为 island；
-> `div.i32`（may_trap）、`move`/`borrow`/`drop`、host 调用、跨 full-
-> expression 的节点自然落在 island 外（无 `switch(op)` 白名单）。
-> 本档只把 `isSegSafe` 接到四组 v1 规则（β/let/常折叠/整数代数）；
-> dead-let 与 selective A-Normal Form 的无 `switch(op)` 摘要化通用形式、
-> 函数 SCC fixpoint、module-const 初始化/teardown 检查仍归 M2b（本节
-> 验收标准第一条的“三个 pass 无 switch(op)”完整验收在 M2b 执行）。
-> 本档验收见 hir.md §11 M2a 记录：白盒规则/代价测试 + 黑盒定向用例
-> （β 单次求值、div/float 拒绝、常量分支、不动点/确定性）+ 全语料
-> `--seg` 编译与 AIR round-trip + SEG-on/off 解释器执行逐字相等。
->
-> **M2b 实施记录（三个消费者无 `switch(op)` + SCC fixpoint + module-const 检查）**：
-> ① **函数 SCC least fixpoint**（§8.2）落在 `hir_effects.zig`：调用图建在
-> 已解析 `fn_ref` 目标上（间接/host/未知不进图 → `Top`），Kosaraju + callee-first
-> Kleene 迭代，递归 SCC 播种 `Diverge`，每轮清 memo 同步更新；同 SCC 读 `cur`，
-> 已完成读 final；`drop` 把类型的 hook 接入调用图。递归不再一律 `Top`，
-> `validate` 重跑 fixpoint 后拒绝低报 callee 摘要的节点注解（§10.1 一致性要求生效）。
-> ② **精确 `drop_effect(T)`**（§11.1）已替换 MVP 的「非 Copy → `Top`」全链：
-> struct 自身 hook `;` Unique 字段逆声明序递归、union 候选 `⊔` + payload 逆序、
-> tuple 逆序、list/box 元素递归、opaque → `Release(Host(host_id))`；递归类型
-> 用「重入给格底」取得 least fixpoint。`any`/`hostdata`/未解析仍保守 `Top`。
-> ③ **module-const 初始化/teardown 检查**（§7）落在
-> `Analysis.checkModuleDependencies`，删除了 checker_validate.zig 的 AST 级
-> `InitOrder`：初始化方向读函数摘要的 `Read(ModuleConst)`；teardown 方向读
-> `drop_effect(type(C))` 全链（闭上前者只走类型直 hook、容器元素 hook 未走查的
-> 缺口）；同一模块内按声明序比较（跨模块读必然来自已初始化依赖）。
-> ④ **dead-let / selective ANF 消费者**落在 `passes/hir_simplify.zig`
-> （`--simplify`，默认关）：合法性只来自 `isDiscardable` / `canFloatAsTree`，
-> 应用层 shape 判定（是否为单 binder `let` / `StrictLTR` 父节点）不带 op 合法性白名单；
-> ANF 只提第一个不可浮动 operand（LTR），仅 Copy 类型（Unique 物化待 CleanupFootprint）。
-> SEG-safe 消费者在 M2a 已落地。验收标准第一条（“三个 pass 无 switch(op)”）至此
-> 完成：三条规则的合法性均为派生查询。本节 §14 的负面用例分别落在
-> `hir_simplify_tests.zig`（trap/host/Unique 不删）、`passes/hir_seg.zig` 与
-> `hir_seg_tests.zig`（div 不进 island）；Q 与 discard 分离、`host_top` 不
-> observable-effect-free、SCC/字段链等白盒用例落在 `effects.zig` /
-> `hir_effects.zig`；全语料 `--simplify` 编译 + AIR round-trip + 43 个程序
-> on/off 解释器逐字相等（8 个 AIR 确实改变）。
-> **不在本档**：「再后」第 3–5 项（host metadata 接线、effectful β 实参、
-> 间接调用目标收窄）与 match 进 SEG。
+- 固定乘积格：每模式的规范化访问行 + `All` 通配；`join` / `sequence` /
+  内部 `latticeMeet` / `le`；`Pure == Bottom` 与 `Top`；行与摘要 interner；
+  `Pending | Ready(EffectSummaryId)` 查询门。
+- `effect_transfer` 按 descriptor 的 `own_effect` + `TransferKind` 组合
+  operand / region / callee；`OperandUse` 由 `UsePolicy` + callee 签名 /
+  operand capability 逐 occurrence 解析。
+- 函数摘要：调用图建在已解析 `fn_ref` 目标上（间接 / 未知 Stilla 目标不
+  进图 → `Top`；host 目标只在显式 `StillaExecution.forbidden` 声明下用
+  声明的摘要，否则 `Top`，§13），Kosaraju + callee-first Kleene 迭代
+  （递归 SCC 播种 `Diverge`，每轮清 memo 同步更新；同 SCC 读 `cur`、
+  已完成读 final）；`drop` 把类型的 hook 接入调用图。`validate` 重跑同一
+  fixpoint 后拒绝低报 callee 摘要的节点注解。宿主注入的声明同时贯穿
+  SEG / selective ANF 内部分析轮次与最终复验，共用同一效果环境。
+- `drop_effect(T)` 全链：Copy → `{}`；struct 自身 hook `;` Unique 字段按
+  逆声明序递归；union 候选 `⊔` + payload 逆序；tuple 逆序；`list`/`box`
+  元素递归；opaque → `Release(Host(host_id))`；递归类型以「重入给格底」
+  取 least fixpoint；`any`/`hostdata`/未解析仍保守 `Top`。
+- cleanup 走 cleanup-free MVP：对已求值子树递归证明全部类型 Copy、无非
+  借用 Unique 绑定、无 `drop`，否则 cleanup 贡献 `Top`（未建模的
+  destructor/FE 清理失败关闭）。`CleanupFootprint` token 登记**尚未由
+  builder 填充**，空注册表视为未建模、不作证明（见 [todo.md](todo.md)）。
+- 未知目标：间接调用 / 缺失函数摘要取完整 `Top`（含 read 通配，在 §7
+  检查里保守拒绝）；**缺失 host 声明同样取完整 `Top`**，只有显式
+  `StillaExecution.forbidden` 才让声明的摘要逐字生效（§13）。host 声明
+  经 `frontend.Options.host_decls`（符号键）→ `HostEffects.resolve` →
+  `consolidate` 解析；`EffectEnvironmentFingerprint` 缓存指纹未接线。
+- `stable` 域与 `disjoint` 对按 §5.5/§5.6 实现，未声明的不同资源对按冲突
+  处理。
+- `canMove` 尚未暴露（FE/lifetime 路径事实未建模，暴露恒 false 的入口无
+  意义）；`canSwapOperands` 组合父节点 operand 位、full-expression 边界、
+  两 operand 的 cleanup/ownership 门，再经 `orderCompatible`（资源冲突、
+  trap/diverge 顺序、`Q`）——摘要相等本身不放行任何程序级交换。
+- 隐藏操作审计（未建模但可能有非 pure 行为者一律 `Top`/`MayTrap`）：值
+  位置的模块链叶子（`ExprNode.access_hops` 非空）取 `Top`——lowering 会
+  重放 `module_ref` + `load_member`（hir.md §7.4），其效果面不建模；
+  `let`/`match` 的 pattern 在 HIR 无节点，transfer 显式序列化其效果：
+  只有 list pattern 非 total（元素访问 lowering 为边界检查的
+  `read_index`/`split_list`，均为 `cfg` `may_trap`），其余类别
+  （wildcard/bind/literal/tuple/struct/variant/type_test）为 total。
+- 查询组合（§10.1 强约束「缺一不可」）：`observableEffectFree` 对任一
+  模的通配/未知资源（含 `Read(Top)`）返回 false；
+  `isIntrinsicallySpeculatable` 除 total / 无可观察 / 无 `Q` 外还要求
+  cleanup 证明与递归 ownership 门；`orderCompatible` 拒绝两个可能失败的
+  位（失败顺序可观察，§5.6），`Q` 位除「同一 stable 域读对」外一律拒绝
+  （§5.5）；`ownershipGate` 递归 operand，嵌套 `move`/borrow 不得逃逸；
+  注解校验先清 per-node memo 再重算摘要，故校验是同逻辑的新推导（能拒绝
+  被篡改/过期的注解并定位到过期的调用者）。
+- module-const 检查在 `Analysis.checkModuleDependencies`：初始化方向读
+  函数摘要的 `Read(ModuleConst)`，teardown 方向读 `drop_effect(type(C))`
+  全链，同一模块内按声明序比较；checker 的 AST 级 `InitOrder` 已删除。
 
 **MVP 前置条件（不能延期）**：
 
@@ -1340,8 +1363,8 @@ SEG-safe）与函数 SCC fixpoint、module-const 检查属 **M2**：M1b 只验�
   并通过相关查询，才允许删除、浮动、复制或 SEG 准入。未建模的
   destructor/FE 清理失败关闭；MVP 可只优化**已证明 cleanup-free** 的
   子树，不能仅检查根结果是否 Copy；
-- 缺失函数摘要、未知 callee、缺失 host metadata 使用 `Top`。尚未实现的
-  精化只降低优化覆盖率，不降低保守性。
+- **缺失函数摘要、未知 callee 使用 `Top`；缺失 host 声明使用
+  `Top`**（§13）。尚未实现的精化只降低优化覆盖率，不降低保守性。
 
 **验收标准**：
 
@@ -1360,24 +1383,14 @@ SEG-safe）与函数 SCC fixpoint、module-const 检查属 **M2**：M1b 只验�
   「摘要相等不单独放行任何程序级交换/删除」的负例，以及 `stable` 域读对
   在整体 `Q = 1` 表达式中的边界用例（§5.5）。
 
-**再后**（各自独立）：
-
-1. ~~精化 `drop_effect(T)`（字段、容器、递归 hook），替换 MVP 的未知
-   cleanup 拒绝/Top 回退，扩大 `observed_effect(expr, ctx)` 可证明的范围~~
-   ——已随 M2b 落地（结构/hook 链精确化；`any`/`hostdata`/未解析仍保守
-   `Top`，`observed_effect` 的清理路径仍走 cleanup-free MVP）；
-2. ~~函数 SCC fixpoint 摘要（§8.2）驱动 Core 的初始化与 teardown 检查，
-   替换特设分析（checker_validate.zig 的 `InitOrder`；属 hir.md §11 的
-   M2b）；teardown 判定按 §7.2 以 `drop_effect` 全链（含字段/容器元素
-   hook）为对象~~——已随 M2b 落地（检查在 `hir_effects.zig`，`InitOrder`
-   已删除）；
-3. host metadata（§13）接入现有 typed registry；
-4. effectful β 实参的放开（在 §10.4 契约下单独验证后）；
-5. 间接调用的局部 fn-ref 目标传播（§9.2：需求驱动、超限回 Top）。
+**里程碑映射**：M1a / M1b / M2a / M2b 各档的内容与交付状态见
+[hir.md](hir.md) §11 的映射表。三个消费者判定（dead-let / selective ANF /
+SEG-safe）均由派生查询驱动、无 `switch(op)` 合法性特判；本节的验收标准
+至此全部满足。未落地项、依赖与验收条件见 [todo.md](todo.md)。
 
 ## 15. 开放问题与现状核对
 
-**开放问题：**
+**开放问题（待决项与验收条件见 [todo.md](todo.md) 的「待决」节）：**
 
 - 域间 overlap/disjoint 声明的具体条目：条目形式见 §5.6，具体内容随
   真实 host 域出现后按需补全。
@@ -1385,24 +1398,27 @@ SEG-safe）与函数 SCC fixpoint、module-const 检查属 **M2**：M1b 只验�
   调用」，字段/容器元素级 hook 的读（构造上同一危害类）与 Copy 常量的
   teardown 期读取（从不销毁、无害）均未表达。两条待规范澄清后回填本节
   与 checker 行为。
-- host 回调/重入的 metadata 条目形式（§13）：未知回调默认 `Top` 的声明
-  语法，以及「回调参数化摘要」（按传入 callable 的 effect_bound 实例化）
-  是否立项。
+- host 重入契约（§13）：**已定并落地**——`StillaExecution = Forbidden |
+  MayExecute | Unknown`，缺失 = `Unknown` 取完整 `Top`；只有显式
+  `Forbidden` 才让声明逐字生效。余下待定项：(a) 「回调参数化摘要」
+  （`own ⊔ ⨆ effect_bound(target_i)`，保存后调用归因于实际触发阶段）
+  是否立项；(b) `EffectEnvironmentFingerprint` 缓存指纹接线（§13
+  末节）。
 
-**现状核对（哪些特设实现会被本文取代）：**
+**现状核对（哪些特设实现已被本文派生查询取代）：**
 
-- module-const 依赖检查：~~checker_validate.zig 的 `InitOrder`（初始化
-  方向 + drop hook 方向）是 AST 级的特设 walker，需用函数摘要替换~~——
-  M2b 已替换：`hir_effects.Analysis.checkModuleDependencies` 用函数摘要的
+- module-const 依赖检查：checker_validate.zig 的 `InitOrder`（初始化
+  方向 + drop hook 方向）曾是 AST 级的特设 walker，现由
+  `hir_effects.Analysis.checkModuleDependencies` 取代——用函数摘要的
   `Read(ModuleConst)` 集（初始化方向）与 `drop_effect(T)` 全链（teardown
-  方向）判定，`InitOrder` 已从 checker 删除（见 hir.md §11 M2b 记录）；
+  方向）判定，`InitOrder` 已从 checker 删除；
 - CFG/AIR 层已有一份 per-op 的 `may_trap / effects` 两位 schema（cfg.zig
   的 op schema，派生查询为 `pure()` 即 `!effects ∧ !may_trap`）——它是
   op 级的保守位，缺少 typed 精度与资源域；本文的 typed-opcode 摘要是对
-  它的精化与统一。**M1b 落地时按“显式分层”处理**：HIR 的 typed 行按具体
-  rep 写死（整数 div/rem `MayTrap`、float div/rem `Pure`），**不要求**与
-  CFG 粗粒度位逐位相等（CFG 故意过度近似 float 除法）；registry 启动
-  校验只断言 HIR 行自身的 typed 一致性，避免同一 trap 语义写两处而漂移。
+  它的精化与统一，按“显式分层”处理：HIR 的 typed 行按具体 rep 写死
+  （整数 div/rem `MayTrap`、float div/rem `Pure`），**不要求**与 CFG 粗
+  粒度位逐位相等（CFG 故意过度近似 float 除法）；registry 启动校验只
+  断言 HIR 行自身的 typed 一致性，避免同一 trap 语义写两处而漂移。
 - 现有 pass（dead-instr 等）以「side-effect-free、non-consuming、
   non-trapping」的 schema 位白名单做判定——正是本文想用派生查询替代的
   形态。

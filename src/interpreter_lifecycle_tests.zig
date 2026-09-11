@@ -25,7 +25,12 @@ const Value = vm_types.Value;
 const ValueCodec = vm_types.ValueCodec;
 
 const support = @import("interpreter_test_support.zig");
+const effects = @import("effects.zig");
 const load = support.load;
+const loadDecls = support.loadDecls;
+const loadFull = support.loadFull;
+const compileFrontend = support.compileFrontend;
+const builtin_host_decls = support.builtin_host_decls;
 const Loaded = support.Loaded;
 const CaptureAdapter = support.CaptureAdapter;
 const runHand = support.runHand;
@@ -168,7 +173,11 @@ test "module teardown runs a slot drop hook exactly once with no trap" {
             return interpreter.defaultHostCall(vm, userdata, module_symbol, member, sig, args);
         }
     };
-    var l = try load(
+    // The drop hook runs at module teardown and calls a host binding. The
+    // embedding attests that `builtin` never re-enters the VM
+    // (docs/effects.md §13), so the host call does not degrade to `Top`
+    // and §7's teardown read check passes.
+    var l = try loadDecls(
         \\const builtin = import("builtin");
         \\struct Token {
         \\    id: int32;
@@ -176,7 +185,7 @@ test "module teardown runs a slot drop hook exactly once with no trap" {
         \\}
         \\const GLOBAL = Token { id: 42 };
         \\fn main() -> void { builtin.print("MAIN"); }
-    , false);
+    , &builtin_host_decls);
     defer l.deinit();
     var term = try interpreter.runWithEntry(
         testing.allocator,
@@ -195,6 +204,52 @@ test "module teardown runs a slot drop hook exactly once with no trap" {
     try testing.expect(state.main_ran);
     try testing.expect(state.saw_id);
     try testing.expectEqual(@as(usize, 1), state.hooks);
+}
+
+test "an undeclared host call in a module-constant drop hook is rejected" {
+    // Same program as the test above (docs/effects.md §13). A host binding
+    // with no declaration is the full `Top`, so the drop hook "may read
+    // any module constant" and §7's teardown read check rejects it. This
+    // is the end-to-end proof that the strict default is enforced rather
+    // than merely documented; the `forbidden` attestation is what makes
+    // the program legal.
+    const src =
+        \\const builtin = import("builtin");
+        \\struct Token {
+        \\    id: int32;
+        \\    drop(t) { builtin.print(builtin.str(t.id)); }
+        \\}
+        \\const GLOBAL = Token { id: 42 };
+        \\fn main() -> void { builtin.print("MAIN"); }
+    ;
+    var refused = try compileFrontend(src, &.{});
+    defer refused.deinit();
+    const diag = refused.diag orelse return error.TestUnexpectedResult;
+    try testing.expect(std.mem.indexOf(u8, diag.message, "declared later") != null);
+    try testing.expect(refused.program == null);
+
+    // `Unknown` and `MayExecute` do not rescue it even when paired with a
+    // `pure` summary: an unknown callback must cover *every* effect, not
+    // just the reads.
+    for ([_]effects.StillaExecution{ .unknown, .may_execute }) |exec| {
+        const decls = [_]effects.HostDecl{
+            .{ .key = "builtin.print", .summary = effects.pure, .stilla_execution = exec },
+            .{ .key = "builtin.str", .summary = effects.pure, .stilla_execution = exec },
+        };
+        var c = try compileFrontend(src, &decls);
+        defer c.deinit();
+        try testing.expect(c.diag != null);
+    }
+
+    // The explicit `Forbidden` attestation makes it legal, and stays legal
+    // through both optional consumers (which must see the same effect
+    // environment as the final re-validation).
+    for ([_]bool{ false, true }) |seg| {
+        for ([_]bool{ false, true }) |simplify| {
+            var l = try loadFull(src, false, seg, simplify, &builtin_host_decls);
+            l.deinit();
+        }
+    }
 }
 
 test "mid-frame drop hook runs once through the hook continuation" {

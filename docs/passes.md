@@ -41,22 +41,22 @@ Driver: `checker.Checker.check(graph)`. Sequence:
 
 Detail: [checker.md](checker.md).
 
-## HIR seam — M1a + M1b implemented (hir.md §11)
+## HIR seam — implemented (hir.md §11)
 
 > Status: **implemented.** The checker's annotated output is built into the
 > canonical monomorphic HIR and lowered from there to CFG AIR; this is the
-> only frontend lowering path (S6b removed the direct annotated-AST
-> lowering and the `hir_stage` toggle). Files: `hir_build.zig`
+> only frontend lowering path (the direct annotated-AST lowering and the
+> `hir_stage` toggle were removed). Files: `hir_build.zig`
 > (+ `hir_build_block` / `hir_build_expr` / `hir_build_path` / `hir_build_call` /
 > `hir_build_control` / `hir_build_pattern`), `hir_validate.zig`,
 > `hir_effects.zig` (with the model in top-level `effects.zig`),
-> `hir_simplify.zig`, `hir_seg.zig`, `hir_lower.zig`. The M1b effect
+> `hir_simplify.zig`, `hir_seg.zig`, `hir_lower.zig`. The effect
 > infrastructure is live: every reachable node carries a `ready` interned
 > `EffectSummary` after analysis, and the effect validator runs in the
-> compile pipeline. M2b added the function-summary SCC least fixpoint, the
+> compile pipeline, including the function-summary SCC least fixpoint, the
 > precise `drop_effect` chain, the summary-driven module-const
-> init/teardown check, and the dead-let / selective-ANF consumers
-> (opt-in); M2a added the optional SEG pass (opt-in).
+> init/teardown check, and the opt-in dead-let / selective-ANF consumers
+> and SEG pass.
 
 Order: checker → AST→HIR construction → structural validation →
 effect analysis + annotation validation → module-const dependency check →
@@ -67,26 +67,25 @@ fresh effect analysis before lowering (hir.md §2.4).
 
 | Pass | File | Job |
 | --- | --- | --- |
-| build | `hir_build.zig` + `hir_build_block` / `_expr` / `_path` / `_call` / `_control` / `_pattern` (data structures in `hir.zig`) | annotated AST + module graph → canonical monomorphic HIR: binder / region / pattern normalization, full-expression fences, ownership view carried over from the checker; `SemanticInfo.effect` starts `pending` (M1b) |
+| build | `hir_build.zig` + `hir_build_block` / `_expr` / `_path` / `_call` / `_control` / `_pattern` (data structures in `hir.zig`) | annotated AST + module graph → canonical monomorphic HIR: binder / region / pattern normalization, full-expression fences, ownership view carried over from the checker; `SemanticInfo.effect` starts `pending` |
 | validate | `hir_validate.zig` | structural HIR invariants only: scope, no capture, tree shape (no DAG), no duplicate BinderId, full-expression fence (hir.md §10.1 first level) |
-| effects | `hir_effects.zig` (model: `effects.zig`) | `effect_transfer` per descriptor (`own_effect` + `TransferKind`); function summaries by the SCC least fixpoint (recursive SCC seeded `Diverge`, `drop` hooks in the call graph; indirect/missing/unknown → `Top`); precise `drop_effect(T)` (struct hook + Unique fields reverse-order, union/tuple/list/box, opaque release); `OperandUse` resolution; cleanup-free MVP proof; derived legality queries; the summary-driven module-const init/teardown check (`checkModuleDependencies`, M2b); publishes interned `ready` summaries and validates them against a fresh derivation (`derived ≤ stored`) |
-| consumers | `hir_simplify.zig` | M2b: dead-let (`B ∉ FV(body)` ∧ `isDiscardable(init)`) and selective A-Normal Form (first `!canFloatAsTree` operand of a `StrictLTR` parent hoisted to a `let`, Copy only); legality is the derived query alone — no `switch(op)`; opt-in (`--simplify`) |
-| seg | `hir_seg.zig` | M2a: β→let / let simplification / constant folding / integer algebra over recursively-admitted `isSegSafe` islands; opt-in (`--seg`) |
-| lower | `hir_lower.zig` | HIR → CFG AIR, reusing the existing `lower.zig` / `cfg_lower_emit.zig` block, value, and drop mechanisms; replaced the direct AST → CFG expression lowering (S6b) |
+| effects | `hir_effects.zig` (model: `effects.zig`) | `effect_transfer` per descriptor (`own_effect` + `TransferKind`); function summaries by the SCC least fixpoint (recursive SCC seeded `Diverge`, `drop` hooks in the call graph; indirect/missing/unknown → `Top`); precise `drop_effect(T)` (struct hook + Unique fields reverse-order, union/tuple/list/box, opaque release); `OperandUse` resolution; cleanup-free MVP proof; derived legality queries; the summary-driven module-const init/teardown check (`checkModuleDependencies`); publishes interned `ready` summaries and validates them against a fresh derivation (`derived ≤ stored`) |
+| consumers | `hir_simplify.zig` | dead-let (`B ∉ FV(body)` ∧ `isDiscardable(init)`) and selective A-Normal Form (first `!canFloatAsTree` operand of a `StrictLTR` parent hoisted to a `let`, Copy only); legality is the derived query alone — no `switch(op)`; opt-in (`--simplify`) |
+| seg | `hir_seg.zig` | β→let / let simplification / constant folding / integer algebra over recursively-admitted `isSegSafe` islands; opt-in (`--seg`) |
+| lower | `hir_lower.zig` | HIR → CFG AIR, reusing the existing `lower.zig` / `cfg_lower_emit.zig` block, value, and drop mechanisms; replaced the direct AST → CFG expression lowering |
 
 The canonical text form (`hir_print.zig` / `hir_parse.zig`, re-exported
 through `hir.zig`) mirrors `cfg_print` / `cfg_parse` for round-trip
 tests; the black-box regression suite lives in `hir_tests.zig`
-(hir.md §10.2–§10.3) — after S6b the differential gate became a pure-HIR
-corpus regression (compile → canonical AIR → standalone cfg parser
-round-trip), extended in M1b with corpus-wide effect annotation +
-validation and in M2b with the module-const dependency cases moved out of
-the checker suite. The effect model's own algebra/law tests live in
-`effects.zig`, the transfer/query tests in `hir_effects.zig`; the
-consumer passes have their own white-box tests plus `hir_simplify_tests.zig`
-(M2b) and `hir_seg_tests.zig` (M2a) black-box suites.
+(hir.md §10.2–§10.3) — a pure-HIR corpus regression (compile → canonical
+AIR → standalone cfg parser round-trip), with corpus-wide effect
+annotation + validation and the module-const dependency cases. The effect
+model's own algebra/law tests live in `effects.zig`, the transfer/query
+tests in `hir_effects.zig`; the consumer passes have their own white-box
+tests plus `hir_simplify_tests.zig` and `hir_seg_tests.zig` black-box
+suites.
 
-Detail: [hir.md](hir.md) (M1a + M1b + M2a + M2b; implemented),
+Detail: [hir.md](hir.md) (implemented),
 [effects.md](effects.md) (§5 lattice + §10–§11 queries + §12 consumers
 implemented; §13 host ABI wiring proposed).
 
@@ -165,7 +164,7 @@ Detail: [frontend.md](frontend.md), [llir-typed.md](llir-typed.md).
 `frontend.compile` wires the whole chain in one call — module graph
 (`moduleinfo`) → checker (`checker`) → HIR build (`hir_build`) →
 structural validation (`hir_validate`) → effect analysis + annotation
-validation (`hir_effects`, the M1a/M1b seam, [hir.md](hir.md) §11,
+validation (`hir_effects`, the HIR seam, [hir.md](hir.md) §11,
 [effects.md](effects.md)) → HIR→CFG lowering (`hir_lower`) →
 validation → `Options.optimize` (the optimizer, then drop lowering,
 then re-validation plus the text round-trip) — and owns the diagnostics
@@ -178,8 +177,8 @@ LLIR emission modes on top; the embeddable path goes through
 
 - [module-graph.md](module-graph.md) — module identity, resolution, loading, cycle detection.
 - [checker.md](checker.md) — inference, generics, ownership, checks.
-- [hir.md](hir.md) — the HIR data structures, text form, and the HIR→CFG contract (M1a + M1b implemented).
-- [effects.md](effects.md) — the effect-semantics model: lattice and derived queries implemented (M1b); consumer passes proposed.
+- [hir.md](hir.md) — the HIR data structures, text form, and the HIR→CFG contract (implemented).
+- [effects.md](effects.md) — the effect-semantics model: lattice, derived queries, and the three consumers implemented.
 - [cfg-lowering.md](cfg-lowering.md) — the AIR model and lowering rules.
 - [optimizer.md](optimizer.md) — the optimizer rewrites and validator.
 - [frontend.md](frontend.md) — the pipeline contract end to end, plus the LLIR stage table.

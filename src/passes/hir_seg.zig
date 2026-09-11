@@ -64,6 +64,10 @@ pub const Config = struct {
     /// The module graph, for the ownership class of generic named types
     /// (same role as in `hir_effects.Config`).
     graph: ?*moduleinfo.ModuleGraph = null,
+    /// Embedding host declarations (docs/effects.md §13), passed through
+    /// to every internal `hir_effects.Analysis` so the rewrite rounds and
+    /// the caller's final re-validation use one effect environment.
+    host_decls: []const effects.HostDecl = &.{},
     /// Bound on analysis→rewrite rounds (each round re-derives effects).
     max_iterations: u32 = 8,
 };
@@ -81,7 +85,7 @@ pub fn optimize(arena: std.mem.Allocator, built: *hir.BuiltProgram, config: Conf
     var beta_done = std.AutoHashMapUnmanaged(hir.FuncId, void).empty;
     var iter: u32 = 0;
     while (iter < config.max_iterations) : (iter += 1) {
-        var analysis = try hir_effects.Analysis.init(arena, built, .{ .graph = config.graph });
+        var analysis = try hir_effects.Analysis.init(arena, built, .{ .graph = config.graph, .host_decls = config.host_decls });
         try analysis.analyze();
         var rw = Rewriter{
             .arena = arena,

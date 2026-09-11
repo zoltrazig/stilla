@@ -115,11 +115,17 @@ fn dfsCollect(
     }
 }
 
-/// Optional external facts. M1b does not wire the embedding host ABI
-/// (docs/effects.md §13) — an empty `hosts` table makes every host call
-/// `Top`, and tests supply an analysis-local registry.
+/// Optional external facts (docs/effects.md §13). A host binding with no
+/// declaration is the full `Top`; `host_decls` carries the embedding's
+/// symbol-keyed attestations, `hosts` the id-keyed form white-box tests
+/// use. An empty table therefore makes every host call `Top`.
 pub const Config = struct {
     hosts: effects.HostEffects = .{},
+    /// Symbol-keyed host declarations (docs/effects.md §13) — the
+    /// embedder-facing ABI form, resolved against `built.hosts` at setup
+    /// and merged ahead of `hosts`. White-box callers that already hold
+    /// `HostBindingId`s use `hosts` directly.
+    host_decls: []const effects.HostDecl = &.{},
     resources: effects.ResourceRegistry = .{},
     /// The module graph, used only to resolve the ownership class of
     /// generic named type instantiations. Without it, such a type is
@@ -136,6 +142,9 @@ pub const Analysis = struct {
     arena: std.mem.Allocator,
     built: *hir.BuiltProgram,
     config: Config,
+    /// The resolved host table: symbol-keyed ABI declarations folded with
+    /// the id-keyed entries of `config.hosts`, one entry per binding.
+    hosts: effects.HostEffects,
     /// Per-node memo of the transfer result (analysis scratch, not the
     /// annotation; the summary driver clears it per fixpoint round so a
     /// round is a simultaneous update from one approximation).
@@ -162,10 +171,22 @@ pub const Analysis = struct {
         @memset(comp_of, 0);
         const cur = try arena.alloc(Summary, built.funcs.items.len);
         @memset(cur, effects.pure);
+        // Resolve the symbol-keyed ABI declarations against this
+        // program's bindings, then fold in the id-keyed entries some
+        // white-box callers pass. `consolidate` makes a conflicting
+        // duplicate degrade to `top` instead of depending on order.
+        const keys = try arena.alloc(effects.HostDeclKey, built.hosts.items.len);
+        for (built.hosts.items, 0..) |hb, i| keys[i] = .{ .key = hb.key, .id = @intCast(i) };
+        const abi = try effects.HostEffects.resolve(arena, config.host_decls, keys);
+        const merged = try effects.HostEffects.consolidate(
+            arena,
+            try std.mem.concat(arena, effects.HostEffects.Entry, &.{ abi.entries, config.hosts.entries }),
+        );
         return .{
             .arena = arena,
             .built = built,
             .config = config,
+            .hosts = merged,
             .memo = memo,
             .summary = summary,
             .known = known,
@@ -785,7 +806,12 @@ pub const Analysis = struct {
             return switch (n.payload) {
                 .func => |fr| switch (fr) {
                     .func => |fid| self.functionSummary(fid),
-                    .host => |hb| self.config.hosts.lookup(hb) orelse effects.host_top,
+                    // A host binding with no declaration is the full `top`
+                    // (docs/effects.md §13): the compiler cannot prove it
+                    // cannot execute Stilla code, so it may reach any
+                    // module constant. A declaration is honoured only as
+                    // far as `HostEffects.Entry.effectiveSummary` allows.
+                    .host => |hb| self.hosts.lookup(hb) orelse effects.top,
                 },
                 else => effects.top,
             };
@@ -1364,6 +1390,19 @@ fn bodyOf(p: *hir.Program, root: hir.ExprId) hir.ExprId {
     return p.region(p.regionsOf(root)[0]).root;
 }
 
+/// Declare every host binding of `f` as `forbidden` with `summary` — the
+/// shape a white-box test that exercises *declared* host summaries needs
+/// (docs/effects.md §13). Without the attestation a declaration is
+/// `unknown` and resolves to `top`, which would make those tests pass
+/// vacuously.
+fn declareHosts(f: *Fixture, summary: effects.Summary) !effects.HostEffects {
+    const entries = try f.arena.allocator().alloc(effects.HostEffects.Entry, f.built.hosts.items.len);
+    for (f.built.hosts.items, 0..) |_, i| {
+        entries[i] = .{ .host = @intCast(i), .summary = summary, .stilla_execution = .forbidden };
+    }
+    return .{ .entries = entries };
+}
+
 test "hir_effects: constant function bodies are pure and total" {
     var f = try build("app", &.{.{
         "app",
@@ -1423,7 +1462,7 @@ test "hir_effects: mutual recursion keeps real reads and still diverges" {
         entries[i] = .{ .host = @intCast(i), .summary = try effects.summaryOf(f.arena.allocator(), &.{.{
             .resource = .{ .host = 7 },
             .mode = .write,
-        }}) };
+        }}), .stilla_execution = .forbidden };
     }
     var an = try Analysis.init(f.arena.allocator(), f.built, .{
         .graph = f.graph,
@@ -1598,25 +1637,21 @@ test "hir_effects: undeclared host metadata is Top, declared metadata refines it
 
     var an = try Analysis.init(f.arena.allocator(), f.built, .{ .graph = f.graph });
     try an.analyze();
-    // Undeclared host metadata is the conservative host summary: every
-    // host resource may be touched, but it carries no Stilla
-    // `ModuleConst` read (docs/effects.md §13).
+    // Undeclared host metadata is the *full* Top (docs/effects.md §13):
+    // the compiler cannot prove the binding cannot execute Stilla code, so
+    // it may reach any module constant.
     const undeclared = try an.functionSummary(shout);
-    try testing.expect(undeclared.eql(effects.host_top));
-    for (undeclared.accesses.accesses) |a| {
-        try testing.expect(a.resource != .module_const);
-    }
+    try testing.expect(undeclared.eql(effects.top));
+    try testing.expect(undeclared.accesses.all[@intFromEnum(effects.EffectMode.read)]);
     try testing.expect((try an.validate(testing.allocator)) == null);
 
-    // Declare every host binding pure: the host call (and the intrinsic
-    // wrapper behind `builtin.str`) becomes pure.
-    const entries = try f.arena.allocator().alloc(effects.HostEffects.Entry, f.built.hosts.items.len);
-    for (f.built.hosts.items, 0..) |_, i| {
-        entries[i] = .{ .host = @intCast(i), .summary = effects.pure };
-    }
+    // Declare every host binding pure *and* `forbidden`: the host call
+    // (and the intrinsic wrapper behind `builtin.str`) becomes pure. The
+    // attestation is what makes the declared summary apply at all.
+    const hosts = try declareHosts(&f, effects.pure);
     var an2 = try Analysis.init(f.arena.allocator(), f.built, .{
         .graph = f.graph,
-        .hosts = .{ .entries = entries },
+        .hosts = hosts,
     });
     try an2.analyze();
     try testing.expect((try an2.functionSummary(shout)).eql(effects.pure));
@@ -1695,7 +1730,7 @@ test "hir_effects: host calls with an effectful declared summary are not discard
     }});
     const entries = try f.arena.allocator().alloc(effects.HostEffects.Entry, f.built.hosts.items.len);
     for (f.built.hosts.items, 0..) |_, i| {
-        entries[i] = .{ .host = @intCast(i), .summary = write_effects };
+        entries[i] = .{ .host = @intCast(i), .summary = write_effects, .stilla_execution = .forbidden };
     }
     var an = try Analysis.init(f.arena.allocator(), f.built, .{
         .graph = f.graph,
@@ -1798,7 +1833,7 @@ test "hir_effects: Q blocks duplication but not discard" {
     };
     const entries = try f.arena.allocator().alloc(effects.HostEffects.Entry, f.built.hosts.items.len);
     for (f.built.hosts.items, 0..) |_, i| {
-        entries[i] = .{ .host = @intCast(i), .summary = q };
+        entries[i] = .{ .host = @intCast(i), .summary = q, .stilla_execution = .forbidden };
     }
     var an = try Analysis.init(f.arena.allocator(), f.built, .{
         .graph = f.graph,
@@ -1831,7 +1866,7 @@ test "hir_effects: a conditional panic keeps MayTrap through the call summary" {
     defer f.deinit();
     const entries = try f.arena.allocator().alloc(effects.HostEffects.Entry, f.built.hosts.items.len);
     for (f.built.hosts.items, 0..) |_, i| {
-        entries[i] = .{ .host = @intCast(i), .summary = effects.may_trap };
+        entries[i] = .{ .host = @intCast(i), .summary = effects.may_trap, .stilla_execution = .forbidden };
     }
     var an = try Analysis.init(f.arena.allocator(), f.built, .{
         .graph = f.graph,
@@ -1871,7 +1906,7 @@ test "hir_effects: a call summary includes the callable's effect_bound" {
     }});
     const entries = try f.arena.allocator().alloc(effects.HostEffects.Entry, f.built.hosts.items.len);
     for (f.built.hosts.items, 0..) |_, i| {
-        entries[i] = .{ .host = @intCast(i), .summary = write };
+        entries[i] = .{ .host = @intCast(i), .summary = write, .stilla_execution = .forbidden };
     }
     var an = try Analysis.init(f.arena.allocator(), f.built, .{
         .graph = f.graph,
@@ -2070,7 +2105,7 @@ test "hir_effects: argument effects are sequenced into a pure callable's call" {
         .mode = .write,
     }});
     for (f.built.hosts.items, 0..) |_, i| {
-        entries[i] = .{ .host = @intCast(i), .summary = write };
+        entries[i] = .{ .host = @intCast(i), .summary = write, .stilla_execution = .forbidden };
     }
     var an = try Analysis.init(f.arena.allocator(), f.built, .{
         .graph = f.graph,

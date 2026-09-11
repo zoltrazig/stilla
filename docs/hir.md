@@ -1,39 +1,22 @@
 # Stilla HIR — 高级别中间表示
 
-> **Status：M1a / M1b / M2a / M2b（摘要化消费者）已实现；match 进 SEG
-> 仍为设计提案。**
->
-> 本文为编译前端定义一个高级别中间表示 HIR：binder/region 化的单态表达式
-> 树、registry 化的 op 语义、文本形式与受限 SEG 投影。**M1a 范围（结构
-> HIR：AST→HIR 构建、§10.1 结构校验、HIR→CFG lowering）已随 S0–S6 落地，
-> 且 S6b 删除直降路径后 HIR 是前端唯一 lowering 路径**；§3–§7、§9、§10
-> 的 M1a 侧描述即已实现形态。**M1b（效果基础设施）已落地**：
-> `SemanticInfo.effect`、固定乘积格、`effect_transfer`、函数摘要（直接
-> 调用传播，递归 → `Top`）、cleanup-aware 派生查询与 §10.1 第二级校验
-> 随 [effects.md](effects.md) §14 实现（§3.6、§10.1、§11 已更新为已实现
-> 形态）。**M2a（SEG v1 规则子集）已落地**：`OpDescriptor.seg` 编码面、
-> island 准入、β/let/常折叠/整数代数四组规则、最小节点数抽取与替换后与
-> 效果再验证随 `passes/hir_seg.zig` 实现，`--seg` / `frontend.Options.seg`
-> 默认关（§11 M2a 交付记录）。**M2b（摘要化消费者）已落地**：函数摘要
-> 的 SCC least fixpoint、精确 `drop_effect(T)` 全链、摘要驱动的 module-const
-> 初始化/teardown 检查（替换 checker 的 `InitOrder` 特设 walk），以及
-> dead-let / selective A-Normal Form 两个无 `switch(op)` 合法性判定的消费者
-> 随 `passes/hir_effects.zig` 与 `passes/hir_simplify.zig` 实现，
-> `--simplify` / `frontend.Options.simplify` 默认关（§11 M2b 交付记录）；
-> **match 进 SEG**（Copy-only known-variant）仍是下一项提案；文中「直降/
-> 落地前基线」措辞均为历史参照。实施记录见本档 §11 的 M1a/M1b/M2a/M2b
-> 交付记录
-> （PROGRESS.md 已于 2026-09-10 随 hir_build 拆分提交删除，历史记录见
-> git 与 §11）。
+> **Status：HIR 是前端唯一 lowering 路径。** 本文定义 binder/region 化的
+> 单态表达式树、registry 化 op 语义、文本形式与受限 SEG 投影。AST→HIR
+> 构建、结构校验、效果分析（`SemanticInfo.effect`、函数摘要 SCC fixpoint、
+> 精确 `drop_effect(T)`、module-const 检查）与 HIR→CFG lowering 均已实现，
+> 另有两个默认关闭的 opt-in 消费者：dead-let / selective ANF（`--simplify`）
+> 与 SEG v1（`--seg`）。未落地项与验收见 [todo.md](todo.md)；§11 保留一张
+> M1a / M1b / M2a / M2b 里程碑映射表。文中「直降/落地前基线」措辞为设计
+> 动机与历史参照。
 
 ## 1. 问题
 
-### 1.1 直降的痛点（M1a 落地前的基线）
+### 1.1 直降的痛点（设计动机）
 
-M1a 落地前，前端走：checker 在 AST 上完成名字解析、泛型展开
-（monomorphization）与 ownership 注解；CFG lowering（`lower.lowerProgram`）把
-这份注解后的 monomorphic AST 直接生成 CFG AIR。直接 lowering 有几个绕不开
-的毛病（S6b 已删除该直降路径，此处为设计动机与历史参照）：
+在 HIR 成为前端唯一路径之前，前端走：checker 在 AST 上完成名字解析、泛型
+展开（monomorphization）与 ownership 注解；CFG lowering
+（`lower.lowerProgram`）把这份注解后的 monomorphic AST 直接生成 CFG AIR。
+直接 lowering 有几个绕不开的毛病（该直降路径已被删除，此处为设计动机）：
 
 - AST 形状贴近源码（`using`、模块路径、泛型、source name 都还在），优化
   与 lowering 耦合在 CFG lowering 的 emit 路径里；
@@ -127,7 +110,7 @@ polymorphism。
 
 ### 2.3 与现状管线的边界
 
-M1a 落地前（行为基线）没有中间规范形，前端直降：
+HIR 成为唯一路径之前，前端没有中间规范形，直接 lowering：
 
 ```text
 module graph → checker（AST 注解：名字/类型/ownership/monomorphization）
@@ -135,7 +118,7 @@ module graph → checker（AST 注解：名字/类型/ownership/monomorphization
     → optimizer → LLIR
 ```
 
-M1a 落地后（S6b 起）：checker 注解 → HIR 构建 → HIR→CFG lowering 是
+现在：checker 注解 → HIR 构建 → HIR→CFG lowering 是
 **唯一**前端路径，直降不再存在。HIR 落在 checker 与 CFG lowering 之间，
 构成一个**兼容边界**，而不是对 checker 或 CFG lowering 的重写：
 
@@ -144,13 +127,13 @@ M1a 落地后（S6b 起）：checker 注解 → HIR 构建 → HIR→CFG lowerin
   不重新推理（静态结论搬移，见 §2.4）；
 - **输出边界** — 「HIR → CFG」按 CFG lowering 语义逐条对齐（§9）：
   HIR→CFG 复用既有 block/value/drop 发射机制，CFG 层的语义参照不因 HIR
-  引入而改变。逐字节等价的证据：S5 差分门禁（当时直降与 HIR 两路径并存
-  `cfg.print` 相等）与 S6a 翻转验收；S6b 删除直降后门禁转为纯 HIR 回归
-  （见 §10.3）。
+  引入而改变。回归门禁做 AIR **表示往返**（compile → canonical AIR →
+  standalone cfg parser round-trip，见 §10.3）；优化正确性另靠定向语义
+  测试与开关前后执行差分。
 - **范围边界** — 本文描述的 HIR 形态只做规范形（binder/region/pattern
   统一、full-expression 标注、效果摘要），覆盖全部现有语言形态，**不含
   SEG**。SEG（§8）是可选的受限优化视图，按两档范围划分（v1 规则子集与
-  match 的 Copy-only known-variant 情形，见 §11）；每档替换后对受影响
+  match 的 Copy-only known-variant 情形，见 [todo.md](todo.md)）；每档替换后对受影响
   区域局部再验证（§2.4）；
 - **远期边界（Target 形态，在本文范围之外）** — 若把 monomorphization
   与 ownership 检查上移到「先建 Typed HIR 再特化」的形态（§2.2 目标管线
@@ -175,7 +158,7 @@ M1a 落地后（S6b 起）：checker 注解 → HIR 构建 → HIR→CFG lowerin
 先读 §3（数据结构）、§4（文本形式——本文所有 HIR 示例的统一记法）、§5
 （绑定/作用域/控制流语义），再读 §6（ownership 与效果摘要）、§7（核心 op
 与类型专门化）、§8（SEG 桥与重写合法性）、§9（HIR→CFG 契约）、§10（验证）
-与 §11（验收与落地范围）。
+与 §11（验收与落地现状）。
 
 ## 3. 核心数据结构：arena、间接节点与身份注册
 
@@ -343,7 +326,7 @@ null` 时必有对应 SEG 类型契约；typed-op effect 行完整；printer/par
 形状对称。v1 不必全拆，但上述检查从 registry 存在起就生效——否则
 registry 化只是把 switch 从代码移到一张更难验证的表。
 
-> **M1b 修订（随效果基础设施落地）**：v1 descriptor 的实际字段名与上表
+> **descriptor 的实际字段（已实现形态）**：v1 descriptor 与上表的 sketch
 > 是语义等价映射：`eval_policy` → `policy`，`operand_uses` → `uses`
 > （`UsePolicy` 策略 + 可选 `operand_uses` 显式切片），`effect_transfer`
 > → `own_effect`（op 自身的 `EffectSummary`）加 `transfer`
@@ -352,28 +335,29 @@ registry 化只是把 switch 从代码移到一张更难验证的表。
 > `transfer` 是数据标签、由参数化的分析函数消费（`ctx` 即分析对象），
 > 不用逐 op 函数指针。`uses`/`own_effect`/`transfer` 三者**无默认值**：
 > 新 op 省略即编译错误，结构上不存在「默认 Pure」。typed 行另带
-> `typed`/`rep`。其余字段（`verify`/`result_policy`/`constant_fold`/`seg`/
-> `lower_to_air`/`print`）在本档仍由既有 lowering/printer/parser 代码
-> 承担，未进 registry 结构——§3.5 的 facet 化是方向，不是 v1 门槛。
+> `typed`/`rep`；`seg: ?SegEncoding` 是 registry 上的可选 SEG 编码 facet
+> （`hir_seg.zig` 读它做 island 准入）。其余字段
+> （`verify`/`result_policy`/`constant_fold`/`lower_to_air`/`print`）仍由
+> 既有 lowering/printer/parser 代码承担——§3.5 的 facet 化是方向，不是
+> v1 门槛。
 
 ### 3.6 SemanticInfo 与 TypeId：view、效果、capability 分离
 
 ```text
 SemanticInfo {
     ownership_view: OwnershipView,   // 值/视图状态（运行时可见）
-    effect:         effects.State,   // Pending | Ready(EffectSummaryId) — 见 §6.2；M1b 实现
+    effect:         effects.State,   // Pending | Ready(EffectSummaryId) — 见 §6.2
 }
 
 OwnershipView = Owned | Borrowed | DestructionView
 effects.State = Pending | Ready(EffectSummaryId)   // Pending 不是「已证纯」
 ```
 
-> **M1a 修订（随 S4 落地）／M1b 修订（随效果基础设施落地）**：M1a 的
-> `SemanticInfo` **不带** `effect` 字段——效果分析关闭，`ownership_view`
-> 是唯一成员（代码注释同此约定）。**M1b 已按加性扩展落地**：
-> `SemanticInfo.effect: effects.State`（`pending | ready(EffectSummaryId)`），
-> 新节点默认为 `pending`（绝不是「已证纯」）；`hir_effects` 在 checker→CFG
-> 之间发布 `ready` 摘要，§10.1 第二级校验要求可达节点全部 `ready`。
+> **已实现形态**：`SemanticInfo` 带 `effect: effects.State`
+> （`pending | ready(EffectSummaryId)`），新节点默认为 `pending`（绝不是
+> 「已证纯」）；`hir_effects` 在 checker→CFG 之间发布 `ready` 摘要，§10.1
+> 第二级校验要求可达节点全部 `ready`。`ownership_view` 与 `effect` 是两个
+> 正交维度。
 
 语义按正交维度组织：`EvalPolicy`（在 op descriptor 上，非节点上）、
 `OperandUse`（operand 的 Read/Borrow/Consume）、`EffectSummary`（节点上
@@ -737,7 +721,7 @@ let B0: i32 = call(fnref F0) in
 IR 里只有 `Let / Seq / Expr` 三种形状，没有 statement IR。这与 SEG 的
 `bind`/`var` 几乎同构（§8）。
 
-**解构 let（M1a 修订，PROGRESS "S4 设计决定"）**：`let (a, b) = e` 这类多叶
+**解构 let**：`let (a, b) = e` 这类多叶
 不可反驳解构保持为 `let` region —— region 的 `params` 是 pattern 的绑定叶，
 `Region.pattern` 记录不可反驳的 pattern 形状（与 match arm 同机制，仅允许
 不可反驳形态：wildcard / bind / tuple / struct / list；literal、variant、
@@ -820,13 +804,12 @@ EvalPolicy =
 - EvalPolicy 是**语言语义**，与 effects 正交：可交换是可证明的派生事实
   （`reorderable`），默认语义仍保持 LTR（§6.2）。
 
-> **M1a 实施修订（随 S5 落地）**：`and`/`or` 在 §7.1 登记为独立 control 行
-> （`ShortCircuit`，1 operand + 2 regions，与 `if` 同构），不再编码为
+> **实现说明**：`and`/`or` 在 §7.1 登记为独立 control 行
+> （`ShortCircuit`，1 operand + 2 regions，与 `if` 同构），不编码为
 > `if (lhs) { rhs } else { false }` 形状。原因：HIR→CFG lowering 的等价格门
-> （§10.3）要求 `and`/`or` 复刻直降的短路菱形结构（`rhs`/`false_` 块与 join），
+> 要求 `and`/`or` 复刻直降的短路菱形结构（`rhs`/`false_` 块与 join），
 > 与 `if`（`then`/`else` 块）不是同构的 CFG 发射；且源码 `if c {x} else
-> {false}` 与 and 形状在 HIR 中不可区分，猜形不可取（§12 认可门禁驱动的表述
-> 缺口补正）。
+> {false}` 与 and 形状在 HIR 中不可区分，猜形不可取。
 
 ### 5.6 full-expression 栅栏
 
@@ -837,18 +820,21 @@ Unique 临时量在所属 full expression 结束时销毁、反向创建序（Ru
 - **SEG 第一阶段绝不跨越 full-expression 边界**，否则
   `foo(make_unique()); bar();` 这类代码的 drop timing 会被无意改变；
 - `FullExpr` 记录入口/出口与登记在其清理栈上的临时量（entry/exit
-  元数据）；每条登记是带 **origin_expr**（创建它的 occurrence）与
-  registration_index 的 token（CleanupFootprint，effects.md §11.2）；
-  A-Normal Form 合成、SEG 准入与 CFG lowering 都以它为准，不重算。
+  元数据）。每条登记是带 `origin_expr`（创建它的 occurrence）与
+  `registration_index` 的 token（`CleanupFootprint`，effects.md §11.2）
+  ——这是设计形态，当前 builder **尚未填充**该注册表，因此清理敏感查询
+  目前只走 cleanup-free 证明，Unique 物化等未放开（见 §5.7 与
+  [todo.md](todo.md)）。
 
 **HIR / CFG 分界**（与 effects.md §11.3「drop_effect ≠ 有序销毁计划」一致）：
-HIR 持有 full-expression 身份、临时量的创建/所有权事实、清理候选（token
-登记）与 FE 内顺序约束；CFG lowering 消费这些事实**重新构造可执行销毁
-计划**——同一 FE 内临时量沿用 per-expression 临时栈在表达式尾反向销毁的
-现有机制（[cfg-lowering.md](cfg-lowering.md)），maybe-unique 的 join 边
-drop 与条件路径清理由 CFG 侧计划。HIR 不重算「谁属于哪个 FE」，CFG 也
-不重算 ownership 事实；HIR 的标注不是把 CFG 的临时栈整个搬上来，而是它
-的上游事实源。
+HIR 持有 full-expression 身份、临时量的创建/所有权事实与 FE 内顺序约束；
+CFG lowering 消费这些事实**重新构造可执行销毁计划**——同一 FE 内临时量沿用
+per-expression 临时栈在表达式尾反向销毁的现有机制
+（[cfg-lowering.md](cfg-lowering.md)），maybe-unique 的 join 边 drop 与
+条件路径清理由 CFG 侧计划。HIR 不重算「谁属于哪个 FE」，CFG 也不重算
+ownership 事实；HIR 的标注不是把 CFG 的临时栈整个搬上来，而是它的上游
+事实源。清理候选的 token 登记（`CleanupFootprint`，§5.6 上方）是**目标
+设计**，当前 builder 尚未填充（见 [todo.md](todo.md)）。
 
 ### 5.7 Selective A-Normal Form（而非全面 A-Normal 化）
 
@@ -883,14 +869,14 @@ observable_effect_free / 清理上下文，§6.2），不硬编码 op 名单。
   原 full-expression 的清理栈上（销毁点与未改写时一致）。不要为此发明
   内层 full-expression 边界——那会提前销毁仍在使用的临时量。
 
-> **M2b 实施修订（随 `hir_simplify.zig` 落地）**：ANF 消费者以派生查询
+> **ANF 消费者（`hir_simplify.zig`，`--simplify`，默认关）**：以派生查询
 > `can_float_as_tree` 逐 operand 判定，父节点为 `StrictLTR` 时只提**第一个**
 > 不可浮动 operand（先前的 operand 可浮动，LTR 不变；每轮提一个，链从外
 > 向内）；惰性 region 内不跨边界提升。**Unique operand 暂不物化**：合成
 > `let` 的绑定在作用域末尾销毁，而原匿名临时量在 full-expression 边界销毁，
-> 二者重合需要 `CleanupFootprint` token 登记（§5.6；builder 尚未填充），
-> 所以本档只提 Copy operand——保守地不改变任何销毁点，Unique 保留在 operand
-> 位（求值序本来就是结构序，不需要重排）。`--simplify` 默认关。
+> 二者重合需要 `CleanupFootprint` token 登记（§5.6；builder **尚未填充**），
+> 所以目前只提 Copy operand——保守地不改变任何销毁点，Unique 保留在 operand
+> 位（求值序本来就是结构序，不需要重排）。放开 Unique 物化见 [todo.md](todo.md)。
 
 ## 6. ownership、效果与借用
 
@@ -1057,7 +1043,7 @@ let Bk: ty = v in body  →  body
 | function | `lambda` | 参数 region（不捕获，见 §5.3） |
 | function | `call` | callee + 有序 operands（LTR） |
 | control | `if` | cond + 两个惰性 region |
-| control | `and` / `or` | 短路分支：cond + 两个惰性 region（与 `if` 同构；M1a 修订：保留为独立行而非 `if` 简写，见 §5.5 注） |
+| control | `and` / `or` | 短路分支：cond + 两个惰性 region（与 `if` 同构；保留为独立行而非 `if` 简写，见 §5.5 注） |
 | control | `match` | scrutinee + arm regions（pattern binders 见 §5.4） |
 | aggregate | `struct_make` | nominal 构造 |
 | aggregate | `field_get` | 字段读取（view 传播见 §6.4） |
@@ -1115,21 +1101,21 @@ alias 在进 SEG **之前**彻底展开：SEG 中不出现 `UserId` 与 `int32` 
 只处理真正的 struct 值。HIR 因此干净很多——但要按 §6.5 保留 module init 语义，不能把
 `fn_ref`/`module_const` 当无初始化依赖的裸指针。
 
-> **M1a 修订（随 S6a 落地；§4.8 文本不承载）**：dotted 模块值路径穿过
-> **module-valued 成员**时（`lib.math.sqrt`——`math` 是 `lib` 的 module 值成员，
-> 语料无 ≥3 段路径，S5 门禁未覆盖），直降 `cfg_lower_path.lowerPathValue`
-> 逐段重放 `module_ref` + 每 hop 一次 `load_member`（module 身份经 AIR 传递，
-> air.md §7），**不是**静态跳到最终模块。HIR 在值位叶（fn_ref/module_const/const）
-> 记录**已解析访问路径** `ExprNode.access_hops`（有序的中间 module 值成员：
-> 属主模块索引 + 成员名；首 hop 的模块即基座 `module_ref` 所指），HIR→CFG
-> 依序重放同款 `load_member` 并把 module_of 记到每个结果上；最终成员的行在链尾
-> 值上装载，**绝不新发**最终模块的 `module_ref`。调用位不受影响（直降直接调用
-> 按 qname，无行装载）。结构校验限制 path 只挂 const/fn_ref/module_const 叶；
-> 文本形式不携带 hop 身份（printer 显式拒绝，绝不静默丢弃）。
+> **实现说明（dotted 模块值路径；§4.8 文本不承载）**：dotted 模块值路径穿过
+> **module-valued 成员**时（`lib.math.sqrt`——`math` 是 `lib` 的 module 值成员），
+> 路径逐段重放 `module_ref` + 每 hop 一次 `load_member`（module 身份经 AIR
+> 传递，air.md §7），**不是**静态跳到最终模块。HIR 在值位叶
+> （fn_ref/module_const/const）记录**已解析访问路径** `ExprNode.access_hops`
+> （有序的中间 module 值成员：属主模块索引 + 成员名；首 hop 的模块即基座
+> `module_ref` 所指），HIR→CFG 依序重放同款 `load_member` 并把 module_of
+> 记到每个结果上；最终成员的行在链尾值上装载，**绝不新发**最终模块的
+> `module_ref`。调用位不受影响（直接调用按 qname，无行装载）。结构校验
+> 限制 path 只挂 const/fn_ref/module_const 叶；文本形式不携带 hop 身份
+> （printer 显式拒绝，绝不静默丢弃）。
 >
-> **M1a 修订（随 S6a 落地；§7.2 typed 行补齐）**：`byte` 无算术（checker 拒），
-> 唯一数值运算是比较，经 u32 家族降级；typed 行补 `lt/le/gt/ge.byte` 四行
-> （eq/ne.byte 已在 S4 登记），套件 byte 比较缺行即报未注册。
+> **实现说明（byte typed 行）**：`byte` 无算术（checker 拒），唯一数值运算
+> 是比较，经 u32 家族降级；typed 行含 `lt/le/gt/ge.byte` 四行（及
+> `eq/ne.byte`），套件 byte 比较缺行即报未注册。
 
 ## 8. SEG 桥与重写合法性
 
@@ -1419,21 +1405,22 @@ Monomorphic（或 SEG 优化后）的 HIR 落到现有 CFG AIR。原则：**把 
 - **树形（无 DAG）**：同一 `ExprId` 不重复出现在多个 operand / region
   切片（§3.7）。
 - **full-expression 栅栏**：每个节点归属一个 FullExprId；SEG 重写不跨
-  边界；A-Normal Form 合成 let 不推迟临时量销毁；清理 token 的
-  origin_expr 与登记一致（变换后重映射、registration_index 保持相对销毁
-  序，effects.md §11.2）。
+  边界；A-Normal Form 合成 let 不推迟临时量销毁。清理 token 的
+  origin_expr/registration_index 不变量（effects.md §11.2）是设计目标，
+  当前 builder **尚未填充** `CleanupFootprint`（见 §5.6、§5.7 与
+  [todo.md](todo.md)）。
 - **view/ownership 数据流**：每个节点按 operand view 与 OperandUse 给出一致
   的 view；`move` 后源 dead；borrow 不外逃其 lifetime。
-- **效果与求值序**（分两级，对应 §11 的落地档）：**结构校验（M1a 起）**——
-  只验 EvalPolicy 与结构一致（惰性 region 不在未选中时求值）。**已启用
-  分析校验（M1b 起，已在前端 pipeline 强制执行）**——每个可达节点必须
-  是 `ready`（`pending` 即违例），且存储摘要须是 `effect_transfer` 递归
-  汇总的**可靠上近似**（`derived ≤ stored`；`Top` 合法）；低于派生值的
-  注解（under-approximation）与越界摘要 id 拒绝。与函数 SCC fixpoint
-  摘要一致的要求随 M2b 启用：`validate` 重新跑 SCC least fixpoint
+- **效果与求值序**（分两级）：**结构校验**——只验 EvalPolicy 与结构一致
+  （惰性 region 不在未选中时求值）。**效果分析校验（前端 pipeline 强制
+  执行）**——每个可达节点必须是 `ready`（`pending` 即违例），且存储摘要
+  须是 `effect_transfer` 递归汇总的**可靠上近似**（`derived ≤ stored`；
+  `Top` 合法）；低于派生值的注解（under-approximation）与越界摘要 id
+  拒绝。`validate` 重新跑 SCC least fixpoint
   （`hir_effects.solveSummaries`）后才比对节点注解，因此对同一调用点
-  低报 callee 摘要的注解会被拒绝；间接/host/未知目标的派生仍为 `Top`。
-  不存派生 bool。
+  低报 callee 摘要的注解会被拒绝；间接 / 未知 Stilla 目标的派生仍为
+  `Top`，host 缺失声明（或声明未担保 `StillaExecution.forbidden`）的
+  派生也取 `Top`（effects.md §13）。不存派生 bool。
 - **registry 完整性（validateRegistry）**：启动时对 OpRegistry 跑 §3.5 的
   检查——每个 op 必有 semantics；可出现在 monomorphic HIR 的 op 必有
   lowering；`seg_encoding != null` 时必有对应 SEG 契约；typed-op effect
@@ -1445,12 +1432,12 @@ Monomorphic（或 SEG 优化后）的 HIR 落到现有 CFG AIR。原则：**把 
 `*_tests.zig` 并由 root.zig 导入）：
 
 - HIR 构建与打印的白盒测试放属主模块；跨模块行为（AST→HIR→CFG 的语义
-  等价回归，S6b 后为纯 HIR 回归）放 `hir_tests.zig` 黑盒文件；
+  等价回归）放 `hir_tests.zig` 黑盒文件；
 - **效果模型与查询的白盒测试放属主模块**：`effects.zig` 放格代数/law 测试
   （Bottom/Pure/Top、join/meet 律、通配、`;`/`⊔` 同式与摘要层交换、冲突/
   `stable` 边界、Pending 门），`hir_effects.zig` 放 transfer/函数摘要/派生
-  查询的定向用例；语料级效果发布与校验放 `hir_tests.zig` 黑盒（与 S4/S6b
-  语料 harness 共用）；
+  查询的定向用例；语料级效果发布与校验放 `hir_tests.zig` 黑盒（与语料
+  harness 共用）；
 - 不要长在 frontend_tests.zig 里：HIR 相关覆盖放进 hir 自有套件；
 - SEG 相关测试放独立的 seg 套件（`hir_seg_tests.zig` 黑盒 + `passes/hir_seg.zig` 白盒），
   每规则一个定向用例 + 不变量断言
@@ -1458,209 +1445,53 @@ Monomorphic（或 SEG 优化后）的 HIR 落到现有 CFG AIR。原则：**把 
 
 ### 10.3 语义等价回归
 
-- 无 SEG 的 monomorphic HIR 落地验收 = 现有全部 suite（`zig build test`）
-  不改语义地通过。等价门禁的历史与现状：**S5 差分门禁**在直降与 HIR 两
-  路径并存时对 examples（18）+ probes（25）断言 `cfg.print` 逐字节相等；
-  **S6a** 翻转默认并修复实现侧差异后全 suite 经 HIR 编译通过（文本等价
-  证据由该验收记录承载）；**S6b** 删除直降路径后，门禁转为纯 HIR 回归
-  （`hir_tests.zig` 的 AirRoundTrip：examples + probes 编译 → canonical AIR
-  → 独立 cfg parser round-trip）；
+- 无 SEG 的 monomorphic HIR 验收 = 现有全部 suite（`zig build test`）
+  不改语义地通过。`hir_tests.zig` 的 AirRoundTrip 验证 AIR **表示往返**
+  （examples + probes 编译 → canonical AIR → 独立 cfg parser round-trip），
+  不是语义等价证明；语义正确性由定向语义测试与优化开关前后的解释器
+  执行差分承载；
 - 每个 SEG 规则用例同时验证「rewrite 后校验通过」与「求值次数/销毁顺序
   不变」——后者靠 §8.4 的准入限定，不由校验器单独保证。
 
-## 11. 验收与落地范围
+## 11. 验收与落地现状
 
-本文的验收按**落地档**划分——每档是本文所描述形态的一个可独立验收的
-里程碑，前档通过才进入后档。效果分析强度沿档递增：M1a 落地结构 HIR
-（无 effect 字段、无效果判断），M1b 落地效果基础设施本身（§3.6 的加性
-`effect` 字段 + effects.md §14 的格/查询门/基础效果行），M2 才以派生查询
-驱动前端变换与 SEG。档位编号（M1a / M1b / M2a / M2b）用于实现
-与评审讨论的稳定指称。
+HIR 已是前端**唯一** lowering 路径：checker 注解 → HIR 构建 → 结构校验 →
+效果分析 + 注解校验 → module-const 依赖检查 → *[可选]* 消费者 / SEG →
+HIR→CFG lowering。可选变换每轮原位重写后重新跑结构 + 效果校验（§2.4）。
 
-**M1a — 结构 HIR（monomorphic、无 SEG、无效果分析）**：以现有 checker
-注解为输入，覆盖**全部现有语言形态**：AST → HIR（规范形：
-binder/region/pattern 统一、full-expression 标注、OpDescriptor 骨架、
-SemanticInfo 携带 ownership view）→ HIR→CFG lowering。**不携带 effect
-字段**（§3.6 修订：效果分析关闭，`effect` 是 M1b 的加性扩展），无
-effect-based 优化；§10.1 只跑结构校验。
+实现与测试文件：
 
-> **M1a 交付记录（S0–S6）**：结构 HIR 已实现并成为唯一前端路径——S6a
-> 翻转 `hir_stage` 默认 true（全 suite 1022 测试经 HIR 编译，实现侧
-> 修复 10 处、零测试放宽），S6b 删除直降路径与 toggle（净删直降代码
-> ~2100 行，17 files，+144/−2227）。验收 = §10.3：现有 suite 全绿 +
-> AIR 文本等价（S5 差分门禁）+ S6a 翻转验收 + S6b 删除后纯 HIR 回归。
-> SEG 与效果优化不在此档内；本档唯一验收是证明 HIR 是
-> semantics-preserving frontend seam。
->
-> **M1b 交付记录**：效果基础设施落地在独立的模型模块 `effects.zig`
-> （模式/抽象资源/规范化访问行/每模式 `All` 通配的固定乘积格、`join`/
-> `sequence`/内部 `latticeMeet`/`le`、`Pure==Bottom` 与 `Top`、行与摘要
-> interner、`Pending | Ready(EffectSummaryId)`、host metadata 与资源域
->（`stable`/`disjoint`）注册表、最小 `drop_effect`）与 HIR 集成 pass
-> `hir_effects.zig`（`effect_transfer` 按 descriptor 的 `own_effect`+
-> `TransferKind` 组合；**直接调用** DFS 传播函数摘要，递归/缺失/未知目标
-> → `Top`，无 SCC fixpoint；`OperandUse` 由 descriptor `UsePolicy` + callee
-> 签名/operand capability 逐 occurrence 解析；cleanup-free MVP 证明 +
-> `observed_effect`；派生查询 `isTotal` / `observableEffectFree` /
-> `canFloatAsTree` / `isDiscardable` / `isDuplicable` / `isSegSafe`（语义）/
-> `hasSegEncoding`（M1b 全 false；M2a 改为读 registry 的 `seg`）/
-> `isSegAdmissible` /
-> `isIntrinsicallySpeculatable` / `canSwapOperands` / `orderCompatible`）。
-> 每个公开查询都组合摘要 × operand uses × capability/view × ownership 门：
-> `observableEffectFree` 对任一模的**通配/未知资源**（含 `Read(Top)`）返回
-> false（§10.1 “无未知资源”）；`isIntrinsicallySpeculatable` 与
-> `canSwapOperands` 另加 cleanup 证明与递归 ownership 门（`move.effects ==
-> {}` 单独不足以放行，§6.2 强约束）；`ownershipGate` 递归 operand，嵌套
-> `move`/borrow 不得逃逸；`canSwapOperands` 另查父节点 operand 位与
-> full-expression 边界；`orderCompatible` 在资源/trap 输入上补两条保守
-> 规则：两个可能失败的位（trap/diverge）直接拒绝（失败顺序可观察，
-> §5.6），带 `Q` 的位除「同一 stable 域读对」外一律拒绝（§5.5）。
-> `validate` 先清 per-node memo 再重算摘要，故校验
-> 是同逻辑的新推导（能拒绝被篡改/过期的注解，且能定位到过期的调用者）。
-> `hir.zig` 加 `SemanticInfo.effect`、`OperandUse`、`OpDescriptor` 的
-> `uses`/`operand_uses`/`own_effect`/`transfer`（必填字段，typed 行完整）
-> 与 `Program` 的效果 interner；registry 启动校验加 typed-op 效果行检查。
-> 前端 seam 顺序变为 **build → 结构校验 → 效果分析/发布 → 效果校验 →
-> HIR→CFG lowering**，注解是加性 metadata，canonical 文本与 AIR 不变。
-> 验收 = `effects.zig` 的代数/law 测试（Bottom/Pure/Top、join/meet 律、
-> `;`/`⊔` 同式与摘要层交换、通配/冲突/`stable` 边界、Pending 门、Q 与
-> discard 分离）+ `hir_effects.zig` 白盒（typed div/rem trap 精化、递归
-> `Top`、module-const 读、host 缺省 `Top`/声明精化、cleanup 拒绝、注解
-> 篡改拒绝）+ `hir_tests.zig` 的语料级效果发布/校验；全 suite 全绿。
-> **不在本档**：函数 SCC least fixpoint（effects.md §8.2）、module-const
-> 初始化/teardown 摘要化检查（§7）、精确 `drop_effect`/CleanupFootprint
-> 登记、host ABI metadata 接线、SEG 与三个消费者 pass。
+- 数据结构 `hir.zig`；构建 `hir_build.zig`（+ `hir_build_block` /
+  `_expr` / `_path` / `_call` / `_control` / `_pattern`）；
+- 文本形式 `hir_print.zig` / `hir_parse.zig`（§4）；
+- 结构校验 `hir_validate.zig`（§10.1 第一级）；
+- 效果模型 `effects.zig`；HIR 集成 / 派生查询 / 函数摘要 SCC fixpoint /
+  精确 `drop_effect(T)` / module-const 检查 `hir_effects.zig`；
+- 消费者：dead-let + selective A-Normal Form `hir_simplify.zig`
+  （`--simplify`，默认关）；SEG v1 `hir_seg.zig`（`--seg`，默认关）；
+- lowering `hir_lower.zig`（+ `hir_lower_expr` / `_control` / `_call` /
+  `_pattern`），复用 `lower.zig` / `cfg_lower_*` 发射机制；
+- 测试：白盒在属主模块 `test{}` 内，黑盒 `hir_tests.zig` /
+  `hir_simplify_tests.zig` / `hir_seg_tests.zig`。
 
-**M1b — 效果基础设施**：落地 effects.md §14 的最小效果模型（MayTrap 含
-panic、MayDiverge、nondeterministic、`Host(resource, Read/Write)`、
-`ModuleConst(Read)`；OperandUse 独立；不跟踪 `may_return_normally`）与
-固定乘积格、`Pending`/`Ready` 门、typed-opcode 基础效果行、
-`effect_transfer`、cleanup-aware 查询门（§6.2，effects.md §10–§11）。
-函数摘要只做**直接调用**（非递归）的基本传播；递归 / 缺失 / 未知目标
-一律保守 `Top`。函数 SCC fixpoint（effects.md §8.2）与 module-const
-初始化/teardown 的摘要化检查（effects.md §7）**不在本档**（归 M2b）。
-精确 drop 摘要可后置，但**未知 cleanup 阻止删除、浮动、复制与 SEG
-准入**，不能只凭结果 Copy 放行。本档验收 = effects.md §14 的 **MVP 前置
-条件**齐备并通过不依赖消费者 pass 的代数/law 测试（Bottom/Pure/Top 与
-组合、`;`/`⊔` 同式与摘要层交换、Pending/Ready 门、cleanup 拒绝等）；
-「dead-let / selective A-Normal Form / SEG-safe 三判定无 `switch(op)`
-特判」的验收属 M2b。
+默认关闭的优化：dead-let / selective A-Normal Form（`--simplify`）与 SEG v1
+（`--seg`）；两者都按派生查询准入、无 `switch(op)` 合法性白名单，每轮重导
+效果分析、迭代到不动点后重跑结构 + 效果校验。SEG 的 op 集为
+`const` / `local` / `let` / `lambda` / `call` / `if` / `struct_make` /
+`field_get` + numeric ops，规则集为 β→let（boundary rewrite，契约 §8.4）+
+let 化简 + constant folding + integer 代数；extraction cost 用最小节点数 +
+确定性 tie-break。
 
-**M2 — 优化消费**：
+落地档映射（历史里程碑编号，供实现与评审讨论引用）：
 
-- **M2a（SEG v1 规则子集）**：`const / local / let / lambda / call /
-  if / struct_make / field_get` + numeric ops；规则只上 **β（→ let，
-  boundary rewrite，契约 §8.4）+ let 化简 + constant folding + integer
-  代数化简**（§8.3 的 ✅ 首行子集；β 的 λ 体按 §8.4 限已证明
-  cleanup-free 的单表达式）；island 准入（§8.1）+ 替换后局部再验证
-  （§2.4）；extraction cost 用**最小节点数 + 确定性 tie-break**（§8.2）；
-  默认关，编译时间预算另测。
+| 档 | 内容 | 落点 |
+| --- | --- | --- |
+| M1a | 结构 HIR：AST→HIR 构建、结构校验、HIR→CFG lowering；直降路径删除后成为唯一前端路径 | `hir_build.zig` / `hir_validate.zig` / `hir_lower.zig` |
+| M1b | 效果基础设施：`SemanticInfo.effect`、固定乘积格、`effect_transfer`、cleanup 门、派生查询、host 语义注册表 | `effects.zig` / `hir_effects.zig` |
+| M2a | SEG v1 规则子集（β / let / 常折叠 / 整数代数），opt-in | `hir_seg.zig` |
+| M2b | 摘要化消费者：函数摘要 SCC least fixpoint、精确 `drop_effect(T)`、module-const 检查、dead-let / selective ANF | `hir_effects.zig` / `hir_simplify.zig` |
 
-> **M2a 交付记录**：SEG v1 落在独立 pass `passes/hir_seg.zig`，由
-> `frontend.Options.seg` / CLI `--seg` 开启（默认关）。registry 面：
-> `OpDescriptor` 增 `seg: ?SegEncoding`（`atom` / `slot` / `binder` /
-> `app` / `branch` / `construct` / `project` / `numeric`），核心行按
-> §11 M2a op 集登记、全部 typed 行经 comptime 映射为 `.numeric`；
-> `validateRegistry` 断言 typed ⇔ `.numeric` 且其余 kind 与 op class
-> 配对，`hir_effects.hasSegEncoding` 改为读 registry。pass 面：
-> **递归 island 准入**（`seg != null` ∧ `isSegSafe` ∧ 每个 operand /
-> region body 同为 island，§8.1）在每轮开头从**重新推导**的效果分析
-> 计算；四组规则（β→let、let 化简（dead let / used-once 转发 /
-> trivial-atom 转发）、typed 常折叠、整数恒等式）、最小节点数抽取
-> （`costOf`，规则序为确定性 tie-break）、β 契约（§8.4：call 自身
-> `isSegSafe`、实参 Copy 且 `isDiscardable`、λ 体 `isSegSafe` 且非
-> `seq`、fresh binder 克隆 + LTR 嵌套 let、每个 λ 记录每次编译至多
-> 内联一次以防递归展开）。重写 **in-place**（HIR 树每节点单父，
-> arena 追加；growable flat buffer 的切片在任何 append 前先拷出）；
-> 每轮重跑效果分析，迭代到不动点（`max_iterations`），调用方再跑
-> 结构 + 效果校验（§2.4）。验收 = `passes/hir_seg.zig` 白盒（常折叠
-> 跨 32/64/float rep、wrapping、trap 保留、整数恒等式、无 unsigned
-> abs）+ `hir_seg_tests.zig` 黑盒（β 实参单次求值 / effectful 体拒绝、
-> `div` 与 float 不进 island、常量 if/and/or 选择、不动点与确定性、
-> examples+probes 全语料 `--seg` 编译 + AIR round-trip、SEG-on/off
-> 解释器执行逐字相等）；全 suite 全绿（1118）。另以 `stsmith` 随机程序
-> 做差分：60 seeds 在 SEG-on/off 下解释器输出（含退出码）逐字相等，
-> 其中 55/60 的 AIR 确实被改变（证明 pass 在真实程序上生效而非空跑）。
-> **不在本档**：match
-> 进 SEG（下一条）、associativity/commutativity 搜索、CSE、dead-let /
-> selective A-Normal Form 的无 `switch(op)` 摘要化通用形式（归 M2b）、
-> Unique/borrow/drop 入 island。
-
-- **M2b（摘要化消费者）**：dead-let / selective A-Normal Form / SEG-safe
-  三个判定以派生查询驱动、无 `switch(op)` 特判（effects.md §12）；函数
-  SCC fixpoint（effects.md §8.2）驱动 Core 的初始化/teardown 检查，
-  替换 checker 特设分析。
-
-> **M2b 交付记录**：四项落地。
->
-> **① 函数摘要 SCC least fixpoint**（`passes/hir_effects.zig`）：调用图
-> 建在分析实际使用的目标上（callee operand 是已解析 `fn_ref` 到函数记录
-> 的 `call`；间接/host/未知目标不进图，取 `Top`，§9.1），Kosaraju 求
-> SCC 后按 **callee-first** 顺序逐个 Kleene 迭代：`cur[f] = seed ⊔ body_f`，
-> 递归 SCC 播种 `Diverge`（§8.2），每轮清 per-node memo 做**同步更新**
-> （单调、有限格收敛）。同 SCC 成员读 `cur`，已完成 SCC 读 final；
-> `drop` 节点把类型的 drop-hook 函数加入调用图（否则 hook 摘要可能晚于
-> 依赖它的 `drop` 求解）。递归函数不再一律 `Top`：`fn loop(n){loop(n)}`
-> 得到 `(∅, false, true, false)`，`validate` 重新跑同一 fixpoint 后
-> 拒绝任何低于派生值的 call 注解（§10.1 的 SCC 一致性要求自此生效）。
->
-> **② 精确 `drop_effect(T)` 全链**（`hir_effects.zig`）：Copy → `{}`；
-> struct → 自身 hook 摘要 `;` Unique 字段按**逆声明序**的
-> 递归（含 hook）；union → 候选 variant 用 `⊔`、每个 variant 的 payload
-> 逆序 `;`；tuple → 逆序；`list`/`box` → 元素/内层递归；host opaque →
-> `Release(Host(hash(host_id)))`；`any`/`hostdata`/未解析 named → `Top`。
-> 递归类型以"重入即返回 `pure`（格底）"的方式取得 least fixpoint（may
-> 摘要的有限展开并集；环上重复的访问幂等），不设展开上限。
->
-> **③ 摘要驱动的 module-const 初始化/teardown 检查**
-> （`Analysis.checkModuleDependencies`，替换 `checker_validate.zig` 的
-> AST 级 `InitOrder` walk）：初始化方向用函数摘要的 `Read(ModuleConst)`
-> 集合（直接调用 transitive；间接/未知目标为 read 通配 → 保守拒绝）；
-> teardown 方向用 `drop_effect(type(C))` 的**全链**读集（闭上前者只走类型
-> 直 hook、容器元素 hook 未走查的缺口）。两条规则对称：同一模块内按声明序
-> 比较（跨模块读必然来自已初始化的依赖，见 effects.md §7）。非法读的
-> 诊断文本与原 walker 同形（含「calls '{f}', which reads …」的传递归因；
-> callee 名以限定名报出），对应用例仍按子串断言。
-> `InitOrder` 从 checker 删除，对应用例迁到 `hir_tests.zig`（走前端
-> phase-3 seam）。
->
-> **④ dead-let / selective A-Normal Form 消费者**
-> （`passes/hir_simplify.zig`，`--simplify` / `Options.simplify`，默认关）：
-> 每轮重导效果分析、原位重写、迭代到不动点，随后重新跑结构 + 效果校验。
-> dead-let：单 binder、无 pattern、`B ∉ FV(body)` ∧ `isDiscardable(init)`
-> → 删除 `let`（`div` 因 `may_trap` 自然保留，§10.2）。ANF：父节点
-> `EvalPolicy == StrictLTR` 时，取**第一个** `!canFloatAsTree` 的 operand
-> 提为合成 `let`（先前的 operand 均可浮动，LTR 不变；每轮只提一个，链从外
-> 向内）。两条规则的应用层（shape）与合法性层（派生查询）分开：合法性命
-> 中无 `switch(op)`。**Unique operand 暂不物化**：合成 `let` 的绑定在作用
-> 域末尾销毁，而原匿名临时量在 full-expression 边界销毁；证明二者重合需要
-> `CleanupFootprint`/FE 登记（effects.md §11.2，未建模），故 ANF 只提 Copy
-> operand，不动 Unique（顺序不变、零重排）。SEG-safe 判定及其无 `switch(op)`
-> 准入在 M2a 已交付（island 成员 = `seg != null` ∧ `isSegSafe` ∧ 递归子项）。
->
-> 验收 = `hir_effects.zig` 白盒（递归 SCC 精确化 + 真实读保留、字段/hook
-> 链 drop_effect、call 注解不得低报 SCC 摘要、host 缺省摘要）+
-> `hir_simplify.zig` 白盒（dead-let、trap/host/Unique 保留、ANF 首项 LTR、
-> Unique 不物化）+ `hir_tests.zig` 的 module-dep 语料（10 例，含原先在
-> checker 侧的 7 例）+ `hir_simplify_tests.zig` 黑盒（规则负例、不动点/
-> 确定性、examples+probes 全语料 `--simplify` 编译 + AIR round-trip）+
-> **解释器差分**：examples+probes 共 43 个程序在 `--simplify` on/off 下
-> 解释器输出（含 panic 信息与退出码）逐字相等，其中 8 个的 canonical AIR
-> 确实被改变（证明 pass 在真实程序上生效而空跑）。全 suite 全绿。
-> **不在本档**：match 进 SEG（下一条）、associativity/commutativity 搜索、
-> CSE、Unique operand 的 ANF 物化（待 CleanupFootprint）、host ABI
-> metadata 接线、effectful β 实参放开（effects.md §14 的「再后」项）。
-
-- **match 进 SEG**：Copy-only、known variant → let；验证架构在更大语言
-  面上成立。M2a 未包含（其 op 集不含 `match`、规则集不含 known-variant
-  化简），列为 M2a 之后的下一项。
-
-**再后**（后续方向，超出上述范围，随实现需求另行定义）：
-
-- Unique / consuming / borrowed 情形进 SEG（需线性等式系统）；
-- 「先建 Typed HIR 再特化」的 Target 形态（monomorphization / ownership
-  检查在 HIR 上完成）；
-- SEG 从可选变为默认，并测编译时间预算。
+尚未实现：`match` 进 SEG。完整清单、依赖与验收条件见 [todo.md](todo.md)。
 
 ## 12. 开放问题
 
