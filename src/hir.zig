@@ -428,11 +428,41 @@ pub const TransferKind = enum {
     field_get,
 };
 
+/// SEG term-encoding kind (hir.md §3.5 `seg`, §8.2): the registry facet
+/// saying an op takes part in the v1 SEG projection and which term shape
+/// it encodes to. `null` is a hard island boundary — `encode` returns
+/// `None` (hir.md §8.2). The kind is the small "SEG type contract"
+/// `validateRegistry` cross-checks against the op's class: a typed
+/// (rep-parameterized) row encodes as `.numeric`; `.atom`/`.slot`
+/// require an atom; `.binder` a binding/function op; `.app` the call;
+/// `.branch` a control op; `.construct`/`.project` aggregates.
+pub const SegEncoding = enum {
+    /// Compile-time literal (const).
+    atom,
+    /// Binder reference — projects to a SLOT (local).
+    slot,
+    /// Binding term (let continuation region / lambda).
+    binder,
+    /// Application (call).
+    app,
+    /// Conditional term (if / and / or).
+    branch,
+    /// Aggregate construction (struct_make).
+    construct,
+    /// Field projection (field_get).
+    project,
+    /// Typed (rep-parameterized) numeric instance (`add.i32`, …).
+    numeric,
+};
+
 /// One registry entry. Facets beyond identity/shape — `verify` (S3),
 /// `print`/parser symmetry (S2), `lower_to_air` (S5), constant folding —
 /// attach to this row as their passes land; no no-op callbacks or
 /// fabricated fields are added to fake completeness.
 pub const OpDescriptor = struct {
+    /// SEG encoding, when this op is in the v1 island set (hir.md §8.1,
+    /// §11 M2a). Default `null` = the operation forms an island boundary.
+    seg: ?SegEncoding = null,
     name: []const u8,
     class: OpClass,
     operands: OperandShape,
@@ -467,20 +497,20 @@ pub const OpDescriptor = struct {
 /// the §7.1 table fixes: category, operand/region shape (from §4.4 text
 /// forms), and §5.5 evaluation policy.
 const core_descriptors = [_]OpDescriptor{
-    .{ .name = "const", .class = .atom, .operands = .none, .regions = .none, .policy = .strict_ltr, .uses = .none, .own_effect = effects.pure, .transfer = .atom },
-    .{ .name = "local", .class = .atom, .operands = .none, .regions = .none, .policy = .strict_ltr, .uses = .none, .own_effect = effects.pure, .transfer = .atom },
+    .{ .name = "const", .class = .atom, .operands = .none, .regions = .none, .policy = .strict_ltr, .uses = .none, .own_effect = effects.pure, .transfer = .atom, .seg = .atom },
+    .{ .name = "local", .class = .atom, .operands = .none, .regions = .none, .policy = .strict_ltr, .uses = .none, .own_effect = effects.pure, .transfer = .atom, .seg = .slot },
     .{ .name = "fn_ref", .class = .atom, .operands = .none, .regions = .none, .policy = .strict_ltr, .uses = .none, .own_effect = effects.pure, .transfer = .atom },
     .{ .name = "module_const", .class = .atom, .operands = .none, .regions = .none, .policy = .strict_ltr, .uses = .none, .own_effect = effects.pure, .transfer = .module_const },
-    .{ .name = "let", .class = .binding, .operands = .one, .regions = .one, .policy = .region, .uses = .operand_capability, .own_effect = effects.pure, .transfer = .let_ },
+    .{ .name = "let", .class = .binding, .operands = .one, .regions = .one, .policy = .region, .uses = .operand_capability, .own_effect = effects.pure, .transfer = .let_, .seg = .binder },
     .{ .name = "seq", .class = .seq, .operands = .list, .regions = .none, .policy = .strict_ltr, .uses = .all_read, .own_effect = effects.pure, .transfer = .strict_ltr },
-    .{ .name = "lambda", .class = .function, .operands = .none, .regions = .one, .policy = .region, .uses = .none, .own_effect = effects.pure, .transfer = .lambda },
-    .{ .name = "call", .class = .function, .operands = .callee_and_args, .regions = .none, .policy = .strict_ltr, .uses = .callee_params, .own_effect = effects.pure, .transfer = .call },
-    .{ .name = "if", .class = .control, .operands = .one, .regions = .two, .policy = .branch, .uses = .all_read, .own_effect = effects.pure, .transfer = .branch },
-    .{ .name = "and", .class = .control, .operands = .one, .regions = .two, .policy = .short_circuit, .uses = .all_read, .own_effect = effects.pure, .transfer = .branch },
-    .{ .name = "or", .class = .control, .operands = .one, .regions = .two, .policy = .short_circuit, .uses = .all_read, .own_effect = effects.pure, .transfer = .branch },
+    .{ .name = "lambda", .class = .function, .operands = .none, .regions = .one, .policy = .region, .uses = .none, .own_effect = effects.pure, .transfer = .lambda, .seg = .binder },
+    .{ .name = "call", .class = .function, .operands = .callee_and_args, .regions = .none, .policy = .strict_ltr, .uses = .callee_params, .own_effect = effects.pure, .transfer = .call, .seg = .app },
+    .{ .name = "if", .class = .control, .operands = .one, .regions = .two, .policy = .branch, .uses = .all_read, .own_effect = effects.pure, .transfer = .branch, .seg = .branch },
+    .{ .name = "and", .class = .control, .operands = .one, .regions = .two, .policy = .short_circuit, .uses = .all_read, .own_effect = effects.pure, .transfer = .branch, .seg = .branch },
+    .{ .name = "or", .class = .control, .operands = .one, .regions = .two, .policy = .short_circuit, .uses = .all_read, .own_effect = effects.pure, .transfer = .branch, .seg = .branch },
     .{ .name = "match", .class = .control, .operands = .one, .regions = .arms, .policy = .match, .uses = .operand_capability, .own_effect = effects.pure, .transfer = .match },
-    .{ .name = "struct_make", .class = .aggregate, .operands = .list, .regions = .none, .policy = .strict_ltr, .uses = .operand_capability, .own_effect = effects.pure, .transfer = .strict_ltr },
-    .{ .name = "field_get", .class = .aggregate, .operands = .one, .regions = .none, .policy = .strict_ltr, .uses = .all_read, .own_effect = effects.pure, .transfer = .field_get },
+    .{ .name = "struct_make", .class = .aggregate, .operands = .list, .regions = .none, .policy = .strict_ltr, .uses = .operand_capability, .own_effect = effects.pure, .transfer = .strict_ltr, .seg = .construct },
+    .{ .name = "field_get", .class = .aggregate, .operands = .one, .regions = .none, .policy = .strict_ltr, .uses = .all_read, .own_effect = effects.pure, .transfer = .field_get, .seg = .project },
     .{ .name = "variant_make", .class = .aggregate, .operands = .list, .regions = .none, .policy = .strict_ltr, .uses = .operand_capability, .own_effect = effects.pure, .transfer = .strict_ltr },
     .{ .name = "tuple_make", .class = .aggregate, .operands = .list, .regions = .none, .policy = .strict_ltr, .uses = .operand_capability, .own_effect = effects.pure, .transfer = .strict_ltr },
     .{ .name = "list_make", .class = .aggregate, .operands = .list, .regions = .none, .policy = .strict_ltr, .uses = .operand_capability, .own_effect = effects.pure, .transfer = .strict_ltr },
@@ -623,9 +653,18 @@ const typed_descriptors = [_]OpDescriptor{
     .{ .name = "not.bool", .class = .numeric, .operands = .one, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .bool, .uses = .all_read, .own_effect = effects.pure, .transfer = .strict_ltr },
 };
 
+/// Every typed (numeric) row is a SEG island member (hir.md §11 M2a:
+/// "+ numeric ops"); stamp the encoding here instead of repeating it on
+/// each of the ~110 rows.
+const typed_seg_descriptors = blk: {
+    var rows = typed_descriptors;
+    for (&rows) |*r| r.seg = .numeric;
+    break :blk rows;
+};
+
 /// The single identity table (hir.md §3.5): core and typed entries share
 /// one OpId space.
-pub const op_descriptors: []const OpDescriptor = &(core_descriptors ++ typed_descriptors);
+pub const op_descriptors: []const OpDescriptor = &(core_descriptors ++ typed_seg_descriptors);
 
 pub const OpRegistry = struct {
     entries: []const OpDescriptor,
@@ -701,6 +740,23 @@ pub const OpRegistry = struct {
             // declaration.
             std.debug.assert(!e.own_effect.may_diverge);
             std.debug.assert(!e.own_effect.nondeterministic);
+
+            // SEG encoding contract (hir.md §3.5/§8.2, §11 M2a): typed
+            // rows encode as `.numeric` and only they do; every other
+            // encoding kind pairs with the op class it belongs to. A row
+            // outside the v1 island set carries no encoding at all.
+            if (e.typed) {
+                std.debug.assert(e.seg == .numeric);
+            } else if (e.seg) |enc| {
+                std.debug.assert(switch (enc) {
+                    .atom, .slot => e.class == .atom,
+                    .binder => e.class == .binding or e.class == .function,
+                    .app => e.class == .function,
+                    .branch => e.class == .control,
+                    .construct, .project => e.class == .aggregate,
+                    .numeric => false, // typed-only, handled above
+                });
+            }
         }
     }
 };
@@ -1378,6 +1434,34 @@ test "registry: typed instances carry their scalar rep" {
     try t.expect(registry.id("add.i32").? != registry.id("add.u32").?);
     // The rep maps to the cfg.Type the node will carry.
     try t.expectEqual(cfg.Type{ .primitive = .uint64 }, ScalarRep.u64.toCfgType());
+}
+
+test "registry: the M2a SEG island set carries `seg`, nothing else does" {
+    // hir.md §11 M2a: `const / local / let / lambda / call / if /
+    // struct_make / field_get` + numeric ops.
+    const encoded = [_]struct { []const u8, SegEncoding }{
+        .{ "const", .atom },
+        .{ "local", .slot },
+        .{ "let", .binder },
+        .{ "lambda", .binder },
+        .{ "call", .app },
+        .{ "if", .branch },
+        .{ "struct_make", .construct },
+        .{ "field_get", .project },
+        .{ "add.i32", .numeric },
+        .{ "div.i64", .numeric },
+        .{ "eq.str", .numeric },
+    };
+    for (encoded) |pair| {
+        const op = registry.get(registry.id(pair[0]) orelse return error.TestUnexpectedResult);
+        try t.expect(op.seg != null);
+        try t.expectEqual(pair[1], op.seg.?);
+    }
+    // Hard island boundaries (hir.md §8.2 `encode` → None).
+    for ([_][]const u8{ "fn_ref", "module_const", "seq", "match", "tuple_make", "list_make", "variant_make", "move", "borrow", "drop", "any_pack", "num_cast", "panic" }) |name| {
+        const op = registry.get(registry.id(name) orelse return error.TestUnexpectedResult);
+        try t.expect(op.seg == null);
+    }
 }
 
 test "text passes are analyzed (forces hir_print/hir_parse analysis in test builds)" {

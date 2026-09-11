@@ -1,6 +1,6 @@
 # Stilla HIR — 高级别中间表示
 
-> **Status：M1a / M1b implemented；M2（SEG 与消费者 pass）仍为设计提案。**
+> **Status：M1a / M1b / M2a implemented；M2b（摘要化消费者）仍为设计提案。**
 >
 > 本文为编译前端定义一个高级别中间表示 HIR：binder/region 化的单态表达式
 > 树、registry 化的 op 语义、文本形式与受限 SEG 投影。**M1a 范围（结构
@@ -10,10 +10,14 @@
 > `SemanticInfo.effect`、固定乘积格、`effect_transfer`、函数摘要（直接
 > 调用传播，递归 → `Top`）、cleanup-aware 派生查询与 §10.1 第二级校验
 > 随 [effects.md](effects.md) §14 实现（§3.6、§10.1、§11 已更新为已实现
-> 形态）。M2（SEG、dead-let / selective A-Normal Form 等消费者 pass）
-> 仍是提案；文中「直降/落地前基线」措辞均为历史参照。实施记录见本档
-> §11 的 M1a/M1b 交付记录（PROGRESS.md 已于 2026-09-10 随 hir_build 拆分
-> 提交删除，历史记录见 git 与 §11）。
+> 形态）。**M2a（SEG v1 规则子集）已落地**：`OpDescriptor.seg` 编码面、
+> island 准入、β/let/常折叠/整数代数四组规则、最小节点数抽取与替换后与
+> 效果再验证随 `passes/hir_seg.zig` 实现，`--seg` / `frontend.Options.seg`
+> 默认关（§11 M2a 交付记录）。M2b（dead-let / selective A-Normal Form /
+> 函数 SCC fixpoint 等摘要化消费者）仍是提案；文中「直降/落地前基线」
+> 措辞均为历史参照。实施记录见本档 §11 的 M1a/M1b/M2a 交付记录
+> （PROGRESS.md 已于 2026-09-10 随 hir_build 拆分提交删除，历史记录见
+> git 与 §11）。
 
 ## 1. 问题
 
@@ -1429,7 +1433,8 @@ Monomorphic（或 SEG 优化后）的 HIR 落到现有 CFG AIR。原则：**把 
   查询的定向用例；语料级效果发布与校验放 `hir_tests.zig` 黑盒（与 S4/S6b
   语料 harness 共用）；
 - 不要长在 frontend_tests.zig 里：HIR 相关覆盖放进 hir 自有套件；
-- SEG 相关测试放独立的 seg 套件，每规则一个定向用例 + 不变量断言
+- SEG 相关测试放独立的 seg 套件（`hir_seg_tests.zig` 黑盒 + `passes/hir_seg.zig` 白盒），
+  每规则一个定向用例 + 不变量断言
   （fresh binder、full-expr 不跨、无 effect 重复求值、无 borrow 进 island）。
 
 ### 10.3 语义等价回归
@@ -1479,7 +1484,8 @@ effect-based 优化；§10.1 只跑结构校验。
 > 签名/operand capability 逐 occurrence 解析；cleanup-free MVP 证明 +
 > `observed_effect`；派生查询 `isTotal` / `observableEffectFree` /
 > `canFloatAsTree` / `isDiscardable` / `isDuplicable` / `isSegSafe`（语义）/
-> `hasSegEncoding`（M1b 全 false）/ `isSegAdmissible` /
+> `hasSegEncoding`（M1b 全 false；M2a 改为读 registry 的 `seg`）/
+> `isSegAdmissible` /
 > `isIntrinsicallySpeculatable` / `canSwapOperands` / `orderCompatible`）。
 > 每个公开查询都组合摘要 × operand uses × capability/view × ownership 门：
 > `observableEffectFree` 对任一模的**通配/未知资源**（含 `Read(Top)`）返回
@@ -1530,12 +1536,44 @@ panic、MayDiverge、nondeterministic、`Host(resource, Read/Write)`、
   cleanup-free 的单表达式）；island 准入（§8.1）+ 替换后局部再验证
   （§2.4）；extraction cost 用**最小节点数 + 确定性 tie-break**（§8.2）；
   默认关，编译时间预算另测。
+
+> **M2a 交付记录**：SEG v1 落在独立 pass `passes/hir_seg.zig`，由
+> `frontend.Options.seg` / CLI `--seg` 开启（默认关）。registry 面：
+> `OpDescriptor` 增 `seg: ?SegEncoding`（`atom` / `slot` / `binder` /
+> `app` / `branch` / `construct` / `project` / `numeric`），核心行按
+> §11 M2a op 集登记、全部 typed 行经 comptime 映射为 `.numeric`；
+> `validateRegistry` 断言 typed ⇔ `.numeric` 且其余 kind 与 op class
+> 配对，`hir_effects.hasSegEncoding` 改为读 registry。pass 面：
+> **递归 island 准入**（`seg != null` ∧ `isSegSafe` ∧ 每个 operand /
+> region body 同为 island，§8.1）在每轮开头从**重新推导**的效果分析
+> 计算；四组规则（β→let、let 化简（dead let / used-once 转发 /
+> trivial-atom 转发）、typed 常折叠、整数恒等式）、最小节点数抽取
+> （`costOf`，规则序为确定性 tie-break）、β 契约（§8.4：call 自身
+> `isSegSafe`、实参 Copy 且 `isDiscardable`、λ 体 `isSegSafe` 且非
+> `seq`、fresh binder 克隆 + LTR 嵌套 let、每个 λ 记录每次编译至多
+> 内联一次以防递归展开）。重写 **in-place**（HIR 树每节点单父，
+> arena 追加；growable flat buffer 的切片在任何 append 前先拷出）；
+> 每轮重跑效果分析，迭代到不动点（`max_iterations`），调用方再跑
+> 结构 + 效果校验（§2.4）。验收 = `passes/hir_seg.zig` 白盒（常折叠
+> 跨 32/64/float rep、wrapping、trap 保留、整数恒等式、无 unsigned
+> abs）+ `hir_seg_tests.zig` 黑盒（β 实参单次求值 / effectful 体拒绝、
+> `div` 与 float 不进 island、常量 if/and/or 选择、不动点与确定性、
+> examples+probes 全语料 `--seg` 编译 + AIR round-trip、SEG-on/off
+> 解释器执行逐字相等）；全 suite 全绿（1118）。另以 `stsmith` 随机程序
+> 做差分：60 seeds 在 SEG-on/off 下解释器输出（含退出码）逐字相等，
+> 其中 55/60 的 AIR 确实被改变（证明 pass 在真实程序上生效而非空跑）。
+> **不在本档**：match
+> 进 SEG（下一条）、associativity/commutativity 搜索、CSE、dead-let /
+> selective A-Normal Form 的无 `switch(op)` 摘要化通用形式（归 M2b）、
+> Unique/borrow/drop 入 island。
+
 - **M2b（摘要化消费者）**：dead-let / selective A-Normal Form / SEG-safe
   三个判定以派生查询驱动、无 `switch(op)` 特判（effects.md §12）；函数
   SCC fixpoint（effects.md §8.2）驱动 Core 的初始化/teardown 检查，
   替换 checker 特设分析。
 - **match 进 SEG**：Copy-only、known variant → let；验证架构在更大语言
-  面上成立（并入 M2a 或紧随其后）。
+  面上成立。M2a 未包含（其 op 集不含 `match`、规则集不含 known-variant
+  化简），列为 M2a 之后的下一项。
 
 **再后**（后续方向，超出上述范围，随实现需求另行定义）：
 

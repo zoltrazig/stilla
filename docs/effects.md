@@ -1268,6 +1268,20 @@ SEG-safe）与函数 SCC fixpoint、module-const 检查属 **M2**：M1b 只验�
 > 外一律拒绝（§5.5）；`ownershipGate` 递归 operand，嵌套
 > `move`/borrow 不得逃逸；注解校验先清 per-node memo 再重算摘要，故校验
 > 是同逻辑的新推导（能拒绝被篗改/过期的注解并定位到过期的调用者）。
+>
+> **M2a 实施记录（SEG-safe 消费者）**：SEG v1 落在 `src/passes/hir_seg.zig`
+> （见 hir.md §11 M2a 交付记录），由 `frontend.Options.seg` / `--seg` 开启，
+> 默认关。准入完全由派生查询驱动：island 成员 = registry 的 `seg`
+> 非空 ∧ `isSegSafe` ∧ 每个 operand / region body 同为 island；
+> `div.i32`（may_trap）、`move`/`borrow`/`drop`、host 调用、跨 full-
+> expression 的节点自然落在 island 外（无 `switch(op)` 白名单）。
+> 本档只把 `isSegSafe` 接到四组 v1 规则（β/let/常折叠/整数代数）；
+> dead-let 与 selective A-Normal Form 的无 `switch(op)` 摘要化通用形式、
+> 函数 SCC fixpoint、module-const 初始化/teardown 检查仍归 M2b（本节
+> 验收标准第一条的“三个 pass 无 switch(op)”完整验收在 M2b 执行）。
+> 本档验收见 hir.md §11 M2a 记录：白盒规则/代价测试 + 黑盒定向用例
+> （β 单次求值、div/float 拒绝、常量分支、不动点/确定性）+ 全语料
+> `--seg` 编译与 AIR round-trip + SEG-on/off 解释器执行逐字相等。
 
 **MVP 前置条件（不能延期）**：
 

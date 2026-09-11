@@ -674,13 +674,13 @@ pub const Analysis = struct {
         return self.ownershipGate(id);
     }
 
-    /// Whether the op carries a SEG encoding. No op does in M1b — SEG is
-    /// M2a (docs/hir.md §11); this is the separate encoding conjunct so
-    /// `isSegSafe` can be tested on its own.
+    /// Whether the op carries a SEG encoding (hir.md §3.5 `seg`, §8.1).
+    /// The v1 M2a island set is registered in the OpRegistry; admission
+    /// also needs the semantic predicate (`isSegSafe`), so a `true` here
+    /// is necessary but not sufficient (`isSegAdmissible`).
     pub fn hasSegEncoding(self: *Analysis, op: hir.OpId) bool {
         _ = self;
-        _ = op;
-        return false;
+        return hir.registry.get(op).seg != null;
     }
 
     pub fn isSegAdmissible(self: *Analysis, id: hir.ExprId) Error!bool {
@@ -869,9 +869,10 @@ test "hir_effects: pending facts fail queries closed; queries read annotations" 
     try testing.expect(try an.isDuplicable(body));
     try testing.expect(try an.isSegSafe(body));
     try testing.expect(try an.canFloatAsTree(body));
-    // Semantic safety is separate from encoding support (M1b registers none).
-    try testing.expect(!try an.isSegAdmissible(body));
-    try testing.expect(!an.hasSegEncoding(f.built.program.node(body).op));
+    // Semantic safety is separate from encoding support (M2a registers
+    // the island set, so this `add.i32` body is both safe and encodable).
+    try testing.expect(an.hasSegEncoding(f.built.program.node(body).op));
+    try testing.expect(try an.isSegAdmissible(body));
 }
 
 test "hir_effects: stored annotations are sound over-approximations; tampering is rejected" {

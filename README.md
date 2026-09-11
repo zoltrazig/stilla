@@ -36,7 +36,14 @@ and the trailing section lists what the code and docs still mark open.
   `effect_transfer`, direct-call function summaries, `OperandUse`, the
   cleanup-aware legality queries (`discardable` / `duplicable` /
   `isSegSafe` …) and per-node annotation validation (M1b infrastructure;
-  the consumer passes remain open, [effects.md](docs/effects.md))
+  the general no-`switch(op)` consumer passes remain open,
+  [effects.md](docs/effects.md))
+- [x] **SEG v1 (M2a)** — registry `seg` encoding facet, recursive island
+  admission over `isSegSafe`, and four rule groups (β→let boundary
+  rewrite, let simplification, typed constant folding, integer algebra)
+  with minimal-node-cost extraction and post-rewrite effect
+  re-validation (`hir_seg`, off by default; `--seg` / `Options.seg`
+  enable it, [hir.md](docs/hir.md) §11)
 - [x] **CFG lowering** — control flow, `match`/patterns, field paths, calls,
   intrinsic (`builtin`) expansion, destruction placement, module init
   functions, syscalls
@@ -73,7 +80,7 @@ and the trailing section lists what the code and docs still mark open.
   `examples/embed/random_demo.zig`, `libstilla.a` static library
 - [x] **CLI** — compile to canonical HIR / CFG AIR / LLIR assembly / LLIR
   binary; `--run` (source or self-contained binary);
-  `--module`/`--entry-fn`/`--no-entry-fn`/`-I`
+  `--module`/`--entry-fn`/`--no-entry-fn`/`-I`; `--seg` (optional M2a SEG)
 
 **Standard library (embedded `std/` source)**
 
@@ -210,9 +217,11 @@ fn () => 42i32
 ```
 
 Options: `--output <file>`, `--module <spec>`, `--entry-fn <name>` /
-`--no-entry-fn`, `-I <dir>`, and the emission modes `--emit-hir` (the
-canonical HIR text form, [hir.md](docs/hir.md) §4), `--emit-asm`,
-`--emit-bin <file>`, and `--run` (compile and execute). Diagnostics are
+`--no-entry-fn`, `-I <dir>`, `--seg` (run the M2a SEG pass,
+[hir.md](docs/hir.md) §11; off by default), and the emission modes
+`--emit-hir` (the canonical HIR text form, [hir.md](docs/hir.md) §4),
+`--emit-asm`, `--emit-bin <file>`, and `--run` (compile and execute).
+Diagnostics are
 `<file>:<line>:<col>: error: <message>`. The pipeline and the LLIR
 backend it lowers to are documented in [frontend.md](docs/frontend.md)
 and [interpreter-vm.md](docs/interpreter-vm.md). `--emit-hir` fails loudly
