@@ -50,19 +50,28 @@ Detail: [checker.md](checker.md).
 > (+ `hir_build_block` / `hir_build_expr` / `hir_build_path` / `hir_build_call` /
 > `hir_build_control` / `hir_build_pattern`), `hir_validate.zig`,
 > `hir_effects.zig` (with the model in top-level `effects.zig`),
-> `hir_lower.zig`. The M1b effect infrastructure is live: every reachable
-> node carries a `ready` interned `EffectSummary` after analysis, and the
-> effect validator runs in the compile pipeline.
+> `hir_simplify.zig`, `hir_seg.zig`, `hir_lower.zig`. The M1b effect
+> infrastructure is live: every reachable node carries a `ready` interned
+> `EffectSummary` after analysis, and the effect validator runs in the
+> compile pipeline. M2b added the function-summary SCC least fixpoint, the
+> precise `drop_effect` chain, the summary-driven module-const
+> init/teardown check, and the dead-let / selective-ANF consumers
+> (opt-in); M2a added the optional SEG pass (opt-in).
 
 Order: checker → AST→HIR construction → structural validation →
-effect analysis + annotation validation → HIR→CFG lowering (into today's
-block/value/drop machinery).
+effect analysis + annotation validation → module-const dependency check →
+*[optional]* effect consumers (`hir_simplify.zig`) → *[optional]* SEG
+(`hir_seg.zig`) → HIR→CFG lowering (into today's block/value/drop
+machinery). Each optional transform re-runs structural validation and a
+fresh effect analysis before lowering (hir.md §2.4).
 
 | Pass | File | Job |
 | --- | --- | --- |
 | build | `hir_build.zig` + `hir_build_block` / `_expr` / `_path` / `_call` / `_control` / `_pattern` (data structures in `hir.zig`) | annotated AST + module graph → canonical monomorphic HIR: binder / region / pattern normalization, full-expression fences, ownership view carried over from the checker; `SemanticInfo.effect` starts `pending` (M1b) |
 | validate | `hir_validate.zig` | structural HIR invariants only: scope, no capture, tree shape (no DAG), no duplicate BinderId, full-expression fence (hir.md §10.1 first level) |
-| effects | `hir_effects.zig` (model: `effects.zig`) | M1b: `effect_transfer` per descriptor (`own_effect` + `TransferKind`), function summaries by direct-call DFS (recursion/missing/unknown → `Top`), `OperandUse` resolution, cleanup-free MVP proof, and the derived legality queries; publishes interned `ready` summaries and validates them against a fresh derivation (`derived ≤ stored`) |
+| effects | `hir_effects.zig` (model: `effects.zig`) | `effect_transfer` per descriptor (`own_effect` + `TransferKind`); function summaries by the SCC least fixpoint (recursive SCC seeded `Diverge`, `drop` hooks in the call graph; indirect/missing/unknown → `Top`); precise `drop_effect(T)` (struct hook + Unique fields reverse-order, union/tuple/list/box, opaque release); `OperandUse` resolution; cleanup-free MVP proof; derived legality queries; the summary-driven module-const init/teardown check (`checkModuleDependencies`, M2b); publishes interned `ready` summaries and validates them against a fresh derivation (`derived ≤ stored`) |
+| consumers | `hir_simplify.zig` | M2b: dead-let (`B ∉ FV(body)` ∧ `isDiscardable(init)`) and selective A-Normal Form (first `!canFloatAsTree` operand of a `StrictLTR` parent hoisted to a `let`, Copy only); legality is the derived query alone — no `switch(op)`; opt-in (`--simplify`) |
+| seg | `hir_seg.zig` | M2a: β→let / let simplification / constant folding / integer algebra over recursively-admitted `isSegSafe` islands; opt-in (`--seg`) |
 | lower | `hir_lower.zig` | HIR → CFG AIR, reusing the existing `lower.zig` / `cfg_lower_emit.zig` block, value, and drop mechanisms; replaced the direct AST → CFG expression lowering (S6b) |
 
 The canonical text form (`hir_print.zig` / `hir_parse.zig`, re-exported
@@ -71,11 +80,15 @@ tests; the black-box regression suite lives in `hir_tests.zig`
 (hir.md §10.2–§10.3) — after S6b the differential gate became a pure-HIR
 corpus regression (compile → canonical AIR → standalone cfg parser
 round-trip), extended in M1b with corpus-wide effect annotation +
-validation. The effect model's own algebra/law tests live in
-`effects.zig`, the transfer/query tests in `hir_effects.zig`.
+validation and in M2b with the module-const dependency cases moved out of
+the checker suite. The effect model's own algebra/law tests live in
+`effects.zig`, the transfer/query tests in `hir_effects.zig`; the
+consumer passes have their own white-box tests plus `hir_simplify_tests.zig`
+(M2b) and `hir_seg_tests.zig` (M2a) black-box suites.
 
-Detail: [hir.md](hir.md) (M1a + M1b; implemented), [effects.md](effects.md)
-(§5 lattice + §10–§11 queries implemented; consumer passes proposed).
+Detail: [hir.md](hir.md) (M1a + M1b + M2a + M2b; implemented),
+[effects.md](effects.md) (§5 lattice + §10–§11 queries + §12 consumers
+implemented; §13 host ABI wiring proposed).
 
 ## CFG lowering (lower.zig)
 

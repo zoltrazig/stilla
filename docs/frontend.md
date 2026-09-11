@@ -47,13 +47,19 @@ canonical HIR
     │
     │  structural validation  scope / no-capture / tree shape (no DAG)
     ▼
-    │  effect analysis  `effect_transfer` over the HIR + direct-call
-    │                   function summaries; publish interned `ready`
-    │                   EffectSummary per node and validate them
-    │                   (hir.md §10.1 level two, effects.md §14 M1b)
+    │  effect analysis  `effect_transfer` over the HIR + function-summary
+    │                   SCC least fixpoint; publish interned `ready`
+    │                   EffectSummary per node and validate them; then the
+    │                   summary-driven module-const init/teardown check
+    │                   (hir.md §10.1 level two, effects.md §7/§14 M1b+M2b)
     ▼
 annotated HIR
     │
+    │  [optional] M2b consumers  dead-let + selective A-Normal Form
+    │              (derived `isDiscardable` / `canFloatAsTree`; `--simplify`)
+    │  [optional] M2a SEG        pure-Copy island rewrites (`--seg`)
+    │              each re-runs structural + effect validation (hir.md §2.4)
+    ▼
     │  HIR→CFG lowering  CFG AIR generation
     │              (per-function basic blocks; host bindings → system calls;
     │               embedded-bundle intrinsics expand into ordinary AIR)
@@ -70,10 +76,10 @@ invariant the next one relies on:
 | module graph | `ModuleGraph` of `ModuleInfo` nodes | every module in the program has its module-level info computed; cross-module name/type lookup is decidable |
 | checker | annotated `ast.Program` per module | every expression, binding, and type use is annotated (name, type, ownership, expression); the program is fully monomorphic and statically correct |
 | HIR build | canonical monomorphic HIR per function | binder / region / pattern normalization; full-expression fences; no capture; tree shape (no DAG) — the structural invariants the HIR validator checks (hir.md §10.1) |
-| HIR effects | interned `EffectSummary` per reachable node (`ready`) | every node's summary is a sound over-approximation of its `effect_transfer` derivation; no node is left `pending` (hir.md §10.1 level two, effects.md §14) |
+| HIR effects | interned `EffectSummary` per reachable node (`ready`) | every node's summary is a sound over-approximation of its `effect_transfer` derivation (function summaries by the SCC least fixpoint); no node is left `pending` (hir.md §10.1 level two, effects.md §14); the module-const init/teardown rules hold over the summaries + `drop_effect` chain (effects.md §7) |
 | HIR→CFG lowering | CFG-based `IrModule` / `IrFunc` | control flow and value flow are explicit; every host binding call is a system call; every intrinsic use is ordinary AIR |
 
-**The HIR seam (implemented, M1a + M1b).** Between the checker and CFG
+**The HIR seam (implemented, M1a + M1b + M2a + M2b).** Between the checker and CFG
 lowering sits the canonical monomorphic HIR seam of
 [hir.md](hir.md) §11: a semantics-preserving stage whose milestone
 acceptance is that the existing suites still pass with equivalent AIR
@@ -82,7 +88,12 @@ path — S6b removed the direct annotated-AST lowering and the
 `hir_stage` toggle. M1b adds the effect infrastructure
 ([effects.md](effects.md) §14): the lattice/transfer/query model lives
 in `src/effects.zig`, the HIR integration in
-`src/passes/hir_effects.zig`, and both run in the compile pipeline.
+`src/passes/hir_effects.zig`, and both run in the compile pipeline. M2b
+adds the function-summary SCC least fixpoint, the precise `drop_effect`
+chain, the summary-driven module-const init/teardown check, and the
+opt-in dead-let / selective-A-Normal-Form consumers
+(`src/passes/hir_simplify.zig`); M2a adds the opt-in SEG pass
+(`src/passes/hir_seg.zig`).
 Shape:
 
 ```text
@@ -100,11 +111,14 @@ canonical HIR
 validated HIR
     │
     │  effect analysis   publish `ready` EffectSummary per reachable node
-    │                   (transfer + direct-call function summaries) and
-    │                   validate `derived ≤ stored`
+    │                   (transfer + SCC-fixpoint function summaries) and
+    │                   validate `derived ≤ stored`; module-const check
     ▼
 annotated HIR
     │
+    │  [optional] M2b consumers / M2a SEG   in-place rewrites, then a
+    │                                       fresh structural + effect pass
+    ▼
     │  HIR → CFG lowering   into today's block/value/drop machinery;
     │                       replaced the direct AST → CFG expression lowering
     ▼

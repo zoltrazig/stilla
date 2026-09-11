@@ -54,12 +54,13 @@ pub const Loaded = struct {
 };
 
 pub fn load(text: []const u8, optimize: bool) !Loaded {
-    return loadOpts(text, optimize, false);
+    return loadOpts(text, optimize, false, false);
 }
 
 /// `load` with the M2a SEG toggle exposed (hir.md §11): the interpreter
-/// equivalence tests compare SEG-on vs SEG-off execution.
-pub fn loadOpts(text: []const u8, optimize: bool, seg: bool) !Loaded {
+/// equivalence tests compare SEG-on vs SEG-off execution. The M2b
+/// consumers toggle (`simplify`) rides the same way.
+pub fn loadOpts(text: []const u8, optimize: bool, seg: bool, simplify: bool) !Loaded {
     var sources = moduleinfo.Sources{};
     var smap = std.StringHashMapUnmanaged([]const u8).empty;
     try smap.put(testing.allocator, "app", text);
@@ -71,6 +72,7 @@ pub fn loadOpts(text: []const u8, optimize: bool, seg: bool) !Loaded {
         .entry_fn = "main",
         .optimize = optimize,
         .seg = seg,
+        .simplify = simplify,
     });
     errdefer compilation.deinit();
     const program = &(compilation.program orelse {

@@ -54,6 +54,9 @@ const usage =
     \\                    --no-entry-fn
     \\  --seg             enable the M2a SEG pass (hir.md §11) before CFG
     \\                    lowering; off by default
+    \\  --simplify        enable the M2b effect-driven HIR consumers
+    \\                    (dead-let + selective A-Normal Form, hir.md
+    \\                    §11) before CFG lowering; off by default
     \\  --module <spec>   module specifier for the entry source (default: the
     \\                    input file's stem, e.g. app.st -> "app")
     \\  --entry-fn <name> entry function to mark (default: "main")
@@ -91,6 +94,10 @@ const Options = struct {
     /// True when `--seg` was given: run the M2a SEG pass (hir.md §11)
     /// before CFG lowering. Off by default; SEG is opt-in.
     seg: bool = false,
+    /// True when `--simplify` was given: run the M2b effect-driven HIR
+    /// consumers (dead-let + selective A-Normal Form, hir.md §11) before
+    /// CFG lowering. Off by default.
+    simplify: bool = false,
     search_dirs: std.ArrayList([]const u8) = .empty,
 };
 
@@ -197,6 +204,7 @@ fn compileInput(
         // it off; embedders of the library control it via Options.
         .optimize = true,
         .seg = opts.seg,
+        .simplify = opts.simplify,
     };
     return stilla.frontend.compile(arena, options) catch {
         errPrint(io, gpa, "stilla: compilation failed\n", .{}) catch {};
@@ -483,6 +491,8 @@ fn parseArgs(io: std.Io, gpa: std.mem.Allocator, args: []const []const u8) !?Opt
             opts.run = true;
         } else if (parse_options and std.mem.eql(u8, a, "--seg")) {
             opts.seg = true;
+        } else if (parse_options and std.mem.eql(u8, a, "--simplify")) {
+            opts.simplify = true;
         } else if (parse_options and std.mem.eql(u8, a, "--emit-bin")) {
             i += 1;
             if (i >= args.len) return argErr(io, gpa, "--emit-bin needs a file argument");
@@ -830,6 +840,17 @@ test "parseArgs --seg enables the SEG pass; defaults off" {
     var o2 = (try parseArgs(std.Io.failing, testing.allocator, &.{ "stilla", "app.st" })).?;
     defer o2.search_dirs.deinit(testing.allocator);
     try testing.expect(!o2.seg);
+}
+
+test "parseArgs --simplify enables the M2b consumers; defaults off" {
+    var o1 = (try parseArgs(std.Io.failing, testing.allocator, &.{ "stilla", "--simplify", "app.st" })).?;
+    defer o1.search_dirs.deinit(testing.allocator);
+    try testing.expect(o1.simplify);
+    try testing.expect(!o1.seg);
+
+    var o2 = (try parseArgs(std.Io.failing, testing.allocator, &.{ "stilla", "app.st" })).?;
+    defer o2.search_dirs.deinit(testing.allocator);
+    try testing.expect(!o2.simplify);
 }
 
 test "parseArgs --emit-hir conflicts with the other emission modes" {

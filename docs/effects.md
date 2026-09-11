@@ -1,7 +1,7 @@
 # Stilla Effects System — 语义交互摘要模型
 
-> **Status：M1b（效果基础设施）已实现；三个消费者 pass 与 SCC
-> fixpoint 仍为设计提案。**
+> **Status：M1b（效果基础设施）与 M2b（摘要化消费者）已实现；§13 的
+> host ABI metadata 接线仍为设计提案。**
 >
 > 本文为编译前端与优化器定义一个内部的**效果语义模型**（effect
 > semantics model）：用一个统一的结构描述「一个表达式求值时，与表达式
@@ -10,9 +10,13 @@
 > drop、函数调用摘要、SEG 准入）。**§5 的格与 §10–§11 的查询门已随
 > M1b 落地（`effects.zig` / `hir_effects.zig`，见 hir.md §11 M1b 交付
 > 记录）**；§6 的 `effect_transfer`、§10.1 的派生查询、§11 的 cleanup
-> 门亦已实现。§12 的三个消费者 pass（dead-let / selective ANF /
-> SEG-safe）、§8.2 的函数 SCC fixpoint、§7 的 module-const 检查与 §13 的
-> host ABI metadata 接线仍为提案，未进入代码。
+> 门亦已实现。**M2b 已落地**：§12 的三个消费者判定（dead-let /
+> selective ANF / SEG-safe）已由派生查询驱动、无 `switch(op)` 合法性特判，
+> §8.2 的函数 SCC least fixpoint 与 §7 的 module-const 初始化/teardown 检查
+> 已实现（`hir_effects.zig` / `passes/hir_simplify.zig` / `passes/hir_seg.zig`，
+> 见 hir.md §11 M2b 交付记录）；§11.1 的精确 `drop_effect(T)` 全链（字段/
+> 容器/递归 hook）已随 teardown 检查落地。仍为提案的是 §13 的 host ABI
+> metadata 接线与 §9.2 的间接调用目标收窄（§14「再后」项）。
 >
 > 配套文档：使用该模型的中间表示（HIR）设计见 [hir.md](hir.md)；本文自含
 > 效果模型所需的全部定义，不依赖其章节细节。两者的重叠概念（求值序、
@@ -590,10 +594,14 @@ teardown 期间运行并读模块常量，与 hook 本体同一危害类。因�
     要求 D 在逆序销毁 schedule 中晚于 C 被销毁（即尚未销毁）
 ```
 
-**现状核对**：现有实现（checker_validate.zig 的 `InitOrder` teardown
-方向）只走查类型直 hook 及其传递调用，其注释自认容器元素携带 drop hook
-（如 `list[File]` 常量）未走查、延后处理——以完整 `drop_effect` 链判定
-即闭合该缺口。
+**M2b 已闭合**：`Analysis.checkModuleDependencies` 以
+`drop_effect(type(C))` 全链为对象（`hir_effects.zig`）；旧的
+（checker_validate.zig 的 `InitOrder`）只走查类型直 hook 及其传递调用，
+其注释自认容器元素携带 drop hook（如 `list[File]` 常量）未走查——
+以完整 `drop_effect` 链判定即闭合该缺口。实现选择：未知读集（来自
+间接调用/模块链的 read 通配）在 **nominal** 类型上保守拒绝；
+`any`/`hostdata`/未解析 named 的 drop_effect 本身为 `Top`，其通配
+不对应具体常量、无归因，退回与旧 walker 相同的「不归因」位置。
 
 两点与规范措辞相关的待决事项（见 §15）：
 
@@ -1093,7 +1101,10 @@ discardable(ctx, expr)   // 内部组合 total、observable_effect_free 与
 ## 12. 效果驱动的前端变换
 
 这套模型的三个首要消费者。它们共同点是：**合法性全部来自派生查询，任何
-一个都没有 `switch(op)` 特判**。
+一个都没有 `switch(op)` 特判**。三者均已落地（M2a 的 SEG-safe 与 M2b 的
+dead-let / selective ANF；见 hir.md §11 交付记录）：dead-let 与 ANF 在
+`passes/hir_simplify.zig`（`--simplify`），SEG 准入在 `passes/hir_seg.zig`
+（`--seg`）。
 
 ### 12.1 Selective A-Normal Form
 
@@ -1193,9 +1204,19 @@ unknown host:   effects = TOP
 
 - host 声明是**受信的语义契约**（host 与编译器约定），不是编译器自动
   验证出的 purity；错误声明是 host 的 bug，编译器按契约优化。
-- 缺失 metadata 默认 TOP，安全优先。这作为 embedding ABI metadata，
+- 缺失 metadata 默认 **TOP**，安全优先（M2b 细化：缺失 host metadata 取
+  `host_top`，见下）。这作为 embedding ABI metadata，
   **不进 Stilla source syntax**；现成的扩展点是 host_bind 的 typed
   registry。
+- **M2b 细化（`host_top`）**：缺失 metadata 的 host 调用取
+  `effects.host_top` =（每 mode 的 `host_any` 资源 + `may_trap` +
+  `may_diverge` + `Q`）。它覆盖任意 host/extension 资源
+  （`isObservableEffectFree` 与 `conflictOf` 均对其保守），但**不携带
+  `Read(ModuleConst)`**——host 代码无法命名 Stilla 模块常量（module
+  storage 是运行时私有的），否则 §7 的 module-const 检查会把每个含 host
+  调用的程序都判违规。真正未知的 **Stilla** 目标（间接调用、模块链）仍取
+  完整 `top`（含 read 通配），在 §7 检查里保守拒绝。完整 embedding ABI
+  接线（把 host 声明送入 `frontend.Options`）仍是 §14「再后」第 3 项。
 - 声明必须覆盖该 host 函数**可能执行的任何 Stilla 代码**：接受 Stilla
   回调（同步调用、存储后重入、转交另一 host）的 host 函数，其摘要须含
   回调可能产生的全部交互与发散——host 自身逻辑纯不能证明整次调用纯。
@@ -1282,6 +1303,35 @@ SEG-safe）与函数 SCC fixpoint、module-const 检查属 **M2**：M1b 只验�
 > 本档验收见 hir.md §11 M2a 记录：白盒规则/代价测试 + 黑盒定向用例
 > （β 单次求值、div/float 拒绝、常量分支、不动点/确定性）+ 全语料
 > `--seg` 编译与 AIR round-trip + SEG-on/off 解释器执行逐字相等。
+>
+> **M2b 实施记录（三个消费者无 `switch(op)` + SCC fixpoint + module-const 检查）**：
+> ① **函数 SCC least fixpoint**（§8.2）落在 `hir_effects.zig`：调用图建在
+> 已解析 `fn_ref` 目标上（间接/host/未知不进图 → `Top`），Kosaraju + callee-first
+> Kleene 迭代，递归 SCC 播种 `Diverge`，每轮清 memo 同步更新；同 SCC 读 `cur`，
+> 已完成读 final；`drop` 把类型的 hook 接入调用图。递归不再一律 `Top`，
+> `validate` 重跑 fixpoint 后拒绝低报 callee 摘要的节点注解（§10.1 一致性要求生效）。
+> ② **精确 `drop_effect(T)`**（§11.1）已替换 MVP 的「非 Copy → `Top`」全链：
+> struct 自身 hook `;` Unique 字段逆声明序递归、union 候选 `⊔` + payload 逆序、
+> tuple 逆序、list/box 元素递归、opaque → `Release(Host(host_id))`；递归类型
+> 用「重入给格底」取得 least fixpoint。`any`/`hostdata`/未解析仍保守 `Top`。
+> ③ **module-const 初始化/teardown 检查**（§7）落在
+> `Analysis.checkModuleDependencies`，删除了 checker_validate.zig 的 AST 级
+> `InitOrder`：初始化方向读函数摘要的 `Read(ModuleConst)`；teardown 方向读
+> `drop_effect(type(C))` 全链（闭上前者只走类型直 hook、容器元素 hook 未走查的
+> 缺口）；同一模块内按声明序比较（跨模块读必然来自已初始化依赖）。
+> ④ **dead-let / selective ANF 消费者**落在 `passes/hir_simplify.zig`
+> （`--simplify`，默认关）：合法性只来自 `isDiscardable` / `canFloatAsTree`，
+> 应用层 shape 判定（是否为单 binder `let` / `StrictLTR` 父节点）不带 op 合法性白名单；
+> ANF 只提第一个不可浮动 operand（LTR），仅 Copy 类型（Unique 物化待 CleanupFootprint）。
+> SEG-safe 消费者在 M2a 已落地。验收标准第一条（“三个 pass 无 switch(op)”）至此
+> 完成：三条规则的合法性均为派生查询。本节 §14 的负面用例分别落在
+> `hir_simplify_tests.zig`（trap/host/Unique 不删）、`passes/hir_seg.zig` 与
+> `hir_seg_tests.zig`（div 不进 island）；Q 与 discard 分离、`host_top` 不
+> observable-effect-free、SCC/字段链等白盒用例落在 `effects.zig` /
+> `hir_effects.zig`；全语料 `--simplify` 编译 + AIR round-trip + 43 个程序
+> on/off 解释器逐字相等（8 个 AIR 确实改变）。
+> **不在本档**：「再后」第 3–5 项（host metadata 接线、effectful β 实参、
+> 间接调用目标收窄）与 match 进 SEG。
 
 **MVP 前置条件（不能延期）**：
 
@@ -1312,12 +1362,15 @@ SEG-safe）与函数 SCC fixpoint、module-const 检查属 **M2**：M1b 只验�
 
 **再后**（各自独立）：
 
-1. 精化 `drop_effect(T)`（字段、容器、递归 hook），替换 MVP 的未知
-   cleanup 拒绝/Top 回退，扩大 `observed_effect(expr, ctx)` 可证明的范围；
-2. 函数 SCC fixpoint 摘要（§8.2）驱动 Core 的初始化与 teardown 检查，
+1. ~~精化 `drop_effect(T)`（字段、容器、递归 hook），替换 MVP 的未知
+   cleanup 拒绝/Top 回退，扩大 `observed_effect(expr, ctx)` 可证明的范围~~
+   ——已随 M2b 落地（结构/hook 链精确化；`any`/`hostdata`/未解析仍保守
+   `Top`，`observed_effect` 的清理路径仍走 cleanup-free MVP）；
+2. ~~函数 SCC fixpoint 摘要（§8.2）驱动 Core 的初始化与 teardown 检查，
    替换特设分析（checker_validate.zig 的 `InitOrder`；属 hir.md §11 的
-   M2b）；teardown 判定按
-   §7.2 以 `drop_effect` 全链（含字段/容器元素 hook）为对象；
+   M2b）；teardown 判定按 §7.2 以 `drop_effect` 全链（含字段/容器元素
+   hook）为对象~~——已随 M2b 落地（检查在 `hir_effects.zig`，`InitOrder`
+   已删除）；
 3. host metadata（§13）接入现有 typed registry；
 4. effectful β 实参的放开（在 §10.4 契约下单独验证后）；
 5. 间接调用的局部 fn-ref 目标传播（§9.2：需求驱动、超限回 Top）。
@@ -1338,8 +1391,11 @@ SEG-safe）与函数 SCC fixpoint、module-const 检查属 **M2**：M1b 只验�
 
 **现状核对（哪些特设实现会被本文取代）：**
 
-- module-const 依赖检查：checker_validate.zig 的 `InitOrder`（初始化
-  方向 + drop hook 方向）是 AST 级的特设 walker，需用函数摘要替换；
+- module-const 依赖检查：~~checker_validate.zig 的 `InitOrder`（初始化
+  方向 + drop hook 方向）是 AST 级的特设 walker，需用函数摘要替换~~——
+  M2b 已替换：`hir_effects.Analysis.checkModuleDependencies` 用函数摘要的
+  `Read(ModuleConst)` 集（初始化方向）与 `drop_effect(T)` 全链（teardown
+  方向）判定，`InitOrder` 已从 checker 删除（见 hir.md §11 M2b 记录）；
 - CFG/AIR 层已有一份 per-op 的 `may_trap / effects` 两位 schema（cfg.zig
   的 op schema，派生查询为 `pure()` 即 `!effects ∧ !may_trap`）——它是
   op 级的保守位，缺少 typed 精度与资源域；本文的 typed-opcode 摘要是对

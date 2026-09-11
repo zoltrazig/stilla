@@ -54,7 +54,66 @@ pub const Error = std.mem.Allocator.Error;
 
 const lambda_op = hir.opId("lambda").?;
 const fn_ref_op = hir.opId("fn_ref").?;
+const call_op = hir.opId("call").?;
 const drop_op = hir.opId("drop").?;
+
+/// Recursion bound for the `drop_effect` type walk (docs/effects.md
+/// §11.1). Named-type recursion is cut by identity; this cap is the
+/// safety net for an uninhabited non-regular instantiation chain, whose
+/// summary falls back to the conservative `Top`.
+const max_drop_type_depth = 64;
+
+/// Kosaraju pass 1: DFS finishing order over the caller→callee graph.
+fn finishOrder(arena: std.mem.Allocator, adj: []const std.ArrayListUnmanaged(hir.FuncId)) Error![]hir.FuncId {
+    const n = adj.len;
+    const visited = try arena.alloc(bool, n);
+    @memset(visited, false);
+    var order = std.ArrayListUnmanaged(hir.FuncId).empty;
+    var stack = std.ArrayListUnmanaged(struct { u32, usize }).empty;
+    for (0..n) |s| {
+        if (visited[s]) continue;
+        visited[s] = true;
+        try stack.append(arena, .{ @intCast(s), 0 });
+        while (stack.items.len > 0) {
+            const top = &stack.items[stack.items.len - 1];
+            const v: hir.FuncId = top[0];
+            if (top[1] < adj[v].items.len) {
+                const w = adj[v].items[top[1]];
+                top[1] += 1;
+                if (!visited[w]) {
+                    visited[w] = true;
+                    try stack.append(arena, .{ w, 0 });
+                }
+            } else {
+                try order.append(arena, v);
+                _ = stack.pop();
+            }
+        }
+    }
+    return order.items;
+}
+
+/// Kosaraju pass 2: one DFS tree on the reversed graph is one SCC.
+fn dfsCollect(
+    arena: std.mem.Allocator,
+    radj: []const std.ArrayListUnmanaged(hir.FuncId),
+    start: hir.FuncId,
+    seen: []bool,
+    out: *std.ArrayListUnmanaged(hir.FuncId),
+) Error!void {
+    var stack = std.ArrayListUnmanaged(hir.FuncId).empty;
+    try stack.append(arena, start);
+    seen[start] = true;
+    while (stack.pop()) |v| {
+        try out.append(arena, v);
+        for (radj[v].items) |w| {
+            if (!seen[w]) {
+                seen[w] = true;
+                try stack.append(arena, w);
+            }
+        }
+    }
+}
 
 /// Optional external facts. M1b does not wire the embedding host ABI
 /// (docs/effects.md §13) — an empty `hosts` table makes every host call
@@ -68,28 +127,52 @@ pub const Config = struct {
     graph: ?*moduleinfo.ModuleGraph = null,
 };
 
-const FnState = union(enum) {
-    pending,
-    visiting,
-    ready: Summary,
-};
-
+/// The function-summary driver's state (docs/effects.md §8.2). `cur`
+/// holds the in-progress least-fixpoint approximation for the SCC being
+/// solved; `summary` holds the finalized summaries. A callee in the SCC
+/// currently being solved reads `cur`, every other callee reads
+/// `summary` (callee-first SCC order makes that a finalized fact).
 pub const Analysis = struct {
     arena: std.mem.Allocator,
     built: *hir.BuiltProgram,
     config: Config,
     /// Per-node memo of the transfer result (analysis scratch, not the
-    /// annotation; `validate` clears it to force an independent
-    /// re-derivation).
+    /// annotation; the summary driver clears it per fixpoint round so a
+    /// round is a simultaneous update from one approximation).
     memo: []?Summary,
-    fn_state: []FnState,
+    /// Finalized per-function summaries.
+    summary: []Summary,
+    /// Whether `summary[fid]` holds a finalized value.
+    known: []bool,
+    /// The SCC each function belongs to (index into the driver's list).
+    comp_of: []u32,
+    /// The SCC currently being solved, if any.
+    solving: ?u32,
+    /// The in-progress approximation for the SCC in `solving`.
+    cur: []Summary,
 
     pub fn init(arena: std.mem.Allocator, built: *hir.BuiltProgram, config: Config) Error!Analysis {
         const memo = try arena.alloc(?Summary, built.program.exprs.items.len);
         @memset(memo, null);
-        const fn_state = try arena.alloc(FnState, built.funcs.items.len);
-        for (fn_state) |*s| s.* = .pending;
-        return .{ .arena = arena, .built = built, .config = config, .memo = memo, .fn_state = fn_state };
+        const summary = try arena.alloc(Summary, built.funcs.items.len);
+        @memset(summary, effects.pure);
+        const known = try arena.alloc(bool, built.funcs.items.len);
+        @memset(known, false);
+        const comp_of = try arena.alloc(u32, built.funcs.items.len);
+        @memset(comp_of, 0);
+        const cur = try arena.alloc(Summary, built.funcs.items.len);
+        @memset(cur, effects.pure);
+        return .{
+            .arena = arena,
+            .built = built,
+            .config = config,
+            .memo = memo,
+            .summary = summary,
+            .known = known,
+            .comp_of = comp_of,
+            .solving = null,
+            .cur = cur,
+        };
     }
 
     fn p(self: *Analysis) *hir.Program {
@@ -100,13 +183,12 @@ pub const Analysis = struct {
     // Annotation driver
     // -----------------------------------------------------------------
 
-    /// Compute every function summary, then annotate every reachable
-    /// node (function bodies and module-constant initializers) with its
+    /// Compute every function summary (the SCC least fixpoint of
+    /// docs/effects.md §8.2), then annotate every reachable node
+    /// (function bodies and module-constant initializers) with its
     /// interned `ready` summary. Idempotent.
     pub fn analyze(self: *Analysis) Error!void {
-        for (0..self.built.funcs.items.len) |fid| {
-            _ = try self.functionSummary(@intCast(fid));
-        }
+        try self.solveSummaries();
         for (self.built.funcs.items) |rec| try self.annotateTree(rec.root);
         for (self.built.consts.items) |c| {
             if (c.init) |root| try self.annotateTree(root);
@@ -136,15 +218,11 @@ pub const Analysis = struct {
     /// stored) is rejected.
     pub fn validate(self: *Analysis, allocator: std.mem.Allocator) Error!?[]const u8 {
         // Re-derive everything through the same transfer logic: clear the
-        // per-node memo *first*, then reset the function-summary states
-        // and recompute the summaries. Clearing the memo afterwards (or
-        // not at all) would let `functionSummary` read stale per-node
-        // facts, making the check compare an annotation against itself.
-        @memset(self.memo, null);
-        for (self.fn_state) |*s| s.* = .pending;
-        for (0..self.built.funcs.items.len) |fid| {
-            _ = try self.functionSummary(@intCast(fid));
-        }
+        // per-node memo *first*, then re-run the SCC least fixpoint so
+        // every function summary is recomputed from scratch (docs/effects
+        // .md §8.2/§8.3). Reusing the prior fixpoint would let the check
+        // compare an annotation against itself.
+        try self.solveSummaries();
         for (self.built.funcs.items) |rec| {
             if (try self.validateTree(rec.root, rec.name, allocator)) |msg| return msg;
         }
@@ -188,6 +266,352 @@ pub const Analysis = struct {
     // -----------------------------------------------------------------
     // effect_transfer (docs/effects.md §6.1)
     // -----------------------------------------------------------------
+
+    // -----------------------------------------------------------------
+    // Precise drop_effect(T) (docs/effects.md §11.1)
+    // -----------------------------------------------------------------
+
+    /// `drop_effect(T)` — the interaction of destroying a value of type
+    /// `ty`: the type's `drop` hook first, then its Unique fields in
+    /// reverse declaration order, structurally through containers, and
+    /// `Release` for host-backed opaque handles.
+    ///
+    /// Recursive types (a struct/union that reaches itself through a
+    /// field) are solved as the least fixpoint of the destruction
+    /// function: re-entering a type on the descent returns `pure`
+    /// (lattice bottom). Because the may-summary of a cycle is the join
+    /// over its finite unfoldings and joining the same accesses twice is
+    /// idempotent, that bottom-on-reentry yields exactly the least
+    /// fixpoint without an explicit iteration (docs/effects.md §11.1).
+    /// No result is memoized: a value computed while a cycle was cut is
+    /// an under-approximation that must not be reused at the top level.
+    pub fn dropEffectOf(self: *Analysis, ty: cfg.Type) Error!Summary {
+        var visiting = std.ArrayListUnmanaged(cfg.Type).empty;
+        defer visiting.deinit(self.arena);
+        return self.dropEffectInner(ty, &visiting);
+    }
+
+    fn dropEffectInner(self: *Analysis, ty: cfg.Type, visiting: *std.ArrayListUnmanaged(cfg.Type)) Error!Summary {
+        // A Copy value's destruction has no interaction (§11.1), and a
+        // Copy result short-circuits regardless of structure. A *stuck*
+        // ownership (null) is not Copy: fall through to the structural
+        // case, which is where `named`/`param` recursion lives.
+        if (ty.ownership()) |ow| if (ow == .copy) return effects.pure;
+        switch (ty) {
+            .primitive => |k| return if (k == .any or k == .hostdata) effects.top else effects.pure,
+            .module, .function, .cleanup => return effects.pure,
+            .list, .box => |inner| return self.dropEffectInner(inner.*, visiting),
+            .tuple => |elems| {
+                var acc = effects.pure;
+                var i = elems.len;
+                while (i > 0) {
+                    i -= 1;
+                    acc = try effects.sequence(self.arena, acc, try self.dropEffectInner(elems[i], visiting));
+                }
+                return acc;
+            },
+            .param => return effects.top,
+            .named => |n| {
+                for (visiting.items) |v| if (cfg.Type.eql(v, ty)) return effects.pure;
+                if (visiting.items.len >= max_drop_type_depth) return effects.top;
+                if (n.id >= self.built.types.len) return effects.top;
+                try visiting.append(self.arena, ty);
+                defer {
+                    _ = visiting.pop();
+                }
+                switch (self.built.types[n.id]) {
+                    .struct_ => |d| {
+                        var acc = effects.pure;
+                        if (d.drop) |dn| {
+                            if (self.findFuncByName(dn)) |fid| acc = try effects.sequence(self.arena, acc, try self.functionSummary(fid));
+                        }
+                        var i = d.fields.len;
+                        while (i > 0) {
+                            i -= 1;
+                            const ft = cfg.substParams(self.arena, d.type_params, n.args, d.fields[i].type_);
+                            if (try self.isCopyType(ft)) continue;
+                            acc = try effects.sequence(self.arena, acc, try self.dropEffectInner(ft, visiting));
+                        }
+                        return acc;
+                    },
+                    .union_ => |d| {
+                        var acc = effects.pure;
+                        for (d.variants) |v| {
+                            var vsum = effects.pure;
+                            var i = v.payloads.len;
+                            while (i > 0) {
+                                i -= 1;
+                                const pt = cfg.substParams(self.arena, d.type_params, n.args, v.payloads[i]);
+                                if (try self.isCopyType(pt)) continue;
+                                vsum = try effects.sequence(self.arena, vsum, try self.dropEffectInner(pt, visiting));
+                            }
+                            acc = try effects.join(self.arena, acc, vsum);
+                        }
+                        return acc;
+                    },
+                    .opaque_ => |d| return self.hostRelease(d.host_id),
+                    .unknown => return effects.top,
+                }
+            },
+        }
+    }
+
+    /// The drop hook functions reachable from `ty` (the type's own hook
+    /// plus every field/element hook), used to add the correct edges to
+    /// the call graph so a hook's summary is solved before the `drop`
+    /// that depends on it.
+    fn collectTypeHooks(
+        self: *Analysis,
+        ty: cfg.Type,
+        visiting: *std.ArrayListUnmanaged(cfg.Type),
+        out: *std.ArrayListUnmanaged(hir.FuncId),
+    ) Error!void {
+        if (ty.ownership()) |ow| if (ow == .copy) return;
+        switch (ty) {
+            .list, .box => |inner| try self.collectTypeHooks(inner.*, visiting, out),
+            .tuple => |elems| for (elems) |e| try self.collectTypeHooks(e, visiting, out),
+            .primitive, .module, .function, .cleanup, .param => {},
+            .named => |n| {
+                // Full-instantiation key: an instantiation is the identity
+                // (a type argument that changes on unrolling is a distinct
+                // node in the type graph). The depth cap is the safety net
+                // for an uninhabited non-regular instantiation chain.
+                for (visiting.items) |v| if (cfg.Type.eql(v, ty)) return;
+                if (visiting.items.len >= max_drop_type_depth) return;
+                if (n.id >= self.built.types.len) return;
+                try visiting.append(self.arena, ty);
+                defer {
+                    _ = visiting.pop();
+                }
+                switch (self.built.types[n.id]) {
+                    .struct_ => |d| {
+                        if (d.drop) |dn| {
+                            if (self.findFuncByName(dn)) |fid| {
+                                if (!std.mem.containsAtLeastScalar(hir.FuncId, out.items, 1, fid)) try out.append(self.arena, fid);
+                            }
+                        }
+                        for (d.fields) |f| try self.collectTypeHooks(cfg.substParams(self.arena, d.type_params, n.args, f.type_), visiting, out);
+                    },
+                    .union_ => |d| for (d.variants) |v| for (v.payloads) |payload| try self.collectTypeHooks(cfg.substParams(self.arena, d.type_params, n.args, payload), visiting, out),
+                    .opaque_, .unknown => {},
+                }
+            },
+        }
+    }
+
+    // -----------------------------------------------------------------
+    // Module-constant init / teardown dependency check (docs/effects.md §7)
+    // -----------------------------------------------------------------
+
+    /// `Read(ModuleConst)` dependency check, replacing the checker's
+    /// ad-hoc `InitOrder` walk (docs/effects.md §7, §14 再后 2). Two
+    /// symmetric rules, both driven by the same function summaries:
+    ///
+    /// - **init**: an initializer (and every function it transitively
+    ///   calls) may read only constants declared before it;
+    /// - **teardown**: a Unique constant's destruction —
+    ///   `drop_effect(type)`, the full hook + field/element chain — may
+    ///   not read a constant destroyed earlier (declared later).
+    ///
+    /// Both rules compare declaration order within the constant's own
+    /// module. Cross-module reads are always from already-initialized
+    /// dependencies (the module graph is acyclic and topologically
+    /// ordered), so checking the local module is complete. Returns null
+    /// or the first violation message (owned by `allocator`).
+    pub fn checkModuleDependencies(self: *Analysis, allocator: std.mem.Allocator) Error!?[]const u8 {
+        for (0..self.built.modules.items.len) |mi| {
+            const range = self.built.modules.items[mi].consts;
+            const slice = self.built.consts.items[range.start..][0..range.len];
+            for (slice) |c| {
+                if (c.init) |root| {
+                    if (try self.checkInitReads(c, root, allocator)) |msg| return msg;
+                    if (try self.checkTeardownReads(c, allocator)) |msg| return msg;
+                }
+            }
+        }
+        return null;
+    }
+
+    fn checkInitReads(self: *Analysis, c: hir.ConstRecord, root: hir.ExprId, allocator: std.mem.Allocator) Error!?[]const u8 {
+        const cur = self.initOrderOf(c) orelse return null;
+        const s = try self.effectOf(root);
+        return self.checkReadSet(c, cur, s, root, false, true, allocator);
+    }
+
+    fn checkTeardownReads(self: *Analysis, c: hir.ConstRecord, allocator: std.mem.Allocator) Error!?[]const u8 {
+        const de = try self.dropEffectOf(c.type_);
+        if (effects.isPure(de)) return null;
+        const cur = self.initOrderOf(c) orelse return null;
+        // Attribute direct reads / calls to the type's own hook body when
+        // it has one; nested field hooks fall back to the generic form.
+        var origin: ?hir.ExprId = null;
+        if (c.type_ == .named and c.type_.named.id < self.built.types.len) {
+            switch (self.built.types[c.type_.named.id]) {
+                .struct_ => |d| if (d.drop) |dn| {
+                    if (self.findFuncByName(dn)) |fid| origin = self.built.funcs.items[fid].root;
+                },
+                else => {},
+            }
+        }
+        // An unknown read set is rejected for a nominal type (its
+        // destruction is structural and a wildcard can only come from an
+        // unmodelled indirect call). For `any`/`hostdata`/unresolved
+        // named types the wildcard is the §11.1 "contents unknown" gap,
+        // which cannot be attributed to a specific constant — the same
+        // position the replaced AST walk took.
+        const reject_unknown = self.typeIsNominal(c.type_);
+        return self.checkReadSet(c, cur, de, origin orelse 0, true, reject_unknown, allocator);
+    }
+
+    fn typeIsNominal(self: *Analysis, ty: cfg.Type) bool {
+        if (ty != .named) return false;
+        const id = ty.named.id;
+        if (id >= self.built.types.len) return false;
+        return switch (self.built.types[id]) {
+            .struct_, .union_ => true,
+            .opaque_, .unknown => false,
+        };
+    }
+
+    /// Apply the declaration-order rule to every module-const read in
+    /// `s` (docs/effects.md §7). `c` owns the read; `root` is used only
+    /// for diagnostic attribution (0 = none).
+    fn checkReadSet(
+        self: *Analysis,
+        c: hir.ConstRecord,
+        cur: u32,
+        s: Summary,
+        root: hir.ExprId,
+        teardown: bool,
+        reject_unknown: bool,
+        allocator: std.mem.Allocator,
+    ) Error!?[]const u8 {
+        if (reject_unknown and s.accesses.all[@intFromEnum(effects.EffectMode.read)]) {
+            // An unknown read set may target any constant, including a
+            // later one or this constant itself (docs/effects.md §7.3,
+            // §9.4) — reject on the first initialized sibling.
+            const range = self.built.modules.items[c.module].consts;
+            for (self.built.consts.items[range.start..][0..range.len]) |other| {
+                if (other.init == null) continue;
+                return self.readDiag(c, other.name, true, root, teardown, allocator);
+            }
+            return null;
+        }
+        for (s.accesses.accesses) |a| {
+            if (a.mode != .read) continue;
+            const d = switch (a.resource) {
+                .module_const => |cid| cid,
+                else => continue,
+            };
+            if (d >= self.built.consts.items.len) continue;
+            const dc = self.built.consts.items[d];
+            if (dc.module != c.module) continue; // cross-module reads are ordered by the graph
+            const dord = self.initOrderOf(dc) orelse continue;
+            if (dord < cur) continue;
+            return self.readDiag(c, dc.name, dord == cur, root, teardown, allocator);
+        }
+        return null;
+    }
+
+    fn readDiag(
+        self: *Analysis,
+        c: hir.ConstRecord,
+        read_name: []const u8,
+        self_read: bool,
+        root: hir.ExprId,
+        teardown: bool,
+        allocator: std.mem.Allocator,
+    ) Error!?[]const u8 {
+        const callee = if (root != 0) self.attributingCallee(root) else null;
+        if (teardown) {
+            if (callee) |caller| {
+                return try std.fmt.allocPrint(allocator, "drop hook of module constant '{s}' calls '{s}', which reads module constant '{s}' declared later (Core §5)", .{ c.name, caller, read_name });
+            }
+            return try std.fmt.allocPrint(allocator, "drop hook of module constant '{s}' reads '{s}' declared later (Core §5)", .{ c.name, read_name });
+        }
+        if (callee) |caller| {
+            return try std.fmt.allocPrint(allocator, "module constant initializer calls '{s}', which reads module constant '{s}' declared later (Core §5)", .{ caller, read_name });
+        }
+        if (self_read) {
+            return try std.fmt.allocPrint(allocator, "module constant initializer reads '{s}' before it is initialized (Core §5)", .{read_name});
+        }
+        return try std.fmt.allocPrint(allocator, "module constant initializer reads '{s}' declared later (Core §5)", .{read_name});
+    }
+
+    /// The name of the first directly-called local function reachable
+    /// from `root` whose summary is non-pure. The old AST walk reported
+    /// the outermost call that introduced a transitive read; this
+    /// preserves that diagnostic shape (attribution only, never the
+    /// legality decision).
+    fn attributingCallee(self: *Analysis, root: hir.ExprId) ?[]const u8 {
+        const pr = self.p();
+        var work = std.ArrayListUnmanaged(hir.ExprId).empty;
+        defer work.deinit(self.arena);
+        work.append(self.arena, root) catch return null;
+        while (work.pop()) |id| {
+            const n = pr.node(id);
+            if (n.op == call_op) {
+                const ops = pr.operands(id);
+                if (ops.len > 0) {
+                    const cn = pr.node(ops[0]);
+                    if (cn.op == fn_ref_op and cn.payload == .func) {
+                        switch (cn.payload.func) {
+                            .func => |fid| {
+                                if (fid < self.built.funcs.items.len and self.known[fid] and !effects.isPure(self.summary[fid])) {
+                                    return self.built.funcs.items[fid].name;
+                                }
+                            },
+                            .host => {},
+                        }
+                    }
+                }
+            }
+            for (pr.operands(id)) |op| work.append(self.arena, op) catch return null;
+            for (pr.regionsOf(id)) |r| work.append(self.arena, pr.region(r).root) catch return null;
+        }
+        return null;
+    }
+
+    /// The declaration-order rank of `c` among the initialized constants
+    /// of its own module (uninitialized / module-valued consts are not
+    /// part of the schedule). Null when `c` has no initializer.
+    fn initOrderOf(self: *Analysis, c: hir.ConstRecord) ?u32 {
+        const range = self.built.modules.items[c.module].consts;
+        var k: u32 = 0;
+        for (self.built.consts.items[range.start..][0..range.len]) |other| {
+            if (other.init == null) continue;
+            if (std.mem.eql(u8, other.key, c.key)) return k;
+            k += 1;
+        }
+        return null;
+    }
+
+    fn isCopyType(self: *Analysis, ty: cfg.Type) Error!bool {
+        const cap = try self.capabilityOf(ty) orelse return false;
+        return cap == .copy;
+    }
+
+    fn findFuncByName(self: *Analysis, name: []const u8) ?hir.FuncId {
+        for (self.built.funcs.items, 0..) |rec, i| {
+            if (std.mem.eql(u8, rec.name, name)) return @intCast(i);
+        }
+        return null;
+    }
+
+    /// A host-backed opaque handle's destruction is a `Release` of its
+    /// host domain (docs/effects.md §11.1). The domain id is a stable
+    /// hash of the host identity; a collision only merges two release
+    /// domains, which conservatively adds conflicts, never removes them.
+    fn hostRelease(self: *Analysis, h: cfg.HostTypeId) Error!Summary {
+        var wh = std.hash.Wyhash.init(0);
+        wh.update(h.host_module);
+        wh.update(h.type_name);
+        const domain: effects.HostDomainId = @truncate(wh.final());
+        return effects.summaryOf(self.arena, &.{.{
+            .resource = .{ .host = domain },
+            .mode = .release,
+        }});
+    }
 
     /// Whether matching `pid` can trap. Only list patterns do: their
     /// element access lowers to bounds-checked `read_index` (borrowed) or
@@ -320,8 +744,7 @@ pub const Analysis = struct {
                 var acc = d.own_effect;
                 const ops = pr.operands(id);
                 if (ops.len > 0) {
-                    const cap = try self.capabilityOf(pr.node(ops[0]).ty);
-                    acc = try effects.sequence(self.arena, acc, effects.dropEffect(cap));
+                    acc = try effects.sequence(self.arena, acc, try self.dropEffectOf(pr.node(ops[0]).ty));
                     acc = try effects.sequence(self.arena, acc, try self.effectOf(ops[0]));
                 }
                 return acc;
@@ -362,7 +785,7 @@ pub const Analysis = struct {
             return switch (n.payload) {
                 .func => |fr| switch (fr) {
                     .func => |fid| self.functionSummary(fid),
-                    .host => |hb| self.config.hosts.lookup(hb) orelse effects.top,
+                    .host => |hb| self.config.hosts.lookup(hb) orelse effects.host_top,
                 },
                 else => effects.top,
             };
@@ -376,20 +799,154 @@ pub const Analysis = struct {
     // Function summaries
     // -----------------------------------------------------------------
 
+    /// A finalized (or in-progress) function summary. `Top` for an
+    /// out-of-range id (missing body). While its SCC is being solved a
+    /// member reads the in-progress approximation; every other id reads
+    /// the finalized value (docs/effects.md §8.2).
     pub fn functionSummary(self: *Analysis, fid: hir.FuncId) Error!Summary {
         if (fid >= self.built.funcs.items.len) return effects.top;
-        switch (self.fn_state[fid]) {
-            .ready => |s| return s,
-            // A recursive dependency: conservative Top, no fixpoint in M1b
-            // (docs/effects.md §8.2 is M2b). Top propagates to callers.
-            .visiting => return effects.top,
-            .pending => {},
+        if (self.solving) |s| {
+            if (self.comp_of[fid] == s) return self.cur[fid];
         }
-        self.fn_state[fid] = .visiting;
-        const rec = self.built.funcs.items[fid];
-        const s = try self.recordBodySummary(rec);
-        self.fn_state[fid] = .{ .ready = s };
-        return s;
+        if (!self.known[fid]) return effects.top;
+        return self.summary[fid];
+    }
+
+    // -----------------------------------------------------------------
+    // Function-summary SCC least fixpoint (docs/effects.md §8.2)
+    // -----------------------------------------------------------------
+
+    /// Solve the whole program's function summaries.
+    ///
+    /// The call graph is built over the analysis' actual targets: a `call`
+    /// whose callee operand is a resolved `fn_ref` to a function record.
+    /// Indirect / host / unknown targets do not enter the graph (`Top`,
+    /// §9.1). SCCs are then processed callee-first, each solved by Kleene
+    /// iteration from `Bottom`; a recursive SCC is seeded `Diverge`
+    /// (§8.2 "从 Bottom 迭代本身不能发现发散"). Rounds use a simultaneous
+    /// update (`next[f]` computed from one approximation, then assigned),
+    /// so the iteration is monotone and converges on the finite lattice.
+    fn solveSummaries(self: *Analysis) Error!void {
+        const n = self.built.funcs.items.len;
+        self.solving = null;
+        @memset(self.memo, null);
+        @memset(self.known, false);
+        @memset(self.summary, effects.pure);
+        if (n == 0) return;
+
+        // 1. Call graph (callee ids, deduplicated per caller).
+        const adj = try self.arena.alloc(std.ArrayListUnmanaged(hir.FuncId), n);
+        for (adj) |*a| a.* = .empty;
+        for (0..n) |i| try self.collectCallees(@intCast(i), &adj[i]);
+
+        // 2. SCCs by Kosaraju: finish order on G, then DFS on G^T in
+        //    reverse finish order.
+        var radj = try self.arena.alloc(std.ArrayListUnmanaged(hir.FuncId), n);
+        for (radj) |*a| a.* = .empty;
+        for (0..n) |u| {
+            for (adj[u].items) |v| try radj[v].append(self.arena, @intCast(u));
+        }
+        const order = try finishOrder(self.arena, adj);
+        var comps = std.ArrayListUnmanaged(std.ArrayListUnmanaged(hir.FuncId)).empty;
+        const seen = try self.arena.alloc(bool, n);
+        @memset(seen, false);
+        var i = order.len;
+        while (i > 0) {
+            i -= 1;
+            const v = order[i];
+            if (seen[v]) continue;
+            var comp = std.ArrayListUnmanaged(hir.FuncId).empty;
+            try dfsCollect(self.arena, radj, v, seen, &comp);
+            const cid: u32 = @intCast(comps.items.len);
+            for (comp.items) |m| self.comp_of[m] = cid;
+            try comps.append(self.arena, comp);
+        }
+
+        // 3. Process components callee-first. Kosaraju's second pass
+        //    discovers source SCCs of G (uncalled roots) first, i.e.
+        //    callers before callees; reverse that.
+        var c = comps.items.len;
+        while (c > 0) {
+            c -= 1;
+            try self.solveComponent(comps.items[c].items, adj);
+        }
+    }
+
+    /// Every `call` target in `fid`'s body that resolves to a function
+    /// record (transitive through nested inline λ bodies, which the
+    /// enclosing body's summary consumes).
+    fn collectCallees(self: *Analysis, fid: hir.FuncId, out: *std.ArrayListUnmanaged(hir.FuncId)) Error!void {
+        const pr = self.p();
+        var work = std.ArrayListUnmanaged(hir.ExprId).empty;
+        defer work.deinit(self.arena);
+        try work.append(self.arena, self.built.funcs.items[fid].root);
+        while (work.pop()) |id| {
+            const node = pr.node(id);
+            if (node.op == call_op) {
+                const ops = pr.operands(id);
+                if (ops.len > 0 and pr.node(ops[0]).op == fn_ref_op) {
+                    if (pr.node(ops[0]).payload == .func) {
+                        switch (pr.node(ops[0]).payload.func) {
+                            .func => |target| if (target < self.built.funcs.items.len and !std.mem.containsAtLeastScalar(hir.FuncId, out.items, 1, target)) {
+                                try out.append(self.arena, target);
+                            },
+                            .host => {},
+                        }
+                    }
+                }
+            }
+            if (node.op == drop_op) {
+                const ops = pr.operands(id);
+                if (ops.len > 0) {
+                    var vids = std.ArrayListUnmanaged(cfg.Type).empty;
+                    defer vids.deinit(self.arena);
+                    try self.collectTypeHooks(pr.node(ops[0]).ty, &vids, out);
+                }
+            }
+            for (pr.operands(id)) |op| try work.append(self.arena, op);
+            for (pr.regionsOf(id)) |r| try work.append(self.arena, pr.region(r).root);
+        }
+    }
+
+    /// Solve one SCC to its least fixpoint from `Bottom`, with the
+    /// `Diverge` seed for a recursive component, then finalize.
+    fn solveComponent(self: *Analysis, comp: []const hir.FuncId, adj: []const std.ArrayListUnmanaged(hir.FuncId)) Error!void {
+        var recursive = comp.len > 1;
+        if (!recursive) {
+            for (adj[comp[0]].items) |t| {
+                if (t == comp[0]) recursive = true;
+            }
+        }
+        const seed: Summary = if (recursive) effects.may_diverge else effects.pure;
+        const cid = self.comp_of[comp[0]];
+        self.solving = cid;
+        defer self.solving = null;
+        for (comp) |f| self.cur[f] = seed;
+
+        const next = try self.arena.alloc(Summary, comp.len);
+        while (true) {
+            // A round is a simultaneous (Jacobi) update: the memo is
+            // cleared so every body summary is derived from the same
+            // `cur` approximation, all `next` values are computed, and
+            // only then is `cur` reassigned.
+            @memset(self.memo, null);
+            for (comp, 0..) |f, k| {
+                const body = try self.recordBodySummary(self.built.funcs.items[f]);
+                next[k] = try effects.join(self.arena, seed, body);
+            }
+            var changed = false;
+            for (comp, 0..) |f, k| {
+                if (!next[k].eql(self.cur[f])) {
+                    self.cur[f] = next[k];
+                    changed = true;
+                }
+            }
+            if (!changed) break;
+        }
+        for (comp) |f| {
+            self.summary[f] = self.cur[f];
+            self.known[f] = true;
+        }
     }
 
     fn recordBodySummary(self: *Analysis, rec: hir.FuncRecord) Error!Summary {
@@ -538,8 +1095,14 @@ pub const Analysis = struct {
             const pr = self.p();
             const n = pr.node(cur);
             if (n.op == drop_op) return false;
-            const cap = try self.capabilityOf(n.ty) orelse return false;
-            if (cap != .copy) return false;
+            // A borrowed / destruction view is not a temporary owner: it
+            // creates nothing to clean up. Requiring Copy on the value a
+            // view points at would wrongly mark every drop-hook body
+            // (which reads fields of a borrowed, Unique value) unclean.
+            if (pr.viewOf(cur) == .owned) {
+                const cap = try self.capabilityOf(n.ty) orelse return false;
+                if (cap != .copy) return false;
+            }
             const d = hir.registry.get(n.op);
             if (d.transfer == .lambda) continue; // value creation; body is deferred
             for (pr.operands(cur)) |op| try work.append(self.arena, op);
@@ -830,7 +1393,7 @@ test "hir_effects: integer division is MayTrap, float division is Pure" {
     try testing.expect((try an.validate(testing.allocator)) == null);
 }
 
-test "hir_effects: recursion is conservatively Top and propagates" {
+test "hir_effects: recursion gets the SCC least fixpoint, seeded may_diverge" {
     var f = try build("app", &.{.{
         "app",
         \\fn loop(n: int32) -> int32 { loop(n) }
@@ -839,8 +1402,42 @@ test "hir_effects: recursion is conservatively Top and propagates" {
     defer f.deinit();
     var an = try Analysis.init(f.arena.allocator(), f.built, .{ .graph = f.graph });
     try an.analyze();
-    try testing.expect((try an.functionSummary(funcId(&f, "app.loop").?)).eql(effects.top));
-    try testing.expect((try an.functionSummary(funcId(&f, "app.callit").?)).eql(effects.top));
+    // docs/effects.md §8.2: a recursive SCC is seeded `Diverge`; the
+    // least fixpoint is `(∅, false, true, false)`, *not* `Top`.
+    try testing.expect((try an.functionSummary(funcId(&f, "app.loop").?)).eql(effects.may_diverge));
+    // The divergence propagates to callers through the fixpoint.
+    try testing.expect((try an.functionSummary(funcId(&f, "app.callit").?)).eql(effects.may_diverge));
+    try testing.expect((try an.validate(testing.allocator)) == null);
+}
+
+test "hir_effects: mutual recursion keeps real reads and still diverges" {
+    var f = try build("app", &.{.{
+        "app",
+        \\const builtin = import("builtin");
+        \\fn f(n: int32) -> int32 { if (n == 0) { 0 } else { g(n - 1) } }
+        \\fn g(n: int32) -> int32 { builtin.print(builtin.str(n)); f(n) }
+    }});
+    defer f.deinit();
+    const entries = try f.arena.allocator().alloc(effects.HostEffects.Entry, f.built.hosts.items.len);
+    for (f.built.hosts.items, 0..) |_, i| {
+        entries[i] = .{ .host = @intCast(i), .summary = try effects.summaryOf(f.arena.allocator(), &.{.{
+            .resource = .{ .host = 7 },
+            .mode = .write,
+        }}) };
+    }
+    var an = try Analysis.init(f.arena.allocator(), f.built, .{
+        .graph = f.graph,
+        .hosts = .{ .entries = entries },
+    });
+    try an.analyze();
+    const fs = try an.functionSummary(funcId(&f, "app.f").?);
+    const gs = try an.functionSummary(funcId(&f, "app.g").?);
+    // Both members of the recursive SCC: may diverge, and the host write
+    // is conservatively kept in the access row (§8.2 example).
+    try testing.expect(fs.may_diverge and gs.may_diverge);
+    try testing.expect(!effects.isObservableEffectFree(fs));
+    try testing.expect(!effects.isObservableEffectFree(gs));
+    try testing.expect(!fs.eql(effects.top));
     try testing.expect((try an.validate(testing.allocator)) == null);
 }
 
@@ -904,6 +1501,73 @@ test "hir_effects: stored annotations are sound over-approximations; tampering i
     testing.allocator.free(msg2.?);
 }
 
+test "hir_effects: SCC-fixpoint summaries are re-derived; a call annotation cannot under-approximate them" {
+    // M2b: the validator re-runs the SCC least fixpoint (docs/effects.md
+    // §8.2/§8.3), so a call node annotated below the callee's derived
+    // summary is rejected.
+    var f = try build("app", &.{.{
+        "app",
+        \\const later: int32 = 3;
+        \\fn leak() -> int32 { later }
+        \\fn caller() -> int32 { leak() }
+    }});
+    defer f.deinit();
+    var an = try Analysis.init(f.arena.allocator(), f.built, .{ .graph = f.graph });
+    try an.analyze();
+    try testing.expect((try an.validate(testing.allocator)) == null);
+    const caller = funcId(&f, "app.caller").?;
+    const body = bodyOf(&f.built.program, f.built.funcs.items[caller].root);
+    // Widen to Top: sound. Narrow to Pure: the callee reads a module
+    // constant, so the derived call summary does not fit in Pure.
+    const top_id2 = try f.built.program.effect_interner.summaryId(effects.top);
+    try f.built.program.setEffect(body, .{ .ready = top_id2 });
+    try testing.expect((try an.validate(testing.allocator)) == null);
+    try f.built.program.setEffect(body, .{ .ready = f.built.program.effect_interner.pureId() });
+    const msg = try an.validate(testing.allocator);
+    try testing.expect(msg != null);
+    testing.allocator.free(msg.?);
+}
+
+test "hir_effects: drop_effect walks the field/hook chain (teardown closed over containers)" {
+    // docs/effects.md §7.2/§11.1: the teardown read set is the whole
+    // destruction chain — the struct's own hook plus every Unique field's
+    // hook — not just the type-direct hook. `Pair` has no hook of its
+    // own; both `File` fields do.
+    var f = try build("app", &.{.{
+        "app",
+        \\const base: int32 = 2;
+        \\struct File { fd: int32; drop(f) { let _ = base; } }
+        \\struct Pair { a: File; b: File; }
+        \\const g: Pair = Pair { a: File{fd:1}, b: File{fd:2} };
+    }});
+    defer f.deinit();
+    var an = try Analysis.init(f.arena.allocator(), f.built, .{ .graph = f.graph });
+    try an.analyze();
+    // The chain is non-trivial and free of any violation (base precedes g).
+    const pair_ty = findStructTy(&f, "Pair") orelse return error.TestUnexpectedResult;
+    const de = try an.dropEffectOf(pair_ty);
+    try testing.expect(!effects.isPure(de));
+    var saw_const_read = false;
+    for (de.accesses.accesses) |a| {
+        if (a.mode == .read and a.resource == .module_const) saw_const_read = true;
+    }
+    try testing.expect(saw_const_read);
+    try testing.expect((try an.checkModuleDependencies(testing.allocator)) == null);
+}
+
+fn findStructTy(f: *Fixture, name: []const u8) ?cfg.Type {
+    for (f.built.types, 0..) |d, i| {
+        const dname = switch (d) {
+            .struct_ => |s| s.name,
+            .union_ => |u| u.name,
+            .opaque_ => |o| o.name,
+            .unknown => continue,
+        };
+        if (std.mem.eql(u8, dname, name)) return .{ .named = .{ .id = @intCast(i), .args = &.{} } };
+    }
+    return null;
+}
+
 test "hir_effects: module constants read ModuleConst" {
     var f = try build("app", &.{.{
         "app",
@@ -934,7 +1598,14 @@ test "hir_effects: undeclared host metadata is Top, declared metadata refines it
 
     var an = try Analysis.init(f.arena.allocator(), f.built, .{ .graph = f.graph });
     try an.analyze();
-    try testing.expect((try an.functionSummary(shout)).eql(effects.top));
+    // Undeclared host metadata is the conservative host summary: every
+    // host resource may be touched, but it carries no Stilla
+    // `ModuleConst` read (docs/effects.md §13).
+    const undeclared = try an.functionSummary(shout);
+    try testing.expect(undeclared.eql(effects.host_top));
+    for (undeclared.accesses.accesses) |a| {
+        try testing.expect(a.resource != .module_const);
+    }
     try testing.expect((try an.validate(testing.allocator)) == null);
 
     // Declare every host binding pure: the host call (and the intrinsic

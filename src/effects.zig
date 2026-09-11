@@ -68,6 +68,14 @@ pub const EffectResource = union(enum) {
     host: HostDomainId,
     runtime: RuntimeDomainId,
     extension: Extension,
+    /// Any host/extension resource, but **not** a Stilla `ModuleConst`
+    /// (docs/effects.md §13): the conservative summary of a host binding
+    /// with no declared metadata. A host call cannot name a Stilla
+    /// module constant (module storage is runtime-private), so this
+    /// stands in for the missing `host` metadata without forcing the
+    /// module-const dependency rules of §7 to reject every host call.
+    /// Genuinely unknown Stilla targets still use `top`.
+    host_any,
     top,
 
     pub const Extension = struct { provider: ProviderId, resource: ResourceId };
@@ -79,7 +87,7 @@ pub const EffectResource = union(enum) {
             .host => |x| x == b.host,
             .runtime => |x| x == b.runtime,
             .extension => |x| x.provider == b.extension.provider and x.resource == b.extension.resource,
-            .top => true,
+            .host_any, .top => true,
         };
     }
 
@@ -94,7 +102,7 @@ pub const EffectResource = union(enum) {
             .runtime => |x| x < b.runtime,
             .extension => |x| x.provider < b.extension.provider or
                 (x.provider == b.extension.provider and x.resource < b.extension.resource),
-            .top => false,
+            .host_any, .top => false,
         };
     }
 };
@@ -281,8 +289,25 @@ pub const bottom: Summary = .{ .accesses = .{}, .may_trap = false, .may_diverge 
 pub const pure: Summary = .{ .accesses = .{}, .may_trap = false, .may_diverge = false, .nondeterministic = false };
 /// `(∅, true, false, false)`: may trap (including panic), else pure.
 pub const may_trap: Summary = .{ .accesses = .{}, .may_trap = true, .may_diverge = false, .nondeterministic = false };
+/// `(∅, false, true, false)`: may diverge, else pure. The recursive-SCC
+/// seed of the function-summary least fixpoint (docs/effects.md §8.2).
+pub const may_diverge: Summary = .{ .accesses = .{}, .may_trap = false, .may_diverge = true, .nondeterministic = false };
 /// `(All, true, true, true)`.
 pub const top: Summary = .{ .accesses = AccessSet.top, .may_trap = true, .may_diverge = true, .nondeterministic = true };
+/// The conservative summary of a host binding with no declared metadata
+/// (docs/effects.md §13): every host resource is touched, but no Stilla
+/// `ModuleConst` is. Missing *Stilla* targets use `top` instead.
+pub const host_top: Summary = .{
+    .accesses = .{ .accesses = &.{
+        .{ .resource = .host_any, .mode = .read },
+        .{ .resource = .host_any, .mode = .write },
+        .{ .resource = .host_any, .mode = .allocate },
+        .{ .resource = .host_any, .mode = .release },
+    } },
+    .may_trap = true,
+    .may_diverge = true,
+    .nondeterministic = true,
+};
 
 /// Build a summary whose only interaction is the given concrete
 /// accesses (`Top`/wildcard resources are folded into the mode flags).
@@ -351,6 +376,9 @@ pub fn isTotal(s: Summary) bool {
 pub fn isObservableEffectFree(s: Summary) bool {
     for (s.accesses.all) |wildcard| if (wildcard) return false;
     for (s.accesses.accesses) |x| {
+        // `host_any` is an unknown host resource: it can hide any
+        // observable interaction (docs/effects.md §13).
+        if (x.resource == .host_any) return false;
         switch (x.mode) {
             .read => {},
             .write, .allocate, .release => return false,
@@ -517,7 +545,7 @@ const AccessSetCtx = struct {
                 h.update(std.mem.asBytes(&x.provider));
                 h.update(std.mem.asBytes(&x.resource));
             },
-            .top => {},
+            .host_any, .top => {},
         }
     }
 };
@@ -575,6 +603,7 @@ pub const Conflict = enum { commute, conflict };
 /// default); `All`/unknown modes conflict.
 pub fn conflictOf(a: EffectAccess, b: EffectAccess, reg: ResourceRegistry) Conflict {
     if (a.resource == .top or b.resource == .top) return .conflict;
+    if (a.resource == .host_any or b.resource == .host_any) return .conflict;
     if (a.resource.eql(b.resource)) {
         return switch (a.mode) {
             .read => switch (b.mode) {
@@ -937,6 +966,17 @@ test "effects: drop_effect is Pure for Copy and Top otherwise" {
     try testing.expect(dropEffect(.copy).eql(pure));
     try testing.expect(dropEffect(.unique).eql(top));
     try testing.expect(dropEffect(null).eql(top));
+}
+
+test "effects: host_top touches every host resource but no ModuleConst" {
+    try testing.expect(!isObservableEffectFree(host_top));
+    try testing.expect(!isTotal(host_top));
+    try testing.expect(host_top.nondeterministic);
+    for (host_top.accesses.accesses) |a| {
+        try testing.expect(a.resource == .host_any);
+    }
+    // Unknown Stilla targets still use the full `top`.
+    try testing.expect(!top.eql(host_top));
 }
 
 test "effects: stable read pairs commute despite a summary-level Q (domain carve-out)" {

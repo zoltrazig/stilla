@@ -372,7 +372,7 @@ test "SEG: off by default; enabling it rewrites the AIR; both round-trip" {
 
 fn capture(text: []const u8, seg: bool) ![]u8 {
     var state = CaptureAdapter{};
-    var l = try support.loadOpts(text, false, seg);
+    var l = try support.loadOpts(text, false, seg, false);
     defer l.deinit();
     var term = try interpreter.runWithEntry(
         testing.allocator,

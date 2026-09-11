@@ -19,8 +19,8 @@ specifications (the spec suite index is [spec/README.md](../spec/README.md)).
 | [frontend.md](frontend.md) | the pipeline contract end to end: module graph, checker, the HIR seam, CFG lowering, the optimizer, drop lowering, the LLIR backend stages |
 | [module-graph.md](module-graph.md) | module identity, resolution, loading, cycle detection, topo sort |
 | [checker.md](checker.md) | inference, generic expansion, ownership analysis, checks |
-| [hir.md](hir.md) | the canonical monomorphic HIR seam between the checker and CFG lowering: data structures, text form, structural invariants, HIR→CFG contract (M1a structure and M1b effect infrastructure implemented; SEG remains a proposal) |
-| [effects.md](effects.md) | the effect-semantics model: resource/control summary lattice, `effect_transfer`, cleanup-aware legality queries (M1b infrastructure implemented; the dead-let / selective-ANF / SEG consumer passes and the SCC fixpoint remain proposals) |
+| [hir.md](hir.md) | the canonical monomorphic HIR seam between the checker and CFG lowering: data structures, text form, structural invariants, HIR→CFG contract (M1a structure, M1b effect infrastructure, M2a SEG and M2b summary-driven consumers implemented; match-into-SEG remains a proposal) |
+| [effects.md](effects.md) | the effect-semantics model: resource/control summary lattice, `effect_transfer`, cleanup-aware legality queries (M1b infrastructure and M2b consumers / SCC fixpoint / module-const check implemented; host ABI metadata wiring remains a proposal) |
 | [cfg-lowering.md](cfg-lowering.md) | the CFG AIR model and the HIR→CFG emission rules: destruction placement, module init functions, syscalls |
 | [optimizer.md](optimizer.md) | tail-call elimination, inlining, CSE, copy propagation, and the mid-level rewrites |
 | [llir-typed.md](llir-typed.md) | the typed LLIR lowering layer (typed opcodes, typed-assembly surface) |
@@ -35,12 +35,13 @@ specifications (the spec suite index is [spec/README.md](../spec/README.md)).
 ## Unimplemented proposals
 
 The remaining unimplemented parts of the model are described inside the
-documents above rather than in a standalone proposal: the SEG bridge and
-optimization consumer passes (hir.md §8, §11 M2), and the effect-model
-consumer passes plus the function SCC fixpoint and module-const summary
-checks (effects.md §7–§8, §12). The effect *infrastructure* — lattice,
-transfer, function-summary propagation, cleanup gate, derived queries —
-is implemented (M1b), and the HIR node annotations carry it.
+documents above rather than in a standalone proposal: the `match`
+SEG bridge (hir.md §8, §11 M2), the host ABI metadata wiring
+(effects.md §13), and indirect-call target narrowing (effects.md §9.2).
+The effect infrastructure — lattice, transfer, SCC-fixpoint function
+summaries, precise `drop_effect`, cleanup gate, derived queries — is
+implemented (M1b + M2b), as are the M2 consumer passes (dead-let /
+selective ANF / SEG-safe) and the module-const init/teardown check.
 
 ## Reading order
 

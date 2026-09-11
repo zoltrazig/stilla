@@ -153,6 +153,139 @@ fn corpusList(dir: []const u8, specs: []const []const u8) !void {
     _ = &failures;
 }
 
+// ---------------------------------------------------------------------------
+// M2b: module-constant init/teardown dependency check (docs/effects.md §7).
+// The check moved out of the checker's AST-level `InitOrder` walk and is now
+// driven by the function summaries + whole-chain `drop_effect`; these cases
+// are the AST-walk suite relocated to the phase-3 seam that owns the rule.
+// ---------------------------------------------------------------------------
+
+/// Compile one module through the full frontend. Returns a diagnostic
+/// message (copied into `allocator`) or null on success.
+fn compileDiag(text: []const u8, allocator: std.mem.Allocator) !?[]const u8 {
+    var source_map = std.StringHashMapUnmanaged([]const u8).empty;
+    defer source_map.deinit(allocator);
+    try source_map.put(allocator, "test", text);
+    var comp = frontend.compile(allocator, .{
+        .entry = "test",
+        .sources = .{ .source = source_map },
+    }) catch |err| switch (err) {
+        error.Diagnostic => return null,
+        else => return err,
+    };
+    defer comp.deinit();
+    if (comp.diag) |d| return try allocator.dupe(u8, d.message);
+    return null;
+}
+
+fn expectModuleDiag(text: []const u8, want: []const u8) !void {
+    const msg = (try compileDiag(text, testing.allocator)) orelse {
+        std.debug.print("expected a diagnostic containing '{s}', got none\n", .{want});
+        return error.TestUnexpectedResult;
+    };
+    defer testing.allocator.free(msg);
+    if (std.mem.indexOf(u8, msg, want) == null) {
+        std.debug.print("expected '{s}' in '{s}'\n", .{ want, msg });
+        return error.TestUnexpectedResult;
+    }
+}
+
+fn expectModuleOk(text: []const u8) !void {
+    if (try compileDiag(text, testing.allocator)) |msg| {
+        defer testing.allocator.free(msg);
+        std.debug.print("unexpected diagnostic: {s}\n", .{msg});
+        return error.TestUnexpectedResult;
+    }
+}
+
+test "M2b: rejects reading a later module constant (summary-driven)" {
+    try expectModuleDiag(
+        \\const a: int32 = b;
+        \\const b: int32 = 1;
+    , "module constant initializer reads 'b' declared later");
+}
+
+test "M2b: rejects transitively reading a later module constant" {
+    try expectModuleDiag(
+        \\const a: int32 = f();
+        \\fn f() -> int32 { b }
+        \\const b: int32 = 1;
+    , "which reads module constant 'b' declared later");
+}
+
+test "M2b: accepts reading an earlier module constant" {
+    try expectModuleOk(
+        \\const a = 1;
+        \\const b = a;
+    );
+}
+
+test "M2b: a function reading a later constant is fine when nothing calls it" {
+    try expectModuleOk(
+        \\const a = 1;
+        \\fn f() -> int32 { b }
+        \\const b: int32 = 2;
+    );
+}
+
+test "M2b: rejects a drop hook reading a later module constant" {
+    try expectModuleDiag(
+        \\struct File { fd: int32; drop(f) { let _ = later_msg; } }
+        \\const log: File = File{ fd: 1 };
+        \\const later_msg: str = "bye";
+    , "drop hook of module constant 'log' reads 'later_msg' declared later");
+}
+
+test "M2b: rejects a drop hook transitively reading a later module constant" {
+    try expectModuleDiag(
+        \\fn tell() -> str { later_msg }
+        \\struct File { fd: int32; drop(f) { let _ = tell(); } }
+        \\const log: File = File{ fd: 1 };
+        \\const later_msg: str = "bye";
+    , "which reads module constant 'later_msg' declared later");
+}
+
+test "M2b: accepts a drop hook reading an earlier module constant" {
+    try expectModuleOk(
+        \\const earlier: str = "hi";
+        \\struct File { fd: int32; drop(f) { let _ = earlier; } }
+        \\const log: File = File{ fd: 1 };
+    );
+}
+
+test "M2b: a mutual call cycle reading no constants is fine" {
+    try expectModuleOk(
+        \\const a: int32 = f();
+        \\fn f() -> int32 { g() }
+        \\fn g() -> int32 { f() }
+    );
+}
+
+test "M2b: a recursive SCC's transitive read is caught (fixpoint drives the check)" {
+    // docs/effects.md §7.1/§8.2: the read is only in `g`, reachable from
+    // the initializer through a recursive SCC — the fixed-point summary of
+    // `f` must still carry it.
+    try expectModuleDiag(
+        \\const a: int32 = f();
+        \\fn f() -> int32 { g() }
+        \\fn g() -> int32 { f() + b }
+        \\const b: int32 = 1;
+    , "which reads module constant 'b' declared later");
+}
+
+test "M2b: rejects a module constant reading itself" {
+    try expectModuleDiag(
+        \\const a: int32 = a;
+    , "reads 'a' before it is initialized");
+}
+
+test "M2b: rejects a module constant reading itself through a call" {
+    try expectModuleDiag(
+        \\const a: int32 = f();
+        \\fn f() -> int32 { a }
+    , "which reads module constant 'a' declared later");
+}
+
 fn validateAllMsg(built: *const hir.BuiltProgram) ?[]const u8 {
     for (built.funcs.items) |f| {
         const msg = hir.validate(&built.program, f.root, testing.allocator) catch return "validate oom";

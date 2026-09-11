@@ -23,6 +23,7 @@ const hir = @import("hir.zig");
 const hir_build = @import("passes/hir_build.zig");
 const hir_effects = @import("passes/hir_effects.zig");
 const hir_seg = @import("passes/hir_seg.zig");
+const hir_simplify = @import("passes/hir_simplify.zig");
 const hir_lower = @import("passes/hir_lower.zig");
 const cfg_optimize = @import("passes/cfg_optimize.zig");
 const cfg_parse = @import("passes/cfg_parse.zig");
@@ -62,6 +63,13 @@ pub const Options = struct {
     /// opt-in optimization with its own compile-time budget; the `--seg`
     /// CLI flag enables it.
     seg: bool = false,
+    /// Run the effect-driven HIR consumers (hir.md §11 M2b): dead-let
+    /// elimination and selective A-Normal Form, both admitted solely by
+    /// the derived `isDiscardable` / `canFloatAsTree` queries
+    /// (effects.md §12). Default off, like `seg` — the pass has its own
+    /// compile-time budget and no CLI-visible semantic oracle beyond the
+    /// interpreter differential.
+    simplify: bool = false,
     /// Run the mid-level optimizer (Passes 7–8) over the lowered CFG
     /// before returning (optimizer.md): tail call elimination, constant
     /// folding, CSE, PRE, copy propagation, dead-block elimination, jump
@@ -144,6 +152,31 @@ fn failed(
         .diag = if (diags.len > 0) diags[0] else null,
         .sources = sources,
     };
+}
+
+/// Re-validate a rewritten HIR (docs/hir.md §2.4): structural checks on
+/// every function and const root, then a fresh effect analysis whose
+/// annotations must be `ready` and a sound over-approximation. Used after
+/// an in-place HIR transform (M2b consumers, SEG). Returns null or the
+/// diagnostic to report.
+fn revalidateHir(arena_alloc: std.mem.Allocator, graph: *moduleinfo.ModuleGraph, built: *hir.BuiltProgram) CompileError!?moduleinfo.Diag {
+    for (built.funcs.items) |rec| {
+        if (hir.validate(&built.program, rec.root, arena_alloc) catch return error.OutOfMemory) |msg| {
+            return moduleinfo.Diag{ .span = ast.Span.init(0, 0, 0), .message = msg };
+        }
+    }
+    for (built.consts.items) |c| {
+        const root = c.init orelse continue;
+        if (hir.validate(&built.program, root, arena_alloc) catch return error.OutOfMemory) |msg| {
+            return moduleinfo.Diag{ .span = ast.Span.init(0, 0, 0), .message = msg };
+        }
+    }
+    var an = hir_effects.Analysis.init(arena_alloc, built, .{ .graph = graph }) catch return error.OutOfMemory;
+    an.analyze() catch return error.OutOfMemory;
+    if (an.validate(arena_alloc) catch return error.OutOfMemory) |msg| {
+        return moduleinfo.Diag{ .span = ast.Span.init(0, 0, 0), .message = msg };
+    }
+    return null;
 }
 
 /// Run the optimizer (optimizer.md): the default single ordered pass,
@@ -240,30 +273,34 @@ pub fn compile(allocator: std.mem.Allocator, options: Options) CompileError!Comp
                 .message = msg,
             }}, graph, builder.loaded_sources.items);
         }
+        // Module-constant init/teardown dependency check (docs/effects.md
+        // §7), driven by the just-computed summaries and the whole-chain
+        // `drop_effect` — it replaces the checker's AST-level `InitOrder`
+        // walk. It runs on the pre-transform form: HIR optimization may
+        // not be used to launder a violating read (docs/effects.md §7.1).
+        if (effect_analysis.checkModuleDependencies(arena_alloc) catch return error.OutOfMemory) |msg| {
+            return failed(arena, &.{.{
+                .span = ast.Span.init(0, 0, 0),
+                .message = msg,
+            }}, graph, builder.loaded_sources.items);
+        }
+        if (options.simplify) {
+            // M2b effect-driven consumers (hir.md §11): dead-let +
+            // selective A-Normal Form, then re-validate structure and
+            // effects on the rewritten program (hir.md §2.4).
+            _ = hir_simplify.optimize(arena_alloc, built, .{ .graph = graph }) catch return error.OutOfMemory;
+            if (revalidateHir(arena_alloc, graph, built) catch return error.OutOfMemory) |diag| {
+                return failed(arena, &.{diag}, graph, builder.loaded_sources.items);
+            }
+        }
         if (options.seg) {
             // M2a SEG (hir.md §11): rewrite islands after the validated
             // effect analysis, then re-validate structure and effects on
             // the rewritten program (hir.md §2.4 — a transform may not
             // assume the pre-rewrite static conclusions still hold).
             _ = hir_seg.optimize(arena_alloc, built, .{ .graph = graph }) catch return error.OutOfMemory;
-            for (built.funcs.items) |rec| {
-                if (hir.validate(&built.program, rec.root, arena_alloc) catch return error.OutOfMemory) |msg| {
-                    return failed(arena, &.{.{ .span = ast.Span.init(0, 0, 0), .message = msg }}, graph, builder.loaded_sources.items);
-                }
-            }
-            for (built.consts.items) |c| {
-                const root = c.init orelse continue;
-                if (hir.validate(&built.program, root, arena_alloc) catch return error.OutOfMemory) |msg| {
-                    return failed(arena, &.{.{ .span = ast.Span.init(0, 0, 0), .message = msg }}, graph, builder.loaded_sources.items);
-                }
-            }
-            var seg_analysis = hir_effects.Analysis.init(arena_alloc, built, .{ .graph = graph }) catch return error.OutOfMemory;
-            seg_analysis.analyze() catch return error.OutOfMemory;
-            if (seg_analysis.validate(arena_alloc) catch return error.OutOfMemory) |msg| {
-                return failed(arena, &.{.{
-                    .span = ast.Span.init(0, 0, 0),
-                    .message = msg,
-                }}, graph, builder.loaded_sources.items);
+            if (revalidateHir(arena_alloc, graph, built) catch return error.OutOfMemory) |diag| {
+                return failed(arena, &.{diag}, graph, builder.loaded_sources.items);
             }
         }
         break :blk hir_lower.lowerProgram(&lowerer, built) catch |err| switch (err) {

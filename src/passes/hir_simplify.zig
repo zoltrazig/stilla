@@ -1,0 +1,412 @@
+//! Pass: effect-driven HIR consumers — dead-let and selective
+//! A-Normal Form (docs/hir.md §11 M2b, §5.7, §8.3; docs/effects.md §12).
+//! In: a built HIR program whose effect annotations are `ready`. Out: the
+//! same tree with dead bindings removed and non-floatable operands
+//! materialized into `let`s, in place.
+//!
+//! Both rules are **derived-query driven** (docs/effects.md §12.3: "所有
+//! 合法性来自派生查询"): legality is the existing `isDiscardable` /
+//! `canFloatAsTree` query, never a `switch(op)` legality table. The pass
+//! never inspects an opcode to decide whether a rewrite is legal — it may
+//! only *apply* the rule to the `let` / `StrictLTR` shapes the query is
+//! evaluated on.
+//!
+//! - **dead-let** (docs/effects.md §10.2, §12.2): `let B = v in body`
+//!   drops the whole `let` when `B` is unused and `isDiscardable(v)`.
+//!   The query spans trap / effect / cleanup / ownership, so `10 / y` is
+//!   never dropped even though it looks dead.
+//! - **selective A-Normal Form** (docs/hir.md §5.7, docs/effects.md
+//!   §12.1): for a `StrictLTR` parent, the *first* operand that is not
+//!   `canFloatAsTree` is hoisted into `let B = op in parent(…, %B, …)`.
+//!   Operands before it are floatable, so leaving them inside the region
+//!   keeps LTR intact; the rule is applied one operand per round so the
+//!   hoist chain is built from the outside in.
+//!
+//! **Unique operands are not materialized yet.** A synthesized `let`
+//! binding a Unique value is destroyed at scope end, while the original
+//! anonymous temporary is destroyed at the full-expression boundary.
+//! Proving those coincide needs the `CleanupFootprint`/FE registration
+//! that the builder does not populate yet (docs/effects.md §11.2), so the
+//! pass hoists only Copy-typed operands and leaves Unique ones in place
+//! (customary evaluation order is preserved; nothing is reordered).
+//!
+//! Like SEG (`hir_seg.zig`), the pass re-derives the effect analysis each
+//! round and rewrites in place (the HIR is a tree, every node a single
+//! parent, arena-append only). The caller re-validates structure and
+//! effects afterwards (docs/hir.md §2.4).
+
+const std = @import("std");
+const cfg = @import("stilla").cfg;
+const hir = @import("stilla").hir;
+const moduleinfo = @import("stilla").moduleinfo;
+const hir_effects = @import("hir_effects.zig");
+
+pub const Error = std.mem.Allocator.Error;
+
+pub const Stats = struct {
+    /// Analysis → rewrite rounds actually run.
+    iterations: u32 = 0,
+    /// Dead `let`s removed.
+    dead_lets: usize = 0,
+    /// Operands materialized into `let`s.
+    hoists: usize = 0,
+};
+
+pub const Config = struct {
+    /// The module graph, for the ownership class of generic named types
+    /// (same role as in `hir_effects.Config`).
+    graph: ?*moduleinfo.ModuleGraph = null,
+    /// Bound on analysis → rewrite rounds (each round re-derives effects).
+    max_iterations: u32 = 8,
+};
+
+/// Apply the M2b consumers to every function body and constant
+/// initializer in place, iterating analysis/rewrite to a bounded
+/// fixpoint. The caller owns `built` and the arena; on return every root
+/// is rewritten but not yet re-validated (the caller runs `hir.validate`
+/// plus a fresh `Analysis.analyze`/`.validate`).
+pub fn optimize(arena: std.mem.Allocator, built: *hir.BuiltProgram, config: Config) Error!Stats {
+    var stats = Stats{};
+    var iter: u32 = 0;
+    while (iter < config.max_iterations) : (iter += 1) {
+        var analysis = try hir_effects.Analysis.init(arena, built, .{ .graph = config.graph });
+        try analysis.analyze();
+        var rw = Rewriter{ .arena = arena, .built = built, .analysis = &analysis };
+        const changed = try rw.run();
+        stats.iterations += 1;
+        stats.dead_lets += rw.dead_lets;
+        stats.hoists += rw.hoists;
+        if (!changed) break;
+    }
+    return stats;
+}
+
+const Rewriter = struct {
+    arena: std.mem.Allocator,
+    built: *hir.BuiltProgram,
+    analysis: *hir_effects.Analysis,
+    changed: bool = false,
+    dead_lets: usize = 0,
+    hoists: usize = 0,
+
+    fn p(self: *Rewriter) *hir.Program {
+        return &self.built.program;
+    }
+
+    fn run(self: *Rewriter) Error!bool {
+        // Nodes appended by this pass are rewritten only on a later
+        // round, when a fresh analysis covers them.
+        for (self.built.funcs.items) |rec| try self.rewrite(rec.root);
+        for (self.built.consts.items) |c| {
+            if (c.init) |root| try self.rewrite(root);
+        }
+        return self.changed;
+    }
+
+    /// Copy the operand/region/param id lists into arena-owned slices
+    /// before any work that may append to the program's flat buffers (the
+    /// same hazard `hir_seg` documents: `operands`/`regionsOf`/`params`
+    /// are views into growable buffers).
+    fn dupOperands(self: *Rewriter, id: hir.ExprId) Error![]hir.ExprId {
+        const src = self.p().operands(id);
+        const out = try self.arena.alloc(hir.ExprId, src.len);
+        @memcpy(out, src);
+        return out;
+    }
+
+    fn dupRegions(self: *Rewriter, id: hir.ExprId) Error![]hir.RegionId {
+        const src = self.p().regionsOf(id);
+        const out = try self.arena.alloc(hir.RegionId, src.len);
+        @memcpy(out, src);
+        return out;
+    }
+
+    fn dupParams(self: *Rewriter, rid: hir.RegionId) Error![]hir.BinderId {
+        const src = self.p().params(rid);
+        const out = try self.arena.alloc(hir.BinderId, src.len);
+        @memcpy(out, src);
+        return out;
+    }
+
+    /// Recursive descent. Rule decisions are taken on the pre-order node
+    /// using the current round's analysis; a rewrite replaces the node's
+    /// content in place, so parent slots need no update.
+    fn rewrite(self: *Rewriter, id: hir.ExprId) Error!void {
+        // Try the rules first, while `id`'s operand annotations are still
+        // the ones the analysis derived this round.
+        if (try self.tryDeadLet(id)) {
+            self.changed = true;
+            self.dead_lets += 1;
+            return;
+        }
+        if (try self.tryAnf(id)) {
+            self.changed = true;
+            self.hoists += 1;
+            return;
+        }
+        const ops = try self.dupOperands(id);
+        for (ops) |op| try self.rewrite(op);
+        const regs = try self.dupRegions(id);
+        for (regs) |r| try self.rewrite(self.p().region(r).root);
+    }
+
+    // -----------------------------------------------------------------
+    // dead-let (docs/effects.md §10.2, §12.2)
+    // -----------------------------------------------------------------
+
+    fn tryDeadLet(self: *Rewriter, id: hir.ExprId) Error!bool {
+        const pr = self.p();
+        if (!std.mem.eql(u8, hir.registry.get(pr.node(id).op).name, "let")) return false;
+        const ops = try self.dupOperands(id);
+        if (ops.len != 1) return false;
+        const regs = try self.dupRegions(id);
+        if (regs.len != 1) return false;
+        const region = pr.region(regs[0]);
+        if (region.pattern != null) return false; // destructuring let: not this rule
+        const params = try self.dupParams(regs[0]);
+        if (params.len != 1) return false;
+        const bind = params[0];
+        if (try self.countUses(region.root, bind) != 0) return false;
+        // Legality is the derived query alone — no opcode knowledge.
+        if (!try self.analysis.isDiscardable(ops[0])) return false;
+        pr.exprs.items[id] = pr.node(region.root);
+        return true;
+    }
+
+    fn countUses(self: *Rewriter, root: hir.ExprId, bind: hir.BinderId) Error!usize {
+        const pr = self.p();
+        var count: usize = 0;
+        var work = std.ArrayListUnmanaged(hir.ExprId).empty;
+        defer work.deinit(self.arena);
+        try work.append(self.arena, root);
+        while (work.pop()) |id| {
+            const n = pr.node(id);
+            if (std.mem.eql(u8, hir.registry.get(n.op).name, "local") and n.payload.binder == bind) count += 1;
+            for (pr.operands(id)) |op| try work.append(self.arena, op);
+            for (pr.regionsOf(id)) |r| try work.append(self.arena, pr.region(r).root);
+        }
+        return count;
+    }
+
+    // -----------------------------------------------------------------
+    // selective A-Normal Form (docs/hir.md §5.7, docs/effects.md §12.1)
+    // -----------------------------------------------------------------
+
+    fn tryAnf(self: *Rewriter, id: hir.ExprId) Error!bool {
+        const pr = self.p();
+        const n = pr.node(id);
+        // EvalPolicy is the language semantics of the parent: only an
+        // eager StrictLTR op has its operands' order fixed by the
+        // operand sequence. (This is the descriptor's policy, not an
+        // opcode table.)
+        if (hir.registry.get(n.op).policy != .strict_ltr) return false;
+        const ops = try self.dupOperands(id);
+        if (ops.len == 0) return false;
+        for (ops, 0..) |op, k| {
+            // Preceding operands may stay inside the region only if they
+            // can float as trees (total, no observable effect, cleanup
+            // free); otherwise they would have been the first hit.
+            if (try self.analysis.canFloatAsTree(op)) continue;
+            // The first non-floatable operand: hoisting it keeps LTR,
+            // because every earlier operand is floatable.
+            const cap = try self.analysis.capabilityOf(pr.node(op).ty) orelse return false;
+            // Unique materialization is deferred until the full-expression
+            // cleanup registration is modelled (see the file header).
+            if (cap != .copy) return false;
+            try self.hoist(id, k, ops);
+            return true;
+        }
+        return false;
+    }
+
+    /// `parent(…, op_k, …)` → `let B = op_k in parent(…, %B, …)`, with the
+    /// parent's region range kept intact for the inner node and the outer
+    /// node overwritten in place with the new `let`.
+    fn hoist(self: *Rewriter, id: hir.ExprId, k: usize, ops: []const hir.ExprId) Error!void {
+        const pr = self.p();
+        const n = pr.node(id);
+        const arg = ops[k];
+        const arg_ty = pr.node(arg).ty;
+
+        const fresh = try pr.addBinder(arg_ty, .value);
+        const local = try pr.addExpr(.{
+            .op = hir.opId("local").?,
+            .ty = arg_ty,
+            .payload = .{ .binder = fresh },
+            .full_expr = n.full_expr,
+            .sema = try pr.internSema(.owned, .pending),
+        });
+
+        const new_ops = try self.arena.dupe(hir.ExprId, ops);
+        new_ops[k] = local;
+        var inner_node = n;
+        inner_node.operands = try pr.addOperands(new_ops);
+        inner_node.sema = try pr.internSema(pr.viewOf(id), .pending);
+        const inner = try pr.addExpr(inner_node);
+
+        const rid = try pr.addRegion(&.{fresh}, inner, null);
+        pr.exprs.items[id] = .{
+            .op = hir.opId("let").?,
+            .ty = n.ty,
+            .operands = try pr.addOperands(&.{arg}),
+            .regions = try pr.addRegions(&.{rid}),
+            .full_expr = n.full_expr,
+            .origin = n.origin,
+            .sema = try pr.internSema(.owned, .pending),
+        };
+    }
+};
+
+// ---------------------------------------------------------------------------
+// White-box tests (docs/hir.md §10.2: owning module `test {}`)
+// ---------------------------------------------------------------------------
+
+const testing = std.testing;
+const hir_build = @import("hir_build.zig");
+const checker = @import("stilla").checker;
+
+const Fixture = struct {
+    arena: *std.heap.ArenaAllocator,
+    built: *hir.BuiltProgram,
+    graph: *moduleinfo.ModuleGraph,
+
+    fn deinit(self: *Fixture) void {
+        self.arena.deinit();
+    }
+};
+
+fn build(entry: []const u8, texts: []const struct { []const u8, []const u8 }) !Fixture {
+    var arena0 = std.heap.ArenaAllocator.init(testing.allocator);
+    errdefer arena0.deinit();
+    const arena = try arena0.allocator().create(std.heap.ArenaAllocator);
+    arena.* = arena0;
+    const alloc = arena.allocator();
+
+    var sources = moduleinfo.Sources{};
+    var source_map = std.StringHashMapUnmanaged([]const u8).empty;
+    for (texts) |pair| try source_map.put(alloc, pair[0], pair[1]);
+    sources.source = source_map;
+
+    var builder = moduleinfo.Builder.init(alloc, sources);
+    const graph = builder.build(entry) catch return error.Diagnostic;
+    var ck = checker.Checker.init(alloc);
+    _ = ck.check(graph) catch return error.Diagnostic;
+    var bdiag: moduleinfo.Diag = undefined;
+    const built = hir_build.buildProgramDiag(alloc, graph, &ck.annotation, &bdiag) catch return error.Diagnostic;
+    return .{ .arena = arena, .built = built, .graph = graph };
+}
+
+fn funcBody(f: *Fixture, name: []const u8) ?hir.ExprId {
+    for (f.built.funcs.items) |rec| {
+        if (std.mem.eql(u8, rec.name, name)) {
+            const root = rec.root;
+            return f.built.program.region(f.built.program.regionsOf(root)[0]).root;
+        }
+    }
+    return null;
+}
+
+fn opName(p: *hir.Program, id: hir.ExprId) []const u8 {
+    return hir.registry.get(p.node(id).op).name;
+}
+
+/// The rewritten program still validates structurally and its effects
+/// re-derive soundly (docs/hir.md §2.4).
+fn expectRewrittenValid(f: *Fixture) !void {
+    for (f.built.funcs.items) |rec| {
+        if (try hir.validate(&f.built.program, rec.root, testing.allocator)) |m| {
+            defer testing.allocator.free(m);
+            std.debug.print("post-simplify validate failed: {s}\n", .{m});
+            return error.TestUnexpectedResult;
+        }
+    }
+    var an = try hir_effects.Analysis.init(f.arena.allocator(), f.built, .{ .graph = f.graph });
+    try an.analyze();
+    if (try an.validate(testing.allocator)) |m| {
+        defer testing.allocator.free(m);
+        std.debug.print("post-simplify effect validation failed: {s}\n", .{m});
+        return error.TestUnexpectedResult;
+    }
+}
+
+test "hir_simplify: dead let with a discardable init is removed" {
+    var f = try build("app", &.{.{
+        "app",
+        \\fn pure(x: int32) -> int32 { x + 1 }
+        \\fn f(x: int32) -> int32 {
+        \\    let unused: int32 = pure(x);
+        \\    7
+        \\}
+    }});
+    defer f.deinit();
+    const stats = try optimize(f.arena.allocator(), f.built, .{ .graph = f.graph });
+    try testing.expect(stats.dead_lets > 0);
+    try expectRewrittenValid(&f);
+    const body = funcBody(&f, "app.f").?;
+    try testing.expect(!std.mem.eql(u8, opName(&f.built.program, body), "let"));
+}
+
+test "hir_simplify: a trapping division is not dropped as dead" {
+    var f = try build("app", &.{.{
+        "app",
+        \\fn f(y: int32) -> int32 {
+        \\    let unused: int32 = 10 / y;
+        \\    0
+        \\}
+    }});
+    defer f.deinit();
+    const stats = try optimize(f.arena.allocator(), f.built, .{ .graph = f.graph });
+    try testing.expectEqual(@as(usize, 0), stats.dead_lets);
+    // The `div.i32` node is still reachable.
+    var found = false;
+    for (f.built.program.exprs.items, 0..) |e, i| {
+        if (std.mem.eql(u8, hir.registry.get(e.op).name, "div.i32")) found = true;
+        _ = i;
+    }
+    try testing.expect(found);
+    try expectRewrittenValid(&f);
+}
+
+test "hir_simplify: ANF hoists the first non-floatable operand in LTR order" {
+    var f = try build("app", &.{.{
+        "app",
+        \\const builtin = import("builtin");
+        \\fn pure(x: int32) -> int32 { x * 2 }
+        \\fn f(x: int32) -> int32 {
+        \\    pure(1) + builtin.hash(x)
+        \\}
+    }});
+    defer f.deinit();
+    _ = try optimize(f.arena.allocator(), f.built, .{ .graph = f.graph });
+    try expectRewrittenValid(&f);
+    // The body root is now a `let` whose init is the quoted host call and
+    // whose region body is the original `add.i32` with a `local` in the
+    // second operand slot.
+    const body = funcBody(&f, "app.f").?;
+    const pr = &f.built.program;
+    try testing.expect(std.mem.eql(u8, opName(pr, body), "let"));
+    const init = pr.operands(body)[0];
+    try testing.expect(std.mem.eql(u8, opName(pr, init), "call"));
+    const inner = pr.region(pr.regionsOf(body)[0]).root;
+    try testing.expect(std.mem.eql(u8, opName(pr, inner), "add.i32"));
+    const ops = pr.operands(inner);
+    try testing.expect(std.mem.eql(u8, opName(pr, ops[1]), "local"));
+}
+
+test "hir_simplify: ANF never hoists a Unique operand (deferred)" {
+    var f = try build("app", &.{.{
+        "app",
+        \\struct Token { id: int32; drop(t) { let x = t.id; } }
+        \\fn make(id: int32) -> Token { Token { id: id } }
+        \\fn take(move t: Token) -> int32 { t.id }
+        \\fn f(x: int32) -> int32 {
+        \\    take(make(x))
+        \\}
+    }});
+    defer f.deinit();
+    try expectRewrittenValid(&f);
+    const body = funcBody(&f, "app.f").?;
+    try testing.expect(!std.mem.eql(u8, opName(&f.built.program, body), "let"));
+    const stats = try optimize(f.arena.allocator(), f.built, .{ .graph = f.graph });
+    try testing.expectEqual(@as(usize, 0), stats.hoists);
+}
