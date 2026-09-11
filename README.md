@@ -28,8 +28,15 @@ and the trailing section lists what the code and docs still mark open.
 - [x] **Type checker** — inference, ownership analysis with conditional
   release and state merging, generic monomorphization, `any`/union/tuple/list
 - [x] **HIR seam** — checker output built into the canonical monomorphic HIR
-  (`hir_build`) and lowered from there (`hir_lower`); canonical text
-  printer/parser for round-trip checks ([hir.md](docs/hir.md))
+  (`hir_build`), structurally validated, annotated with effect summaries
+  (`hir_effects` / `effects`, M1b), and lowered from there (`hir_lower`);
+  canonical text printer/parser for round-trip checks
+  ([hir.md](docs/hir.md), [effects.md](docs/effects.md))
+- [x] **Effect model** — resource/control `EffectSummary` lattice,
+  `effect_transfer`, direct-call function summaries, `OperandUse`, the
+  cleanup-aware legality queries (`discardable` / `duplicable` /
+  `isSegSafe` …) and per-node annotation validation (M1b infrastructure;
+  the consumer passes remain open, [effects.md](docs/effects.md))
 - [x] **CFG lowering** — control flow, `match`/patterns, field paths, calls,
   intrinsic (`builtin`) expansion, destruction placement, module init
   functions, syscalls

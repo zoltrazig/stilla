@@ -11,6 +11,7 @@ const moduleinfo = @import("moduleinfo.zig");
 const checker = @import("passes/checker.zig");
 const hir = @import("hir.zig");
 const hir_build = @import("passes/hir_build.zig");
+const hir_effects = @import("passes/hir_effects.zig");
 const testing = std.testing;
 
 /// Compile `texts` (specifier → source), check it, and build the HIR.
@@ -69,6 +70,32 @@ fn expectValidAll(built: *const hir.BuiltProgram) !void {
     }
 }
 
+/// M1b black-box acceptance (hir.md §11, effects.md §14): run the effect
+/// analysis over a built program and validate the annotations. This is
+/// the seam the frontend runs between HIR build and HIR→CFG lowering.
+fn expectEffectsAll(built: *hir.BuiltProgram, graph: *moduleinfo.ModuleGraph) !void {
+    var an = try hir_effects.Analysis.init(built.arena, built, .{ .graph = graph });
+    try an.analyze();
+    if (try an.validate(built.arena)) |m| {
+        std.debug.print("EFFECT VALIDATE FAIL: {s}\n", .{m});
+        return error.TestUnexpectedResult;
+    }
+    // Every function root and constant initializer must be annotated.
+    for (built.funcs.items) |f| {
+        if (built.program.effectOf(f.root).readyId() == null) {
+            std.debug.print("EFFECT ANNOTATION MISSING on '{s}'\n", .{f.name});
+            return error.TestUnexpectedResult;
+        }
+    }
+    for (built.consts.items) |c| {
+        const root = c.init orelse continue;
+        if (built.program.effectOf(root).readyId() == null) {
+            std.debug.print("EFFECT ANNOTATION MISSING on const '{s}'\n", .{c.key});
+            return error.TestUnexpectedResult;
+        }
+    }
+}
+
 test "S4: build fib-class module and validate every function root" {
     var b = try buildText("app", &.{
         .{
@@ -86,6 +113,7 @@ test "S4: build fib-class module and validate every function root" {
     // builtin is an embedded host module — it appears as a module record
     // with only host records, no bodies.
     try expectValidAll(b.built);
+    try expectEffectsAll(b.built, b.graph);
 }
 
 /// The corpus harness: compile every listed module of `dir` as its own
@@ -115,6 +143,11 @@ fn corpusList(dir: []const u8, specs: []const []const u8) !void {
             testing.allocator.free(text);
             return error.TestUnexpectedResult;
         }
+        expectEffectsAll(b.built, b.graph) catch {
+            std.debug.print("HIR corpus: {s} failed effect validation\n", .{path});
+            testing.allocator.free(text);
+            return error.TestUnexpectedResult;
+        };
         testing.allocator.free(text);
     }
     _ = &failures;

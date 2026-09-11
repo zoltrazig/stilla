@@ -118,6 +118,7 @@ pub const ast = @import("ast.zig");
 pub const llir = @import("llir.zig");
 pub const vm_instr = @import("vm_instr.zig");
 pub const cfg = @import("cfg.zig");
+pub const effects = @import("effects.zig");
 pub const checker = @import("passes/checker.zig");
 pub const frontend = @import("frontend.zig");
 pub const frontend_cache = @import("frontend_cache.zig");

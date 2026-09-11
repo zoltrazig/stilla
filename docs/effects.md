@@ -1,13 +1,18 @@
 # Stilla Effects System — 语义交互摘要模型
 
-> **Status：设计提案（尚未实现）。**
+> **Status：M1b（效果基础设施）已实现；三个消费者 pass 与 SCC
+> fixpoint 仍为设计提案。**
 >
 > 本文为编译前端与优化器定义一个内部的**效果语义模型**（effect
 > semantics model）：用一个统一的结构描述「一个表达式求值时，与表达式
 > 之外的语义状态发生了哪些交互」，并用它替换当前散落在各 pass 里的
 > 特判规则（求值顺序、trap/panic、host 调用、module constant 依赖、
-> drop、函数调用摘要、SEG 准入）。文中出现的 pass/分析均为提案，未进入
-> 代码。
+> drop、函数调用摘要、SEG 准入）。**§5 的格与 §10–§11 的查询门已随
+> M1b 落地（`effects.zig` / `hir_effects.zig`，见 hir.md §11 M1b 交付
+> 记录）**；§6 的 `effect_transfer`、§10.1 的派生查询、§11 的 cleanup
+> 门亦已实现。§12 的三个消费者 pass（dead-let / selective ANF /
+> SEG-safe）、§8.2 的函数 SCC fixpoint、§7 的 module-const 检查与 §13 的
+> host ABI metadata 接线仍为提案，未进入代码。
 >
 > 配套文档：使用该模型的中间表示（HIR）设计见 [hir.md](hir.md)；本文自含
 > 效果模型所需的全部定义，不依赖其章节细节。两者的重叠概念（求值序、
@@ -942,6 +947,21 @@ const MovementContext = struct {
 签名作废：EvalPolicy 是 **parent + operand 位置**的属性，不是 `a` / `b`
 的自身属性，二元签名无法消费「EvalPolicy 允许」。
 
+> **M1b 实施记录**：实际落地的 descriptor 形状与上面的 sketch 是语义等价
+> 映射（`OpDescriptor` 定义见 [hir.md](hir.md) §3.5 的 M1b 修订）：
+> `operand_uses` 拆为 `uses`（`UsePolicy`，含 `operand_capability` /
+> `callee_params` / `static_list`）加可选显式 `operand_uses` 切片；
+> `infer_effects` 拆为 `own_effect`（op 自身摘要）加 `transfer`
+> （`TransferKind` 数据标签，由 `hir_effects.compute` 单一函数按标签组合
+> operand / region / callee）；`seg` 在 M1b 落为 `hasSegEncoding`（恒
+> false），`result_policy` 由既有 capability/view 数据承担。三者必填、
+> 无默认值（省略即编译错误）。`EffectSummary` 同样无字段默认值，
+> `pure`/`top`/`bottom`/`may_trap` 是唯一构造点。公开查询面的实现形态：
+> `isIntrinsicallySpeculatable` 除 total / 无可观察 / 无 `Q` 外还要求
+> cleanup 证明与递归 ownership 门；`canSwapOperands` 组合父节点 operand
+> 位、full-expression 边界、两 operand 的 cleanup/ownership 与
+> `orderCompatible`；`canMove` 本档不暴露（FE/lifetime 路径事实未建模）。
+
 ## 11. 完整销毁的可观察性
 
 ### 11.1 drop_effect(T)：类型系统与效果系统的桥
@@ -1209,12 +1229,45 @@ MayTrap（含 panic）+ MayDiverge + nondeterministic
 用它驱动三个 pass：**dead-let、selective ANF、SEG-safe**。
 
 **落地档位映射（与 [hir.md](hir.md) §11 对齐）**：本节的**最小范围 + MVP
-前置条件 = M1b（效果基础设施）**——在 hir.md 的档位里，效果字段先随结构
-HIR（M1a）带到节点、允许 `Ready(Top)` 占位；本节的格 / 查询门 / 基础效果
-行在 M1b 实现。三个消费者 pass（dead-let / selective ANF / SEG-safe）与
-函数 SCC fixpoint、module-const 检查属 **M2**：M1b 只验收基础设施与查询门
-本身，「三个 pass 无 `switch(op)` 特判」的验收在 M2b 执行。函数摘要的
-SCC least fixpoint（§8.2）不在 M1b——M1b 内递归函数摘要一律保守 `Top`。
+前置条件 = M1b（效果基础设施）**。在 hir.md 的档位里，M1a 落地结构 HIR
+（不含 effect 字段），M1b 以加性扩展带上 `SemanticInfo.effect` 并落地本
+节的格 / 查询门 / 基础效果行。三个消费者 pass（dead-let / selective ANF /
+SEG-safe）与函数 SCC fixpoint、module-const 检查属 **M2**：M1b 只验收基础
+设施与查询门本身，「三个 pass 无 `switch(op)` 特判」的验收在 M2b 执行。
+函数摘要的 SCC least fixpoint（§8.2）不在 M1b——M1b 内递归函数摘要一律
+保守 `Top`。
+
+> **M1b 实施记录**：模型落在 `src/effects.zig`，HIR 集成落在
+> `src/passes/hir_effects.zig`（均见 hir.md §11 M1b 交付记录）。相对于
+> 本节最小范围的实现选择：① `drop_effect(T)` 只做 Copy → `{}`、其余 →
+> `Top`（精确结构/hook 摘要在“再后”第 1 项）；② cleanup 走本节允许的
+> cleanup-free MVP 路径：对已求值子树递归证明全部类型 Copy、无非借用
+> Unique 绑定、无 `drop`，否则 cleanup 贡献 `Top`（未建模的
+> destructor/FE 清理失败关闭）； `CleanupFootprint` token 登记未由当前
+> builder 填充，空注册表视为未建模、不作证明；③ 间接调用/缺失函数摘要/
+> 缺失 host metadata 均取 `Top`；host metadata 通过分析局部注册表测试，
+> 未接 embedding ABI；④ `stable` 域与 `disjoint` 对按本节 §5.5/§5.6
+> 实现，未声明的不同资源对按冲突处理；⑤ §10.5 的 `canMove` 未暴露
+> （FE/lifetime 路径事实未建模，expose 一个恒 false 的入口无意义）；
+> `canSwapOperands` 组合父节点 operand 位、full-expression 边界、两个
+> operand 的 cleanup/ownership 门，再经 `orderCompatible`（资源冲突、
+> trap/diverge 顺序、`Q`）——摘要相等本身不放行任何交换；
+> ⑥ **隐藏操作审计**（本档不建模但可能
+> 有非 pure 行为者一律 `Top`/`MayTrap`）：值位置模块链叶子
+> （`ExprNode.access_hops` 非空）取 `Top`——lowering 会重放
+> `module_ref` + `load_member`（hir.md §7.4），模块加载/初始化的效果面
+> 本档不建模；`let`/`match` 的 pattern 在 HIR 里没有节点，transfer 显式
+> 序列化其效果：只有 list pattern 非 total（元素访问 lowering 为
+> 边界检查的 `read_index`/`split_list`，均为 `cfg` `may_trap`），其余
+> pattern 类别（wildcard/bind/literal/tuple/struct/variant/type_test）
+> 为 total；⑦ **查询组合**（§10.1 强约束「缺一不可」）：
+> `observableEffectFree` 对任一模的**通配/未知资源**（含 `Read(Top)`）
+> 返回 false；`isIntrinsicallySpeculatable` 除 total / 无可观察 / 无 `Q`
+> 外还要求 cleanup 证明与递归 ownership 门；`orderCompatible` 拒绝两个
+> 可能失败的位（失败顺序可观察，§5.6），`Q` 位除「同一 stable 域读对」
+> 外一律拒绝（§5.5）；`ownershipGate` 递归 operand，嵌套
+> `move`/borrow 不得逃逸；注解校验先清 per-node memo 再重算摘要，故校验
+> 是同逻辑的新推导（能拒绝被篗改/过期的注解并定位到过期的调用者）。
 
 **MVP 前置条件（不能延期）**：
 
@@ -1276,8 +1329,10 @@ SCC least fixpoint（§8.2）不在 M1b——M1b 内递归函数摘要一律保�
 - CFG/AIR 层已有一份 per-op 的 `may_trap / effects` 两位 schema（cfg.zig
   的 op schema，派生查询为 `pure()` 即 `!effects ∧ !may_trap`）——它是
   op 级的保守位，缺少 typed 精度与资源域；本文的 typed-opcode 摘要是对
-  它的精化与统一。落地时两者须保持
-  一致或显式分层，避免同一 trap 语义写两处而漂移。
+  它的精化与统一。**M1b 落地时按“显式分层”处理**：HIR 的 typed 行按具体
+  rep 写死（整数 div/rem `MayTrap`、float div/rem `Pure`），**不要求**与
+  CFG 粗粒度位逐位相等（CFG 故意过度近似 float 除法）；registry 启动
+  校验只断言 HIR 行自身的 typed 一致性，避免同一 trap 语义写两处而漂移。
 - 现有 pass（dead-instr 等）以「side-effect-free、non-consuming、
   non-trapping」的 schema 位白名单做判定——正是本文想用派生查询替代的
   形态。

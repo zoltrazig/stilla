@@ -41,7 +41,7 @@ Driver: `checker.Checker.check(graph)`. Sequence:
 
 Detail: [checker.md](checker.md).
 
-## HIR seam — M1a implemented (hir.md §11)
+## HIR seam — M1a + M1b implemented (hir.md §11)
 
 > Status: **implemented.** The checker's annotated output is built into the
 > canonical monomorphic HIR and lowered from there to CFG AIR; this is the
@@ -49,16 +49,20 @@ Detail: [checker.md](checker.md).
 > lowering and the `hir_stage` toggle). Files: `hir_build.zig`
 > (+ `hir_build_block` / `hir_build_expr` / `hir_build_path` / `hir_build_call` /
 > `hir_build_control` / `hir_build_pattern`), `hir_validate.zig`,
-> `hir_lower.zig`. Effect analysis is disabled in this milestone, so
-> `SemanticInfo` carries no effect field.
+> `hir_effects.zig` (with the model in top-level `effects.zig`),
+> `hir_lower.zig`. The M1b effect infrastructure is live: every reachable
+> node carries a `ready` interned `EffectSummary` after analysis, and the
+> effect validator runs in the compile pipeline.
 
 Order: checker → AST→HIR construction → structural validation →
-HIR→CFG lowering (into today's block/value/drop machinery).
+effect analysis + annotation validation → HIR→CFG lowering (into today's
+block/value/drop machinery).
 
 | Pass | File | Job |
 | --- | --- | --- |
-| build | `hir_build.zig` + `hir_build_block` / `_expr` / `_path` / `_call` / `_control` / `_pattern` (data structures in `hir.zig`) | annotated AST + module graph → canonical monomorphic HIR: binder / region / pattern normalization, full-expression fences, ownership view carried over from the checker; effect analysis disabled (M1a) |
-| validate | `hir_validate.zig` | structural HIR invariants only: scope, no capture, tree shape (no DAG), no duplicate BinderId, full-expression fence (hir.md §10.1) |
+| build | `hir_build.zig` + `hir_build_block` / `_expr` / `_path` / `_call` / `_control` / `_pattern` (data structures in `hir.zig`) | annotated AST + module graph → canonical monomorphic HIR: binder / region / pattern normalization, full-expression fences, ownership view carried over from the checker; `SemanticInfo.effect` starts `pending` (M1b) |
+| validate | `hir_validate.zig` | structural HIR invariants only: scope, no capture, tree shape (no DAG), no duplicate BinderId, full-expression fence (hir.md §10.1 first level) |
+| effects | `hir_effects.zig` (model: `effects.zig`) | M1b: `effect_transfer` per descriptor (`own_effect` + `TransferKind`), function summaries by direct-call DFS (recursion/missing/unknown → `Top`), `OperandUse` resolution, cleanup-free MVP proof, and the derived legality queries; publishes interned `ready` summaries and validates them against a fresh derivation (`derived ≤ stored`) |
 | lower | `hir_lower.zig` | HIR → CFG AIR, reusing the existing `lower.zig` / `cfg_lower_emit.zig` block, value, and drop mechanisms; replaced the direct AST → CFG expression lowering (S6b) |
 
 The canonical text form (`hir_print.zig` / `hir_parse.zig`, re-exported
@@ -66,9 +70,12 @@ through `hir.zig`) mirrors `cfg_print` / `cfg_parse` for round-trip
 tests; the black-box regression suite lives in `hir_tests.zig`
 (hir.md §10.2–§10.3) — after S6b the differential gate became a pure-HIR
 corpus regression (compile → canonical AIR → standalone cfg parser
-round-trip).
+round-trip), extended in M1b with corpus-wide effect annotation +
+validation. The effect model's own algebra/law tests live in
+`effects.zig`, the transfer/query tests in `hir_effects.zig`.
 
-Detail: [hir.md](hir.md) (M1a; implemented).
+Detail: [hir.md](hir.md) (M1a + M1b; implemented), [effects.md](effects.md)
+(§5 lattice + §10–§11 queries implemented; consumer passes proposed).
 
 ## CFG lowering (lower.zig)
 
@@ -143,8 +150,10 @@ Detail: [frontend.md](frontend.md), [llir-typed.md](llir-typed.md).
 ## Orchestration (frontend.zig)
 
 `frontend.compile` wires the whole chain in one call — module graph
-(`moduleinfo`) → checker (`checker`) → HIR build + HIR→CFG lowering
-(`hir_build` / `hir_lower`, the M1a seam, [hir.md](hir.md) §11) →
+(`moduleinfo`) → checker (`checker`) → HIR build (`hir_build`) →
+structural validation (`hir_validate`) → effect analysis + annotation
+validation (`hir_effects`, the M1a/M1b seam, [hir.md](hir.md) §11,
+[effects.md](effects.md)) → HIR→CFG lowering (`hir_lower`) →
 validation → `Options.optimize` (the optimizer, then drop lowering,
 then re-validation plus the text round-trip) — and owns the diagnostics
 and the arena that outlives every stage. The CLI (`main.zig`) adds the
@@ -156,6 +165,8 @@ LLIR emission modes on top; the embeddable path goes through
 
 - [module-graph.md](module-graph.md) — module identity, resolution, loading, cycle detection.
 - [checker.md](checker.md) — inference, generics, ownership, checks.
+- [hir.md](hir.md) — the HIR data structures, text form, and the HIR→CFG contract (M1a + M1b implemented).
+- [effects.md](effects.md) — the effect-semantics model: lattice and derived queries implemented (M1b); consumer passes proposed.
 - [cfg-lowering.md](cfg-lowering.md) — the AIR model and lowering rules.
 - [optimizer.md](optimizer.md) — the optimizer rewrites and validator.
 - [frontend.md](frontend.md) — the pipeline contract end to end, plus the LLIR stage table.

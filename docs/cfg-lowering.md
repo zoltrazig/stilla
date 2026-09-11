@@ -14,7 +14,7 @@ a declaration and no definition) to system calls.
 
 ## Overview
 
-CFG lowering lowers the canonical monomorphic HIR (the M1a seam,
+CFG lowering lowers the canonical monomorphic HIR (the HIR seam,
 [hir.md](hir.md)) into a CFG-based AIR: functions become directed
 graphs of basic blocks over typed values, with explicit ownership
 operations and control flow. It is the last frontend stage and the

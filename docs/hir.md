@@ -1,14 +1,19 @@
-# Stilla HIR — 规范形中间表示
+# Stilla HIR — 高级别中间表示
 
-> **Status：M1a implemented；M1b / M2（SEG）仍为设计提案。**
+> **Status：M1a / M1b implemented；M2（SEG 与消费者 pass）仍为设计提案。**
 >
-> 本文为编译前端定义一个规范形中间表示 HIR：binder/region 化的单态表达式
+> 本文为编译前端定义一个高级别中间表示 HIR：binder/region 化的单态表达式
 > 树、registry 化的 op 语义、文本形式与受限 SEG 投影。**M1a 范围（结构
 > HIR：AST→HIR 构建、§10.1 结构校验、HIR→CFG lowering）已随 S0–S6 落地，
 > 且 S6b 删除直降路径后 HIR 是前端唯一 lowering 路径**；§3–§7、§9、§10
-> 的 M1a 侧描述即已实现形态。效果基础设施（[effects.md](effects.md)，
-> §6.2 只保留 HIR 侧自含摘要）与 SEG（§8）仍是提案；文中「直降/落地前
-> 基线」措辞均为历史参照。实施记录见 PROGRESS.md。
+> 的 M1a 侧描述即已实现形态。**M1b（效果基础设施）已落地**：
+> `SemanticInfo.effect`、固定乘积格、`effect_transfer`、函数摘要（直接
+> 调用传播，递归 → `Top`）、cleanup-aware 派生查询与 §10.1 第二级校验
+> 随 [effects.md](effects.md) §14 实现（§3.6、§10.1、§11 已更新为已实现
+> 形态）。M2（SEG、dead-let / selective A-Normal Form 等消费者 pass）
+> 仍是提案；文中「直降/落地前基线」措辞均为历史参照。实施记录见本档
+> §11 的 M1a/M1b 交付记录（PROGRESS.md 已于 2026-09-10 随 hir_build 拆分
+> 提交删除，历史记录见 git 与 §11）。
 
 ## 1. 问题
 
@@ -327,21 +332,37 @@ null` 时必有对应 SEG 类型契约；typed-op effect 行完整；printer/par
 形状对称。v1 不必全拆，但上述检查从 registry 存在起就生效——否则
 registry 化只是把 switch 从代码移到一张更难验证的表。
 
+> **M1b 修订（随效果基础设施落地）**：v1 descriptor 的实际字段名与上表
+> 是语义等价映射：`eval_policy` → `policy`，`operand_uses` → `uses`
+> （`UsePolicy` 策略 + 可选 `operand_uses` 显式切片），`effect_transfer`
+> → `own_effect`（op 自身的 `EffectSummary`）加 `transfer`
+> （`TransferKind`：`atom` / `strict_ltr` / `let_` / `branch` / `match` /
+> `call` / `lambda` / `drop_effect` / `module_const` / `field_get`）。
+> `transfer` 是数据标签、由参数化的分析函数消费（`ctx` 即分析对象），
+> 不用逐 op 函数指针。`uses`/`own_effect`/`transfer` 三者**无默认值**：
+> 新 op 省略即编译错误，结构上不存在「默认 Pure」。typed 行另带
+> `typed`/`rep`。其余字段（`verify`/`result_policy`/`constant_fold`/`seg`/
+> `lower_to_air`/`print`）在本档仍由既有 lowering/printer/parser 代码
+> 承担，未进 registry 结构——§3.5 的 facet 化是方向，不是 v1 门槛。
+
 ### 3.6 SemanticInfo 与 TypeId：view、效果、capability 分离
 
 ```text
 SemanticInfo {
     ownership_view: OwnershipView,   // 值/视图状态（运行时可见）
-    effect:         EffectSummaryId, // M1b+：语义交互摘要（见 §6.2）
+    effect:         effects.State,   // Pending | Ready(EffectSummaryId) — 见 §6.2；M1b 实现
 }
 
 OwnershipView = Owned | Borrowed | DestructionView
+effects.State = Pending | Ready(EffectSummaryId)   // Pending 不是「已证纯」
 ```
 
-> **M1a 修订（随 S4 落地，PROGRESS 风险表「效果字段表示」执行决定）**：
-> M1a 的 `SemanticInfo` **不带** `effect` 字段——效果分析关闭，
-> `ownership_view` 是唯一成员；`effect` 为 M1b 的加性扩展（代码注释同此
-> 约定；§6.2 的效果模型仍是设计描述）。
+> **M1a 修订（随 S4 落地）／M1b 修订（随效果基础设施落地）**：M1a 的
+> `SemanticInfo` **不带** `effect` 字段——效果分析关闭，`ownership_view`
+> 是唯一成员（代码注释同此约定）。**M1b 已按加性扩展落地**：
+> `SemanticInfo.effect: effects.State`（`pending | ready(EffectSummaryId)`），
+> 新节点默认为 `pending`（绝不是「已证纯」）；`hir_effects` 在 checker→CFG
+> 之间发布 `ready` 摘要，§10.1 第二级校验要求可达节点全部 `ready`。
 
 语义按正交维度组织：`EvalPolicy`（在 op descriptor 上，非节点上）、
 `OperandUse`（operand 的 Read/Borrow/Consume）、`EffectSummary`（节点上
@@ -1383,13 +1404,13 @@ Monomorphic（或 SEG 优化后）的 HIR 落到现有 CFG AIR。原则：**把 
   序，effects.md §11.2）。
 - **view/ownership 数据流**：每个节点按 operand view 与 OperandUse 给出一致
   的 view；`move` 后源 dead；borrow 不外逃其 lifetime。
-- **效果与求值序**（分两级，对应 §11 的落地档）：**结构校验（M1a 起，
-  效果分析关闭时）**——M1a 节点不携带 effect 字段（§3.6），无摘要可比，
-  只验 EvalPolicy 与结构一致（惰性 region 不在未选中时求值）。**已启用分析校验（M1b 起）**——节点摘要须与
-  `effect_transfer` 的递归汇总一致；与函数 SCC fixpoint 摘要一致的要求
-  只在 SCC 推导启用（M2b）后生效。`Top` 是合法保守值：缺省 / 递归 / 未知
-  目标摘要取 `Top` **不等于**与最精确 transfer 不一致的错误。不存派生
-  bool。
+- **效果与求值序**（分两级，对应 §11 的落地档）：**结构校验（M1a 起）**——
+  只验 EvalPolicy 与结构一致（惰性 region 不在未选中时求值）。**已启用
+  分析校验（M1b 起，已在前端 pipeline 强制执行）**——每个可达节点必须
+  是 `ready`（`pending` 即违例），且存储摘要须是 `effect_transfer` 递归
+  汇总的**可靠上近似**（`derived ≤ stored`；`Top` 合法）；低于派生值的
+  注解（under-approximation）与越界摘要 id 拒绝。与函数 SCC fixpoint
+  摘要一致的要求只在 SCC 推导启用（M2b）后生效。不存派生 bool。
 - **registry 完整性（validateRegistry）**：启动时对 OpRegistry 跑 §3.5 的
   检查——每个 op 必有 semantics；可出现在 monomorphic HIR 的 op 必有
   lowering；`seg_encoding != null` 时必有对应 SEG 契约；typed-op effect
@@ -1402,6 +1423,11 @@ Monomorphic（或 SEG 优化后）的 HIR 落到现有 CFG AIR。原则：**把 
 
 - HIR 构建与打印的白盒测试放属主模块；跨模块行为（AST→HIR→CFG 的语义
   等价回归，S6b 后为纯 HIR 回归）放 `hir_tests.zig` 黑盒文件；
+- **效果模型与查询的白盒测试放属主模块**：`effects.zig` 放格代数/law 测试
+  （Bottom/Pure/Top、join/meet 律、通配、`;`/`⊔` 同式与摘要层交换、冲突/
+  `stable` 边界、Pending 门），`hir_effects.zig` 放 transfer/函数摘要/派生
+  查询的定向用例；语料级效果发布与校验放 `hir_tests.zig` 黑盒（与 S4/S6b
+  语料 harness 共用）；
 - 不要长在 frontend_tests.zig 里：HIR 相关覆盖放进 hir 自有套件；
 - SEG 相关测试放独立的 seg 套件，每规则一个定向用例 + 不变量断言
   （fresh binder、full-expr 不跨、无 effect 重复求值、无 borrow 进 island）。
@@ -1421,9 +1447,10 @@ Monomorphic（或 SEG 优化后）的 HIR 落到现有 CFG AIR。原则：**把 
 ## 11. 验收与落地范围
 
 本文的验收按**落地档**划分——每档是本文所描述形态的一个可独立验收的
-里程碑，前档通过才进入后档。效果分析强度沿档递增：M1a 只把效果字段
-**带到** HIR（允许占位、无效果判断），M1b 落地效果基础设施本身，M2 才
-以派生查询驱动前端变换与 SEG。档位编号（M1a / M1b / M2a / M2b）用于实现
+里程碑，前档通过才进入后档。效果分析强度沿档递增：M1a 落地结构 HIR
+（无 effect 字段、无效果判断），M1b 落地效果基础设施本身（§3.6 的加性
+`effect` 字段 + effects.md §14 的格/查询门/基础效果行），M2 才以派生查询
+驱动前端变换与 SEG。档位编号（M1a / M1b / M2a / M2b）用于实现
 与评审讨论的稳定指称。
 
 **M1a — 结构 HIR（monomorphic、无 SEG、无效果分析）**：以现有 checker
@@ -1440,6 +1467,44 @@ effect-based 优化；§10.1 只跑结构校验。
 > AIR 文本等价（S5 差分门禁）+ S6a 翻转验收 + S6b 删除后纯 HIR 回归。
 > SEG 与效果优化不在此档内；本档唯一验收是证明 HIR 是
 > semantics-preserving frontend seam。
+>
+> **M1b 交付记录**：效果基础设施落地在独立的模型模块 `effects.zig`
+> （模式/抽象资源/规范化访问行/每模式 `All` 通配的固定乘积格、`join`/
+> `sequence`/内部 `latticeMeet`/`le`、`Pure==Bottom` 与 `Top`、行与摘要
+> interner、`Pending | Ready(EffectSummaryId)`、host metadata 与资源域
+>（`stable`/`disjoint`）注册表、最小 `drop_effect`）与 HIR 集成 pass
+> `hir_effects.zig`（`effect_transfer` 按 descriptor 的 `own_effect`+
+> `TransferKind` 组合；**直接调用** DFS 传播函数摘要，递归/缺失/未知目标
+> → `Top`，无 SCC fixpoint；`OperandUse` 由 descriptor `UsePolicy` + callee
+> 签名/operand capability 逐 occurrence 解析；cleanup-free MVP 证明 +
+> `observed_effect`；派生查询 `isTotal` / `observableEffectFree` /
+> `canFloatAsTree` / `isDiscardable` / `isDuplicable` / `isSegSafe`（语义）/
+> `hasSegEncoding`（M1b 全 false）/ `isSegAdmissible` /
+> `isIntrinsicallySpeculatable` / `canSwapOperands` / `orderCompatible`）。
+> 每个公开查询都组合摘要 × operand uses × capability/view × ownership 门：
+> `observableEffectFree` 对任一模的**通配/未知资源**（含 `Read(Top)`）返回
+> false（§10.1 “无未知资源”）；`isIntrinsicallySpeculatable` 与
+> `canSwapOperands` 另加 cleanup 证明与递归 ownership 门（`move.effects ==
+> {}` 单独不足以放行，§6.2 强约束）；`ownershipGate` 递归 operand，嵌套
+> `move`/borrow 不得逃逸；`canSwapOperands` 另查父节点 operand 位与
+> full-expression 边界；`orderCompatible` 在资源/trap 输入上补两条保守
+> 规则：两个可能失败的位（trap/diverge）直接拒绝（失败顺序可观察，
+> §5.6），带 `Q` 的位除「同一 stable 域读对」外一律拒绝（§5.5）。
+> `validate` 先清 per-node memo 再重算摘要，故校验
+> 是同逻辑的新推导（能拒绝被篡改/过期的注解，且能定位到过期的调用者）。
+> `hir.zig` 加 `SemanticInfo.effect`、`OperandUse`、`OpDescriptor` 的
+> `uses`/`operand_uses`/`own_effect`/`transfer`（必填字段，typed 行完整）
+> 与 `Program` 的效果 interner；registry 启动校验加 typed-op 效果行检查。
+> 前端 seam 顺序变为 **build → 结构校验 → 效果分析/发布 → 效果校验 →
+> HIR→CFG lowering**，注解是加性 metadata，canonical 文本与 AIR 不变。
+> 验收 = `effects.zig` 的代数/law 测试（Bottom/Pure/Top、join/meet 律、
+> `;`/`⊔` 同式与摘要层交换、通配/冲突/`stable` 边界、Pending 门、Q 与
+> discard 分离）+ `hir_effects.zig` 白盒（typed div/rem trap 精化、递归
+> `Top`、module-const 读、host 缺省 `Top`/声明精化、cleanup 拒绝、注解
+> 篡改拒绝）+ `hir_tests.zig` 的语料级效果发布/校验；全 suite 全绿。
+> **不在本档**：函数 SCC least fixpoint（effects.md §8.2）、module-const
+> 初始化/teardown 摘要化检查（§7）、精确 `drop_effect`/CleanupFootprint
+> 登记、host ABI metadata 接线、SEG 与三个消费者 pass。
 
 **M1b — 效果基础设施**：落地 effects.md §14 的最小效果模型（MayTrap 含
 panic、MayDiverge、nondeterministic、`Host(resource, Read/Write)`、

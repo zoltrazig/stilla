@@ -1,26 +1,27 @@
-//! HIR data structures — hir.md §3 core (structural-HIR skeleton, M1a).
+//! HIR data structures — hir.md §3 core (M1a structure + M1b effects).
 //!
 //! This module owns the *in-memory shape* of the canonical monomorphic HIR
 //! the seam between the checker and CFG lowering is built around
 //! (docs/hir.md): an arena + dense-handle tree of small `ExprNode`s whose
 //! operands and regions are ranges into flat buffers, a registry of op
-//! descriptors, and the container that S4's AST→HIR builder appends into.
+//! descriptors, and the container the AST→HIR builder appends into.
 //!
-//! Staging (PROGRESS.md). This is **S1 — data structures only**. No HIR
-//! compiler stage is wired: the printer/parser (S2), the structural
-//! validator (S3), the AST→HIR builder (S4), and the HIR→CFG lowering
-//! (S5) live in later phases and are re-exported here when they land
-//! (mirroring `cfg` re-exporting `cfg_parse`/`cfg_print`). Until then the
-//! checker's output still feeds the CFG lowering directly.
+//! Staging. M1a (S0–S6) landed the whole seam — data structures, the
+//! canonical text printer/parser, the structural validator, the AST→HIR
+//! builder, and the HIR→CFG lowering (re-exported below); it is the only
+//! frontend lowering path. M1b adds the effect infrastructure: the
+//! `OpDescriptor` semantics rows (`uses` / `own_effect` / `transfer`),
+//! `SemanticInfo.effect` with its interned summaries and the `Program`
+//! interner, and the analysis/validation pass in `passes/hir_effects.zig`
+//! (model: `effects.zig`). Annotations are additive metadata — they do
+//! not change the canonical text or the lowered AIR.
 //!
-//! M1a fences (hir.md §11). Effect analysis is disabled: `SemanticInfo`
-//! carries the ownership view only — there is deliberately no effect
-//! field and no `Top` interner, and no SEG field appears anywhere. The
-//! registry's completeness gates (hir.md §10.1 `validateRegistry`:
-//! lowering presence, printer/parser symmetry, effect rows) become
-//! non-vacuous as the S2/S3/S5 facets land; this skeleton asserts
-//! identity/shape only and documents that it is not yet registry-complete
-//! for a milestone that hir.md measures by the §10.3 equivalence gate.
+//! M1b notes (hir.md §11, effects.md §14). A fresh node's effect is
+//! `pending`, never "proved pure": `Bottom` and `Pure` share a lattice
+//! value, so "not yet derived" is carried by the `State` machine. The
+//! registry's completeness gates (hir.md §10.1 `validateRegistry`) check
+//! identity/shape and the M1b typed-op effect rows at comptime; lowering
+//! and printer/parser symmetry are exercised by their own suites.
 //!
 //! Documented layout choices where the target schema (hir.md §3) leaves a
 //! degree of freedom:
@@ -47,6 +48,9 @@
 
 const std = @import("std");
 const cfg = @import("cfg.zig");
+/// The effect-semantics model (docs/effects.md §5) — M1b. The HIR owns
+/// the *interned* summaries (`Program`); the model itself is pass-free.
+pub const effects = @import("effects.zig");
 
 // ---------------------------------------------------------------------------
 // Handles — dense ids into their owning arena (hir.md §3.1)
@@ -103,11 +107,22 @@ pub const OwnershipView = enum {
     destruction_view,
 };
 
-/// hir.md §3.6 `effect` is deliberately absent in M1a: effect analysis
-/// is disabled (§11). M1b extends this struct additively.
+/// M1b additive extension of hir.md §3.6: the interned effect summary
+/// joins the ownership view. A fresh node is `pending` — effect
+/// analysis has not run, so no query may read it as "proved pure"
+/// (docs/effects.md §8.2/§10.5). The effects pass (`hir_effects.zig`)
+/// resolves every reachable node to `ready`; the validator rejects a
+/// reachable node that is still pending.
 pub const SemanticInfo = struct {
     ownership_view: OwnershipView = .owned,
+    effect: effects.State = .pending,
 };
+
+/// Per-operand value use (docs/effects.md §4, hir.md §6.1): the
+/// occurrence-level fact for one operand position. `operand_uses` are
+/// resolved from the descriptor's `UsePolicy` (never stored as a fourth
+/// variant such as "dynamic").
+pub const OperandUse = effects.OperandUse;
 
 // ---------------------------------------------------------------------------
 // Binder, Region, ExprNode (hir.md §3.3–§3.4)
@@ -273,7 +288,8 @@ pub const Pattern = union(enum) {
 };
 
 // ---------------------------------------------------------------------------
-// Op registry (hir.md §3.5, §7.1) — one identity table, no effect/SEG facets
+// Op registry (hir.md §3.5, §7.1) — one identity table: identity/shape
+// plus the M1b semantics facets (`uses` / `own_effect` / `transfer`).
 // ---------------------------------------------------------------------------
 
 /// The scalar rep of a typed (rep-parameterized) opcode (hir.md §7.2):
@@ -360,6 +376,58 @@ pub const EvalPolicy = enum {
     region,
 };
 
+/// How an op's operand-use facts are obtained (docs/effects.md §4).
+/// `static_list` reads `OpDescriptor.operand_uses`; the other policies
+/// are resolved per occurrence by the effect analysis from the callee
+/// signature, the operand's capability/view, or the op's contract.
+pub const UsePolicy = enum {
+    /// No operands.
+    none,
+    /// Every operand is `Read`.
+    all_read,
+    /// Every operand is consumed (assignment-style ownership transfer).
+    all_consume,
+    /// `call`: the callee operand is `Read`; each argument's use comes
+    /// from the callee parameter mode (borrow → Borrow, move → Consume,
+    /// value → Consume for a Unique value else Read).
+    callee_params,
+    /// `let`/aggregates/match scrutinee: `Consume` for a Unique operand
+    /// (ownership transfer into the binding/aggregate), `Borrow` for a
+    /// borrowed view, `Read` otherwise.
+    operand_capability,
+    /// The explicit slice in `OpDescriptor.operand_uses`.
+    static_list,
+};
+
+/// How a descriptor's own effect combines with its operands and regions
+/// to produce the node's `EffectSummary` (docs/hir.md §6.1). The
+/// dispatch lives in `hir_effects.transfer`; this tag is descriptor
+/// data so a new op states its composition explicitly.
+pub const TransferKind = enum {
+    /// `own_effect` only (no operands/regions).
+    atom,
+    /// `own_effect ;` each operand's effect, left to right.
+    strict_ltr,
+    /// `own_effect ; effects(init) ; effects(region root)`.
+    let_,
+    /// `own_effect ; effects(cond) ; (then ⊔ else)` (if/and/or).
+    branch,
+    /// `own_effect ; effects(scrutinee) ; ⨆ effects(arm bodies)`.
+    match,
+    /// `own_effect ; effects(callee) ; seq(args) ; effect_bound(callee)`.
+    call,
+    /// λ value creation: `own_effect` only (no capture, no body run).
+    /// The body summary becomes the callable's `effect_bound`.
+    lambda,
+    /// Explicit destruction: `drop_effect(operand type) ; effects(operand)`.
+    drop_effect,
+    /// `Read(ModuleConst(payload const))`.
+    module_const,
+    /// `field_get`: `own_effect` (base-type dependent — a list index may
+    /// trap) `;` the base's effect.
+    field_get,
+};
+
 /// One registry entry. Facets beyond identity/shape — `verify` (S3),
 /// `print`/parser symmetry (S2), `lower_to_air` (S5), constant folding —
 /// attach to this row as their passes land; no no-op callbacks or
@@ -374,36 +442,55 @@ pub const OpDescriptor = struct {
     /// `.rep` suffix and the row is a registry entry of its own.
     typed: bool = false,
     rep: ?ScalarRep = null,
+
+    // --- M1b semantics (docs/effects.md §4, hir.md §3.5/§6.2) ---
+    // These three are required (no defaults): a new opcode must state
+    // its operand-use policy, its own effect, and its composition rule.
+    // A silently defaulted `pure` is exactly the drift the registry
+    // exists to prevent.
+
+    /// Operand-use resolution policy.
+    uses: UsePolicy,
+    /// Static operand uses when `uses == .static_list`.
+    operand_uses: []const OperandUse = &.{},
+    /// The op's own interaction with state outside the expression
+    /// (docs/hir.md §6.2). Typed numeric rows refine the coarse CFG
+    /// `may_trap` bit (effects.md §15); the two are explicitly layered,
+    /// not required to be bit-identical (CFG deliberately over-
+    /// approximates float division).
+    own_effect: effects.Summary,
+    /// How `own_effect` combines with operands/regions.
+    transfer: TransferKind,
 };
 
 /// The v1 core opcodes (hir.md §7.1). Rows carry the structural metadata
 /// the §7.1 table fixes: category, operand/region shape (from §4.4 text
 /// forms), and §5.5 evaluation policy.
 const core_descriptors = [_]OpDescriptor{
-    .{ .name = "const", .class = .atom, .operands = .none, .regions = .none, .policy = .strict_ltr },
-    .{ .name = "local", .class = .atom, .operands = .none, .regions = .none, .policy = .strict_ltr },
-    .{ .name = "fn_ref", .class = .atom, .operands = .none, .regions = .none, .policy = .strict_ltr },
-    .{ .name = "module_const", .class = .atom, .operands = .none, .regions = .none, .policy = .strict_ltr },
-    .{ .name = "let", .class = .binding, .operands = .one, .regions = .one, .policy = .region },
-    .{ .name = "seq", .class = .seq, .operands = .list, .regions = .none, .policy = .strict_ltr },
-    .{ .name = "lambda", .class = .function, .operands = .none, .regions = .one, .policy = .region },
-    .{ .name = "call", .class = .function, .operands = .callee_and_args, .regions = .none, .policy = .strict_ltr },
-    .{ .name = "if", .class = .control, .operands = .one, .regions = .two, .policy = .branch },
-    .{ .name = "and", .class = .control, .operands = .one, .regions = .two, .policy = .short_circuit },
-    .{ .name = "or", .class = .control, .operands = .one, .regions = .two, .policy = .short_circuit },
-    .{ .name = "match", .class = .control, .operands = .one, .regions = .arms, .policy = .match },
-    .{ .name = "struct_make", .class = .aggregate, .operands = .list, .regions = .none, .policy = .strict_ltr },
-    .{ .name = "field_get", .class = .aggregate, .operands = .one, .regions = .none, .policy = .strict_ltr },
-    .{ .name = "variant_make", .class = .aggregate, .operands = .list, .regions = .none, .policy = .strict_ltr },
-    .{ .name = "tuple_make", .class = .aggregate, .operands = .list, .regions = .none, .policy = .strict_ltr },
-    .{ .name = "list_make", .class = .aggregate, .operands = .list, .regions = .none, .policy = .strict_ltr },
-    .{ .name = "move", .class = .ownership, .operands = .one, .regions = .none, .policy = .strict_ltr },
-    .{ .name = "borrow", .class = .ownership, .operands = .one, .regions = .none, .policy = .strict_ltr },
-    .{ .name = "drop", .class = .ownership, .operands = .one, .regions = .none, .policy = .strict_ltr },
-    .{ .name = "any_pack", .class = .dynamic, .operands = .one, .regions = .none, .policy = .strict_ltr },
-    .{ .name = "any_cast", .class = .dynamic, .operands = .one, .regions = .none, .policy = .strict_ltr },
-    .{ .name = "num_cast", .class = .conversion, .operands = .one, .regions = .none, .policy = .strict_ltr },
-    .{ .name = "panic", .class = .runtime, .operands = .none, .regions = .none, .policy = .strict_ltr },
+    .{ .name = "const", .class = .atom, .operands = .none, .regions = .none, .policy = .strict_ltr, .uses = .none, .own_effect = effects.pure, .transfer = .atom },
+    .{ .name = "local", .class = .atom, .operands = .none, .regions = .none, .policy = .strict_ltr, .uses = .none, .own_effect = effects.pure, .transfer = .atom },
+    .{ .name = "fn_ref", .class = .atom, .operands = .none, .regions = .none, .policy = .strict_ltr, .uses = .none, .own_effect = effects.pure, .transfer = .atom },
+    .{ .name = "module_const", .class = .atom, .operands = .none, .regions = .none, .policy = .strict_ltr, .uses = .none, .own_effect = effects.pure, .transfer = .module_const },
+    .{ .name = "let", .class = .binding, .operands = .one, .regions = .one, .policy = .region, .uses = .operand_capability, .own_effect = effects.pure, .transfer = .let_ },
+    .{ .name = "seq", .class = .seq, .operands = .list, .regions = .none, .policy = .strict_ltr, .uses = .all_read, .own_effect = effects.pure, .transfer = .strict_ltr },
+    .{ .name = "lambda", .class = .function, .operands = .none, .regions = .one, .policy = .region, .uses = .none, .own_effect = effects.pure, .transfer = .lambda },
+    .{ .name = "call", .class = .function, .operands = .callee_and_args, .regions = .none, .policy = .strict_ltr, .uses = .callee_params, .own_effect = effects.pure, .transfer = .call },
+    .{ .name = "if", .class = .control, .operands = .one, .regions = .two, .policy = .branch, .uses = .all_read, .own_effect = effects.pure, .transfer = .branch },
+    .{ .name = "and", .class = .control, .operands = .one, .regions = .two, .policy = .short_circuit, .uses = .all_read, .own_effect = effects.pure, .transfer = .branch },
+    .{ .name = "or", .class = .control, .operands = .one, .regions = .two, .policy = .short_circuit, .uses = .all_read, .own_effect = effects.pure, .transfer = .branch },
+    .{ .name = "match", .class = .control, .operands = .one, .regions = .arms, .policy = .match, .uses = .operand_capability, .own_effect = effects.pure, .transfer = .match },
+    .{ .name = "struct_make", .class = .aggregate, .operands = .list, .regions = .none, .policy = .strict_ltr, .uses = .operand_capability, .own_effect = effects.pure, .transfer = .strict_ltr },
+    .{ .name = "field_get", .class = .aggregate, .operands = .one, .regions = .none, .policy = .strict_ltr, .uses = .all_read, .own_effect = effects.pure, .transfer = .field_get },
+    .{ .name = "variant_make", .class = .aggregate, .operands = .list, .regions = .none, .policy = .strict_ltr, .uses = .operand_capability, .own_effect = effects.pure, .transfer = .strict_ltr },
+    .{ .name = "tuple_make", .class = .aggregate, .operands = .list, .regions = .none, .policy = .strict_ltr, .uses = .operand_capability, .own_effect = effects.pure, .transfer = .strict_ltr },
+    .{ .name = "list_make", .class = .aggregate, .operands = .list, .regions = .none, .policy = .strict_ltr, .uses = .operand_capability, .own_effect = effects.pure, .transfer = .strict_ltr },
+    .{ .name = "move", .class = .ownership, .operands = .one, .regions = .none, .policy = .strict_ltr, .uses = .static_list, .own_effect = effects.pure, .transfer = .strict_ltr, .operand_uses = &[_]OperandUse{.consume} },
+    .{ .name = "borrow", .class = .ownership, .operands = .one, .regions = .none, .policy = .strict_ltr, .uses = .static_list, .own_effect = effects.pure, .transfer = .strict_ltr, .operand_uses = &[_]OperandUse{.borrow} },
+    .{ .name = "drop", .class = .ownership, .operands = .one, .regions = .none, .policy = .strict_ltr, .uses = .static_list, .own_effect = effects.pure, .transfer = .drop_effect, .operand_uses = &[_]OperandUse{.consume} },
+    .{ .name = "any_pack", .class = .dynamic, .operands = .one, .regions = .none, .policy = .strict_ltr, .uses = .operand_capability, .own_effect = effects.pure, .transfer = .strict_ltr },
+    .{ .name = "any_cast", .class = .dynamic, .operands = .one, .regions = .none, .policy = .strict_ltr, .uses = .all_read, .own_effect = effects.may_trap, .transfer = .strict_ltr },
+    .{ .name = "num_cast", .class = .conversion, .operands = .one, .regions = .none, .policy = .strict_ltr, .uses = .all_read, .own_effect = effects.pure, .transfer = .strict_ltr },
+    .{ .name = "panic", .class = .runtime, .operands = .none, .regions = .none, .policy = .strict_ltr, .uses = .none, .own_effect = effects.may_trap, .transfer = .atom },
 };
 
 /// Typed instances registered to make the rep-parameterized mechanism
@@ -411,129 +498,129 @@ const core_descriptors = [_]OpDescriptor{
 /// (and every other typed opcode) registers here as the builder (S4)
 /// needs it; adding a row is a data edit.
 const typed_descriptors = [_]OpDescriptor{
-    .{ .name = "add.i32", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .i32 },
-    .{ .name = "add.u32", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .u32 },
-    .{ .name = "add.i64", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .i64 },
-    .{ .name = "add.u64", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .u64 },
-    .{ .name = "div.i32", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .i32 },
-    .{ .name = "div.u64", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .u64 },
-    .{ .name = "mul.i32", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .i32 },
-    .{ .name = "add.f32", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .f32 },
-    .{ .name = "add.f64", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .f64 },
-    .{ .name = "sub.i32", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .i32 },
-    .{ .name = "sub.u32", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .u32 },
-    .{ .name = "sub.i64", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .i64 },
-    .{ .name = "sub.u64", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .u64 },
-    .{ .name = "sub.f32", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .f32 },
-    .{ .name = "sub.f64", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .f64 },
-    .{ .name = "mul.u32", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .u32 },
-    .{ .name = "mul.i64", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .i64 },
-    .{ .name = "mul.u64", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .u64 },
-    .{ .name = "mul.f32", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .f32 },
-    .{ .name = "mul.f64", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .f64 },
-    .{ .name = "div.u32", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .u32 },
-    .{ .name = "div.i64", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .i64 },
-    .{ .name = "div.f32", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .f32 },
-    .{ .name = "div.f64", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .f64 },
-    .{ .name = "rem.i32", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .i32 },
-    .{ .name = "rem.u32", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .u32 },
-    .{ .name = "rem.i64", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .i64 },
-    .{ .name = "rem.u64", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .u64 },
-    .{ .name = "rem.f32", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .f32 },
-    .{ .name = "rem.f64", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .f64 },
-    .{ .name = "min.i32", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .i32 },
-    .{ .name = "min.u32", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .u32 },
-    .{ .name = "min.f32", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .f32 },
-    .{ .name = "min.f64", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .f64 },
-    .{ .name = "max.i32", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .i32 },
-    .{ .name = "max.u32", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .u32 },
-    .{ .name = "max.f32", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .f32 },
-    .{ .name = "max.f64", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .f64 },
-    .{ .name = "shl.i32", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .i32 },
-    .{ .name = "shl.u32", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .u32 },
-    .{ .name = "shl.i64", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .i64 },
-    .{ .name = "shl.u64", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .u64 },
-    .{ .name = "shr.i32", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .i32 },
-    .{ .name = "shr.u32", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .u32 },
-    .{ .name = "shr.i64", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .i64 },
-    .{ .name = "shr.u64", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .u64 },
-    .{ .name = "band.i32", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .i32 },
-    .{ .name = "band.u32", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .u32 },
-    .{ .name = "band.i64", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .i64 },
-    .{ .name = "band.u64", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .u64 },
-    .{ .name = "bor.i32", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .i32 },
-    .{ .name = "bor.u32", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .u32 },
-    .{ .name = "bor.i64", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .i64 },
-    .{ .name = "bor.u64", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .u64 },
-    .{ .name = "bxor.i32", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .i32 },
-    .{ .name = "bxor.u32", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .u32 },
-    .{ .name = "bxor.i64", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .i64 },
-    .{ .name = "bxor.u64", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .u64 },
-    .{ .name = "eq.byte", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .byte },
-    .{ .name = "ne.byte", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .byte },
+    .{ .name = "add.i32", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .i32, .uses = .all_read, .own_effect = effects.pure, .transfer = .strict_ltr },
+    .{ .name = "add.u32", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .u32, .uses = .all_read, .own_effect = effects.pure, .transfer = .strict_ltr },
+    .{ .name = "add.i64", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .i64, .uses = .all_read, .own_effect = effects.pure, .transfer = .strict_ltr },
+    .{ .name = "add.u64", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .u64, .uses = .all_read, .own_effect = effects.pure, .transfer = .strict_ltr },
+    .{ .name = "div.i32", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .i32, .uses = .all_read, .own_effect = effects.may_trap, .transfer = .strict_ltr },
+    .{ .name = "div.u64", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .u64, .uses = .all_read, .own_effect = effects.may_trap, .transfer = .strict_ltr },
+    .{ .name = "mul.i32", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .i32, .uses = .all_read, .own_effect = effects.pure, .transfer = .strict_ltr },
+    .{ .name = "add.f32", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .f32, .uses = .all_read, .own_effect = effects.pure, .transfer = .strict_ltr },
+    .{ .name = "add.f64", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .f64, .uses = .all_read, .own_effect = effects.pure, .transfer = .strict_ltr },
+    .{ .name = "sub.i32", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .i32, .uses = .all_read, .own_effect = effects.pure, .transfer = .strict_ltr },
+    .{ .name = "sub.u32", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .u32, .uses = .all_read, .own_effect = effects.pure, .transfer = .strict_ltr },
+    .{ .name = "sub.i64", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .i64, .uses = .all_read, .own_effect = effects.pure, .transfer = .strict_ltr },
+    .{ .name = "sub.u64", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .u64, .uses = .all_read, .own_effect = effects.pure, .transfer = .strict_ltr },
+    .{ .name = "sub.f32", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .f32, .uses = .all_read, .own_effect = effects.pure, .transfer = .strict_ltr },
+    .{ .name = "sub.f64", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .f64, .uses = .all_read, .own_effect = effects.pure, .transfer = .strict_ltr },
+    .{ .name = "mul.u32", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .u32, .uses = .all_read, .own_effect = effects.pure, .transfer = .strict_ltr },
+    .{ .name = "mul.i64", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .i64, .uses = .all_read, .own_effect = effects.pure, .transfer = .strict_ltr },
+    .{ .name = "mul.u64", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .u64, .uses = .all_read, .own_effect = effects.pure, .transfer = .strict_ltr },
+    .{ .name = "mul.f32", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .f32, .uses = .all_read, .own_effect = effects.pure, .transfer = .strict_ltr },
+    .{ .name = "mul.f64", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .f64, .uses = .all_read, .own_effect = effects.pure, .transfer = .strict_ltr },
+    .{ .name = "div.u32", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .u32, .uses = .all_read, .own_effect = effects.may_trap, .transfer = .strict_ltr },
+    .{ .name = "div.i64", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .i64, .uses = .all_read, .own_effect = effects.may_trap, .transfer = .strict_ltr },
+    .{ .name = "div.f32", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .f32, .uses = .all_read, .own_effect = effects.pure, .transfer = .strict_ltr },
+    .{ .name = "div.f64", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .f64, .uses = .all_read, .own_effect = effects.pure, .transfer = .strict_ltr },
+    .{ .name = "rem.i32", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .i32, .uses = .all_read, .own_effect = effects.may_trap, .transfer = .strict_ltr },
+    .{ .name = "rem.u32", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .u32, .uses = .all_read, .own_effect = effects.may_trap, .transfer = .strict_ltr },
+    .{ .name = "rem.i64", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .i64, .uses = .all_read, .own_effect = effects.may_trap, .transfer = .strict_ltr },
+    .{ .name = "rem.u64", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .u64, .uses = .all_read, .own_effect = effects.may_trap, .transfer = .strict_ltr },
+    .{ .name = "rem.f32", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .f32, .uses = .all_read, .own_effect = effects.pure, .transfer = .strict_ltr },
+    .{ .name = "rem.f64", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .f64, .uses = .all_read, .own_effect = effects.pure, .transfer = .strict_ltr },
+    .{ .name = "min.i32", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .i32, .uses = .all_read, .own_effect = effects.pure, .transfer = .strict_ltr },
+    .{ .name = "min.u32", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .u32, .uses = .all_read, .own_effect = effects.pure, .transfer = .strict_ltr },
+    .{ .name = "min.f32", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .f32, .uses = .all_read, .own_effect = effects.pure, .transfer = .strict_ltr },
+    .{ .name = "min.f64", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .f64, .uses = .all_read, .own_effect = effects.pure, .transfer = .strict_ltr },
+    .{ .name = "max.i32", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .i32, .uses = .all_read, .own_effect = effects.pure, .transfer = .strict_ltr },
+    .{ .name = "max.u32", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .u32, .uses = .all_read, .own_effect = effects.pure, .transfer = .strict_ltr },
+    .{ .name = "max.f32", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .f32, .uses = .all_read, .own_effect = effects.pure, .transfer = .strict_ltr },
+    .{ .name = "max.f64", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .f64, .uses = .all_read, .own_effect = effects.pure, .transfer = .strict_ltr },
+    .{ .name = "shl.i32", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .i32, .uses = .all_read, .own_effect = effects.pure, .transfer = .strict_ltr },
+    .{ .name = "shl.u32", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .u32, .uses = .all_read, .own_effect = effects.pure, .transfer = .strict_ltr },
+    .{ .name = "shl.i64", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .i64, .uses = .all_read, .own_effect = effects.pure, .transfer = .strict_ltr },
+    .{ .name = "shl.u64", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .u64, .uses = .all_read, .own_effect = effects.pure, .transfer = .strict_ltr },
+    .{ .name = "shr.i32", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .i32, .uses = .all_read, .own_effect = effects.pure, .transfer = .strict_ltr },
+    .{ .name = "shr.u32", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .u32, .uses = .all_read, .own_effect = effects.pure, .transfer = .strict_ltr },
+    .{ .name = "shr.i64", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .i64, .uses = .all_read, .own_effect = effects.pure, .transfer = .strict_ltr },
+    .{ .name = "shr.u64", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .u64, .uses = .all_read, .own_effect = effects.pure, .transfer = .strict_ltr },
+    .{ .name = "band.i32", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .i32, .uses = .all_read, .own_effect = effects.pure, .transfer = .strict_ltr },
+    .{ .name = "band.u32", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .u32, .uses = .all_read, .own_effect = effects.pure, .transfer = .strict_ltr },
+    .{ .name = "band.i64", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .i64, .uses = .all_read, .own_effect = effects.pure, .transfer = .strict_ltr },
+    .{ .name = "band.u64", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .u64, .uses = .all_read, .own_effect = effects.pure, .transfer = .strict_ltr },
+    .{ .name = "bor.i32", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .i32, .uses = .all_read, .own_effect = effects.pure, .transfer = .strict_ltr },
+    .{ .name = "bor.u32", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .u32, .uses = .all_read, .own_effect = effects.pure, .transfer = .strict_ltr },
+    .{ .name = "bor.i64", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .i64, .uses = .all_read, .own_effect = effects.pure, .transfer = .strict_ltr },
+    .{ .name = "bor.u64", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .u64, .uses = .all_read, .own_effect = effects.pure, .transfer = .strict_ltr },
+    .{ .name = "bxor.i32", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .i32, .uses = .all_read, .own_effect = effects.pure, .transfer = .strict_ltr },
+    .{ .name = "bxor.u32", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .u32, .uses = .all_read, .own_effect = effects.pure, .transfer = .strict_ltr },
+    .{ .name = "bxor.i64", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .i64, .uses = .all_read, .own_effect = effects.pure, .transfer = .strict_ltr },
+    .{ .name = "bxor.u64", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .u64, .uses = .all_read, .own_effect = effects.pure, .transfer = .strict_ltr },
+    .{ .name = "eq.byte", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .byte, .uses = .all_read, .own_effect = effects.pure, .transfer = .strict_ltr },
+    .{ .name = "ne.byte", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .byte, .uses = .all_read, .own_effect = effects.pure, .transfer = .strict_ltr },
     // `byte` has no arithmetic (checker-rejected); its only numeric ops
     // are the comparisons, which lower through the u32 family at the
     // typed stage (the byte value occupies one host cell).
-    .{ .name = "lt.byte", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .byte },
-    .{ .name = "le.byte", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .byte },
-    .{ .name = "gt.byte", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .byte },
-    .{ .name = "ge.byte", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .byte },
-    .{ .name = "eq.i32", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .i32 },
-    .{ .name = "eq.u32", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .u32 },
-    .{ .name = "eq.i64", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .i64 },
-    .{ .name = "eq.u64", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .u64 },
-    .{ .name = "eq.f32", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .f32 },
-    .{ .name = "eq.f64", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .f64 },
-    .{ .name = "eq.bool", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .bool },
-    .{ .name = "eq.str", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .str },
-    .{ .name = "ne.i32", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .i32 },
-    .{ .name = "ne.u32", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .u32 },
-    .{ .name = "ne.i64", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .i64 },
-    .{ .name = "ne.u64", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .u64 },
-    .{ .name = "ne.f32", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .f32 },
-    .{ .name = "ne.f64", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .f64 },
-    .{ .name = "ne.bool", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .bool },
-    .{ .name = "ne.str", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .str },
-    .{ .name = "lt.i32", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .i32 },
-    .{ .name = "lt.u32", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .u32 },
-    .{ .name = "lt.i64", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .i64 },
-    .{ .name = "lt.u64", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .u64 },
-    .{ .name = "lt.f32", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .f32 },
-    .{ .name = "lt.f64", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .f64 },
-    .{ .name = "le.i32", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .i32 },
-    .{ .name = "le.u32", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .u32 },
-    .{ .name = "le.i64", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .i64 },
-    .{ .name = "le.u64", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .u64 },
-    .{ .name = "le.f32", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .f32 },
-    .{ .name = "le.f64", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .f64 },
-    .{ .name = "gt.i32", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .i32 },
-    .{ .name = "gt.u32", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .u32 },
-    .{ .name = "gt.i64", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .i64 },
-    .{ .name = "gt.u64", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .u64 },
-    .{ .name = "gt.f32", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .f32 },
-    .{ .name = "gt.f64", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .f64 },
-    .{ .name = "ge.i32", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .i32 },
-    .{ .name = "ge.u32", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .u32 },
-    .{ .name = "ge.i64", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .i64 },
-    .{ .name = "ge.u64", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .u64 },
-    .{ .name = "ge.f32", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .f32 },
-    .{ .name = "ge.f64", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .f64 },
-    .{ .name = "neg.i32", .class = .numeric, .operands = .one, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .i32 },
-    .{ .name = "neg.u32", .class = .numeric, .operands = .one, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .u32 },
-    .{ .name = "neg.i64", .class = .numeric, .operands = .one, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .i64 },
-    .{ .name = "neg.u64", .class = .numeric, .operands = .one, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .u64 },
-    .{ .name = "neg.f32", .class = .numeric, .operands = .one, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .f32 },
-    .{ .name = "neg.f64", .class = .numeric, .operands = .one, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .f64 },
-    .{ .name = "abs.i32", .class = .numeric, .operands = .one, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .i32 },
-    .{ .name = "abs.u32", .class = .numeric, .operands = .one, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .u32 },
-    .{ .name = "abs.f32", .class = .numeric, .operands = .one, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .f32 },
-    .{ .name = "abs.f64", .class = .numeric, .operands = .one, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .f64 },
-    .{ .name = "clz.i32", .class = .numeric, .operands = .one, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .i32 },
-    .{ .name = "clz.u32", .class = .numeric, .operands = .one, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .u32 },
-    .{ .name = "popcount.i32", .class = .numeric, .operands = .one, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .i32 },
-    .{ .name = "popcount.u32", .class = .numeric, .operands = .one, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .u32 },
-    .{ .name = "concat.str", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .str },
-    .{ .name = "not.bool", .class = .numeric, .operands = .one, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .bool },
+    .{ .name = "lt.byte", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .byte, .uses = .all_read, .own_effect = effects.pure, .transfer = .strict_ltr },
+    .{ .name = "le.byte", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .byte, .uses = .all_read, .own_effect = effects.pure, .transfer = .strict_ltr },
+    .{ .name = "gt.byte", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .byte, .uses = .all_read, .own_effect = effects.pure, .transfer = .strict_ltr },
+    .{ .name = "ge.byte", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .byte, .uses = .all_read, .own_effect = effects.pure, .transfer = .strict_ltr },
+    .{ .name = "eq.i32", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .i32, .uses = .all_read, .own_effect = effects.pure, .transfer = .strict_ltr },
+    .{ .name = "eq.u32", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .u32, .uses = .all_read, .own_effect = effects.pure, .transfer = .strict_ltr },
+    .{ .name = "eq.i64", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .i64, .uses = .all_read, .own_effect = effects.pure, .transfer = .strict_ltr },
+    .{ .name = "eq.u64", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .u64, .uses = .all_read, .own_effect = effects.pure, .transfer = .strict_ltr },
+    .{ .name = "eq.f32", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .f32, .uses = .all_read, .own_effect = effects.pure, .transfer = .strict_ltr },
+    .{ .name = "eq.f64", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .f64, .uses = .all_read, .own_effect = effects.pure, .transfer = .strict_ltr },
+    .{ .name = "eq.bool", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .bool, .uses = .all_read, .own_effect = effects.pure, .transfer = .strict_ltr },
+    .{ .name = "eq.str", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .str, .uses = .all_read, .own_effect = effects.pure, .transfer = .strict_ltr },
+    .{ .name = "ne.i32", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .i32, .uses = .all_read, .own_effect = effects.pure, .transfer = .strict_ltr },
+    .{ .name = "ne.u32", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .u32, .uses = .all_read, .own_effect = effects.pure, .transfer = .strict_ltr },
+    .{ .name = "ne.i64", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .i64, .uses = .all_read, .own_effect = effects.pure, .transfer = .strict_ltr },
+    .{ .name = "ne.u64", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .u64, .uses = .all_read, .own_effect = effects.pure, .transfer = .strict_ltr },
+    .{ .name = "ne.f32", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .f32, .uses = .all_read, .own_effect = effects.pure, .transfer = .strict_ltr },
+    .{ .name = "ne.f64", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .f64, .uses = .all_read, .own_effect = effects.pure, .transfer = .strict_ltr },
+    .{ .name = "ne.bool", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .bool, .uses = .all_read, .own_effect = effects.pure, .transfer = .strict_ltr },
+    .{ .name = "ne.str", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .str, .uses = .all_read, .own_effect = effects.pure, .transfer = .strict_ltr },
+    .{ .name = "lt.i32", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .i32, .uses = .all_read, .own_effect = effects.pure, .transfer = .strict_ltr },
+    .{ .name = "lt.u32", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .u32, .uses = .all_read, .own_effect = effects.pure, .transfer = .strict_ltr },
+    .{ .name = "lt.i64", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .i64, .uses = .all_read, .own_effect = effects.pure, .transfer = .strict_ltr },
+    .{ .name = "lt.u64", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .u64, .uses = .all_read, .own_effect = effects.pure, .transfer = .strict_ltr },
+    .{ .name = "lt.f32", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .f32, .uses = .all_read, .own_effect = effects.pure, .transfer = .strict_ltr },
+    .{ .name = "lt.f64", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .f64, .uses = .all_read, .own_effect = effects.pure, .transfer = .strict_ltr },
+    .{ .name = "le.i32", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .i32, .uses = .all_read, .own_effect = effects.pure, .transfer = .strict_ltr },
+    .{ .name = "le.u32", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .u32, .uses = .all_read, .own_effect = effects.pure, .transfer = .strict_ltr },
+    .{ .name = "le.i64", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .i64, .uses = .all_read, .own_effect = effects.pure, .transfer = .strict_ltr },
+    .{ .name = "le.u64", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .u64, .uses = .all_read, .own_effect = effects.pure, .transfer = .strict_ltr },
+    .{ .name = "le.f32", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .f32, .uses = .all_read, .own_effect = effects.pure, .transfer = .strict_ltr },
+    .{ .name = "le.f64", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .f64, .uses = .all_read, .own_effect = effects.pure, .transfer = .strict_ltr },
+    .{ .name = "gt.i32", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .i32, .uses = .all_read, .own_effect = effects.pure, .transfer = .strict_ltr },
+    .{ .name = "gt.u32", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .u32, .uses = .all_read, .own_effect = effects.pure, .transfer = .strict_ltr },
+    .{ .name = "gt.i64", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .i64, .uses = .all_read, .own_effect = effects.pure, .transfer = .strict_ltr },
+    .{ .name = "gt.u64", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .u64, .uses = .all_read, .own_effect = effects.pure, .transfer = .strict_ltr },
+    .{ .name = "gt.f32", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .f32, .uses = .all_read, .own_effect = effects.pure, .transfer = .strict_ltr },
+    .{ .name = "gt.f64", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .f64, .uses = .all_read, .own_effect = effects.pure, .transfer = .strict_ltr },
+    .{ .name = "ge.i32", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .i32, .uses = .all_read, .own_effect = effects.pure, .transfer = .strict_ltr },
+    .{ .name = "ge.u32", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .u32, .uses = .all_read, .own_effect = effects.pure, .transfer = .strict_ltr },
+    .{ .name = "ge.i64", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .i64, .uses = .all_read, .own_effect = effects.pure, .transfer = .strict_ltr },
+    .{ .name = "ge.u64", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .u64, .uses = .all_read, .own_effect = effects.pure, .transfer = .strict_ltr },
+    .{ .name = "ge.f32", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .f32, .uses = .all_read, .own_effect = effects.pure, .transfer = .strict_ltr },
+    .{ .name = "ge.f64", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .f64, .uses = .all_read, .own_effect = effects.pure, .transfer = .strict_ltr },
+    .{ .name = "neg.i32", .class = .numeric, .operands = .one, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .i32, .uses = .all_read, .own_effect = effects.pure, .transfer = .strict_ltr },
+    .{ .name = "neg.u32", .class = .numeric, .operands = .one, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .u32, .uses = .all_read, .own_effect = effects.pure, .transfer = .strict_ltr },
+    .{ .name = "neg.i64", .class = .numeric, .operands = .one, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .i64, .uses = .all_read, .own_effect = effects.pure, .transfer = .strict_ltr },
+    .{ .name = "neg.u64", .class = .numeric, .operands = .one, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .u64, .uses = .all_read, .own_effect = effects.pure, .transfer = .strict_ltr },
+    .{ .name = "neg.f32", .class = .numeric, .operands = .one, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .f32, .uses = .all_read, .own_effect = effects.pure, .transfer = .strict_ltr },
+    .{ .name = "neg.f64", .class = .numeric, .operands = .one, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .f64, .uses = .all_read, .own_effect = effects.pure, .transfer = .strict_ltr },
+    .{ .name = "abs.i32", .class = .numeric, .operands = .one, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .i32, .uses = .all_read, .own_effect = effects.pure, .transfer = .strict_ltr },
+    .{ .name = "abs.u32", .class = .numeric, .operands = .one, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .u32, .uses = .all_read, .own_effect = effects.pure, .transfer = .strict_ltr },
+    .{ .name = "abs.f32", .class = .numeric, .operands = .one, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .f32, .uses = .all_read, .own_effect = effects.pure, .transfer = .strict_ltr },
+    .{ .name = "abs.f64", .class = .numeric, .operands = .one, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .f64, .uses = .all_read, .own_effect = effects.pure, .transfer = .strict_ltr },
+    .{ .name = "clz.i32", .class = .numeric, .operands = .one, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .i32, .uses = .all_read, .own_effect = effects.pure, .transfer = .strict_ltr },
+    .{ .name = "clz.u32", .class = .numeric, .operands = .one, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .u32, .uses = .all_read, .own_effect = effects.pure, .transfer = .strict_ltr },
+    .{ .name = "popcount.i32", .class = .numeric, .operands = .one, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .i32, .uses = .all_read, .own_effect = effects.pure, .transfer = .strict_ltr },
+    .{ .name = "popcount.u32", .class = .numeric, .operands = .one, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .u32, .uses = .all_read, .own_effect = effects.pure, .transfer = .strict_ltr },
+    .{ .name = "concat.str", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .str, .uses = .all_read, .own_effect = effects.pure, .transfer = .strict_ltr },
+    .{ .name = "not.bool", .class = .numeric, .operands = .one, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .bool, .uses = .all_read, .own_effect = effects.pure, .transfer = .strict_ltr },
 };
 
 /// The single identity table (hir.md §3.5): core and typed entries share
@@ -555,10 +642,10 @@ pub const OpRegistry = struct {
         return self.entries[op_id];
     }
 
-    /// Identity/shape consistency of the table — the part of hir.md
-    /// §10.1 `validateRegistry` that is non-vacuous from this skeleton
-    /// onward. Completeness facets (lowering presence, printer/parser
-    /// symmetry, effect rows) attach when their passes land (S2/S3/S5).
+    /// Identity/shape + M1b effect-row consistency of the table — the
+    /// part of hir.md §10.1 `validateRegistry` that is comptime-checkable
+    /// here (lowering presence and printer/parser symmetry are exercised
+    /// by their own suites instead of a table field).
     pub fn validate(self: OpRegistry) void {
         for (self.entries, 0..) |e, i| {
             // Unique names: identity is the row, not a name prefix.
@@ -575,6 +662,45 @@ pub const OpRegistry = struct {
             } else {
                 std.debug.assert(e.rep == null);
             }
+
+            // M1b effect-row completeness (hir.md §3.5/§10.1).
+            // Registry rows carry no static resource access: every
+            // resource read/write is dynamic (module_const, drop,
+            // host metadata) and lives on the analysis. A row that
+            // needs accesses would have to say so explicitly.
+            std.debug.assert(e.own_effect.accesses.isEmpty());
+            // A `static_list` row must supply exactly its eager-operand
+            // uses (shape is free of operands that are not uses only
+            // for `call`, which is never static).
+            if (e.uses == .static_list) {
+                const want: usize = switch (e.operands) {
+                    .none => 0,
+                    .one => 1,
+                    .two => 2,
+                    .list, .callee_and_args => e.operand_uses.len,
+                };
+                std.debug.assert(e.operand_uses.len == want);
+            } else {
+                std.debug.assert(e.operand_uses.len == 0);
+            }
+            // Typed-opcode base effect rows (hir.md §6.2, effects.md
+            // §6.3): integer div/rem may trap (divisor zero, and for
+            // i64 also `min / -1`); float div/rem are IEEE and never
+            // trap; every other typed op is total. This refines — and
+            // is deliberately *not* asserted equal to — the coarse CFG
+            // `may_trap` bit (effects.md §15: CFG over-approximates
+            // float division).
+            if (e.typed) {
+                const traps = (std.mem.startsWith(u8, e.name, "div.") or
+                    std.mem.startsWith(u8, e.name, "rem.")) and
+                    e.rep.? != .f32 and e.rep.? != .f64;
+                std.debug.assert(e.own_effect.may_trap == traps);
+            }
+            // Core rows are total or explicitly trapping (panic,
+            // any_cast); no core row diverges or is nondeterministic by
+            // declaration.
+            std.debug.assert(!e.own_effect.may_diverge);
+            std.debug.assert(!e.own_effect.nondeterministic);
         }
     }
 };
@@ -651,14 +777,55 @@ pub const Program = struct {
     region_buffer: std.ArrayListUnmanaged(RegionId) = .empty,
     binder_buffer: std.ArrayListUnmanaged(BinderId) = .empty,
 
+    /// Interned effect summaries (docs/effects.md §5, hir.md §3.6):
+    /// `SemanticInfo.effect` ids index this table.
+    effect_interner: effects.Interner,
+    /// Dedupe map for `(ownership_view, effect state)` pairs so nodes
+    /// with equal annotations share one SemanticInfoId.
+    sema_map: std.HashMapUnmanaged(SemaKey, SemanticInfoId, SemaKeyCtx, std.hash_map.default_max_load_percentage) = .empty,
+
+    pub const SemaKey = struct {
+        view: OwnershipView,
+        state: effects.State,
+    };
+
+    const SemaKeyCtx = struct {
+        pub fn hash(_: SemaKeyCtx, k: SemaKey) u64 {
+            var h = std.hash.Wyhash.init(0);
+            h.update(std.mem.asBytes(&k.view));
+            switch (k.state) {
+                .pending => h.update(&[_]u8{0}),
+                .ready => |id| {
+                    h.update(&[_]u8{1});
+                    h.update(std.mem.asBytes(&id));
+                },
+            }
+            return h.final();
+        }
+        pub fn eql(_: SemaKeyCtx, a: SemaKey, b: SemaKey) bool {
+            if (a.view != b.view) return false;
+            return switch (a.state) {
+                .pending => b.state == .pending,
+                .ready => |id| switch (b.state) {
+                    .ready => |bid| id == bid,
+                    .pending => false,
+                },
+            };
+        }
+    };
+
     /// Seed the default entries so id 0 is always valid: the default
-    /// (owned) semantic info and the default full expression. Nodes
-    /// built without explicit annotation therefore belong to FE 0 with
-    /// view `.owned`.
+    /// (owned, pending) semantic info and the default full expression.
+    /// Nodes built without explicit annotation therefore belong to FE 0
+    /// with view `.owned` and a *pending* effect — never a claim of
+    /// purity, which only the effects pass may make.
     pub fn init(arena: std.mem.Allocator) !Program {
-        var p = Program{ .arena = arena };
+        var p = Program{ .arena = arena, .effect_interner = try effects.Interner.init(arena) };
+        const default_sema: SemanticInfoId = @intCast(p.semantic_infos.items.len);
         try p.semantic_infos.append(arena, .{});
         try p.full_exprs.append(arena, .{});
+        // The seeded default is the canonical `(owned, pending)` entry.
+        try p.sema_map.put(arena, .{ .view = .owned, .state = .pending }, default_sema);
         return p;
     }
 
@@ -709,6 +876,16 @@ pub const Program = struct {
     pub fn addSemanticInfo(self: *Program, info: SemanticInfo) !SemanticInfoId {
         try self.semantic_infos.append(self.arena, info);
         return @intCast(self.semantic_infos.items.len - 1);
+    }
+
+    /// Intern `(view, effect state)` so annotation sharing is stable.
+    pub fn internSema(self: *Program, view: OwnershipView, state: effects.State) !SemanticInfoId {
+        const key = SemaKey{ .view = view, .state = state };
+        const gop = try self.sema_map.getOrPut(self.arena, key);
+        if (!gop.found_existing) {
+            gop.value_ptr.* = try self.addSemanticInfo(.{ .ownership_view = view, .effect = state });
+        }
+        return gop.value_ptr.*;
     }
 
     /// Append operands (in evaluation order) to the expr buffer.
@@ -772,6 +949,27 @@ pub const Program = struct {
     pub fn viewOf(self: *const Program, id: ExprId) OwnershipView {
         const n = self.exprs.items[id];
         return self.semantic_infos.items[n.sema].ownership_view;
+    }
+
+    /// The effect state of one expr node (default = pending).
+    pub fn effectOf(self: *const Program, id: ExprId) effects.State {
+        const n = self.exprs.items[id];
+        return self.semantic_infos.items[n.sema].effect;
+    }
+
+    /// Resolve a node's effect state to a summary id, or null while the
+    /// analysis has not published one (a legality query must fail closed
+    /// on null — docs/effects.md §10.5).
+    pub fn effectIdOf(self: *const Program, id: ExprId) ?effects.SummaryId {
+        return self.effectOf(id).readyId();
+    }
+
+    /// Record a node's effect state, preserving its ownership view. The
+    /// effects pass uses this to publish `ready` summaries; nothing else
+    /// should widen or narrow an annotation.
+    pub fn setEffect(self: *Program, id: ExprId, state: effects.State) !void {
+        const view = self.viewOf(id);
+        self.exprs.items[id].sema = try self.internSema(view, state);
     }
 };
 

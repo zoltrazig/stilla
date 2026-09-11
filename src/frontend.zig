@@ -21,6 +21,7 @@ const moduleinfo = @import("moduleinfo.zig");
 const checker = @import("passes/checker.zig");
 const hir = @import("hir.zig");
 const hir_build = @import("passes/hir_build.zig");
+const hir_effects = @import("passes/hir_effects.zig");
 const hir_lower = @import("passes/hir_lower.zig");
 const cfg_optimize = @import("passes/cfg_optimize.zig");
 const cfg_parse = @import("passes/cfg_parse.zig");
@@ -207,6 +208,30 @@ pub fn compile(allocator: std.mem.Allocator, options: Options) CompileError!Comp
             else => return err,
         };
         built_hir = built;
+        // M1b seam order (docs/hir.md §2.3/§10.1): structural validation
+        // first, then effect analysis and annotation validation. The
+        // structural gate is what makes the effect walk safe on a
+        // malformed arena; the effect annotations are additive metadata
+        // and do not change the canonical HIR text or the lowered AIR.
+        for (built.funcs.items) |rec| {
+            if (hir.validate(&built.program, rec.root, arena_alloc) catch return error.OutOfMemory) |msg| {
+                return failed(arena, &.{.{ .span = ast.Span.init(0, 0, 0), .message = msg }}, graph, builder.loaded_sources.items);
+            }
+        }
+        for (built.consts.items) |c| {
+            const root = c.init orelse continue;
+            if (hir.validate(&built.program, root, arena_alloc) catch return error.OutOfMemory) |msg| {
+                return failed(arena, &.{.{ .span = ast.Span.init(0, 0, 0), .message = msg }}, graph, builder.loaded_sources.items);
+            }
+        }
+        var effect_analysis = hir_effects.Analysis.init(arena_alloc, built, .{ .graph = graph }) catch return error.OutOfMemory;
+        effect_analysis.analyze() catch return error.OutOfMemory;
+        if (effect_analysis.validate(arena_alloc) catch return error.OutOfMemory) |msg| {
+            return failed(arena, &.{.{
+                .span = ast.Span.init(0, 0, 0),
+                .message = msg,
+            }}, graph, builder.loaded_sources.items);
+        }
         break :blk hir_lower.lowerProgram(&lowerer, built) catch |err| switch (err) {
             error.Diagnostic => {
                 // Lowering stays first-error; wrap the single diagnostic

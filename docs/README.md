@@ -19,7 +19,8 @@ specifications (the spec suite index is [spec/README.md](../spec/README.md)).
 | [frontend.md](frontend.md) | the pipeline contract end to end: module graph, checker, the HIR seam, CFG lowering, the optimizer, drop lowering, the LLIR backend stages |
 | [module-graph.md](module-graph.md) | module identity, resolution, loading, cycle detection, topo sort |
 | [checker.md](checker.md) | inference, generic expansion, ownership analysis, checks |
-| [hir.md](hir.md) | the canonical monomorphic HIR seam between the checker and CFG lowering: data structures, text form, structural invariants, HIR→CFG contract (M1a scope implemented; effect analysis and SEG remain proposals) |
+| [hir.md](hir.md) | the canonical monomorphic HIR seam between the checker and CFG lowering: data structures, text form, structural invariants, HIR→CFG contract (M1a structure and M1b effect infrastructure implemented; SEG remains a proposal) |
+| [effects.md](effects.md) | the effect-semantics model: resource/control summary lattice, `effect_transfer`, cleanup-aware legality queries (M1b infrastructure implemented; the dead-let / selective-ANF / SEG consumer passes and the SCC fixpoint remain proposals) |
 | [cfg-lowering.md](cfg-lowering.md) | the CFG AIR model and the HIR→CFG emission rules: destruction placement, module init functions, syscalls |
 | [optimizer.md](optimizer.md) | tail-call elimination, inlining, CSE, copy propagation, and the mid-level rewrites |
 | [llir-typed.md](llir-typed.md) | the typed LLIR lowering layer (typed opcodes, typed-assembly surface) |
@@ -33,18 +34,13 @@ specifications (the spec suite index is [spec/README.md](../spec/README.md)).
 
 ## Unimplemented proposals
 
-The following are design proposals, not descriptions of the built
-compiler; they are kept in this directory for review. Their documents
-are self-consistent and cross-reference the pipeline documents above
-without being indexed as implementation documentation.
-
-| Document | Covers |
-| --- | --- |
-| [effects.md](effects.md) | a proposed effect-semantics model driving optimizer/SEG legality queries (design proposal) |
-
-`effects.md` remains a pure proposal; the HIR-side self-contained
-summary lives in [hir.md](hir.md) §6.2 (the effect *field* is absent
-from `SemanticInfo` in M1a — analysis disabled, hir.md §3.6).
+The remaining unimplemented parts of the model are described inside the
+documents above rather than in a standalone proposal: the SEG bridge and
+optimization consumer passes (hir.md §8, §11 M2), and the effect-model
+consumer passes plus the function SCC fixpoint and module-const summary
+checks (effects.md §7–§8, §12). The effect *infrastructure* — lattice,
+transfer, function-summary propagation, cleanup gate, derived queries —
+is implemented (M1b), and the HIR node annotations carry it.
 
 ## Reading order
 

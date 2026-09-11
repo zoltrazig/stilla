@@ -1,11 +1,15 @@
-//! Pass: structural HIR validator — hir.md §10.1, M1a first level
-//! (effect analysis disabled). In: one root expression of a
-//! `hir.Program`. Out: null when the reachable tree satisfies the
-//! invariants, or a human-readable first-violation message.
+//! Pass: structural HIR validator — hir.md §10.1, M1a first level.
+//! In: one root expression of a `hir.Program`. Out: null when the
+//! reachable tree satisfies the invariants, or a human-readable
+//! first-violation message.
 //!
-//! This is the structural level only: **no effect / ownership dataflow
-//! and no SEG checks** (those need M1b/M2). What is enforced, in order
-//! (spec references in the messages):
+//! This is the structural level only: **no ownership dataflow and no SEG
+//! checks here**. The M1b effect level (every reachable node carries a
+//! `ready` summary that soundly over-approximates `effect_transfer`, and
+//! every `sema` id is in range) is a separate pass —
+//! `passes/hir_effects.zig` (`Analysis.validate`), run by the frontend
+//! right after this one (hir.md §10.1 level two). What is enforced here,
+//! in order (spec references in the messages):
 //!
 //! - **Bounds** — every expr/region/binder/pattern id and every operand /
 //!   region / param range is checked *before* the indexed access, so the

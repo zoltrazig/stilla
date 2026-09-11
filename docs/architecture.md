@@ -33,8 +33,10 @@ checker — annotate every module, then validate every module
          (checker_annotate / checker_validate / checker_ownership,
           monomorphize)                                             [passes.md]
     ▼
-HIR seam — hir_build builds canonical monomorphic HIR, hir_lower
-         lowers it back to CFG AIR (hir_validate, hir.md §11 M1a)   [passes.md]
+HIR seam — hir_build builds canonical monomorphic HIR; hir_validate
+         checks the structural invariants; hir_effects publishes effect
+         annotations and validates them; hir_lower lowers to CFG AIR
+         (hir.md §11 M1a+M1b, effects.md §14)                       [passes.md]
     ▼
 CFG lowering — hir_lower.lowerProgram → cfg.IrProgram
          (cfg_lower_program / _module / _func / _expr / _control /
@@ -57,12 +59,13 @@ per-module LLIR artifacts  →  interpreter (loader + dispatch)  →  result
 ```
 
 `frontend.compile` (frontend.zig) is the one-call driver of the whole
-compile side: module graph → checker → HIR build / HIR→CFG lowering
-(HIR seam, M1a) → validation → optional optimization (single pass or
-bounded fixpoint) → drop lowering → re-validation and the canonical
-text round-trip. Everything the compile allocates lives in one arena
-that outlives the call; diagnostics follow first-error-wins unless the
-stage collects (lexer/parser/checker collect per-module).
+compile side: module graph → checker → HIR build → structural validation
+→ effect analysis + validation (HIR seam, M1a + M1b) → HIR→CFG lowering
+→ validation → optional optimization (single pass or bounded fixpoint)
+→ drop lowering → re-validation and the canonical text round-trip.
+Everything the compile allocates lives in one arena that outlives the
+call; diagnostics follow first-error-wins unless the stage collects
+(lexer/parser/checker collect per-module).
 
 ## Boundaries
 
@@ -71,7 +74,7 @@ stage collects (lexer/parser/checker collect per-module).
 | Lexer / parser / AST | `lex.zig`, `parser.zig`, `ast.zig`, `parse/` (grammar sub-parsers) | text → tokens → `ast.Program`; recovery + diagnostics | module resolution, types |
 | Module graph | `moduleinfo.zig` + `passes/module_load.zig`, `module_scan.zig`, `topo_sort.zig`, `module_materialize.zig`, `module_check.zig` | module identity, specifier resolution, dedup, cycles, topo order, member tables, host-binding classification | function bodies |
 | Checker | `passes/checker.zig` + `checker_annotate.zig`, `checker_validate.zig`, `checker_ownership.zig`, `monomorphize.zig`, `type_infer.zig`, `type_resolve.zig`, `type_shape.zig` | name/type/ownership annotation; generic expansion; all static checks | control flow |
-| HIR seam (implemented, M1a) | `hir.zig`, `passes/hir_build.zig` (+ `hir_build_block` / `_expr` / `_path` / `_call` / `_control` / `_pattern`), `hir_validate.zig`, `hir_lower.zig` (+ `hir_lower_expr` / `hir_lower_control` / `hir_lower_call` / `hir_lower_pattern`), `passes/hir_parse.zig`, `passes/hir_print.zig` | canonical monomorphic HIR between the checker and CFG lowering: consumes the checker's annotation and module-graph decisions only (no re-inference); binder / region / pattern normalization, full-expression fences, ownership view carried over; effect analysis disabled (hir.md §11 M1a) — the only frontend lowering path | re-deriving static decisions, effect analysis, SEG; post-CFG drop expansion and LLIR lifecycle stay with the CFG / backend |
+| HIR seam (implemented, M1a + M1b) | `hir.zig`, `effects.zig`, `passes/hir_build.zig` (+ `hir_build_block` / `_expr` / `_path` / `_call` / `_control` / `_pattern`), `hir_validate.zig`, `hir_effects.zig`, `hir_lower.zig` (+ `hir_lower_expr` / `hir_lower_control` / `hir_lower_call` / `hir_lower_pattern`), `passes/hir_parse.zig`, `passes/hir_print.zig` | canonical monomorphic HIR between the checker and CFG lowering: consumes the checker's annotation and module-graph decisions only (no re-inference); binder / region / pattern normalization, full-expression fences, ownership view carried over; M1b effect infrastructure (`EffectSummary` lattice, `effect_transfer`, direct-call function summaries, cleanup gate, derived legality queries) annotated onto nodes and validated — the only frontend lowering path | re-deriving static decisions, SEG and the effect consumer passes (M2); post-CFG drop expansion and LLIR lifecycle stay with the CFG / backend |
 | CFG AIR | `cfg.zig` (op schema, types, `IrProgram`) + `passes/cfg_lex.zig`, `cfg_parse.zig`, `cfg_print.zig` | the mid-level IR, its text form, and the ops themselves | semantics — the validator enforces them |
 | CFG lowering | `lower.zig` + `passes/cfg_lower_*.zig` | HIR→CFG emission helpers driven by `hir_lower`: evaluation order, destruction placement, module init functions, syscalls for host bindings | optimization (runs later) |
 | Optimizer | `passes/cfg_optimize.zig` + `cfg_tail_call`, `cfg_inline`, `cfg_cse`, `cfg_copy_prop`, `cfg_pre`, `cfg_select`, `cfg_dead_block`, `cfg_drop_elide`, `cfg_dead_instr`, `cfg_jump_thread`, `cfg_phi_simplify`, `cfg_lower_drop` | semantics-preserving CFG→CFG rewrites; drop expansion | the LLIR image |
@@ -98,5 +101,5 @@ supplies them.
 
 - **Compiler**: [frontend.md](frontend.md) (pipeline contract end to end), [passes.md](passes.md) (pass order), [module-graph.md](module-graph.md), [checker.md](checker.md), [cfg-lowering.md](cfg-lowering.md), [optimizer.md](optimizer.md), [llir-typed.md](llir-typed.md).
 - **Runtime & embedding**: [interpreter-vm.md](interpreter-vm.md), [host-bindings.md](host-bindings.md).
-- **Unimplemented proposals** (kept for review, not descriptions of the built compiler): [hir.md](hir.md), [effects.md](effects.md).
+- **Unimplemented proposals** (described inside the documents above, not as standalone files): the SEG bridge and the M2 consumer passes ([hir.md](hir.md) §8/§11), the effect consumer passes, function SCC fixpoint, and module-const summary checks ([effects.md](effects.md) §7–§8/§12). [hir.md](hir.md) and [effects.md](effects.md) themselves describe implemented code (M1a / M1b).
 - **Normative specs**: `spec/` (see [spec/README.md](../spec/README.md)); the AIR op inventory and validator contract are authoritative in [../spec/air.md](../spec/air.md).
