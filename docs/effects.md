@@ -4,7 +4,8 @@
 >
 > - **已实现**：固定乘积格与派生查询、函数摘要 SCC least fixpoint、精确
 >   `drop_effect(T)` 全链、module-const 检查、`StillaExecution` 三态与符号键
->   host 声明解析、间接调用目标收窄（§9.2 局部 fn-ref 传播）。
+>   host 声明解析、间接调用目标收窄（§9.2 局部 fn-ref 传播）、β 的 effectful
+>   实参（§10.4，契约下放开求值次数 / 序 / scope / FE / cleanup）。
 > - **opt-in 消费者（默认关）**：dead-let + selective ANF（`--simplify`）、
 >   SEG v1（`--seg`）。
 > - **设计已定但未实现**（§14、[todo.md](todo.md)）：`never_returns` must 事实、
@@ -736,14 +737,18 @@ let-unused  : MayDiscard(init) → 引擎自动要求 discardable(init)
 ```
 
 > **现状：契约是设计概念，不是类型。** `RewriteContract` / `RewriteRule` 在
-> 代码中不存在；β 的契约由 `tryBeta`（hir_seg.zig）内联强制：call 必须
-> 语义 seg-safe、每个实参 Copy 且 discardable、λ 体是 cleanup-free 的单表达式
-> （非 `seq` root）、λ 只经 `fn_ref` 可达，克隆时用 fresh binder 重映射 scope。
-> 详见 [hir.md](hir.md) §8.4。
+> 代码中不存在；β 的契约由 `tryBeta`（hir_seg.zig）内联强制：call 结果 Copy、
+> 被求值的 call 子树 **cleanup-free 且过 ownership gate**、λ 体是 seg-safe 的
+> 单表达式（非 `seq` root）、λ 只经 `fn_ref` 可达，克隆时用 fresh binder 重映射
+> scope。**实参不要求 total / 无可观察效果**：β→let 不删除、不复制、不重排实参，
+> 故 effectful 实参逐字保留（求值次数与 LTR 序不变）。详见 [hir.md](hir.md) §8.4。
 
 `(fn(x) { x + 1 })(host.read())` 整体仍不能进纯 term 的 equality saturation
-——但 β 本身不删除、不复制、不重排 `arg`，契约证明后**可**允许 effectful 实参
-（单独验证后再放开的方向，见 [todo.md](todo.md)）。v1 仍保守。
+——但 β 本身不删除、不复制、不重排 `arg`，契约（求值次数 / 序 / scope / FE /
+cleanup）证明后**已允许** effectful 实参：`host.read()` 作为 λ 外实参按原序求值
+一次。随之而来的义务落在下游规则：β 生成的 `let` 可能绑一个非 island 的
+init，dead-let / forwarding 只有在 init 仍是 island 成员时才可把它当纯值删除或
+搬移，否则会丢掉或重排效果（`hir_seg.zig` 的 `ruleLet` 已按此设门）。
 
 ### 10.5 实现形态（Zig）
 

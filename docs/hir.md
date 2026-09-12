@@ -896,9 +896,10 @@ isSegSafe(e)  ==
 > **两类重写**：普通 SEG 重写必须 full-expression-preserving；**boundary
 > rewrite**（v1 唯一实例是 β）把 λ 体搬进调用点。β 的 callee 是 `fn_ref`
 > （无 SEG 编码），call 节点本就不是 island 成员，因此 β **绕过 island 的编码 /
-> 成员资格**；但语义安全仍要过 `isSegSafe`——`tryBeta` 对 call 节点与 λ 体都
-> 调用它，再逐条检查 §8.4 的契约。契约判定内联在 `tryBeta`，没有独立的
-> `RewriteContract` 类型。
+> 成员资格**；但语义安全仍要过 `isSegSafe` 的残余部分——`tryBeta` 对 call 节点
+> 只要求 Copy 结果、cleanup-free 求值子树与 ownership gate（**不要求实参
+> total / 无可观察效果**），对 λ 体仍调用完整 `isSegSafe`，再逐条检查 §8.4 的
+> 契约。契约判定内联在 `tryBeta`，没有独立的 `RewriteContract` 类型。
 
 ### 8.2 投影与抽取（Target）
 
@@ -928,7 +929,7 @@ extract(eclass)      -> ExprId
 
 | 优化 | v1 | 备注 |
 | --- | --- | --- |
-| β-reduction → `let` | ✅ | boundary rewrite，契约见 §8.4；实参限 Copy 且 discardable |
+| β-reduction → `let` | ✅ | boundary rewrite，契约见 §8.4；实参限 Copy，call 子树 cleanup-free / ownership gate（可 effectful） |
 | dead let | ✅ | `x ∉ FV(body)` 且 init 在 island 内 total / 无可观察效果 |
 | used-once let forwarding | ✅ | 单次使用：把 init 内容搬进使用点 |
 | trivial-atom forwarding | ✅ | const / local / fn_ref 无求值、无 region，可复制到每个使用点 |
@@ -984,7 +985,12 @@ RewriteContract {
   闭包逃逸）；
 - `maps_full_expr`：v1 只对 cleanup-free 的单表达式 λ 体做 β，其唯一 FE 并入
   调用点 FE；
-- `preserves_cleanup`：实参限 **Copy 且 discardable**，λ 体 cleanup-free。
+- `preserves_cleanup`：实参限 **Copy**，且 call 被求值的子树 cleanup-free、过
+  ownership gate（body 是延迟的，不计入 call 子树）；λ 体 cleanup-free。**实参不再
+  要求 total / 无可观察效果**：β→let 不删除、不复制、不重排实参，故 effectful
+  实参按原序求值一次即可。下游规则因此不得把 β 生成的 `let` 的 init 当纯值处置
+  ——dead-let / used-once forwarding 只有 init 仍是 island 成员时才准入
+  （`ruleLet` 的 `encOf(init)` 门），否则删除或搬移会丢掉 / 重排效果。
 
 「校验器每次 rewrite 后重跑」是必要非充分（destructor timing 变化校验收不到），
 所以由**契约准入**兜底。多语句 / 带清理 λ 的 β 待 `drop_effect` 精化后再提供
@@ -1159,7 +1165,7 @@ lowering。可选变换每轮原位重写后重新跑结构 + 效果校验（§2
 
 **尚未实现**（完整清单见 [todo.md](todo.md)）：η-reduction；**节点级**
 full-expression 边界标注（清理 token 登记已落地，见 [effects.md](effects.md)
-§11.2）；effectful β 实参放开；真正的 slotted e-graph / extraction；
+§11.2）；真正的 slotted e-graph / extraction；
 HIRTypeId canonical 表。
 
 ## 12. 开放问题

@@ -140,14 +140,26 @@
     `may_diverge`、回调解经 let 绑定实参；黑盒：间接调用读较早 module const
     的初始化器被接受；新增 `probes/indirect_targets.st` 进全语料差分。
 
-- [ ] **6. effectful β 实参放开**（[effects.md](effects.md) §10.4）
+- [x] **6. effectful β 实参放开**（[effects.md](effects.md) §10.4）
   - 范围：在 β 契约（求值次数与顺序保持 + scope/FE 映射 + cleanup
-    证明）下，允许 effectful 实参进入 β；v1 目前只对 Copy 且
+    证明）下，允许 effectful 实参进入 β；v1 原先只对 Copy 且
     discardable 的实参、cleanup-free 的单表达式 λ 体提供契约实例。
   - 依赖：必须有 cleanup 证明；涉及清理注册变化时依赖第 3 项，
     cleanup-free 子集可单独验证。
   - 验收：契约下单独验证的定向用例；破坏顺序 / scope / FE 的负例；
     on/off 解释器差分。
+  - 已完成：`hir_seg.tryBeta` 的 call 级门从完整 `isSegSafe(id)` 收窄为其
+    **残余三件**——结果 `Copy`、`cleanupFree(id)`（callee + 实参子树，body
+    延迟不计）、`ownershipGate(id)`；实参逐项只再要求 `Copy`。于是 trap /
+    diverge / Q / 任何可观察效果的实参都进入 β（β→let 逐参数 LTR 求值一次，
+    不删除 / 不复制 / 不重排），而 `move` / borrow 实参仍被 ownership gate 拒，
+    effectful λ 体仍被 `isSegSafe(body)` 拒。契约新增的下游义务落在 `ruleLet`：
+    dead-let 与 used-once forwarding 现在要求 `encOf(init)`（init 仍是 island
+    成员）——否则 effectful init 会被丢弃或搬到使用点，丢掉 / 重排效果；β 克隆
+    体与 match 拼接的 `let` 的 init 由构造保证仍在 island 内，不受影响。测试：
+    effectful 实参被 β 的正例、unused / used-once 实参的 init 保留（效果不丢）、
+    双 effectful 实参 LTR 序（打印序逐字）、fresh-binder scope、full_expr 破坏
+    负例；新增语料 `probes/effectful_beta.st` 进 on/off 差分与 pass smoke。
 
 ## 长期探索
 

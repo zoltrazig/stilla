@@ -164,8 +164,8 @@ const Rewriter = struct {
     }
 
     /// `true` when `id` is inside an island. For nodes appended by this
-    /// pass (β clones of an admissible body + its Copy/discardable args)
-    /// that is a structural given, not a claim about stale annotations.
+    /// pass (the cloned body and the `let` chain β splices) that is a
+    /// structural given, not a claim about stale annotations.
     fn encOf(self: *Rewriter, id: hir.ExprId) bool {
         if (id < self.enc.len) return self.enc[id];
         return true;
@@ -297,13 +297,16 @@ const Rewriter = struct {
 
     /// `call(fn_ref-to-λ, args…)` → nested `let`s binding the λ params to
     /// the args, body = the cloned λ body. Contract (hir.md §8.4,
-    /// docs/effects.md §10.4): the call is semantically seg-safe, every
-    /// argument is Copy and discardable, the λ body is a cleanup-free
-    /// single expression (`isSegSafe`, not a `seq` root), and the λ is
-    /// copied with fresh binders (scope mapping) — evaluation count, LTR
-    /// order, and the (absent) cleanup all preserved. `preserves_cleanup`
-    /// holds because both the call subtree (excluding the deferred body)
-    /// and the body itself are cleanup-free.
+    /// docs/effects.md §10.4): the call result is Copy, the evaluated call
+    /// subtree is literally cleanup-free and passes the ownership gate, the
+    /// λ body is a seg-safe single expression (`isSegSafe`, not a `seq`
+    /// root), and the λ is copied with fresh binders (scope mapping).
+    /// Evaluation count and LTR order are structural: β→let evaluates each
+    /// argument once, in order, and never deletes, duplicates, or reorders
+    /// it — so an argument may carry traps, divergence, `Q`, or observable
+    /// effects and is preserved verbatim. `preserves_cleanup` holds because
+    /// both the evaluated call subtree (args; the body is deferred) and the
+    /// body itself are cleanup-free, with the args staying Copy.
     fn tryBeta(self: *Rewriter, id: hir.ExprId) Error!bool {
         const pr = self.p();
         const n = pr.node(id);
@@ -327,8 +330,15 @@ const Rewriter = struct {
         if (rec.kind != .lambda) return false;
         if (self.beta_done.contains(fid)) return false;
 
-        // Contract: the call itself is a safe island root.
-        if (!try self.analysis.isSegSafe(id)) return false;
+        // Contract: the argument-independent residue of the call-level
+        // island predicate. `isSegSafe(id)` itself is deliberately not used
+        // — it also demands the arguments be total and observable-effect-
+        // free, which β does not need and would wrongly reject an effectful
+        // argument (docs/effects.md §10.4).
+        const result_cap = try self.analysis.capabilityOf(n.ty) orelse return false;
+        if (result_cap != .copy) return false;
+        if (!try self.analysis.cleanupFree(id)) return false;
+        if (!try self.analysis.ownershipGate(id)) return false;
 
         const lambda = pr.node(rec.root);
         if (hir.registry.get(lambda.op).seg != .binder) return false;
@@ -341,12 +351,17 @@ const Rewriter = struct {
         // "single expression" (§8.4): no statement sequence.
         if (std.mem.eql(u8, hir.registry.get(pr.node(body).op).name, "seq")) return false;
 
+        // Arguments stay Copy (a Unique / borrowed argument would change
+        // ownership at the synthesized let); their effects are preserved
+        // verbatim, so no purity is required. `cleanupFree(id)` above
+        // already covers every argument's cleanup and `ownershipGate(id)`
+        // its ownership (a `move`/borrow argument leaves `callArgUse` at
+        // `.consume`/`.borrow`, which the gate rejects).
         var k: usize = 1;
         while (k < ops.len) : (k += 1) {
             const arg = ops[k];
             const cap = try self.analysis.capabilityOf(pr.node(arg).ty) orelse return false;
             if (cap != .copy) return false;
-            if (!try self.analysis.isDiscardable(arg)) return false;
         }
 
         // Fresh binders for the λ params (maps_scope), then clone the
@@ -671,7 +686,11 @@ const Rewriter = struct {
     /// Plain `let` simplification (hir.md §8.3): dead let, used-once
     /// forwarding, and trivial-atom forwarding. All three strictly reduce
     /// `costOf`; the island invariant makes the init discardable (dead)
-    /// and the subtree duplicable (forward).
+    /// and the subtree duplicable (forward). A β-generated let may bind an
+    /// effectful, non-island init (docs/effects.md §10.4), so the
+    /// dead/forward branches additionally require the init to be an island
+    /// member (`encOf`) — dropping or moving it would lose or reorder the
+    /// effect.
     fn ruleLet(self: *Rewriter, id: hir.ExprId) Error!bool {
         const pr = self.p();
         const ops = pr.operands(id);
@@ -686,13 +705,22 @@ const Rewriter = struct {
         const body = region.root;
 
         const uses = try self.countUses(body, bind);
+        // The island invariant: an island-member init is total and
+        // observable-effect-free, so dropping (dead) or forwarding
+        // (used-once) its evaluation is unobservable. A β-generated let may
+        // instead bind an effectful, non-island argument (docs/effects.md
+        // §10.4) — then the init must stay exactly where the call evaluated
+        // it. `encOf` is exact for those old argument ids, and true by fiat
+        // only for β-clone bodies / match-spliced lets, which are island-safe
+        // by construction.
+        const init_island = self.encOf(init);
         if (uses == 0) {
-            // Dead let: the init is total / observable-effect-free in the
-            // island, so dropping its evaluation is unobservable.
+            if (!init_island) return false;
             pr.exprs.items[id] = pr.node(body);
             return true;
         }
         if (uses == 1) {
+            if (!init_island) return false;
             try self.substOnce(body, bind, init);
             pr.exprs.items[id] = pr.node(body);
             return true;

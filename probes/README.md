@@ -50,6 +50,10 @@ The detailed probes cover the source-reachable operation/type matrix:
 - `indirect_targets.st`: the §9.2 indirect-call target narrowing (a `let`-bound
   fn-ref, a `let`-bound λ, and an `if`-selected finite set) next to the
   unresolvable function-parameter callee that stays `Top`
+- `effectful_beta.st`: β with effectful arguments ([effects.md](effects.md)
+  §10.4) — a two-argument call evaluates both printing arguments left-to-right,
+  and an unused / once-used parameter keeps its `let` so β neither drops nor
+  moves the effect
 
 Every `probes/*.st` file is enumerated at test time by
 `src/probe_corpus.zig`, so a new probe automatically joins the HIR build

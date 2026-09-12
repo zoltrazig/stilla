@@ -185,6 +185,117 @@ test "SEG: β is refused for an effectful body and for a non-Copy argument" {
     try testing.expect(std.mem.indexOf(u8, text, "call(fnref") != null);
 }
 
+test "SEG: β admits an effectful argument (docs/effects.md §10.4)" {
+    const src = try probe_corpus.read(testing.allocator, "probes", "effectful_beta");
+    defer testing.allocator.free(src);
+    var b = try buildText("app", &.{.{ "app", src }});
+    defer b.deinit();
+    const stats = try segAll(&b);
+    try testing.expect(stats.beta >= 4);
+    // The argument is evaluated once and read from the binder.
+    const doubled = try funcText(&b, "app.doubled");
+    try testing.expect(std.mem.startsWith(u8, doubled, "fn () => let "));
+    try testing.expect(std.mem.indexOf(u8, doubled, "call(") != null);
+    // LTR: the first argument's effect is emitted before the second's.
+    // A swap (or a used-once forwarding that moved the first init after
+    // the second) would invert these positions.
+    const ordered = try funcText(&b, "app.ordered");
+    const first = std.mem.indexOf(u8, ordered, "1i32") orelse return error.TestUnexpectedResult;
+    const second = std.mem.indexOf(u8, ordered, "2i32") orelse return error.TestUnexpectedResult;
+    try testing.expect(first < second);
+}
+
+test "SEG: an effectful β argument keeps its let (no drop / forwarding)" {
+    const src = try probe_corpus.read(testing.allocator, "probes", "effectful_beta");
+    defer testing.allocator.free(src);
+    var b = try buildText("app", &.{.{ "app", src }});
+    defer b.deinit();
+    _ = try segAll(&b);
+    // The parameter is never read, but the init's effect is observable —
+    // dead-let must refuse rather than delete the call.
+    const unused = try funcText(&b, "app.unused");
+    try testing.expect(std.mem.startsWith(u8, unused, "fn () => let "));
+    try testing.expect(std.mem.indexOf(u8, unused, "call(") != null);
+    // The parameter is read once, but forwarding the init to its use point
+    // would move the effect off the argument position — the init must stay
+    // the let it was.
+    const once = try funcText(&b, "app.once");
+    try testing.expect(std.mem.startsWith(u8, once, "fn () => let "));
+}
+
+test "SEG: an effectful β clone binds fresh binders (scope mapping)" {
+    const src = try probe_corpus.read(testing.allocator, "probes", "effectful_beta");
+    defer testing.allocator.free(src);
+    var b = try buildText("app", &.{.{ "app", src }});
+    defer b.deinit();
+    _ = try segAll(&b);
+    const pr = &b.built.program;
+    var lam_rec: ?hir.FuncRecord = null;
+    for (b.built.funcs.items) |f| {
+        if (f.kind == .lambda and std.mem.startsWith(u8, f.name, "app.doubled")) {
+            lam_rec = f;
+            break;
+        }
+    }
+    const lam = lam_rec orelse return error.TestUnexpectedResult;
+    const lam_param = pr.params(pr.regionsOf(lam.root)[0])[0];
+    const dbl = try findFunc(&b, "app.doubled");
+    // A function record's root is its (zero-param) thunk; its region root
+    // is the body, which β turned into the outermost let.
+    const dbl_body = pr.region(pr.regionsOf(dbl.root)[0]).root;
+    const let_param = pr.params(pr.regionsOf(dbl_body)[0])[0];
+    // The λ parameter and the call-site let binder are distinct identities.
+    try testing.expect(lam_param != let_param);
+    // The cloned body reads the call-site binder, never the λ binder.
+    const body = pr.region(pr.regionsOf(dbl_body)[0]).root;
+    var work = std.ArrayList(hir.ExprId).empty;
+    defer work.deinit(testing.allocator);
+    try work.append(testing.allocator, body);
+    var saw_local = false;
+    while (work.pop()) |cur| {
+        const n = pr.node(cur);
+        if (std.mem.eql(u8, hir.registry.get(n.op).name, "local")) {
+            saw_local = true;
+            try testing.expectEqual(let_param, n.payload.binder);
+        }
+        for (pr.operands(cur)) |op| try work.append(testing.allocator, op);
+        for (pr.regionsOf(cur)) |r| try work.append(testing.allocator, pr.region(r).root);
+    }
+    try testing.expect(saw_local);
+}
+
+test "SEG: a full-expression boundary on a β argument refuses the reduction" {
+    const src = try probe_corpus.read(testing.allocator, "probes", "effectful_beta");
+    defer testing.allocator.free(src);
+    var b = try buildText("app", &.{.{ "app", src }});
+    defer b.deinit();
+    const f = try findFunc(&b, "app.doubled");
+    // `doubled`'s body (the root of its thunk region) is the
+    // immediately-invoked call; operand 1 is its argument.
+    const outer = b.built.program.region(b.built.program.regionsOf(f.root)[0]).root;
+    const call = try findNode(&b, outer, "call") orelse return error.TestUnexpectedResult;
+    const arg = b.built.program.operands(call)[1];
+    b.built.program.exprs.items[arg].full_expr = 1;
+    // Run the pass alone (the §2.4 re-validation is what would reject the
+    // corrupted annotation first, and this test pins the rule's own gate).
+    _ = try hir_seg.optimize(b.arena.allocator(), b.built, .{ .graph = b.graph });
+    const after = b.built.program.region(b.built.program.regionsOf(f.root)[0]).root;
+    const after_name = hir.registry.get(b.built.program.node(after).op).name;
+    try testing.expect(std.mem.eql(u8, after_name, "call"));
+}
+
+test "SEG: β preserves effectful argument order (SEG-on == SEG-off)" {
+    const src = try probe_corpus.read(testing.allocator, "probes", "effectful_beta");
+    defer testing.allocator.free(src);
+    const off = try capture(src, false);
+    defer testing.allocator.free(off);
+    const on = try capture(src, true);
+    defer testing.allocator.free(on);
+    try testing.expectEqualStrings(off, on);
+    // Non-vacuous: the two effectful arguments print in source order.
+    try testing.expect(std.mem.indexOf(u8, on, "1\n2\n21") != null);
+}
+
 test "SEG: may-trap ops never enter an island (div is left to the runtime)" {
     const src = try probe_corpus.read(testing.allocator, "probes/cases", "seg_div_left_to_runtime");
     defer testing.allocator.free(src);
