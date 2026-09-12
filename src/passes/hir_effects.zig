@@ -849,9 +849,13 @@ pub const Analysis = struct {
                     const positions = entry.callbacks orelse return self.effectBound(ops[0]);
                     var acc = entry.summary;
                     for (positions) |pos| {
-                        const arg_index = @as(usize, pos) + 1; // arg 0 is ops[1]
-                        if (arg_index >= ops.len) return effects.top;
-                        const bound = try self.callbackBound(ops[arg_index]) orelse return effects.top;
+                        // Bounds-check before widening: `pos + 1` would
+                        // overflow on a 32-bit target when `pos` is
+                        // `maxInt(u32)`, and a wrapped index is a wrong
+                        // answer, not a conservative one. Arg 0 is ops[1],
+                        // so a valid position is `< ops.len - 1`.
+                        if (pos >= ops.len - 1) return effects.top;
+                        const bound = try self.callbackBound(ops[@as(usize, pos) + 1]) orelse return effects.top;
                         acc = try effects.join(self.arena, acc, bound);
                     }
                     return acc;
@@ -989,8 +993,7 @@ pub const Analysis = struct {
                             .host => |hb| if (self.hosts.lookupEntry(hb)) |e| {
                                 if (e.stilla_execution == .may_execute) {
                                     if (e.callbacks) |positions| for (positions) |pos| {
-                                        const ai = @as(usize, pos) + 1;
-                                        if (ai < ops.len) try self.collectCallableTarget(ops[ai], out);
+                                        if (pos < ops.len - 1) try self.collectCallableTarget(ops[@as(usize, pos) + 1], out);
                                     };
                                 }
                             },
@@ -2397,6 +2400,13 @@ test "hir_effects: a host callback contract with an unbounded or invalid argumen
     var an2 = try Analysis.init(f.arena.allocator(), f.built, .{ .graph = f.graph, .hosts = invalid });
     try an2.analyze();
     try testing.expect((try an2.effectOf(call)).eql(effects.top));
+
+    // An extreme position must fail closed rather than wrap an index.
+    const huge = [_]u32{std.math.maxInt(u32)};
+    const extreme = try declareCallbackHost(&f, "hostmod.apply", effects.pure, &huge);
+    var an_ext = try Analysis.init(f.arena.allocator(), f.built, .{ .graph = f.graph, .hosts = extreme });
+    try an_ext.analyze();
+    try testing.expect((try an_ext.effectOf(call)).eql(effects.top));
 
     // A `forbidden` attestation ignores any contract: the declared
     // summary applies verbatim, contract or not.

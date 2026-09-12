@@ -64,15 +64,16 @@ pub const FrontendCache = struct {
         program: *const ast.Program,
     };
 
-    /// The semantic key of one cached module (docs/effects.md §13): its
-    /// parse identity (specifier + content hash) plus the effect
-    /// environment any phase-2/3 conclusion about it would depend on. The
-    /// *parse* cache ignores the fingerprint — parsing is
-    /// environment-independent, so a change must not drop an `Entry` —
-    /// but a cache of phase-2/3 results must key on this, or a changed
-    /// host contract would reuse a conclusion derived under the old one.
-    /// No such cache exists today; this is its key, exposed for the
-    /// embedder that will own it.
+    /// An **effect-sensitive component** of a cached module's semantic
+    /// key (docs/effects.md §13): its parse identity (specifier + content
+    /// hash) plus the effect environment any phase-2/3 conclusion about
+    /// it depends on. It is not a sufficient key for arbitrary phase-2/3
+    /// reuse — dependency identities, compiler/options state, and
+    /// source-hash collision handling remain the future cache's
+    /// responsibility — but it is the environment half that a changed
+    /// host contract must invalidate. The *parse* cache ignores the
+    /// fingerprint: parsing is environment-independent, so a change must
+    /// not drop an `Entry`.
     pub const SemanticKey = struct {
         specifier: []const u8,
         content_hash: u64,

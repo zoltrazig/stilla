@@ -180,8 +180,8 @@ registry generation (`Options.host_decls` / `Options.resources` /
 into one canonical digest.
 Parsing is independent of it, so an environment change leaves every cached
 parse reusable but moves the semantic key (`Stats.effect_environment_changes`),
-which a future cache of phase-2/3 results must key on so a changed contract
-can never reuse a conclusion derived under the old one.
+which a future cache of phase-2/3 results must include in its key so a
+changed contract does not reuse a conclusion derived under the old one.
 See [module-graph.md](module-graph.md).
 
 **Aggressive optimization (optional)** — `Options.optimize_aggressive`

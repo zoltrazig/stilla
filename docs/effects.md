@@ -1047,9 +1047,10 @@ host 调用」列在当前范围之外只是范围，不是「永远不会发生
   `HostEffects.resolve` 解析成 `HostBindingId`；符号指不到 binding 的声明被忽略。
 - **编译与运行必须用同一份契约。** **编译器不校验运行时是否真的遵守**——这不是
   runtime 侧的重入设计，只是一份编译器消费的受信声明。
-- **重复 / 矛盾的声明** 顺序无关地合并：两侧全等才保留（attestation 与回调
-  契约分别判等），摘要取 join；出现 `Forbidden` 与 `MayExecute` 矛盾、或两个
-  不同回调契约则降为 `Unknown`（即 `Top`），不采用「后来者胜」。
+- **重复 / 矛盾的声明** 顺序无关地合并：摘要取 join。attestation 不一致
+  （`Forbidden` vs `MayExecute`）降为 `Unknown`（即 `Top`）；回调契约不一致只
+  撤销回调参数化（不再收紧），两个 `Forbidden` 声明仍用其 join 摘要——
+  `Forbidden` 不查契约。不采用「后来者胜」。
 
 **兼容成本。** 严格默认会拒绝原本合法的程序：模块常量的销毁链里带日志
 （`drop(t) { builtin.print(...) }`）属于这一类。迁移方式是让 embedding（含测试

@@ -86,8 +86,8 @@ records the last compile's effect-environment fingerprint
 not depend on the effect environment, so a change to the host declarations,
 the effect-domain registry, or the host-semantics registry generation keeps
 every parse reusable and only moves the semantic key
-(`Stats.effect_environment_changes`) that a future phase-2/3 cache must key
-on.
+(`Stats.effect_environment_changes`) a future phase-2/3 cache must include
+in its key.
 
 ## Module-level information computed per module
 

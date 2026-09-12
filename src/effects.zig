@@ -622,12 +622,15 @@ pub const HostEffects = struct {
     }
 
     /// Fold declarations of the same binding into one entry, *order
-    /// independently*: the entries survive only when every declaration
-    /// for that binding agrees — an identical attestation and an
-    /// identical callback contract — and the summaries are joined. A
-    /// contradiction (e.g. `forbidden` vs `may_execute`, or two different
-    /// callback contracts) therefore degrades to the full `top`, rather
-    /// than depending on which declaration happened to come first.
+    /// independently*: all declarations must agree. The summaries are
+    /// joined. A disagreement on the execution attestation (`forbidden`
+    /// vs `may_execute`, say) degrades it to `unknown` — the full `top`
+    /// for `effectiveSummary`. A disagreement on the callback contract
+    /// only drops callback refinement (`callbacks` becomes null): two
+    /// `forbidden` declarations with different contracts still use their
+    /// joined summary, because no contract is consulted for a binding
+    /// that executes no Stilla code. Neither outcome depends on which
+    /// declaration came first.
     pub fn consolidate(arena: std.mem.Allocator, entries: []const Entry) std.mem.Allocator.Error!HostEffects {
         var out = std.ArrayListUnmanaged(Entry).empty;
         for (entries, 0..) |e, i| {
@@ -772,16 +775,17 @@ pub const Environment = struct {
     host_decls: []const HostDecl = &.{},
 };
 
-/// Canonical digest of an `Environment` (docs/effects.md §13). Two
-/// environments with the same fingerprint must produce the same effect
-/// conclusions for the same program — so a cache keyed on it may reuse
-/// phase-2/3 results — and a different fingerprint must not reuse them.
-/// The encoding is explicit and canonical: collections are sorted,
-/// integers are little-endian fixed width (never native byte order),
-/// symbols are length-delimited, and each summary row is canonicalized
-/// before hashing. It never hashes raw struct bytes, arena pointers, or a
-/// session-local interner id (`ResourceRegistry`'s domain ids are
-/// embedding ABI values, not interned handles, so they are included).
+/// Canonical digest of an `Environment` (docs/effects.md §13), the
+/// semantic component of a compile cache key. Its job is to make a cache
+/// hit improbable when the environment changed, not to *prove* equality:
+/// it is a 64-bit digest, so a collision would silently reuse a stale
+/// conclusion. It is a staleness guard, never a security boundary. The
+/// encoding is explicit and canonical — sorted collections, fixed-width
+/// little-endian integers (never native byte order), length-delimited
+/// symbols, each summary row canonicalized first — and never hashes raw
+/// struct bytes, arena pointers, or a session-local interner id
+/// (`ResourceRegistry`'s domain ids are embedding ABI values, not
+/// interned handles, so they are included).
 pub const EffectEnvironmentFingerprint = struct {
     value: u64 = 0,
 
@@ -1468,7 +1472,12 @@ test "effects: fingerprint is order independent and tracks every environment dim
     try testing.expect(!canon.eql(try EffectEnvironmentFingerprint.compute(a, .{ .registry_generation = 7, .host_decls = &.{ d1, nocb } })));
     try testing.expect(!canon.eql(try EffectEnvironmentFingerprint.compute(a, .{
         .registry_generation = 7,
-        .resources = .{ .stable = &.{host(1)}, .disjoint = &.{.{ .a = host(1), .b = host(2) }} },
+        .resources = .{ .stable = &.{host(1)} },
+        .host_decls = &.{ d1, d2 },
+    })));
+    try testing.expect(!canon.eql(try EffectEnvironmentFingerprint.compute(a, .{
+        .registry_generation = 7,
+        .resources = .{ .disjoint = &.{.{ .a = host(1), .b = host(2) }} },
         .host_decls = &.{ d1, d2 },
     })));
     // ...and the domain inventory, independently of the relations.
