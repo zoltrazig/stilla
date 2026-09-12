@@ -4,8 +4,112 @@
 [hir.md](hir.md) 与 [effects.md](effects.md) 的现状章节统一引用。
 「近期」内各项的先后是**建议顺序**，不是串行依赖；每项单独列出前置
 依赖。设计细节仍在两篇文档正文，本文件只记范围、依赖与验收。
+已完成的历史条目按原编号归档于「已完成」节，供跨文档交叉引用；
+「近期」从第 7 项续起，新增项一律追加到队尾。
 
 ## 近期（建议顺序）
+
+- [ ] **7. 节点级 full-expression 边界标注**（[hir.md](hir.md) §5.6 / §8.1 /
+      §8.7、[effects.md](effects.md) §11.2）
+  - 现状：`FullExpr`（hir.zig）只是身份占位——「S1 records identity only」，
+    builder 给每个节点 `full_expr = 0`（hir.md §5.6「所有节点同属 FE 0」）。
+    清理 token 的 FE 身份由 `hir_build_cleanup.zig` 按语句 / let 初始化器切分，
+    与节点标注并非同一事实。后果：SEG 的「不跨越 full-expression 边界」无法被
+    validator 强制（hir.md §8.7 的 FE1/FE2 例子只是设计依据），β 的
+    `maps_full_expr` 是恒等映射（hir_seg.zig 的 `clone_fe`）。
+  - 范围：builder 在构造时按 FE 切分并给 `ExprNode.full_expr` 赋真值；validator
+    增加「节点 FE 与清理 token FE 一致」与「SEG island 不跨 FE」两条不变量；β /
+    match 克隆的 FE 改为按真实 FE 映射；顺带解掉 [effects.md](effects.md) §11.2
+    中「含 Unique region 绑定子树回 `null`」的 scope-end 保守守卫。
+  - 依赖：无（承接已落地的清理 token）。
+  - 验收：FE 边界白盒正 / 负例（同 FE 内 vs 跨 FE 的两条语句）；跨 FE island
+    被拒的负例；β 克隆节点 FE == 调用点 FE；examples/probes on/off 解释器输出
+    逐字相等。
+
+- [ ] **8. η-reduction**（[hir.md](hir.md) §8.5）
+  - 范围：`fn (B0: T) => call(fnref F, %B0)` → `fnref F`。v1 只允许
+    `callee = fn_ref`（更一般的 callee 表达式在 η 展开后可能改变求值行为）；
+    前提是 exact same fn type（含参数模式）、`B0` 在 callee 中不自由（不捕获
+    天然满足）、callee total（无效果、无 trap）。结果 `fnref` 无 SEG 编码，规则
+    在 `applyRules` 中不得要求 `encOf(result)`（与 β 的 callee 同一处理）。
+  - 依赖：无。
+  - 验收：白盒正例 + 负例（capture / trap / 非 `fn_ref` callee / fn type 或
+    参数模式不符）；`--seg` on/off 解释器输出逐字相等。
+
+- [ ] **9. struct 投影规则**（[hir.md](hir.md) §8.3）
+  - 现状：`struct_make` 已注册 `seg = .construct`、`field_get` 已注册
+    `seg = .project`（hir.zig registry），但没有消费二者的规则：
+    `field_get(struct_make(v0, v1, …), i) → vi` 未落地。`tuple_make` /
+    `list_make` 是硬边界（`seg == null`），故本项只覆盖 struct；tuple projection
+    待 `tuple_make` 获得编码后另行立项。
+  - 范围：在 island 内把已知字段下标（`Payload.field`）的 `field_get` 归约为对应
+    operand；下标越界 / base 非 `struct_make` 拒绝。
+  - 依赖：无。
+  - 验收：白盒正例（各字段下标）+ 负例（越界、base 非构造、非 island）；新增
+    `probes/*.st` 用例进 on/off 差分与 pass smoke，并在 probes 目录的 README.md
+    加条目。
+
+- [ ] **10. CSE-style sharing → 合成 `let`**（[hir.md](hir.md) §8.3）
+  - 范围：同一 island 内结构相等（`alphaEq`）且 `isDuplicable` 的纯子树合并为
+    一个 `let`，后续出现替换为对该绑定量的 `local` 引用；共享子项必须是 island
+    成员（`encOf`），合成 `let` 不得改变求值次数与销毁注册。
+  - 依赖：**第 7 项**（合成 `let` 不得跨 FE 移动清理）；`isDuplicable` 查询已落地。
+  - 验收：白盒正例（两处同形、结果 Copy 且 `!Q`）+ 负例（可观察效果 / `Q` /
+    跨 FE / Unique）；`isDuplicable == false` 一律拒绝；on/off 解释器差分。
+
+- [ ] **11. SEG 终止性：递减度量或显式轮界契约**（[hir.md](hir.md) §8.2、
+      hir_seg.zig）
+  - 现状：`ruleMatch` 多 payload 时每个绑定叶合成一个 `let`，节点数可能不降；
+    终止只靠 `max_iterations = 8` 轮界，代码明确注明「不保证收敛到不动点」；
+    「每个 λ 至多内联一次」由 `beta_done` 把守。需要显式决策：给出每轮严格递减的
+    度量（cost + 被消费规则的匹配数），或把「有界轮数、非不动点」写成契约。
+  - 依赖：无。
+  - 验收：需要 >1 轮才稳定的构造用例——若选度量方案，断言收敛到不动点；若选
+    轮界方案，断言轮界内 `changed == false`；hir.md §8.2 与 hir_seg.zig 头注释同步。
+
+- [ ] **12. SEG 编译时间预算与默认开启**（应用面；[hir.md](hir.md) §11、
+      frontend.zig）
+  - 现状：`--seg` 默认关，pipeline 位置在 `--simplify` 之后、各自跟一次
+    `revalidateHir`（frontend.zig）；`hir_seg.Stats` 已记
+    `iterations / islands / beta / folds / algebra / lets / conds / matches`，但
+    没有语料级时间 / 预算基线。
+  - 范围：以 `Stats` 与 `probes/` + `examples/` 全语料为输入，度量 SEG 编译时间、
+    轮数与 island 覆盖并形成预算；据此把 SEG 从 `--seg` 翻为默认开启（保留 opt-out）。
+  - 依赖：**第 11 项**（先定收敛性契约，预算才有意义）。
+  - 验收：语料级 SEG 编译时间 / 轮数基线记录；默认开启后 `--simplify` × `--seg`
+    四种组合的 on/off 解释器输出逐字相等；CI 时间预算不回归。
+
+- [ ] **13. rewrite 契约形式化**（[effects.md](effects.md) §10.3–§10.4）
+  - 现状：两层判定（applicability 按 typed opcode vs operational legality 走派生
+    查询）已经分开，但只是内联在规则函数里——`RewriteRule` / `Requirement` 与
+    `RewriteContract` **在代码中不存在**，β 的契约由 `hir_seg.zig` 的 `tryBeta`
+    内联强制。
+  - 范围：把 effects.md §10.3 的 applicability / legality 两层与 §10.4 的
+    `RewriteContract` 落为类型：`RewriteRule { match, build, applicability,
+    legality: [Requirement] }`、`Requirement = Discardable | Duplicable |
+    SwapOperands | EvaluationCountPreserved`、`RewriteContract { effect,
+    maps_scope, maps_full_expr, preserves_cleanup }`；先用 β 与 hir_simplify 的
+    dead-let 做首批实例，行为逐字不变。
+  - 依赖：无（是现有内联判定的提取，不是新语义）。
+  - 验收：规则层 applicability 仍按 typed opcode 分派、legality 引擎无
+    `switch(op)`；β / dead-let 现有正负例在形式化实现下逐条通过；
+    [effects.md](effects.md) §10.3–§10.4 的「现状：无统一接口类型」段落随实现
+    删除或改写。
+
+- [ ] **14. `never_returns` must 事实与后缀删除**（[effects.md](effects.md) §10.1）
+  - 现状：`never_returns(f)` 设计为**独立于摘要的 must 事实**（签名 `-> never`
+    或结构推导），代码中**不存在**；由它驱动的后缀不可达删除也未实现。摘要代数
+    不变，`;` 合并仍保守并入后缀位。
+  - 范围：推导 `never_returns`（取不到即 false，递归 SCC 用 greatest-fixpoint
+    语义）；调用点后同一直行区域的后缀不可达，可整段删除（含该区域的 FE 清理）。
+  - 依赖：删后缀时的 FE 清理归属依赖第 7 项（节点级 FE 边界标注）。
+  - 验收：`-> never` callee 后的语句与清理被删除；有正常返回路径的 callee 不
+    删；递归 SCC 的 greatest-fixpoint 用例；on/off 解释器差分。
+
+## 已完成（归档，原「近期」第 1–6 项）
+
+> 以下条目均已落地，按完成时的编号保留，供 [effects.md](effects.md) 等正文
+> 交叉引用；新工作从「近期」第 7 项续起。
 
 - [x] **1. `match` 进 SEG**（[hir.md](hir.md) island/规则集与
       `passes/hir_seg.zig`）
@@ -165,12 +269,19 @@
 
 - [ ] 统一 `EffectDependencyNode`（Function ∪ DropType）单图 fixpoint，
       消掉跨层环回退 `Top` 的精度洞（[effects.md](effects.md) §11.1）。
-- [ ] SEG 从可选变默认，并测编译时间预算。
+- [ ] 真正的 slotted e-graph / extraction（[hir.md](hir.md) §8.2 Target）：
+      e-class、union-find、saturation、SLOT 编号、extraction、cost model；v1 原位
+      树重写器是其前身。
+- [ ] `HIRTypeId` canonical 表（[hir.md](hir.md) §3.8 Target）：为 SEG 的 O(1)
+      类型相等与摘要 interning 给 `meta.Type` 加一张 canonical 表。
+- [ ] source span side table（[hir.md](hir.md) §3.6）：`ExprNode.origin` 的 span
+      表尚未落地。
+- [ ] SEG 从可选变默认（前置：近期第 12 项的编译时间预算基线）。
 - [ ] Unique / consuming / borrowed 情形进 SEG（需线性等式系统）。
 - [ ] Typed HIR Target 形态：monomorphization / ownership 检查在 HIR 上
       完成（[hir.md](hir.md) §2.3 远期边界；未立项）。
-- [ ] SEG 的 associativity / commutativity 搜索与 CSE（正文列为 SEG
-      之外的方向，未立项）。
+- [ ] SEG 的 associativity / commutativity 搜索（正文列为 SEG 之外的
+      方向，未立项；结构相等的 CSE sharing 已上移为近期第 10 项）。
 
 ## 待决（规范措辞与契约）
 
@@ -184,5 +295,5 @@
 - [x] host 重入契约已定并落地（[effects.md](effects.md) §13）：缺失 =
       `Unknown` 取完整 `Top`，只有显式 `Forbidden` 才让声明逐字生效。
       回调参数化摘要与 `EffectEnvironmentFingerprint` 缓存指纹均已落地
-      （见「近期」第 2 项）；运行时侧契约校验仍不在范围内（编译器看不到
+      （见「已完成」第 2 项）；运行时侧契约校验仍不在范围内（编译器看不到
       host 代码，也不提供重入能力）。

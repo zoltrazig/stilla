@@ -1242,7 +1242,7 @@ hir_effects.zig / hir_simplify_tests.zig / hir_seg_tests.zig 的正负例覆盖�
 - host 重入契约（§13）：**已定并落地**——缺失 = `Unknown` 取完整 `Top`；只有
   显式 `Forbidden` 才让声明逐字生效。回调参数化摘要与
   `EffectEnvironmentFingerprint` 缓存指纹均已落地（见 §13 与 [todo.md](todo.md)
-  近期第 2 项）；运行时侧契约校验刻意不在范围内。
+  的「已完成」第 2 项）；运行时侧契约校验刻意不在范围内。
 
 **现状核对（哪些特设实现已被本文派生查询取代）：**
 
