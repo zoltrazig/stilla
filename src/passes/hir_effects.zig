@@ -757,7 +757,7 @@ pub const Analysis = struct {
                     for (ops[1..]) |arg| {
                         acc = try effects.sequence(self.arena, acc, try self.effectOf(arg));
                     }
-                    acc = try effects.sequence(self.arena, acc, try self.effectBound(ops[0]));
+                    acc = try effects.sequence(self.arena, acc, try self.callBound(ops));
                 }
                 return acc;
             },
@@ -819,6 +819,67 @@ pub const Analysis = struct {
         if (n.op == lambda_op) return self.lambdaBodySummary(callee);
         // Indirect call: v1 is Top (docs/effects.md §9.1).
         return effects.top;
+    }
+
+    /// `effect_bound` of a *call site* (docs/effects.md §6.1, §13).
+    ///
+    /// For a host binding declared `may_execute` with an exhaustive
+    /// callback contract, an invocation that passes a provable finite
+    /// target at every listed argument position is bounded by the host's
+    /// own declared summary joined with those targets' effect bounds
+    /// (`own ⊔ ⨆ effect_bound(target_i)`). The contract attests the
+    /// execution happens synchronously, during this invocation, and only
+    /// through those arguments — so a binding that stores a callable for
+    /// a later call cannot use it, and the later invocation (with no such
+    /// argument) is `Top`.
+    ///
+    /// Every other case is `Top`: no contract, no declaration, an
+    /// out-of-range position, or a callback with no provable finite
+    /// target set. The refinement is a precision budget, never a
+    /// truncation. `collectCallees` adds the same targets to the call
+    /// graph, so this only ever reads finalized or in-progress SCC facts.
+    fn callBound(self: *Analysis, ops: []const hir.ExprId) Error!Summary {
+        if (ops.len == 0) return effects.top;
+        const callee = self.p().node(ops[0]);
+        if (callee.op == fn_ref_op and callee.payload == .func) {
+            switch (callee.payload.func) {
+                .host => |hb| {
+                    const entry = self.hosts.lookupEntry(hb) orelse return effects.top;
+                    if (entry.stilla_execution != .may_execute) return self.effectBound(ops[0]);
+                    const positions = entry.callbacks orelse return self.effectBound(ops[0]);
+                    var acc = entry.summary;
+                    for (positions) |pos| {
+                        const arg_index = @as(usize, pos) + 1; // arg 0 is ops[1]
+                        if (arg_index >= ops.len) return effects.top;
+                        const bound = try self.callbackBound(ops[arg_index]) orelse return effects.top;
+                        acc = try effects.join(self.arena, acc, bound);
+                    }
+                    return acc;
+                },
+                .func => {},
+            }
+        }
+        return self.effectBound(ops[0]);
+    }
+
+    /// `effect_bound` of a callable value passed as an argument, when it
+    /// has a provable finite target set — the singleton forms v1 supports
+    /// (a direct `fn_ref`, an inline λ). A `let`-bound or otherwise
+    /// indirect value is null, which the caller maps to `Top` (the
+    /// general local-propagation refinement of docs/effects.md §9.2 is
+    /// separate and unimplemented). A value-position module chain would
+    /// run module initialization, so it is null too.
+    fn callbackBound(self: *Analysis, arg: hir.ExprId) Error!?Summary {
+        const n = self.p().node(arg);
+        if (n.access_hops.len > 0) return null;
+        if (n.op == fn_ref_op and n.payload == .func) {
+            return switch (n.payload.func) {
+                .func => |fid| try self.functionSummary(fid),
+                .host => |hb| self.hosts.lookup(hb),
+            };
+        }
+        if (n.op == lambda_op) return try self.lambdaBodySummary(arg);
+        return null;
     }
 
     // -----------------------------------------------------------------
@@ -916,7 +977,19 @@ pub const Analysis = struct {
                             .func => |target| if (target < self.built.funcs.items.len and !std.mem.containsAtLeastScalar(hir.FuncId, out.items, 1, target)) {
                                 try out.append(self.arena, target);
                             },
-                            .host => {},
+                            // A host call with a callback contract
+                            // instantiates its designated callback
+                            // arguments: those targets are real callees of
+                            // this body (docs/effects.md §13), so they
+                            // belong in the call graph — otherwise a
+                            // callback recursion misses the SCC `Diverge`
+                            // seed.
+                            .host => |hb| if (self.hosts.lookupEntry(hb)) |e| {
+                                if (e.callbacks) |positions| for (positions) |pos| {
+                                    const ai = @as(usize, pos) + 1;
+                                    if (ai < ops.len) try self.collectCallableTarget(ops[ai], out);
+                                };
+                            },
                         }
                     }
                 }
@@ -931,6 +1004,20 @@ pub const Analysis = struct {
             }
             for (pr.operands(id)) |op| try work.append(self.arena, op);
             for (pr.regionsOf(id)) |r| try work.append(self.arena, pr.region(r).root);
+        }
+    }
+
+    /// Record the function target of a callable value when it is a direct
+    /// `fn_ref`, so a callback instantiated at a host call site becomes an
+    /// edge of this body's call graph.
+    fn collectCallableTarget(self: *Analysis, arg: hir.ExprId, out: *std.ArrayListUnmanaged(hir.FuncId)) Error!void {
+        const n = self.p().node(arg);
+        if (n.access_hops.len > 0 or n.op != fn_ref_op or n.payload != .func) return;
+        switch (n.payload.func) {
+            .func => |target| if (target < self.built.funcs.items.len and !std.mem.containsAtLeastScalar(hir.FuncId, out.items, 1, target)) {
+                try out.append(self.arena, target);
+            },
+            .host => {},
         }
     }
 
@@ -2152,4 +2239,210 @@ test "hir_effects: validation re-derives summaries (stale *caller* facts are rej
     // The violation must be attributed to the caller, not the (now
     // consistent) callee.
     try testing.expect(std.mem.indexOf(u8, msg.?, "app.caller") != null);
+}
+
+/// Find the `call` node whose callee is a host binding (the white-box
+/// callback tests have exactly one).
+fn findHostCall(f: *Fixture) ?hir.ExprId {
+    const p = &f.built.program;
+    for (p.exprs.items, 0..) |e, i| {
+        if (e.op != call_op) continue;
+        const ops = p.operands(@intCast(i));
+        if (ops.len == 0) continue;
+        const callee = p.node(ops[0]);
+        if (callee.op != fn_ref_op or callee.payload != .func) continue;
+        switch (callee.payload.func) {
+            .host => return @intCast(i),
+            .func => {},
+        }
+    }
+    return null;
+}
+
+/// Declare one host binding `may_execute` with `summary` + `callbacks`;
+/// every other binding is `forbidden` + pure, so only the target's
+/// contract can shape the result.
+fn declareCallbackHost(f: *Fixture, key: []const u8, summary: effects.Summary, callbacks: ?[]const u32) !effects.HostEffects {
+    const a = f.arena.allocator();
+    const entries = try a.alloc(effects.HostEffects.Entry, f.built.hosts.items.len);
+    for (f.built.hosts.items, 0..) |hb, i| {
+        const target = std.mem.eql(u8, hb.key, key);
+        entries[i] = .{
+            .host = @intCast(i),
+            .summary = if (target) summary else effects.pure,
+            .stilla_execution = if (target) .may_execute else .forbidden,
+            .callbacks = if (target) callbacks else null,
+        };
+    }
+    return .{ .entries = entries };
+}
+
+test "hir_effects: a host callback contract bounds the call by the passed target" {
+    var f = try build("app", &.{
+        .{ "hostmod", "fn apply(f: fn(int32) -> int32, x: int32) -> int32;" },
+        .{
+            "app",
+            \\const hostmod = import("hostmod");
+            \\const base: int32 = 7;
+            \\fn readbase(x: int32) -> int32 { x + base }
+            \\fn main() -> int32 { hostmod.apply(readbase, 3) }
+        },
+    });
+    defer f.deinit();
+    const call = findHostCall(&f).?;
+    const pos0 = [_]u32{0};
+
+    // Without the contract a `may_execute` host is Top, even though the
+    // callable argument is statically a direct `fn_ref`.
+    const bare = try declareCallbackHost(&f, "hostmod.apply", effects.pure, null);
+    var an_bare = try Analysis.init(f.arena.allocator(), f.built, .{ .graph = f.graph, .hosts = bare });
+    try an_bare.analyze();
+    try testing.expect((try an_bare.effectOf(call)).eql(effects.top));
+    try testing.expect((try an_bare.validate(testing.allocator)) == null);
+
+    // With the exhaustive synchronous contract the call is exactly
+    // `own ⊔ effect_bound(readbase)` = readbase's module-const read.
+    const hosts = try declareCallbackHost(&f, "hostmod.apply", effects.pure, &pos0);
+    var an = try Analysis.init(f.arena.allocator(), f.built, .{ .graph = f.graph, .hosts = hosts });
+    try an.analyze();
+    const sum = try an.effectOf(call);
+    try testing.expect(sum.eql(try an.functionSummary(funcId(&f, "app.readbase").?)));
+    try testing.expectEqual(@as(usize, 1), sum.accesses.accesses.len);
+    switch (sum.accesses.accesses[0].resource) {
+        .module_const => {},
+        else => return error.TestUnexpectedResult,
+    }
+    try testing.expectEqual(effects.EffectMode.read, sum.accesses.accesses[0].mode);
+    try testing.expect((try an.validate(testing.allocator)) == null);
+}
+
+test "hir_effects: a host callback contract with an unbounded or invalid argument is Top" {
+    var f = try build("app", &.{
+        .{ "hostmod", "fn apply(f: fn(int32) -> int32, x: int32) -> int32;" },
+        .{ "impl", "fn inc(x: int32) -> int32 { x + 1 }" },
+        .{
+            "app",
+            \\const hostmod = import("hostmod");
+            \\const impl = import("impl");
+            \\fn main() -> int32 {
+            \\    let g = impl.inc;
+            \\    hostmod.apply(g, 3)
+            \\}
+        },
+    });
+    defer f.deinit();
+    const call = findHostCall(&f).?;
+    const pos0 = [_]u32{0};
+
+    // An indirect callable (a `let`-bound value) has no provable finite
+    // target set, so the refinement is refused: Top, never a truncated
+    // target set.
+    const indirect = try declareCallbackHost(&f, "hostmod.apply", effects.pure, &pos0);
+    var an = try Analysis.init(f.arena.allocator(), f.built, .{ .graph = f.graph, .hosts = indirect });
+    try an.analyze();
+    try testing.expect((try an.effectOf(call)).eql(effects.top));
+
+    // A listed position outside the call's arguments is refused too.
+    const oob = [_]u32{5};
+    const invalid = try declareCallbackHost(&f, "hostmod.apply", effects.pure, &oob);
+    var an2 = try Analysis.init(f.arena.allocator(), f.built, .{ .graph = f.graph, .hosts = invalid });
+    try an2.analyze();
+    try testing.expect((try an2.effectOf(call)).eql(effects.top));
+
+    // A `forbidden` attestation ignores any contract: the declared
+    // summary applies verbatim, contract or not.
+    const a = f.arena.allocator();
+    const entries = try a.alloc(effects.HostEffects.Entry, f.built.hosts.items.len);
+    for (f.built.hosts.items, 0..) |hb, i| {
+        const target = std.mem.eql(u8, hb.key, "hostmod.apply");
+        entries[i] = .{
+            .host = @intCast(i),
+            .summary = if (target) effects.may_trap else effects.pure,
+            .stilla_execution = .forbidden,
+            .callbacks = if (target) &oob else null,
+        };
+    }
+    var an3 = try Analysis.init(a, f.built, .{ .graph = f.graph, .hosts = .{ .entries = entries } });
+    try an3.analyze();
+    try testing.expect((try an3.effectOf(call)).eql(effects.may_trap));
+}
+
+test "hir_effects: a callback recursion is seeded may_diverge by the SCC fixpoint" {
+    var f = try build("app", &.{
+        .{ "hostmod", "fn apply(f: fn(int32) -> int32, x: int32) -> int32;" },
+        .{
+            "app",
+            \\const hostmod = import("hostmod");
+            \\fn g(x: int32) -> int32 { hostmod.apply(g, x) }
+            \\fn main() -> int32 { g(1) }
+        },
+    });
+    defer f.deinit();
+    const pos0 = [_]u32{0};
+    const hosts = try declareCallbackHost(&f, "hostmod.apply", effects.pure, &pos0);
+    var an = try Analysis.init(f.arena.allocator(), f.built, .{ .graph = f.graph, .hosts = hosts });
+    try an.analyze();
+    // `g` reaches itself only through the host's callback argument, so
+    // the call graph edge `g -> g` must come from the instantiated
+    // contract; without it the SCC is a singleton with no self-loop and
+    // the `Diverge` seed would be missed, under-reporting the summary.
+    const g = try an.functionSummary(funcId(&f, "app.g").?);
+    try testing.expect(g.may_diverge);
+    try testing.expect((try an.validate(testing.allocator)) == null);
+}
+
+test "hir_effects: a registration-only contract leaves the trigger call conservative" {
+    var f = try build("app", &.{
+        .{ "hostmod", "fn store(f: fn(int32) -> int32) -> void;\nfn trigger() -> int32;" },
+        .{
+            "app",
+            \\const hostmod = import("hostmod");
+            \\fn inc(x: int32) -> int32 { x + 1 }
+            \\fn main() -> int32 {
+            \\    hostmod.store(inc);
+            \\    hostmod.trigger()
+            \\}
+        },
+    });
+    defer f.deinit();
+    const a = f.arena.allocator();
+    const entries = try a.alloc(effects.HostEffects.Entry, f.built.hosts.items.len);
+    const empty = [_]u32{};
+    for (f.built.hosts.items, 0..) |hb, i| {
+        if (std.mem.eql(u8, hb.key, "hostmod.store")) {
+            // Attests it stores the callable but executes nothing during
+            // this invocation.
+            entries[i] = .{ .host = @intCast(i), .summary = effects.pure, .stilla_execution = .may_execute, .callbacks = &empty };
+        } else {
+            // The trigger invokes the stored callable: it passes no
+            // callable argument, so only an unspecified contract is
+            // honest — and that is Top.
+            entries[i] = .{ .host = @intCast(i), .summary = effects.pure, .stilla_execution = .may_execute };
+        }
+    }
+    var an = try Analysis.init(a, f.built, .{ .graph = f.graph, .hosts = .{ .entries = entries } });
+    try an.analyze();
+
+    var saw_store = false;
+    var saw_trigger = false;
+    for (f.built.program.exprs.items, 0..) |e, i| {
+        if (e.op != call_op) continue;
+        const id: hir.ExprId = @intCast(i);
+        const callee = f.built.program.node(f.built.program.operands(id)[0]);
+        if (callee.payload != .func or callee.payload.func != .host) continue;
+        const key = f.built.hosts.items[callee.payload.func.host].key;
+        if (std.mem.eql(u8, key, "hostmod.store")) {
+            // Registration is pure: the callback's execution is never
+            // charged to the storing call.
+            try testing.expect((try an.effectOf(id)).eql(effects.pure));
+            saw_store = true;
+        } else if (std.mem.eql(u8, key, "hostmod.trigger")) {
+            // The later invocation has no callable argument, so it is Top
+            // even though the registration call was pure.
+            try testing.expect((try an.effectOf(id)).eql(effects.top));
+            saw_trigger = true;
+        }
+    }
+    try testing.expect(saw_store and saw_trigger);
+    try testing.expect((try an.validate(testing.allocator)) == null);
 }

@@ -62,6 +62,17 @@ pub const Options = struct {
     /// this program are ignored (a declaration set describes an
     /// embedding, not one program). Caller-owned.
     host_decls: []const effects.HostDecl = &.{},
+    /// Effect-domain registry declarations (docs/effects.md §5.5–§5.6):
+    /// `stable` domains (deterministic reads) and explicit `disjoint`
+    /// resource pairs. Undeclared distinct domains overlap conservatively.
+    /// Caller-owned.
+    resources: effects.ResourceRegistry = .{},
+    /// Host-semantics registry generation/version (docs/effects.md §13),
+    /// bumped by the embedding whenever its host registry's *meaning*
+    /// changes without the declaration set changing. It feeds
+    /// `EffectEnvironmentFingerprint` only — it changes no conclusion by
+    /// itself.
+    host_registry_generation: u64 = 0,
     /// Optional per-module frontend cache (PLAN item 3): when set,
     /// repeated `compile` calls reuse each unchanged module's parsed
     /// `ast.Program`/`ast.Source` from the cache's arena, skipping
@@ -172,7 +183,7 @@ fn failed(
 /// annotations must be `ready` and a sound over-approximation. Used after
 /// an in-place HIR transform (M2b consumers, SEG). Returns null or the
 /// diagnostic to report.
-fn revalidateHir(arena_alloc: std.mem.Allocator, graph: *moduleinfo.ModuleGraph, built: *hir.BuiltProgram, host_decls: []const effects.HostDecl) CompileError!?moduleinfo.Diag {
+fn revalidateHir(arena_alloc: std.mem.Allocator, graph: *moduleinfo.ModuleGraph, built: *hir.BuiltProgram, host_decls: []const effects.HostDecl, resources: effects.ResourceRegistry) CompileError!?moduleinfo.Diag {
     for (built.funcs.items) |rec| {
         if (hir.validate(&built.program, rec.root, arena_alloc) catch return error.OutOfMemory) |msg| {
             return moduleinfo.Diag{ .span = meta.Span.init(0, 0, 0), .message = msg };
@@ -184,7 +195,7 @@ fn revalidateHir(arena_alloc: std.mem.Allocator, graph: *moduleinfo.ModuleGraph,
             return moduleinfo.Diag{ .span = meta.Span.init(0, 0, 0), .message = msg };
         }
     }
-    var an = hir_effects.Analysis.init(arena_alloc, built, .{ .graph = graph, .host_decls = host_decls }) catch return error.OutOfMemory;
+    var an = hir_effects.Analysis.init(arena_alloc, built, .{ .graph = graph, .host_decls = host_decls, .resources = resources }) catch return error.OutOfMemory;
     an.analyze() catch return error.OutOfMemory;
     if (an.validate(arena_alloc) catch return error.OutOfMemory) |msg| {
         return moduleinfo.Diag{ .span = meta.Span.init(0, 0, 0), .message = msg };
@@ -219,6 +230,21 @@ pub fn compile(allocator: std.mem.Allocator, options: Options) CompileError!Comp
     const arena = try arena0.allocator().create(std.heap.ArenaAllocator);
     arena.* = arena0;
     const arena_alloc = arena.allocator();
+
+    // The effect-environment fingerprint (docs/effects.md §13): the
+    // semantic half of a module cache key, the program text being the
+    // other half. The parse cache is independent of it, so cached parses
+    // stay valid across a change; stamping it is what lets a phase-2/3
+    // cache invalidate on an environment change instead of reusing a
+    // conclusion derived under a different contract.
+    if (options.cache) |cache| {
+        const fp = effects.EffectEnvironmentFingerprint.compute(arena_alloc, .{
+            .registry_generation = options.host_registry_generation,
+            .resources = options.resources,
+            .host_decls = options.host_decls,
+        }) catch return error.OutOfMemory;
+        _ = cache.noteEffectEnvironment(fp);
+    }
 
     // Phase 1: module graph (load, parse, annotate, sort).
     var builder = moduleinfo.Builder.init(arena_alloc, options.sources);
@@ -278,7 +304,7 @@ pub fn compile(allocator: std.mem.Allocator, options: Options) CompileError!Comp
                 return failed(arena, &.{.{ .span = meta.Span.init(0, 0, 0), .message = msg }}, graph, builder.loaded_sources.items);
             }
         }
-        var effect_analysis = hir_effects.Analysis.init(arena_alloc, built, .{ .graph = graph, .host_decls = options.host_decls }) catch return error.OutOfMemory;
+        var effect_analysis = hir_effects.Analysis.init(arena_alloc, built, .{ .graph = graph, .host_decls = options.host_decls, .resources = options.resources }) catch return error.OutOfMemory;
         effect_analysis.analyze() catch return error.OutOfMemory;
         if (effect_analysis.validate(arena_alloc) catch return error.OutOfMemory) |msg| {
             return failed(arena, &.{.{
@@ -301,8 +327,8 @@ pub fn compile(allocator: std.mem.Allocator, options: Options) CompileError!Comp
             // M2b effect-driven consumers (hir.md §11): dead-let +
             // selective A-Normal Form, then re-validate structure and
             // effects on the rewritten program (hir.md §2.4).
-            _ = hir_simplify.optimize(arena_alloc, built, .{ .graph = graph, .host_decls = options.host_decls }) catch return error.OutOfMemory;
-            if (revalidateHir(arena_alloc, graph, built, options.host_decls) catch return error.OutOfMemory) |diag| {
+            _ = hir_simplify.optimize(arena_alloc, built, .{ .graph = graph, .host_decls = options.host_decls, .resources = options.resources }) catch return error.OutOfMemory;
+            if (revalidateHir(arena_alloc, graph, built, options.host_decls, options.resources) catch return error.OutOfMemory) |diag| {
                 return failed(arena, &.{diag}, graph, builder.loaded_sources.items);
             }
         }
@@ -311,8 +337,8 @@ pub fn compile(allocator: std.mem.Allocator, options: Options) CompileError!Comp
             // effect analysis, then re-validate structure and effects on
             // the rewritten program (hir.md §2.4 — a transform may not
             // assume the pre-rewrite static conclusions still hold).
-            _ = hir_seg.optimize(arena_alloc, built, .{ .graph = graph, .host_decls = options.host_decls }) catch return error.OutOfMemory;
-            if (revalidateHir(arena_alloc, graph, built, options.host_decls) catch return error.OutOfMemory) |diag| {
+            _ = hir_seg.optimize(arena_alloc, built, .{ .graph = graph, .host_decls = options.host_decls, .resources = options.resources }) catch return error.OutOfMemory;
+            if (revalidateHir(arena_alloc, graph, built, options.host_decls, options.resources) catch return error.OutOfMemory) |diag| {
                 return failed(arena, &.{diag}, graph, builder.loaded_sources.items);
             }
         }

@@ -74,6 +74,10 @@ pub const Config = struct {
     /// to every internal `hir_effects.Analysis` so the rewrite rounds and
     /// the caller's final re-validation use one effect environment.
     host_decls: []const effects.HostDecl = &.{},
+    /// Effect-domain registry (docs/effects.md §5.5–§5.6), passed through
+    /// with `host_decls` so the rounds and the re-validation share one
+    /// environment.
+    resources: effects.ResourceRegistry = .{},
     /// Bound on analysis→rewrite rounds (each round re-derives effects).
     max_iterations: u32 = 8,
 };
@@ -91,7 +95,7 @@ pub fn optimize(arena: std.mem.Allocator, built: *hir.BuiltProgram, config: Conf
     var beta_done = std.AutoHashMapUnmanaged(hir.FuncId, void).empty;
     var iter: u32 = 0;
     while (iter < config.max_iterations) : (iter += 1) {
-        var analysis = try hir_effects.Analysis.init(arena, built, .{ .graph = config.graph, .host_decls = config.host_decls });
+        var analysis = try hir_effects.Analysis.init(arena, built, .{ .graph = config.graph, .host_decls = config.host_decls, .resources = config.resources });
         try analysis.analyze();
         var rw = Rewriter{
             .arena = arena,

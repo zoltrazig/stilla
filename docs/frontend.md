@@ -172,7 +172,16 @@ compile performs zero lex/parse work. The cached artifact is the parse
 only — module-graph member tables and the checker/CFG-lowering side
 tables are re-derived each compile, keeping `TypeId`s consistent with
 the fresh per-compile interner and making stale-dependency reuse
-impossible. See [module-graph.md](module-graph.md).
+impossible. The cache also records the last compile's *effect environment*
+fingerprint (`effects.EffectEnvironmentFingerprint`, docs/effects.md §13)
+— the host declarations, effect-domain registry, and host-semantics
+registry generation (`Options.host_decls` / `Options.resources` /
+`Options.host_registry_generation`) folded into one canonical digest.
+Parsing is independent of it, so an environment change leaves every cached
+parse reusable but moves the semantic key (`Stats.effect_environment_changes`),
+which a future cache of phase-2/3 results must key on so a changed contract
+can never reuse a conclusion derived under the old one.
+See [module-graph.md](module-graph.md).
 
 **Aggressive optimization (optional)** — `Options.optimize_aggressive`
 (code-only, like `optimize`) runs the optimizer sequence to a bounded

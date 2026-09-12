@@ -6,6 +6,7 @@
 
 const std = @import("std");
 const llir = @import("llir.zig");
+const effects = @import("effects.zig");
 const vm_types = @import("vm_types.zig");
 const interp_types = @import("interpreter_types.zig");
 const interpreter = @import("interpreter.zig");
@@ -266,6 +267,12 @@ pub const ModuleDesc = struct {
     symbol: []const u8,
     /// Sorted by name (binary search).
     members: []const Binding,
+    /// Explicit per-member effect semantics (docs/effects.md §13),
+    /// qualified as `<symbol>.<member>` — the compiler's stable host
+    /// symbol. Built at comptime from the module struct's `effects`
+    /// table; a member absent from that table is absent here, and an
+    /// undeclared member is the compiler's full `Top`, never pure.
+    decls: []const effects.HostDecl = &.{},
 };
 
 pub const RegisteredModule = struct {
@@ -351,6 +358,20 @@ fn lookupMember(module: RegisteredModule, member: []const u8) ?Lookup {
 // Comptime glue: module structs, raw, and the generated thunks
 // ---------------------------------------------------------------------------
 
+/// Explicit effect semantics for one host member (docs/effects.md §13),
+/// written next to the member in the module struct's `effects` table.
+/// The embedder supplies this; `register` never infers purity,
+/// non-reentrancy, or a callback contract from a Zig signature, and an
+/// omitted member stays undeclared (the compiler's full `Top`).
+pub const MemberEffects = struct {
+    summary: effects.Summary,
+    stilla_execution: effects.StillaExecution = .unknown,
+    /// Callback contract (docs/effects.md §13): argument positions whose
+    /// callables this binding invokes synchronously during the same
+    /// call. Null = unspecified. Positions must be sorted ascending.
+    callbacks: ?[]const u32 = null,
+};
+
 /// Hand-written escape hatch: no signature check, full `sig` + `args`
 /// surface — the ownership-sensitive members' path.
 pub fn raw(comptime name: []const u8, comptime thunk: anytype) Binding {
@@ -398,7 +419,65 @@ pub fn register(comptime M: type) ModuleDesc {
         }
         break :blk sortBindings(arr);
     };
-    return .{ .symbol = @field(M, "symbol"), .members = &members };
+    // The member's explicit semantics, serialized under the compiler's
+    // stable `<symbol>.<member>` key. Members the embedder declares no
+    // semantics for are absent: undeclared is unknown, never pure.
+    const decl_entries = comptime blk: {
+        if (!@hasDecl(M, "effects")) break :blk [0]effects.HostDecl{};
+        const tbl = @field(M, "effects");
+        const fields = switch (@typeInfo(@TypeOf(tbl))) {
+            .@"struct" => |s| s.fields,
+            else => @compileError("host_bind.register: `effects` must be a struct literal keyed by member name"),
+        };
+        for (fields) |f| {
+            var known = false;
+            for (names) |nm| {
+                if (std.mem.eql(u8, nm, f.name)) known = true;
+            }
+            if (!known) @compileError("host_bind.register: effects." ++ f.name ++ " names no member fn of " ++ @typeName(M));
+        }
+        var count: usize = 0;
+        for (names) |nm| {
+            if (@hasField(@TypeOf(tbl), nm)) count += 1;
+        }
+        var arr: [count]effects.HostDecl = undefined;
+        var i: usize = 0;
+        for (names) |nm| {
+            if (!@hasField(@TypeOf(tbl), nm)) continue;
+            const me: MemberEffects = @field(tbl, nm);
+            arr[i] = .{
+                .key = std.fmt.comptimePrint("{s}.{s}", .{ @field(M, "symbol"), nm }),
+                .summary = me.summary,
+                .stilla_execution = me.stilla_execution,
+                .callbacks = me.callbacks,
+            };
+            i += 1;
+        }
+        break :blk arr;
+    };
+    return .{ .symbol = @field(M, "symbol"), .members = &members, .decls = &decl_entries };
+}
+
+/// The host-side symbol serialization tool (docs/effects.md §13): every
+/// explicitly-declared member across `registry`, in registry order, under
+/// the compiler's stable `<module>.<member>` symbol. The keys are built
+/// at comptime by `register`, so only strings a runtime can also resolve
+/// are exported — never a dense binding id, which is session-local.
+/// Members with no explicit semantics are absent — undeclared means
+/// unknown, not pure. The result is `allocator`-owned; the declarations
+/// borrow each module's comptime data.
+pub fn declarations(allocator: std.mem.Allocator, registry: HostRegistry) ![]effects.HostDecl {
+    var n: usize = 0;
+    for (registry.modules) |m| n += m.desc.decls.len;
+    const out = try allocator.alloc(effects.HostDecl, n);
+    var i: usize = 0;
+    for (registry.modules) |m| {
+        for (m.desc.decls) |d| {
+            out[i] = d;
+            i += 1;
+        }
+    }
+    return out;
 }
 
 // ---------------------------------------------------------------------------

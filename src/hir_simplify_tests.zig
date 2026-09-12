@@ -19,6 +19,7 @@ const hir_effects = @import("passes/hir_effects.zig");
 const hir_simplify = @import("passes/hir_simplify.zig");
 const frontend = @import("frontend.zig");
 const interpreter = @import("interpreter.zig");
+const effects = @import("effects.zig");
 const support = @import("interpreter_test_support.zig");
 const testing = std.testing;
 
@@ -84,6 +85,19 @@ fn simplifyAll(b: *Built) !hir_simplify.Stats {
         }
     }
     var an = try hir_effects.Analysis.init(b.arena.allocator(), b.built, .{ .graph = b.graph });
+    try an.analyze();
+    if (try an.validate(b.arena.allocator())) |m| {
+        std.debug.print("simplify effect validation failed: {s}\n", .{m});
+        return error.TestUnexpectedResult;
+    }
+    return stats;
+}
+
+/// `simplifyAll` with the embedding's host declarations (docs/effects.md
+/// §13): the pass and the re-validation share one effect environment.
+fn simplifyAllWith(b: *Built, host_decls: []const effects.HostDecl) !hir_simplify.Stats {
+    const stats = try hir_simplify.optimize(b.arena.allocator(), b.built, .{ .graph = b.graph, .host_decls = host_decls });
+    var an = try hir_effects.Analysis.init(b.arena.allocator(), b.built, .{ .graph = b.graph, .host_decls = host_decls });
     try an.analyze();
     if (try an.validate(b.arena.allocator())) |m| {
         std.debug.print("simplify effect validation failed: {s}\n", .{m});
@@ -407,4 +421,50 @@ test "M2b corpus — probes/*.st compile+validate+round-trip with consumers on" 
         "union_match",
     };
     for (pr) |spec| try corpusSimplify("probes", spec);
+}
+
+test "M2b: an observable read declared Write is kept; a Q-only read is discarded" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    // The host owns the "read is observable" decision (docs/effects.md
+    // §10.1, §13): a read declared as a write is an observable
+    // interaction, while a Q-carrying non-observable read is not.
+    const write_read = try effects.summaryOf(a, &.{.{ .resource = .{ .host = 1 }, .mode = .write }});
+    const q_read = effects.Summary{
+        .accesses = (try effects.summaryOf(a, &.{.{ .resource = .{ .host = 1 }, .mode = .read }})).accesses,
+        .may_trap = false,
+        .may_diverge = false,
+        .nondeterministic = true,
+    };
+    const texts = [_]struct { []const u8, []const u8 }{
+        .{ "sensor", "fn read() -> int32;" },
+        .{
+            "app",
+            \\const sensor = import("sensor");
+            \\fn f() -> int32 {
+            \\    let unused: int32 = sensor.read();
+            \\    0
+            \\}
+        },
+    };
+
+    {
+        var b = try buildText("app", &texts);
+        defer b.deinit();
+        const decls = [_]effects.HostDecl{
+            .{ .key = "sensor.read", .summary = write_read, .stilla_execution = .forbidden },
+        };
+        const stats = try simplifyAllWith(&b, &decls);
+        try testing.expectEqual(@as(usize, 0), stats.dead_lets);
+    }
+    {
+        var b = try buildText("app", &texts);
+        defer b.deinit();
+        const decls = [_]effects.HostDecl{
+            .{ .key = "sensor.read", .summary = q_read, .stilla_execution = .forbidden },
+        };
+        const stats = try simplifyAllWith(&b, &decls);
+        try testing.expect(stats.dead_lets > 0);
+    }
 }

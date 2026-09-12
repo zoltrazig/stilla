@@ -26,7 +26,7 @@
     注：多 payload 时节点数可能不降，终止由 `max_iterations` 轮界保证
     （不保证收敛到不动点）。
 
-- [ ] **2. host ABI 余项：缓存指纹 + 回调参数化**（[effects.md](effects.md) §13）
+- [x] **2. host ABI 余项：缓存指纹 + 回调参数化**（[effects.md](effects.md) §13）
   - 已落地：`StillaExecution = Forbidden | MayExecute | Unknown`（缺失 =
     `Unknown`）、符号键 `effects.HostDecl` + `HostEffects.resolve` +
     顺序无关的 `consolidate`、`frontend.Options.host_decls` 贯穿初始分析 /
@@ -51,6 +51,25 @@
     无声明被拒并断言具体 §7 诊断 + `program == null`；`Unknown` /
     `MayExecute` 配 `pure` 仍被拒；`Forbidden` 在 seg/simplify 四种开关
     组合下均通过）。
+  - 已完成：(a) `effects.Environment` +
+    `EffectEnvironmentFingerprint.compute`：host 声明集合（含回调契约）、
+    resource registry（`stable` / `disjoint`，排序规范化）、registry
+    generation 折叠为规范指纹；声明顺序不变，增删改任一维即变。
+    `frontend.Options.resources` / `host_registry_generation` 贯穿初始分析 /
+    SEG / selective ANF / `revalidateHir`；`frontend_cache.zig` 记录最近一次
+    编译的指纹并按转换计数——解析与 effect 环境无关，解析缓存不随之失效，
+    指纹是「缓存 phase-2/3 结果」的语义键。(b) `HostDecl.callbacks` /
+    `HostEffects.Entry.callbacks`：`MayExecute` binding 的「同一次调用内、
+    只经列出的实参位置」穷尽契约；`.call` 处收紧为
+    `own ⊔ ⨆ effect_bound(target_i)`，直接 `fn_ref` / 内联 λ 之外的目标、
+    越界位置、缺契约一律 `Top`；`collectCallees` 把实例化目标并入调用图
+    （回调递归因此拿到 SCC `Diverge` 种子）；`consolidate` 对同一 binding
+    的声明「全等才保留，否则 unknown」。(c) `host_bind.MemberEffects` +
+    模块结构体的 `effects` 表：`register` 在 comptime 生成
+    `<module>.<member>` 键的 `HostDecl`；`host_bind.declarations` 是宿主侧
+    序列化工具；`buildProgram` 把所选 registry 的声明接入 `frontend.compile`。
+    测试：指纹顺序稳定 / 各维变键、回调正负例与递归、注册-only 契约、
+    可观察读（`Write`）保留 vs 仅 Q 读删除、host_bind 序列化与 embed 接线。
 
 - [ ] **3. `CleanupFootprint` / `observed_effect` 清理路径**
       （[effects.md](effects.md) §11.2、[hir.md](hir.md) §5.6 / §10.1）
@@ -108,6 +127,8 @@
       [effects.md](effects.md) §15 与 checker 行为。
 - [ ] effect 域间 overlap/disjoint 的具体条目，随真实 host 域出现后
       按需补全（[effects.md](effects.md) §5.6）。
-- [ ] host 重入契约已定并落地（[effects.md](effects.md) §13）：缺失 =
+- [x] host 重入契约已定并落地（[effects.md](effects.md) §13）：缺失 =
       `Unknown` 取完整 `Top`，只有显式 `Forbidden` 才让声明逐字生效。
-      待决：回调参数化摘要是否立项、及缓存指纹接线（均已归入近期第 2 项）。
+      回调参数化摘要与 `EffectEnvironmentFingerprint` 缓存指纹均已落地
+      （见「近期」第 2 项）；运行时侧契约校验仍不在范围内（编译器看不到
+      host 代码，也不提供重入能力）。

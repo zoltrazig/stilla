@@ -9,8 +9,7 @@
 >   SEG v1（`--seg`）。
 > - **设计已定但未实现**（§14、[todo.md](todo.md)）：`never_returns` must 事实、
 >   `RewriteRule` / `Requirement` 统一接口、`RewriteContract` 类型、
->   `CleanupFootprint` token、间接调用目标收窄、回调参数化摘要、
->   `EffectEnvironmentFingerprint` 缓存指纹、host_bind 自动声明接线。
+>   `CleanupFootprint` token、间接调用目标收窄。
 >
 > 配套文档：使用该模型的 IR 见 [hir.md](hir.md)。本文自含效果模型所需的全部
 > 定义；两者重叠的概念（求值序、值使用、效果）在本文给出权威定义，[hir.md](hir.md) 保留
@@ -986,13 +985,16 @@ drop / move Unique             ❌
 
 ## 13. Host 接口 metadata（embedding ABI）
 
-> **Status：声明入口与重入契约已落地；其余 embedding ABI 项未实现。**
+> **Status：声明入口、重入契约、缓存指纹、回调参数化与 host_bind 接线均已落地。**
 > **已实现**：`StillaExecution` 三态、符号键声明（`effects.HostDecl` /
-> `HostEffects.resolve` / `consolidate`）、`frontend.Options.host_decls` 贯穿
-> 初始分析 / SEG / selective ANF / `revalidateHir`、分析内局部 host 语义注册表
-> （`stable` / `disjoint`）。**未实现**：运行时侧契约匹配校验（编译器无法验证
-> embedding 真的不重入）、host_bind typed registry 的自动声明接线、符号→`ConstId`
-> 的宿主侧序列化工具、`EffectEnvironmentFingerprint` 缓存指纹。
+> `HostEffects.resolve` / `consolidate`）、`frontend.Options.host_decls` 与
+> `resources` 贯穿初始分析 / SEG / selective ANF / `revalidateHir`、分析内
+> 局部 host 语义注册表（`stable` / `disjoint`）、`HostDecl.callbacks` 回调
+> 契约与调用点 `own ⊔ ⨆ effect_bound(target_i)` 收紧、
+> `EffectEnvironmentFingerprint` 与 `frontend_cache` 的语义键记录、
+> `host_bind.MemberEffects` + `declarations` 的 typed registry 自动声明接线。
+> **未实现（有意）**：运行时侧契约匹配校验——编译器看不到 host 代码，声明是
+> 受信契约，不提供重入能力，也不校验 embedding 是否真的遵守。
 
 host 是 Stilla 的核心目标。编译器侧模块元数据：
 
@@ -1035,6 +1037,8 @@ host 调用」列在当前范围之外只是范围，不是「永远不会发生
 - **`Unknown`（缺失声明的默认）与 `MayExecute` 都取完整 `top`**：未知回调要
   覆盖**全部**效果——资源、`may_trap`、`may_diverge`、`Q`、以及
   `Read(ModuleConst)` 通配。§7 的 module-const 检查按「可能读任意较晚常量」拒绝。
+  唯一的例外是 `MayExecute` 带**穷尽回调契约**时的调用点收紧（见下文
+  「回调参数化摘要」）。
 - **只有显式 `Forbidden` 才让声明逐字生效。** `Forbidden` 的语义要覆盖「执行
   相关 Stilla 代码的**所有**通道」。
 - **单一事实。** 读集就是 `EffectSummary` 里的 `Read(ModuleConst)`，**不另设**
@@ -1043,9 +1047,9 @@ host 调用」列在当前范围之外只是范围，不是「永远不会发生
   `HostEffects.resolve` 解析成 `HostBindingId`；符号指不到 binding 的声明被忽略。
 - **编译与运行必须用同一份契约。** **编译器不校验运行时是否真的遵守**——这不是
   runtime 侧的重入设计，只是一份编译器消费的受信声明。
-- **重复 / 矛盾的声明** 顺序无关地合并：只有全部 `Forbidden` 才保留担保，摘要
-  取 join；出现 `Forbidden` 与 `MayExecute` 矛盾则降为 `Unknown`（即 `Top`），
-  不采用「后来者胜」。
+- **重复 / 矛盾的声明** 顺序无关地合并：两侧全等才保留（attestation 与回调
+  契约分别判等），摘要取 join；出现 `Forbidden` 与 `MayExecute` 矛盾、或两个
+  不同回调契约则降为 `Unknown`（即 `Top`），不采用「后来者胜」。
 
 **兼容成本。** 严格默认会拒绝原本合法的程序：模块常量的销毁链里带日志
 （`drop(t) { builtin.print(...) }`）属于这一类。迁移方式是让 embedding（含测试
@@ -1053,22 +1057,28 @@ host 调用」列在当前范围之外只是范围，不是「永远不会发生
 
 **待决**（[todo.md](todo.md)）：
 
-- **回调参数化摘要**：调用点若能证明传入 callable 的有限目标集，`MayExecute`
-  的摘要可精化为 `own ⊔ ⨆ effect_bound(target_i)`；保存后触发的调用必须在
-  **实际触发阶段**归因效果。v1 不做。
-- **metadata 不是执行许可。** 即使将来声明 `MayExecute`，允许 host 真正重入
-  还需要运行时的安全设计；声明只描述后果，不开启能力。
+- **回调参数化摘要（已落地）。** `.call` 处的 `MayExecute` host 调用若带
+  **穷尽回调契约**（`HostDecl.callbacks`：同一次调用内、只经列出的实参位置执行
+  Stilla 代码），摘要收紧为 `own ⊔ ⨆ effect_bound(target_i)`，`target_i` 限
+  直接 `fn_ref` / 内联 λ；缺契约、越界位置、无有限目标一律 `Top`（精度预算，
+  不截断目标集）。契约按调用归因：保存后触发的调用没有该实参，故只能是 `Top`，
+  绝不把执行记在注册调用上。`unknown` / `forbidden` 不使用该契约。
+- **metadata 不是执行许可。** 即使声明 `MayExecute`，允许 host 真正重入还需要
+  运行时的安全设计；声明只描述后果，不开启能力。
 
-**缓存指纹（EffectEnvironmentFingerprint）。** 若将来缓存**解析之后**的结果，
-effect metadata 必须进入该缓存键：host 语义 registry 的 generation / 版本、
-effect-domain 注册表、overlap/disjoint 与 `stable` 声明、以及**本次的 host
-声明集合**，整体折叠为一个指纹。否则声明从 `Pure` 改成 `Write(OS)` 后，旧缓存
-里按 `Pure` 优化的代码会变得 unsound。
+**缓存指纹（EffectEnvironmentFingerprint）。已落地。** effect metadata 必须
+进入 phase-2/3 结果的缓存键，否则声明从 `Pure` 改成 `Write(OS)` 后，旧缓存里按
+`Pure` 优化的代码会变得 unsound。`effects.Environment` 把 host 语义 registry 的
+generation / 版本、effect-domain 注册表、overlap/disjoint 与 `stable` 声明、
+以及**本次的 host 声明集合**（含回调契约）折叠为一个指纹；编码显式且规范：
+集合排序、整数逐字段、符号带长度前缀，不 hash 原始结构字节、指针或会话内
+interner id。`frontend.Options` 携带 `host_registry_generation` / `resources`，
+二者随 `host_decls` 进入 `hir_effects.Config`；`frontend_cache.zig` 记录最近一次
+编译的指纹并按转换计数。
 
-**今天不阻塞。** 现有 frontend_cache.zig 只缓存**解析产物**（`ast.Program` /
-`ast.Source`，按内容 hash + 逐字节比对校验），member 表与 phase-2/3 的所有 side
-table **每次编译都重新推导**——所以声明改变不会命中陈旧的效果结论，指纹是为
-「缓存 phase-2/3 结果」预留的前置条件，不是现有缓存的漏洞。
+**解析缓存不受影响。** frontend_cache.zig 只缓存**解析产物**（`ast.Program` /
+`ast.Source`，按内容 hash + 逐字节比对校验），解析不依赖 effect 环境，故指纹变化
+不丢弃任何 `Entry`；指纹只是「缓存 phase-2/3 结果」的语义键。
 
 ## 14. 模型范围与验收
 
@@ -1106,7 +1116,18 @@ MayTrap（含 panic）+ MayDiverge + nondeterministic
   登记**尚未填充**，空注册表视为未建模、不作证明。
 - 未知目标：间接调用 / 缺失函数摘要 / 缺失 host 声明取完整 `Top`；host 声明经
   `frontend.Options.host_decls`（符号键）→ `HostEffects.resolve` →
-  `consolidate` 解析；`EffectEnvironmentFingerprint` 未接线。
+  `consolidate` 解析；带回调契约的 `MayExecute` host 调用按
+  `own ⊔ ⨆ effect_bound(target_i)` 收紧（见 §13），`collectCallees` 同步把
+  实例化目标并入调用图。
+- `EffectEnvironmentFingerprint`：`effects.Environment`（host 声明集合 + host
+  语义 registry generation + effect-domain registry）经排序规范化折叠为指纹，
+  `frontend.Options` 携带 `host_registry_generation` / `resources`，
+  `frontend_cache` 记录最近一次编译的指纹并按转换计数（解析与 effect 环境
+  无关，故解析缓存不失效；指纹是缓存 phase-2/3 结果的语义键）。
+- host_bind typed registry 接线：模块结构体的 `effects` 表（`MemberEffects`）
+  由 `register` 在 comptime 序列化为 `<module>.<member>` 的 `HostDecl`，
+  `declarations` 导出所选 registry 的声明，`buildProgram` 把它接入
+  `frontend.compile`；未声明的成员保持 unknown（绝不从 Zig 签名推断纯度）。
 - `stable` 域与 `disjoint` 对按 §5.5/§5.6 实现，未声明的不同资源对按冲突处理。
 - `canMove` 尚未暴露；`canSwapOperands` 组合父节点 operand 位、full-expression
   边界、两 operand 的 cleanup / ownership 门，再经 `orderCompatible`。
@@ -1158,8 +1179,9 @@ hir_effects.zig / hir_simplify_tests.zig / hir_seg_tests.zig 的正负例覆盖�
   / 容器元素级 hook 的读与 Copy 常量的 teardown 期读取均未表达。待规范澄清后
   回填本节与 checker 行为。
 - host 重入契约（§13）：**已定并落地**——缺失 = `Unknown` 取完整 `Top`；只有
-  显式 `Forbidden` 才让声明逐字生效。余下待定项：(a)「回调参数化摘要」是否
-  立项；(b) `EffectEnvironmentFingerprint` 缓存指纹接线。
+  显式 `Forbidden` 才让声明逐字生效。回调参数化摘要与
+  `EffectEnvironmentFingerprint` 缓存指纹均已落地（见 §13 与 [todo.md](todo.md)
+  近期第 2 项）；运行时侧契约校验刻意不在范围内。
 
 **现状核对（哪些特设实现已被本文派生查询取代）：**
 

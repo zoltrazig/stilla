@@ -194,10 +194,21 @@ pub fn buildProgram(
     defer iface_map.deinit(allocator);
     for (options.ifaces) |i| try iface_map.put(allocator, i.specifier, i.text);
     sources.standard_library = iface_map;
+    // The selected runtime registry is the source of truth for which host
+    // members exist; its explicitly-declared semantics are the embedder's
+    // effect contract (docs/effects.md §13). Members with no declared
+    // semantics stay undeclared — the compiler's full `Top` — so the
+    // contract is never inferred from a Zig signature.
+    const reg = if (options.modules.len == 0)
+        defaultHostRegistry
+    else
+        try host_bind.mergeRegistry(allocator, defaultHostRegistry, options.modules);
+    const host_decls = try host_bind.declarations(allocator, reg);
     var compilation = frontend.compile(allocator, .{
         .entry = options.entry,
         .sources = sources,
         .entry_fn = options.entry_fn,
+        .host_decls = host_decls,
     }) catch |err| switch (err) {
         error.Diagnostic => return error.CompileFailed, // never carries a value; the value path below is the norm
         error.OutOfMemory => return error.OutOfMemory,
@@ -208,10 +219,6 @@ pub fn buildProgram(
     });
     defer compilation.deinit();
     const bundle = try artifact_bundle.ArtifactBundle.build(allocator, program);
-    const reg = if (options.modules.len == 0)
-        defaultHostRegistry
-    else
-        try host_bind.mergeRegistry(allocator, defaultHostRegistry, options.modules);
     return .{ .bundle = bundle, .host = HostCall{ .registry = reg, .print = options.print } };
 }
 

@@ -420,3 +420,90 @@ test "embed: buildProgram compile failure hands back the compilation with its di
     try testing.expect(compilation.diag != null);
     compilation.deinit();
 }
+
+const fx = @import("effects.zig");
+
+/// A module struct that carries explicit semantics for two of its three
+/// members; `undeclared` has none.
+const declared_module = struct {
+    pub const symbol = "probe";
+    pub const effects = .{
+        .emit = host_bind.MemberEffects{ .summary = fx.pure, .stilla_execution = .forbidden },
+        .each = host_bind.MemberEffects{ .summary = fx.pure, .stilla_execution = .may_execute, .callbacks = &.{0} },
+    };
+    pub fn emit() void {}
+    pub fn each(x: i32) i32 {
+        return x;
+    }
+    pub fn undeclared(x: i32) i32 {
+        return x;
+    }
+};
+const declared_desc: host_bind.ModuleDesc = host_bind.register(declared_module);
+
+test "host bind: register serializes explicit member semantics under qualified symbols" {
+    try testing.expectEqual(@as(usize, 2), declared_desc.decls.len);
+    // Member-declaration order; `undeclared` is absent — undeclared
+    // means unknown, never pure.
+    try testing.expectEqualStrings("probe.emit", declared_desc.decls[0].key);
+    try testing.expect(declared_desc.decls[0].summary.eql(fx.pure));
+    try testing.expectEqual(fx.StillaExecution.forbidden, declared_desc.decls[0].stilla_execution);
+    try testing.expect(declared_desc.decls[0].callbacks == null);
+    try testing.expectEqualStrings("probe.each", declared_desc.decls[1].key);
+    try testing.expectEqual(fx.StillaExecution.may_execute, declared_desc.decls[1].stilla_execution);
+    try testing.expectEqual(@as(u32, 0), declared_desc.decls[1].callbacks.?[0]);
+
+    // The serialization tool renders the selected registry's
+    // declarations as the compiler's `<module>.<member>` ABI keys.
+    const registry = host_bind.HostRegistry{ .modules = &.{.{ .desc = &declared_desc }} };
+    const out = try host_bind.declarations(testing.allocator, registry);
+    defer testing.allocator.free(out);
+    try testing.expectEqual(@as(usize, 2), out.len);
+    try testing.expectEqualStrings("probe.emit", out[0].key);
+    try testing.expectEqualStrings("probe.each", out[1].key);
+
+    const empty = try host_bind.declarations(testing.allocator, .{ .modules = &.{} });
+    defer testing.allocator.free(empty);
+    try testing.expectEqual(@as(usize, 0), empty.len);
+}
+
+/// The same module without semantics: every member is undeclared, hence
+/// the compiler's full `Top`.
+const silent_module = struct {
+    pub const symbol = "probe";
+    pub fn emit() void {}
+};
+const silent_desc: host_bind.ModuleDesc = host_bind.register(silent_module);
+
+test "embed: buildProgram feeds the registry's declarations into the effect analysis" {
+    const iface = host_bind.interfaceOf(declared_module, "");
+    const app =
+        \\const probe = import("probe");
+        \\const seed: int32 = init();
+        \\fn init() -> int32 { probe.emit(); 1 }
+        \\fn main() -> int32 { seed }
+    ;
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+
+    // `emit` is declared `forbidden` + pure, so the module-constant
+    // initializer provably reads no module constant and §7 accepts.
+    _ = try interpreter.buildProgram(arena.allocator(), .{
+        .entry = "app",
+        .sources = &.{.{ .specifier = "app", .text = app }},
+        .ifaces = &.{.{ .specifier = "probe", .text = iface }},
+        .modules = &.{.{ .desc = &declared_desc }},
+        .entry_fn = "main",
+    }, null);
+
+    // With no declaration the same call is the full `Top`, whose
+    // module-const read wildcard §7 rejects. The auto-declaration wiring
+    // is what made the first case compile.
+    try testing.expectError(error.CompileFailed, interpreter.buildProgram(arena.allocator(), .{
+        .entry = "app",
+        .sources = &.{.{ .specifier = "app", .text = app }},
+        .ifaces = &.{.{ .specifier = "probe", .text = iface }},
+        .modules = &.{.{ .desc = &silent_desc }},
+        .entry_fn = "main",
+    }, null));
+}

@@ -29,6 +29,7 @@
 const std = @import("std");
 const ast = @import("ast.zig");
 const meta = @import("meta.zig");
+const effects = @import("effects.zig");
 
 pub const FrontendCache = struct {
     arena: std.heap.ArenaAllocator,
@@ -41,6 +42,16 @@ pub const FrontendCache = struct {
     /// arena-owned and would dangle once the compile ends).
     entries: std.StringHashMapUnmanaged(Entry) = .{},
     stats: Stats = .{},
+    /// The effect environment fingerprint of the most recent compile
+    /// through this cache (docs/effects.md §13). Lexing and parsing do not
+    /// depend on the effect environment, so entries stay valid across a
+    /// change; a cache of *phase-2/3* results must additionally key on
+    /// this value, and `Stats.effect_environment_changes` counts the
+    /// transitions the embedder (or a future phase-2/3 cache) must react
+    /// to. `effect_environment_known` distinguishes the unset default from
+    /// a stamped fingerprint, so the first compile is not a change.
+    effect_environment: effects.EffectEnvironmentFingerprint = .{},
+    effect_environment_known: bool = false,
 
     /// One cached module: the content hash (a fast validity filter — a
     /// hit is confirmed by byte-comparing the text) plus the parsed
@@ -58,6 +69,11 @@ pub const FrontendCache = struct {
         hits: u32 = 0,
         /// Modules parsed fresh and stored.
         parses: u32 = 0,
+        /// Compiles at which `effect_environment` changed: the phase-2/3
+        /// semantic key moved, so any cached effect conclusion (there is
+        /// none today) would have been invalidated. Parse reuse is
+        /// unaffected.
+        effect_environment_changes: u32 = 0,
     };
 
     pub fn init(allocator: std.mem.Allocator) FrontendCache {
@@ -74,6 +90,18 @@ pub const FrontendCache = struct {
     pub fn allocSourceId(self: *FrontendCache) meta.SourceId {
         defer self.next_source_id += 1;
         return self.next_source_id;
+    }
+
+    /// Record the effect environment of a compile performed through this
+    /// cache (docs/effects.md §13), returning whether the semantic key
+    /// moved. Parsing is environment-independent, so this never drops an
+    /// `Entry`; it is the invalidation hook a phase-2/3 cache would use.
+    pub fn noteEffectEnvironment(self: *FrontendCache, fp: effects.EffectEnvironmentFingerprint) bool {
+        const changed = self.effect_environment_known and !self.effect_environment.eql(fp);
+        self.effect_environment = fp;
+        self.effect_environment_known = true;
+        if (changed) self.stats.effect_environment_changes += 1;
+        return changed;
     }
 
     /// Look up one specifier's cached parse, when present.

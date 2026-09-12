@@ -176,6 +176,41 @@ const mydb_desc: host_bind.ModuleDesc = host_bind.register(mydb);
 ```
 
 Every fn in the module struct is a member — helpers live at file scope.
+A member may also declare its **effect semantics** next to the code
+(docs/effects.md §13) in a `pub const effects` table keyed by member
+name. `register` serializes each entry into the compiler's stable
+`<symbol>.<member>` declaration, so the Zig signature and the effect
+contract can't drift apart; a member absent from the table stays
+undeclared — the compiler's full `Top`. Semantics are **never** inferred
+from a Zig signature (a `forbidden` attestation is a promise about the
+binding's runtime behavior, which only the embedder can make).
+
+```zig
+const mydb = struct {
+    pub const symbol = "mydb";
+    /// Explicit per-member semantics. `summary` is the embedding's own
+    /// effect contract (resource accesses, trap, divergence, Q);
+    /// `stilla_execution` attests whether the binding may execute Stilla
+    /// code; `callbacks`, only on a `may_execute` binding, lists the
+    /// argument positions it invokes *synchronously, during the same
+    /// call* — a binding that stores a callable for a later call cannot
+    /// use it (docs/effects.md §13).
+    pub const effects = .{
+        .query = host_bind.MemberEffects{
+            .summary = effects.host_top,    // declared own effects
+            .stilla_execution = .forbidden, // enters no Stilla code
+        },
+    };
+    pub fn query(s: host_bind.Str) i32 { ... }
+};
+const mydb_desc: host_bind.ModuleDesc = host_bind.register(mydb);
+```
+
+A callback contract names argument positions whose values the binding
+executes; a typed binding cannot accept a Stilla `fn` parameter, so a
+member that really takes a callable uses a `raw()` thunk and its
+contract lists the corresponding argument positions.
+
 Each member's generated thunk:
 
 1. checks the expected signature (see §5);
@@ -198,7 +233,19 @@ pub const Binding = struct {
 pub const ModuleDesc = struct {
     symbol: []const u8,
     members: []const Binding, // sorted by name (binary search)
+    /// The members' explicit effect semantics (docs/effects.md §13),
+    /// qualified as `<symbol>.<member>`. Built at comptime by `register`
+    /// from the module struct's `effects` table; a member with no entry
+    /// is absent — undeclared means unknown, never pure.
+    decls: []const effects.HostDecl,
 };
+
+/// The host-side symbol serialization tool (docs/effects.md §13): every
+/// declared member of `registry`, under the compiler's stable
+/// `<module>.<member>` symbol. The keys are built at comptime by
+/// `register`, so only strings a runtime can also resolve are exported —
+/// never a dense binding id, which is session-local.
+pub fn declarations(allocator: std.mem.Allocator, registry: HostRegistry) ![]effects.HostDecl;
 
 pub const RegisteredModule = struct {
     desc: *const ModuleDesc,
@@ -285,8 +332,10 @@ output sink as a `PrintHook` with its own userdata and an `invoke`
 callback; the CLI `--run` mode passes one that writes to stdout.
 
 Compile, lower, and run through the two-stage embed path (`buildProgram`
-builds the source/interface maps, compiles, lowers, and merges the
-module into the default host registry; `runProgram` executes the built
+builds the source/interface maps, derives the merged registry's effect
+declarations (`declarations`, §3.2/§3.3) and feeds them into
+`frontend.compile`, lowers, and merges the module into the default host
+registry; `runProgram` executes the built
 program, so one build runs many times):
 
 ```zig

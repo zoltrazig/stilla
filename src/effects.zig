@@ -538,18 +538,7 @@ const AccessSetCtx = struct {
     }
 
     fn hashResource(h: *std.hash.Wyhash, r: EffectResource) void {
-        const tag: u8 = @intFromEnum(std.meta.activeTag(r));
-        h.update(std.mem.asBytes(&tag));
-        switch (r) {
-            .module_const => |x| h.update(std.mem.asBytes(&x)),
-            .host => |x| h.update(std.mem.asBytes(&x)),
-            .runtime => |x| h.update(std.mem.asBytes(&x)),
-            .extension => |x| {
-                h.update(std.mem.asBytes(&x.provider));
-                h.update(std.mem.asBytes(&x.resource));
-            },
-            .host_any, .top => {},
-        }
+        hashResourceInto(h, r);
     }
 };
 
@@ -572,10 +561,18 @@ pub const HostEffects = struct {
         /// has not established that the binding cannot execute Stilla
         /// code.
         stilla_execution: StillaExecution = .unknown,
+        /// The callback contract (docs/effects.md §13), or null when
+        /// unspecified. See `HostDecl.callbacks`: it is an attestation
+        /// that every Stilla execution this binding causes happens
+        /// synchronously, during the same invocation, and only through
+        /// callables passed at the listed argument positions.
+        callbacks: ?[]const u32 = null,
 
         /// The summary actually used for this binding (docs/effects.md
         /// §13): the declared one only under an explicit `forbidden`
-        /// attestation, otherwise the full `top`.
+        /// attestation, otherwise the full `top`. This is the
+        /// *context-free* value — a call site may do better (§13
+        /// callback parameterization) by consulting `callbacks`.
         pub fn effectiveSummary(self: Entry) Summary {
             return switch (self.stilla_execution) {
                 .forbidden => self.summary,
@@ -585,8 +582,17 @@ pub const HostEffects = struct {
     };
 
     pub fn lookup(self: HostEffects, host_id: HostBindingId) ?Summary {
+        const e = self.lookupEntry(host_id) orelse return null;
+        return e.effectiveSummary();
+    }
+
+    /// The raw entry for a binding, contract included — the call-site
+    /// path (docs/effects.md §13 callback parameterization) needs
+    /// `summary` + `callbacks` before `effectiveSummary` degrades a
+    /// `may_execute` binding to `top`.
+    pub fn lookupEntry(self: HostEffects, host_id: HostBindingId) ?Entry {
         for (self.entries) |e| {
-            if (e.host == host_id) return e.effectiveSummary();
+            if (e.host == host_id) return e;
         }
         return null;
     }
@@ -608,6 +614,7 @@ pub const HostEffects = struct {
                     .host = b.id,
                     .summary = d.summary,
                     .stilla_execution = d.stilla_execution,
+                    .callbacks = d.callbacks,
                 });
             }
         }
@@ -615,11 +622,12 @@ pub const HostEffects = struct {
     }
 
     /// Fold declarations of the same binding into one entry, *order
-    /// independently*: the attestation survives only when every
-    /// declaration for that binding is `forbidden`, and the summaries are
-    /// joined. A contradiction (`forbidden` vs `may_execute`) therefore
-    /// degrades to the full `top`, rather than depending on which
-    /// declaration happened to come first.
+    /// independently*: the entries survive only when every declaration
+    /// for that binding agrees — an identical attestation and an
+    /// identical callback contract — and the summaries are joined. A
+    /// contradiction (e.g. `forbidden` vs `may_execute`, or two different
+    /// callback contracts) therefore degrades to the full `top`, rather
+    /// than depending on which declaration happened to come first.
     pub fn consolidate(arena: std.mem.Allocator, entries: []const Entry) std.mem.Allocator.Error!HostEffects {
         var out = std.ArrayListUnmanaged(Entry).empty;
         for (entries, 0..) |e, i| {
@@ -629,13 +637,23 @@ pub const HostEffects = struct {
             }
             if (already) continue;
             var summary = e.summary;
-            var exec: StillaExecution = if (e.stilla_execution == .forbidden) .forbidden else .unknown;
+            var exec = e.stilla_execution;
+            var callbacks = e.callbacks;
             for (entries[i + 1 ..]) |later| {
                 if (later.host != e.host) continue;
                 summary = try join(arena, summary, later.summary);
-                if (later.stilla_execution != .forbidden) exec = .unknown;
+                // Any disagreement — on the attestation or on the
+                // callback contract — is unknown, not a merge. Equal
+                // values survive; this is "all equal, else unknown".
+                if (later.stilla_execution != exec) exec = .unknown;
+                if (!callbacksEqual(callbacks, later.callbacks)) callbacks = null;
             }
-            try out.append(arena, .{ .host = e.host, .summary = summary, .stilla_execution = exec });
+            try out.append(arena, .{
+                .host = e.host,
+                .summary = summary,
+                .stilla_execution = exec,
+                .callbacks = callbacks,
+            });
         }
         return .{ .entries = out.items };
     }
@@ -655,7 +673,29 @@ pub const HostDecl = struct {
     key: []const u8,
     summary: Summary,
     stilla_execution: StillaExecution = .unknown,
+    /// The callback contract (docs/effects.md §13), or null when
+    /// unspecified. A non-null value attests that this binding, on
+    /// every invocation, executes Stilla code **only** synchronously and
+    /// **only** through a callable passed at one of the listed argument
+    /// positions (0-based, callee excluded); a position that holds no
+    /// provable finite target set makes the whole call `top`. It is an
+    /// embedding attestation, never inferred from a signature; a binding
+    /// that stores a callable and invokes it later cannot use it (the
+    /// later invocation has no such argument, so it is `top`). Only
+    /// meaningful with `may_execute`; `forbidden` needs no contract and
+    /// `unknown` is always `top`. Positions are sorted ascending.
+    callbacks: ?[]const u32 = null,
 };
+
+/// Set equality for callback contracts: both null, or both non-null with
+/// the same positions (the lists are stored sorted).
+fn callbacksEqual(a: ?[]const u32, b: ?[]const u32) bool {
+    const x = a orelse return b == null;
+    const y = b orelse return false;
+    if (x.len != y.len) return false;
+    for (x, y) |p, q| if (p != q) return false;
+    return true;
+}
 
 /// Whether a host binding may execute Stilla code (docs/effects.md §13).
 /// It is a *trusted declaration*, not a compiler inference: a host binding
@@ -704,6 +744,129 @@ pub const ResourceRegistry = struct {
         return false;
     }
 };
+
+// ---------------------------------------------------------------------------
+// Effect-environment fingerprint (docs/effects.md §13)
+// ---------------------------------------------------------------------------
+
+/// The embedding's effect environment (docs/effects.md §13): everything
+/// outside the program text that can change an effect conclusion — the
+/// host-semantics registry generation, the effect-domain registry, and
+/// the symbol-keyed host declaration set (callback contracts included).
+/// It is the semantic half of a compile cache key; the program text is
+/// the other half. Not part of any program.
+pub const Environment = struct {
+    /// Host-semantics registry generation/version, bumped by the
+    /// embedding whenever a registry's *meaning* changes without its
+    /// declaration set changing (adapter rewrites, domain-table edits).
+    registry_generation: u64 = 0,
+    resources: ResourceRegistry = .{},
+    host_decls: []const HostDecl = &.{},
+};
+
+/// Canonical digest of an `Environment` (docs/effects.md §13). Two
+/// environments with the same fingerprint must produce the same effect
+/// conclusions for the same program — so a cache keyed on it may reuse
+/// phase-2/3 results — and a different fingerprint must not reuse them.
+/// The encoding is explicit and canonical: collections are sorted,
+/// integers are encoded field by field, symbols length-delimited. It
+/// never hashes raw struct bytes, arena pointers, or a session-local
+/// interner id (`ResourceRegistry`'s domain ids are embedding ABI
+/// values, not interned handles, so they are included).
+pub const EffectEnvironmentFingerprint = struct {
+    value: u64 = 0,
+
+    pub fn eql(a: EffectEnvironmentFingerprint, b: EffectEnvironmentFingerprint) bool {
+        return a.value == b.value;
+    }
+
+    /// Canonicalize and digest `env`. Declaration order never changes the
+    /// result; adding, removing, or editing any declaration does.
+    pub fn compute(arena: std.mem.Allocator, env: Environment) std.mem.Allocator.Error!EffectEnvironmentFingerprint {
+        const digests = try arena.alloc(u64, env.host_decls.len);
+        for (env.host_decls, 0..) |d, i| digests[i] = declDigest(d);
+        std.mem.sort(u64, digests, {}, std.sort.asc(u64));
+
+        var h = std.hash.Wyhash.init(0);
+        h.update(std.mem.asBytes(&env.registry_generation));
+        try hashResourceRegistry(&h, arena, env.resources);
+        h.update(std.mem.asBytes(&@as(u64, digests.len)));
+        for (digests) |d| h.update(std.mem.asBytes(&d));
+        return .{ .value = h.final() };
+    }
+};
+
+fn hashResourceInto(h: *std.hash.Wyhash, r: EffectResource) void {
+    h.update(&.{@as(u8, @intFromEnum(std.meta.activeTag(r)))});
+    switch (r) {
+        .module_const => |x| h.update(std.mem.asBytes(&x)),
+        .host => |x| h.update(std.mem.asBytes(&x)),
+        .runtime => |x| h.update(std.mem.asBytes(&x)),
+        .extension => |x| {
+            h.update(std.mem.asBytes(&x.provider));
+            h.update(std.mem.asBytes(&x.resource));
+        },
+        .host_any, .top => {},
+    }
+}
+
+fn hashAccessInto(h: *std.hash.Wyhash, a: EffectAccess) void {
+    h.update(&.{@as(u8, @intFromEnum(a.mode))});
+    hashResourceInto(h, a.resource);
+}
+
+fn hashSummaryInto(h: *std.hash.Wyhash, s: Summary) void {
+    h.update(std.mem.asBytes(&s.accesses.all));
+    h.update(std.mem.asBytes(&@as(u64, s.accesses.accesses.len)));
+    for (s.accesses.accesses) |a| hashAccessInto(h, a);
+    h.update(&.{
+        @as(u8, @intFromBool(s.may_trap)),
+        @as(u8, @intFromBool(s.may_diverge)),
+        @as(u8, @intFromBool(s.nondeterministic)),
+    });
+}
+
+/// One declaration's digest. Keyed on the full content, so editing a
+/// summary, the attestation, or the callback contract all change it.
+fn declDigest(d: HostDecl) u64 {
+    var h = std.hash.Wyhash.init(0x9e37_79b9_7f4a_7c15);
+    h.update(std.mem.asBytes(&@as(u64, d.key.len)));
+    h.update(d.key);
+    hashSummaryInto(&h, d.summary);
+    h.update(&.{@as(u8, @intFromEnum(d.stilla_execution))});
+    if (d.callbacks) |pos| {
+        h.update(&.{1});
+        h.update(std.mem.asBytes(&@as(u64, pos.len)));
+        for (pos) |p| h.update(std.mem.asBytes(&p));
+    } else {
+        h.update(&.{0});
+    }
+    return h.final();
+}
+
+fn resourceLessThan(_: void, a: EffectResource, b: EffectResource) bool {
+    return a.lessThan(b);
+}
+
+fn resourcePairLessThan(_: void, a: [2]EffectResource, b: [2]EffectResource) bool {
+    if (a[0].eql(b[0])) return a[1].lessThan(b[1]);
+    return a[0].lessThan(b[0]);
+}
+
+fn hashResourceRegistry(h: *std.hash.Wyhash, arena: std.mem.Allocator, reg: ResourceRegistry) std.mem.Allocator.Error!void {
+    const stable = try arena.dupe(EffectResource, reg.stable);
+    std.mem.sort(EffectResource, stable, {}, resourceLessThan);
+    h.update(std.mem.asBytes(&@as(u64, stable.len)));
+    for (stable) |r| hashResourceInto(h, r);
+
+    const pairs = try arena.alloc([2]EffectResource, reg.disjoint.len);
+    for (reg.disjoint, 0..) |p, i| {
+        pairs[i] = if (p.a.lessThan(p.b)) .{ p.a, p.b } else .{ p.b, p.a };
+    }
+    std.mem.sort([2]EffectResource, pairs, {}, resourcePairLessThan);
+    h.update(std.mem.asBytes(&@as(u64, pairs.len)));
+    for (pairs) |p| for (p) |r| hashResourceInto(h, r);
+}
 
 pub const Conflict = enum { commute, conflict };
 
@@ -1228,4 +1391,95 @@ test "effects: Summary join/meet laws over control bits and wildcards" {
             }
         }
     }
+}
+
+test "effects: fingerprint is order independent and tracks every environment dimension" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const pos0 = [_]u32{0};
+    const d1 = HostDecl{ .key = "random.next", .summary = host_top, .stilla_execution = .forbidden };
+    const d2 = HostDecl{ .key = "random.emit", .summary = may_trap, .stilla_execution = .may_execute, .callbacks = &pos0 };
+    const base = Environment{ .registry_generation = 7, .host_decls = &.{ d1, d2 } };
+    const canon = try EffectEnvironmentFingerprint.compute(a, base);
+    try testing.expect(canon.eql(try EffectEnvironmentFingerprint.compute(a, base)));
+
+    // Declaration order never changes the digest...
+    const reordered = try EffectEnvironmentFingerprint.compute(a, .{ .registry_generation = 7, .host_decls = &.{ d2, d1 } });
+    try testing.expect(canon.eql(reordered));
+    // ...but a duplicate declaration is a different set.
+    const duped = try EffectEnvironmentFingerprint.compute(a, .{ .registry_generation = 7, .host_decls = &.{ d1, d2, d1 } });
+    try testing.expect(!canon.eql(duped));
+
+    // Each environment dimension changes the digest: registry generation,
+    // the declaration set, a declaration's summary/attestation, its
+    // callback contract, and the resource registry.
+    try testing.expect(!canon.eql(try EffectEnvironmentFingerprint.compute(a, .{ .registry_generation = 8, .host_decls = &.{ d1, d2 } })));
+    try testing.expect(!canon.eql(try EffectEnvironmentFingerprint.compute(a, .{ .registry_generation = 7, .host_decls = &.{d1} })));
+    const edit = HostDecl{ .key = "random.emit", .summary = top, .stilla_execution = .may_execute, .callbacks = &pos0 };
+    try testing.expect(!canon.eql(try EffectEnvironmentFingerprint.compute(a, .{ .registry_generation = 7, .host_decls = &.{ d1, edit } })));
+    const nocb = HostDecl{ .key = "random.emit", .summary = may_trap, .stilla_execution = .may_execute };
+    try testing.expect(!canon.eql(try EffectEnvironmentFingerprint.compute(a, .{ .registry_generation = 7, .host_decls = &.{ d1, nocb } })));
+    try testing.expect(!canon.eql(try EffectEnvironmentFingerprint.compute(a, .{
+        .registry_generation = 7,
+        .resources = .{ .stable = &.{host(1)}, .disjoint = &.{.{ .a = host(1), .b = host(2) }} },
+        .host_decls = &.{ d1, d2 },
+    })));
+
+    // The resource registry is canonicalized too.
+    const res2 = try EffectEnvironmentFingerprint.compute(a, .{
+        .registry_generation = 7,
+        .resources = .{ .stable = &.{ host(1), host(2) }, .disjoint = &.{.{ .a = host(2), .b = host(1) }} },
+        .host_decls = &.{ d1, d2 },
+    });
+    const res3 = try EffectEnvironmentFingerprint.compute(a, .{
+        .registry_generation = 7,
+        .resources = .{ .stable = &.{ host(2), host(1) }, .disjoint = &.{.{ .a = host(1), .b = host(2) }} },
+        .host_decls = &.{ d1, d2 },
+    });
+    try testing.expect(res2.eql(res3));
+}
+
+test "effects: callback contracts survive resolution and contradicting duplicates degrade to unknown" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const bindings = [_]HostDeclKey{.{ .key = "loop.emit", .id = 5 }};
+    const pos = [_]u32{1};
+
+    // The contract is carried from the declaration to the resolved entry.
+    const decls = [_]HostDecl{
+        .{ .key = "loop.emit", .summary = may_trap, .stilla_execution = .may_execute, .callbacks = &pos },
+    };
+    const r = try HostEffects.resolve(a, &decls, &bindings);
+    try testing.expectEqual(@as(usize, 1), r.entries.len);
+    try testing.expect(r.lookupEntry(5).?.callbacks != null);
+    try testing.expectEqual(@as(u32, 1), r.lookupEntry(5).?.callbacks.?[0]);
+    // Context-free lookup stays conservative under `may_execute`.
+    try testing.expect(r.lookup(5).?.eql(top));
+
+    // A duplicate with a different contract makes the contract unknown
+    // (not a merge), regardless of order; an identical duplicate keeps it.
+    const forked = [_][2]HostDecl{
+        .{
+            .{ .key = "loop.emit", .summary = may_trap, .stilla_execution = .may_execute, .callbacks = &pos },
+            .{ .key = "loop.emit", .summary = pure, .stilla_execution = .may_execute },
+        },
+        .{
+            .{ .key = "loop.emit", .summary = pure, .stilla_execution = .may_execute },
+            .{ .key = "loop.emit", .summary = may_trap, .stilla_execution = .may_execute, .callbacks = &pos },
+        },
+    };
+    for (forked) |d| {
+        const fr = try HostEffects.resolve(a, &d, &bindings);
+        try testing.expect(fr.lookupEntry(5).?.callbacks == null);
+    }
+    const agreed = [_]HostDecl{
+        .{ .key = "loop.emit", .summary = may_trap, .stilla_execution = .may_execute, .callbacks = &pos },
+        .{ .key = "loop.emit", .summary = pure, .stilla_execution = .may_execute, .callbacks = &pos },
+    };
+    const ar = try HostEffects.resolve(a, &agreed, &bindings);
+    try testing.expect(ar.lookupEntry(5).?.callbacks != null);
+    try testing.expect(ar.lookupEntry(5).?.summary.eql(may_trap));
 }

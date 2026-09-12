@@ -80,7 +80,14 @@ interner. Source ids are stable per specifier (a cached module keeps the
 id it was first stored with; fresh modules draw from the cache's
 monotonic counter), so spans resolve correctly across changing module
 sets. The cache carries a counting hook (`Stats.hits` / `Stats.parses`)
-for embedders measuring the lex/parse share of repeated compiles.
+for embedders measuring the lex/parse share of repeated compiles. It also
+records the last compile's effect-environment fingerprint
+(`effects.EffectEnvironmentFingerprint`, docs/effects.md §13): parsing does
+not depend on the effect environment, so a change to the host declarations,
+the effect-domain registry, or the host-semantics registry generation keeps
+every parse reusable and only moves the semantic key
+(`Stats.effect_environment_changes`) that a future phase-2/3 cache must key
+on.
 
 ## Module-level information computed per module
 
@@ -284,7 +291,7 @@ from the graph alone.
 | File | Role |
 | --- | --- |
 | `src/frontend.zig` | Pipeline driver; wires `Options.cache` / `Options.io` into the builder |
-| `src/frontend_cache.zig` | `FrontendCache`: per-module parsed-AST cache + counting hook |
+| `src/frontend_cache.zig` | `FrontendCache`: per-module parsed-AST cache + counting hook + effect-environment fingerprint |
 | `src/moduleinfo.zig` | Stage driver `Builder.build` (load → expand → sort → materialize → check → assemble); `ModuleInfo`, `ModuleGraph` |
 | `src/passes/module_load.zig` | Specifier resolution; cache lookup/store around lex/parse; `RawModule` registration and scanner handoff |
 | `src/passes/module_scan.zig` | `RawModule` pre-scan: import and module-value consts, transitive module-value aliases |
