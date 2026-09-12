@@ -655,9 +655,15 @@ let B0: i32 = call(fnref H0) in       // host binding：effectful → 提为 let
 
 > **消费者（hir_simplify.zig，`--simplify`，默认关）**：以 `can_float_as_tree`
 > 逐 operand 判定，父节点为 `strict_ltr` 时每轮只提**第一个**不可浮动 operand
-> （链从外向内）；惰性 region 内不跨边界提升。**Unique operand 暂不物化**：
-> 需要 `CleanupFootprint` token 证明合成 let 的销毁点与原匿名临时量的 FE 边界
-> 重合，当前只提 Copy operand。放开见 [todo.md](todo.md)。
+> （链从外向内）；惰性 region 内不跨边界提升。**Copy operand 总是可提**；
+> **Unique operand 仅在父节点已转移或就地处弃它时可提**：合成的 `let` 绑定在
+> 外层作用域末尾销毁，只有 (a) 父节点按 `Consume` 使用（调用实参、聚合元素、
+> `move` / `drop`）——合成局部量与匿名临时量一样被转移、两侧都不销毁，或
+> (b) 父节点是 `Class.seq` 的非末位 operand（被丢弃的语句）——序列的
+> `discardValue` 在原语句处销毁合成局部量，析构点才与原匿名临时量的
+> full-expression 边界重合。`Read` / `Borrow` operand 仍留在树内。此外
+> sequence 提升后来 operand 时，其先前的 operand 必须全为 Copy：Unique 绑定的
+> 就地处弃不在 `can_float_as_tree` 的清理模型内，跨过它会推迟一个可观察析构。
 
 ## 6. ownership、效果与借用
 

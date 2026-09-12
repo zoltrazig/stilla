@@ -110,6 +110,12 @@ pub fn lowerCallArg(self: *Lowerer, fs: *FuncState, v: *cfg.Value, mode: meta.Pa
                     const m = (try cfg_lower_emit.emit(self, fs, v.span, .{ .move_ = v }, v.type_)).?;
                     cfg_lower_emit.markConsumed(self, fs, v);
                     try cfg_lower_emit.cleanupDisable(self, fs, v.span, v);
+                    // The moved value is the argument the callee owns:
+                    // mark it consumed too, or the enclosing full-
+                    // expression boundary drops a value already handed
+                    // off (hir_simplify's synthesized `let` bindings make
+                    // this path reachable).
+                    cfg_lower_emit.markConsumed(self, fs, m);
                     break :blk m;
                 }
                 // A fresh unique value transfers directly (Core §10.5).

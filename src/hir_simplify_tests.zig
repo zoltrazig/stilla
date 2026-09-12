@@ -22,6 +22,7 @@ const frontend = @import("frontend.zig");
 const interpreter = @import("interpreter.zig");
 const effects = @import("effects.zig");
 const support = @import("interpreter_test_support.zig");
+const artifact_bundle = @import("artifact_bundle.zig");
 const testing = std.testing;
 
 const CaptureAdapter = support.CaptureAdapter;
@@ -227,7 +228,7 @@ test "M2b: ANF does not hoist a pure tree" {
     try testing.expectEqual(@as(usize, 0), stats.hoists);
 }
 
-test "M2b: ANF never materializes a Unique operand (deferred)" {
+test "M2b: ANF materializes a Unique operand the parent transfers" {
     var b = try buildText("app", &.{.{
         "app",
         \\struct Token { id: int32; drop(t) { let x = t.id; } }
@@ -237,7 +238,32 @@ test "M2b: ANF never materializes a Unique operand (deferred)" {
     }});
     defer b.deinit();
     const stats = try simplifyAll(&b);
+    try testing.expect(stats.hoists >= 1);
+    // `take(make(x))` → `let B = make(x) in take(%B)`: the binder is
+    // transferred to the call exactly as the anonymous temporary was, so
+    // no destructor moves to the let's scope end.
+    const body = try funcBody(&b, "app.f");
+    const pr = &b.built.program;
+    try testing.expectEqualStrings("let", opName(pr, body));
+    try testing.expectEqualStrings("call", opName(pr, pr.operands(body)[0]));
+    const inner = pr.region(pr.regionsOf(body)[0]).root;
+    try testing.expectEqualStrings("call", opName(pr, inner));
+    try testing.expectEqualStrings("local", opName(pr, pr.operands(inner)[1]));
+}
+
+test "M2b: ANF leaves a Unique operand the parent only borrows in place" {
+    var b = try buildText("app", &.{.{
+        "app",
+        \\struct Token { id: int32; drop(t) { let x = t.id; } }
+        \\fn make(id: int32) -> Token { Token { id: id } }
+        \\fn show(borrow t: Token) -> int32 { t.id }
+        \\fn f(x: int32) -> int32 { show(make(x)) }
+    }});
+    defer b.deinit();
+    const stats = try simplifyAll(&b);
     try testing.expectEqual(@as(usize, 0), stats.hoists);
+    const body = try funcBody(&b, "app.f");
+    try testing.expectEqualStrings("call", opName(&b.built.program, body));
 }
 
 test "M2b: lazy-branch regions are not hoisted across" {
@@ -379,6 +405,34 @@ test "M2b: consumers-on and consumers-off execute identically" {
     try testing.expect(on.len > 0);
 }
 
+test "M2b: a materialized discarded Unique still drops at its statement" {
+    // `make(1);` is an anonymous Unique temporary discarded at its full
+    // expression. Phase 4 binds it to a synthesized `let`; the sequence's
+    // in-place discard must fire the destructor *before* the following
+    // statement, not at the enclosing scope end (docs/effects.md §11.2).
+    const src =
+        \\const builtin = import("builtin");
+        \\struct Token { id: int32; drop(t) { builtin.print(builtin.str(t.id)); } }
+        \\fn make(id: int32) -> Token { Token { id: id } }
+        \\fn take(move t: Token) -> int32 { t.id }
+        \\fn main() -> void {
+        \\    let first = take(make(1));
+        \\    make(2);
+        \\    builtin.print(builtin.str(first));
+        \\    make(3);
+        \\}
+    ;
+    const off = try capture(src, false);
+    defer testing.allocator.free(off);
+    const on = try capture(src, true);
+    defer testing.allocator.free(on);
+    try testing.expectEqualStrings(off, on);
+    // `take` drops its parameter (1), then make(2) drops (2), then the
+    // printed value, then make(3) drops (3): the drops never float to the
+    // end of `main`.
+    try testing.expectEqualStrings("1\n2\n1\n3\n", on);
+}
+
 // ---------------------------------------------------------------------------
 // Corpus: every example / probe compiles through the consumers seam
 // ---------------------------------------------------------------------------
@@ -404,16 +458,117 @@ fn corpusSimplify(dir: []const u8, spec: []const u8) !void {
     };
 }
 
-test "M2b corpus — examples/*.st compile+validate+round-trip with consumers on" {
+/// One corpus execution's observable outcome for the consumers-on/off
+/// differential: captured output, how the run ended, and the panic
+/// message / run error name (docs/hir.md §10.3).
+const Term = struct {
+    out: []u8,
+    end: enum { normal, panic, failed },
+    detail: []u8,
+
+    fn deinit(self: *Term) void {
+        testing.allocator.free(self.out);
+        testing.allocator.free(self.detail);
+    }
+
+    fn eql(a: Term, b: Term) bool {
+        return a.end == b.end and
+            std.mem.eql(u8, a.out, b.out) and
+            std.mem.eql(u8, a.detail, b.detail);
+    }
+};
+
+/// Run one corpus program with the consumers on/off, capturing output,
+/// termination, and the panic / error detail. The corpus imports std
+/// modules, so the whole-program artifact bundle resolves the imports
+/// (the SEG suite's pattern). Each run uses its own arena: the shared
+/// `VmHeap` frees only its provenance registry, so this semantic
+/// differential does not verify runtime leak-freedom.
+fn captureTerm(text: []const u8, simplify: bool) !Term {
+    var state = CaptureAdapter{};
+    var l = try support.loadOpts(text, false, false, simplify);
+    defer l.deinit();
+    var bundle_arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer bundle_arena.deinit();
+    var bundle = try artifact_bundle.ArtifactBundle.build(bundle_arena.allocator(), &(l.compilation.program orelse return error.TestUnexpectedResult));
+    var run_arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer run_arena.deinit();
+    const run_alloc = run_arena.allocator();
+    var term = interpreter.runWithEntryAndLoader(
+        run_alloc,
+        &bundle.root,
+        bundle.entry,
+        .{ .userdata = &state, .invoke = CaptureAdapter.invoke },
+        bundle.loaderHandle(),
+    ) catch |err| return .{
+        .out = try testing.allocator.dupe(u8, state.buffer[0..state.len]),
+        .end = .failed,
+        .detail = try testing.allocator.dupe(u8, @errorName(err)),
+    };
+    defer term.deinit(run_alloc);
+    const out = try testing.allocator.dupe(u8, state.buffer[0..state.len]);
+    return switch (term) {
+        .normal => .{ .out = out, .end = .normal, .detail = try testing.allocator.dupe(u8, "") },
+        .panic => |m| .{ .out = out, .end = .panic, .detail = try testing.allocator.dupe(u8, m) },
+    };
+}
+
+/// Consumers-on and consumers-off interpretation must agree verbatim —
+/// output, termination, and panic message (docs/hir.md §10.3).
+/// `expect_panic` pins the intended termination so a coincidentally
+/// identical failure cannot pass as coverage.
+fn corpusDiff(dir: []const u8, spec: []const u8, expect_panic: bool) !void {
+    const path = try std.fmt.allocPrint(testing.allocator, "{s}/{s}.st", .{ dir, spec });
+    defer testing.allocator.free(path);
+    const text = std.Io.Dir.cwd().readFileAlloc(testing.io, path, testing.allocator, .limited(1 << 20)) catch |err| {
+        std.debug.print("simplify corpus: cannot read {s} ({s})\n", .{ path, @errorName(err) });
+        return error.TestUnexpectedResult;
+    };
+    defer testing.allocator.free(text);
+    var off = try captureTerm(text, false);
+    defer off.deinit();
+    var on = try captureTerm(text, true);
+    defer on.deinit();
+    if (off.end == .failed) {
+        std.debug.print("simplify corpus: {s} did not run with consumers off: {s} (output {d} bytes)\n", .{ path, off.detail, off.out.len });
+        return error.TestUnexpectedResult;
+    }
+    if (off.end == .panic and std.mem.eql(u8, off.detail, "capture buffer overflow")) {
+        std.debug.print("simplify corpus: {s} overflowed the capture buffer\n", .{path});
+        return error.TestUnexpectedResult;
+    }
+    const End = @TypeOf(off.end);
+    const want: End = if (expect_panic) .panic else .normal;
+    if (off.end != want or on.end != want) {
+        std.debug.print("simplify corpus: {s} expected {s} termination, got off={s} {s} / on={s} {s}\n", .{ path, @tagName(want), @tagName(off.end), off.detail, @tagName(on.end), on.detail });
+        return error.TestUnexpectedResult;
+    }
+    if (!Term.eql(off, on)) {
+        std.debug.print("simplify corpus: {s} consumers-on/off interpretation differs (off={s} {s}, on={s} {s})\n", .{ path, @tagName(off.end), off.detail, @tagName(on.end), on.detail });
+        return error.TestUnexpectedResult;
+    }
+}
+
+/// Probes whose `main` intentionally traps (`builtin.panic` /
+/// unreachable): the differential pins the panic instead of treating it
+/// as coverage.
+fn probePanics(spec: []const u8) bool {
+    return std.mem.eql(u8, spec, "cli_panic") or std.mem.eql(u8, spec, "control_flow");
+}
+
+test "M2b corpus — examples/*.st compile+round-trip and consumers-on/off agree" {
     const ex = [_][]const u8{
         "any",    "arrays", "basics",    "box",       "fib",     "fib_tail_call",
         "floats", "fold",   "functions", "generics",  "madd",    "maps",
         "match",  "minmax", "nest",      "ownership", "strings", "structs",
     };
-    for (ex) |spec| try corpusSimplify("examples", spec);
+    for (ex) |spec| {
+        try corpusSimplify("examples", spec);
+        try corpusDiff("examples", spec, false);
+    }
 }
 
-test "M2b corpus — probes/*.st compile+validate+round-trip with consumers on" {
+test "M2b corpus — probes/*.st compile+round-trip and consumers-on/off agree" {
     const pr = [_][]const u8{
         "aggregates",  "any",                "box",         "branch",        "calls",        "casts",
         "cli_panic",   "cli_run",            "comparisons", "constants",     "control_flow", "fusion",
@@ -421,7 +576,10 @@ test "M2b corpus — probes/*.st compile+validate+round-trip with consumers on" 
         "numeric",     "ownership",          "patterns",    "short_circuit", "strings",      "tail_recursion",
         "union_match",
     };
-    for (pr) |spec| try corpusSimplify("probes", spec);
+    for (pr) |spec| {
+        try corpusSimplify("probes", spec);
+        try corpusDiff("probes", spec, probePanics(spec));
+    }
 }
 
 test "M2b: an observable read declared Write is kept; a Q-only read is discarded" {

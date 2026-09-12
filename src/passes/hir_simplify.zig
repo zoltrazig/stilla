@@ -22,13 +22,26 @@
 //!   keeps LTR intact; the rule is applied one operand per round so the
 //!   hoist chain is built from the outside in.
 //!
-//! **Unique operands are not materialized yet.** A synthesized `let`
-//! binding a Unique value is destroyed at scope end, while the original
-//! anonymous temporary is destroyed at the full-expression boundary.
-//! Proving those coincide needs the `CleanupFootprint`/FE registration
-//! that the builder does not populate yet (docs/effects.md §11.2), so the
-//! pass hoists only Copy-typed operands and leaves Unique ones in place
-//! (customary evaluation order is preserved; nothing is reordered).
+//! **Unique operands transfer or are discarded in place.** A synthesized
+//! `let` binding a Unique value is destroyed at the enclosing scope's end,
+//! while the original anonymous temporary is destroyed at its
+//! full-expression boundary. The rewrite is therefore legal only where
+//! the parent already transfers or discards the value, so the synthesized
+//! binder's destruction point coincides with the original's (docs/effects
+//! .md §11.2, docs/hir.md §5.7):
+//!
+//! - a `Consume` operand (call argument, aggregate element, `move` /
+//!   `drop`) transfers the value to the parent, exactly as the synthesized
+//!   local is transferred — nothing is destroyed on either side, so the
+//!   full-expression cleanup registration is unchanged;
+//! - a statement operand of a sequence (`Class.seq`, every operand but the
+//!   forwarded last) is discarded in place, so the synthesized local is
+//!   dropped at the same point the anonymous temporary was.
+//!
+//! A `Read` / `Borrow` operand is never materialized: the original
+//! temporary is destroyed at the parent expression's full-expression
+//! boundary while the synthesized binder would be destroyed at the
+//! enclosing scope end (later).
 //!
 //! Like SEG (`hir_seg.zig`), the pass re-derives the effect analysis each
 //! round and rewrites in place (the HIR is a tree, every node a single
@@ -229,15 +242,55 @@ const Rewriter = struct {
             // free); otherwise they would have been the first hit.
             if (try self.analysis.canFloatAsTree(op)) continue;
             // The first non-floatable operand: hoisting it keeps LTR,
-            // because every earlier operand is floatable.
+            // because every earlier operand is floatable. For a sequence
+            // the earlier operands are *discarded statements*: deferring
+            // their discard past this operand is observable when their
+            // value is Unique-owned (its destructor is not captured by
+            // `canFloatAsTree`), so require those values Copy.
+            if (!try self.deferrableOperands(id, k, ops)) return false;
             const cap = try self.analysis.capabilityOf(pr.node(op).ty) orelse return false;
-            // Unique materialization is deferred until the full-expression
-            // cleanup registration is modelled (see the file header).
-            if (cap != .copy) return false;
+            if (cap != .copy and !try self.uniqueDestructionCoincides(id, k, ops)) return false;
             try self.hoist(id, k, ops);
             return true;
         }
         return false;
+    }
+
+    /// Whether operands `0..k` may be deferred until after operand `k`.
+    /// `canFloatAsTree` already covers every preceding operand's own
+    /// evaluation and full-expression cleanup; the one shape it cannot
+    /// see is a *Unique-typed* operand whose binding destruction (a
+    /// sequence's in-place discard) is observable. A sequence discards
+    /// each operand before the next, so hoisting a later operand must
+    /// not slide past a preceding Unique discard: require those values
+    /// Copy (docs/effects.md §11.2). Other parents evaluate their
+    /// operands into one node, with no destruction between them, so a
+    /// preceding read/transfer is already safe to defer.
+    fn deferrableOperands(self: *Rewriter, id: hir.ExprId, k: usize, ops: []const hir.ExprId) Error!bool {
+        const pr = self.p();
+        if (hir.registry.get(pr.node(id).op).class != .seq) return true;
+        for (ops[0..k]) |op| {
+            const cap = try self.analysis.capabilityOf(pr.node(op).ty) orelse return false;
+            if (cap != .copy) return false;
+        }
+        return true;
+    }
+
+    /// Whether the parent already transfers or discards the Unique
+    /// operand at index `k`, so binding it to a synthesized `let` leaves
+    /// its destruction point where it was (see the file header; docs
+    /// /effects.md §11.2, docs/hir.md §5.7).
+    ///
+    /// The parent's *use* is the derived fact (`operandUseOf`, docs/effects
+    /// .md §4) — never an opcode legality table. The one op-shape fact is
+    /// the sequence's operand discipline: a `Class.seq` operand that is not
+    /// the forwarded last is a discarded statement, so both the original
+    /// temporary and the synthesized local are dropped in place at the
+    /// same point (the lowering's `discardValue`).
+    fn uniqueDestructionCoincides(self: *Rewriter, id: hir.ExprId, k: usize, ops: []const hir.ExprId) Error!bool {
+        if (try self.analysis.operandUseOf(id, k) == .consume) return true;
+        const class = hir.registry.get(self.p().node(id).op).class;
+        return class == .seq and k + 1 < ops.len;
     }
 
     /// `parent(…, op_k, …)` → `let B = op_k in parent(…, %B, …)`, with the
@@ -419,10 +472,11 @@ test "hir_simplify: ANF hoists the first non-floatable operand in LTR order" {
     try testing.expect(std.mem.eql(u8, opName(pr, ops[1]), "local"));
 }
 
-test "hir_simplify: ANF never hoists a Unique operand (deferred)" {
+test "hir_simplify: ANF materializes a Unique operand the parent transfers" {
     var f = try build("app", &.{.{
         "app",
-        \\struct Token { id: int32; drop(t) { let x = t.id; } }
+        \\const builtin = import("builtin");
+        \\struct Token { id: int32; drop(t) { builtin.print(builtin.str(t.id)); } }
         \\fn make(id: int32) -> Token { Token { id: id } }
         \\fn take(move t: Token) -> int32 { t.id }
         \\fn f(x: int32) -> int32 {
@@ -430,9 +484,74 @@ test "hir_simplify: ANF never hoists a Unique operand (deferred)" {
         \\}
     }});
     defer f.deinit();
-    try expectRewrittenValid(&f);
-    const body = funcBody(&f, "app.f").?;
-    try testing.expect(!std.mem.eql(u8, opName(&f.built.program, body), "let"));
     const stats = try optimize(f.arena.allocator(), f.built, .{ .graph = f.graph });
-    try testing.expectEqual(@as(usize, 0), stats.hoists);
+    try testing.expect(stats.hoists >= 1);
+    try expectRewrittenValid(&f);
+    // `take(make(x))` → `let B = make(x) in take(%B)`: the synthesized
+    // binder is transferred to the call exactly as the anonymous
+    // temporary was, so nothing is destroyed at the let's scope end.
+    const body = funcBody(&f, "app.f").?;
+    const pr = &f.built.program;
+    try testing.expect(std.mem.eql(u8, opName(pr, body), "let"));
+    const init = pr.operands(body)[0];
+    try testing.expect(std.mem.eql(u8, opName(pr, init), "call"));
+    const inner = pr.region(pr.regionsOf(body)[0]).root;
+    try testing.expect(std.mem.eql(u8, opName(pr, inner), "call"));
+    try testing.expect(std.mem.eql(u8, opName(pr, pr.operands(inner)[1]), "local"));
+    // The temporary stays transferred: no cleanup token names the
+    // synthesized local or the forwarded call's argument.
+    for (pr.cleanup_tokens.items) |tk| {
+        if (tk.origin_expr == hir.no_expr) continue;
+        try testing.expect(!std.mem.eql(u8, opName(pr, tk.origin_expr), "local"));
+    }
+}
+
+test "hir_simplify: ANF does not materialize a Unique operand the parent only borrows" {
+    var f = try build("app", &.{.{
+        "app",
+        \\const builtin = import("builtin");
+        \\struct Token { id: int32; drop(t) { builtin.print("bye"); } }
+        \\fn make(id: int32) -> Token { Token { id: id } }
+        \\fn show(borrow t: Token) -> int32 { t.id }
+        \\fn f(x: int32) -> int32 {
+        \\    show(make(x))
+        \\}
+    }});
+    defer f.deinit();
+    const stats = try optimize(f.arena.allocator(), f.built, .{ .graph = f.graph });
+    _ = stats; // unrelated `seq`/`call` hoists in the hook body are counted too
+    try expectRewrittenValid(&f);
+    // `f`'s operand stays in place: the parent only borrows it, so the
+    // temporary is still destroyed at `f`'s full-expression boundary.
+    const body = funcBody(&f, "app.f").?;
+    const pr = &f.built.program;
+    try testing.expect(std.mem.eql(u8, opName(pr, body), "call"));
+    try testing.expect(std.mem.eql(u8, opName(pr, pr.operands(body)[1]), "call"));
+}
+
+test "hir_simplify: ANF materializes a discarded Unique statement in place" {
+    var f = try build("app", &.{.{
+        "app",
+        \\const builtin = import("builtin");
+        \\struct Token { id: int32; drop(t) { builtin.print(builtin.str(t.id)); } }
+        \\fn make(id: int32) -> Token { Token { id: id } }
+        \\fn f(x: int32) -> int32 {
+        \\    make(x);
+        \\    7
+        \\}
+    }});
+    defer f.deinit();
+    const stats = try optimize(f.arena.allocator(), f.built, .{ .graph = f.graph });
+    try testing.expect(stats.hoists >= 1);
+    try expectRewrittenValid(&f);
+    // `make(x); 7` → `let B = make(x) in seq(%B, 7)`: the sequence
+    // discards `%B` at the statement point, so the destructor fires
+    // exactly where the anonymous temporary's did.
+    const body = funcBody(&f, "app.f").?;
+    const pr = &f.built.program;
+    try testing.expect(std.mem.eql(u8, opName(pr, body), "let"));
+    try testing.expect(std.mem.eql(u8, opName(pr, pr.operands(body)[0]), "call"));
+    const inner = pr.region(pr.regionsOf(body)[0]).root;
+    try testing.expect(std.mem.eql(u8, opName(pr, inner), "seq"));
+    try testing.expect(std.mem.eql(u8, opName(pr, pr.operands(inner)[0]), "local"));
 }

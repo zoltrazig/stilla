@@ -101,12 +101,22 @@
   - 注：节点级 full-expression 边界标注（`ExprNode.full_expr`）仍为身份
     占位；token 自带 FE 身份用于 `registration_index` 的 FE 局部序。
 
-- [ ] **4. selective ANF 的 Unique 物化**（[hir.md](hir.md) §5.7）
+- [x] **4. selective ANF 的 Unique 物化**（[hir.md](hir.md) §5.7）
   - 范围：在清理 token 证明合成 `let` 的销毁点与原匿名临时量的
     full-expression 边界重合后，放开 ANF 只提 Copy operand 的限制。
   - 依赖：**第 3 项**。
   - 验收：Unique operand 物化后的析构点与未改写一致；examples/probes
     on/off 解释器输出逐字相等。
+  - 已完成：`hir_simplify.zig` 的 `tryAnf` 放开为「Copy 总可提；Unique 仅在
+    `operandUseOf == .consume`（父节点转移）或父节点为 `Class.seq` 的非末位
+    operand（被丢弃语句、`discardValue` 就地处弃）时可提」，`Read` / `Borrow`
+    仍在树内；新增 `deferrableOperands`：sequence 提升后来 operand 时要求其
+    先前 operand 全为 Copy（Unique 绑定的就地处弃不在 `can_float_as_tree`
+    的清理模型内，跨过它会推迟一个可观察析构）。顺带修正 `cfg_lower_call`
+    的 `lowerCallArg`：绑定局部量的 `move_` 结果未被标记已消费，full-expression
+    边界会重复 drop（该路径由合成 `let` 首次触达）。测试：白盒正例（转移、
+    丢弃语句）与负例（`borrow` 留在树内）、黑盒正/负例、定向 on/off 解释器
+    差分（析构顺序逐字固定）、examples/probes 全语料的 on/off 差分。
 
 - [ ] **5. 间接调用目标收窄**（[effects.md](effects.md) §9.2）
   - 范围：需求驱动的局部 fn-ref 目标传播；预算超限即回 `Top`，

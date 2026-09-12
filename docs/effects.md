@@ -905,7 +905,9 @@ registration_index }`：`value: TempId` 与 token 的 `Consumed / Escaped` **状
 >   绝不构成安全证明。
 > - **scope-end 清理仍未建模**。子树含非借用 Unique region 绑定时
 >   `cleanupEffect` 返回 null（`regionOwnsUnique`）。`cleanupFree` 语义保持
->   字面 cleanup-free 不变，仍供 β / speculatability / reorder 使用。
+>   字面 cleanup-free 不变，仍供 β / speculatability / reorder 使用；selective
+>   ANF 合成的 Unique `let` 绑定也落入这一保守守卫（其后的派生查询回 `Top`，
+>   不会因此低报）。
 > - **失败关闭**。未分类类型经 `drop_effect(T)` 升为 `Top`；dead-let 对 Unique
 >   绑定额外要求 `bindingCleanupDiscardable(bind.ty)`，避免连同绑定删掉
 >   其 scope-end 析构。
@@ -957,7 +959,12 @@ let T0 = os.read() in call(f, local T0, add(a, mul(b, c)))
 新增 intrinsic（如 `gpu.query`）：在 stdlib 加无体声明并写 lowering 展开；其
 效果来自展开出的现有 op 与 host 调用，前端 canonicalizer 零改动。约束保留：
 callee 若本身是表达式先按 LTR 绑定；不跨 full expression；不从惰性分支内提升；
-不改变临时量销毁注册。
+不改变临时量销毁注册。**Unique operand 的物化条件**：合成的 `let` 绑定在外层
+作用域末尾销毁，只有父节点已 `Consume` 转移该值，或父节点是 `Class.seq` 的
+非末位 operand（被丢弃的语句，`discardValue` 就地处弃）时才提——两种情形下
+合成绑定与原匿名临时量的析构点重合；`Read` / `Borrow` operand 留在树内。
+且 sequence 提升后来 operand 时，其先前 operand 必须全为 Copy：Unique 绑定的
+就地处弃不在 `can_float_as_tree` 的清理模型内，跨过它会推迟一个可观察析构。
 
 ### 12.2 dead-let
 
