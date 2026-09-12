@@ -64,6 +64,27 @@ pub const FrontendCache = struct {
         program: *const ast.Program,
     };
 
+    /// The semantic key of one cached module (docs/effects.md §13): its
+    /// parse identity (specifier + content hash) plus the effect
+    /// environment any phase-2/3 conclusion about it would depend on. The
+    /// *parse* cache ignores the fingerprint — parsing is
+    /// environment-independent, so a change must not drop an `Entry` —
+    /// but a cache of phase-2/3 results must key on this, or a changed
+    /// host contract would reuse a conclusion derived under the old one.
+    /// No such cache exists today; this is its key, exposed for the
+    /// embedder that will own it.
+    pub const SemanticKey = struct {
+        specifier: []const u8,
+        content_hash: u64,
+        effect_environment: effects.EffectEnvironmentFingerprint,
+
+        pub fn eql(a: SemanticKey, b: SemanticKey) bool {
+            return std.mem.eql(u8, a.specifier, b.specifier) and
+                a.content_hash == b.content_hash and
+                a.effect_environment.eql(b.effect_environment);
+        }
+    };
+
     pub const Stats = struct {
         /// Modules reused from the cache (lex/parse skipped).
         hits: u32 = 0,
@@ -107,6 +128,18 @@ pub const FrontendCache = struct {
     /// Look up one specifier's cached parse, when present.
     pub fn get(self: *const FrontendCache, specifier: []const u8) ?Entry {
         return self.entries.get(specifier);
+    }
+
+    /// The semantic key of a cached module under this cache's most recent
+    /// effect environment, or null when the module is not cached. Two
+    /// calls agree iff the parse identity and the environment agree.
+    pub fn semanticKey(self: *const FrontendCache, specifier: []const u8) ?SemanticKey {
+        const e = self.entries.get(specifier) orelse return null;
+        return .{
+            .specifier = specifier,
+            .content_hash = e.hash,
+            .effect_environment = self.effect_environment,
+        };
     }
 
     /// Store (or replace) one specifier's cached parse. `source` and

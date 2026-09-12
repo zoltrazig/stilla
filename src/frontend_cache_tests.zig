@@ -72,6 +72,12 @@ test "cache: an effect-environment change moves the semantic key, never the pars
     const parses = cache.stats.parses;
     const fp = cache.effect_environment;
     try testing.expectEqual(@as(u32, 0), cache.stats.effect_environment_changes);
+    // The module's semantic key pairs its parse identity with that
+    // environment fingerprint.
+    const key1 = cache.semanticKey("app").?;
+    try testing.expectEqualStrings("app", key1.specifier);
+    try testing.expectEqual(cache.get("app").?.hash, key1.content_hash);
+    try testing.expect(cache.semanticKey("absent") == null);
 
     // The same environment does not move the key, and the parse is
     // reused.
@@ -85,6 +91,8 @@ test "cache: an effect-environment change moves the semantic key, never the pars
     try testing.expectEqual(parses, cache.stats.parses);
     try testing.expectEqual(@as(u32, 0), cache.stats.effect_environment_changes);
     try testing.expect(cache.effect_environment.eql(fp));
+    // Same identity + same environment: the semantic key is unchanged.
+    try testing.expect(key1.eql(cache.semanticKey("app").?));
 
     // A declaration-set change moves the key even though it names no
     // member of this program (a declaration set describes an embedding,
@@ -103,6 +111,11 @@ test "cache: an effect-environment change moves the semantic key, never the pars
     try testing.expectEqual(parses, cache.stats.parses);
     try testing.expectEqual(@as(u32, 1), cache.stats.effect_environment_changes);
     try testing.expect(!cache.effect_environment.eql(fp));
+    // Same identity, changed environment: the semantic key differs even
+    // though the parse entry is the very same one.
+    const key3 = cache.semanticKey("app").?;
+    try testing.expectEqual(cache.get("app").?.hash, key3.content_hash);
+    try testing.expect(!key1.eql(key3));
 
     // A registry-generation bump moves it too, with no declaration
     // change at all.

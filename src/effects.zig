@@ -708,10 +708,13 @@ pub const StillaExecution = enum {
     unknown,
     /// The binding may execute Stilla code — a callable passed at this
     /// call, one stored by an earlier call, or any other channel back
-    /// into the VM. v1 has no callback-parameterized instantiation, so
-    /// this yields the full `top`: every resource, `may_trap`,
-    /// `may_diverge`, `Q`, *and* the module-const read wildcard. An
-    /// unknown callback must cover all of those, not merely add reads.
+    /// into the VM. The *context-free* summary (`effectiveSummary`) is
+    /// the full `top`: every resource, `may_trap`, `may_diverge`, `Q`,
+    /// *and* the module-const read wildcard. A call site can do better
+    /// when the binding carries an exhaustive callback contract
+    /// (docs/effects.md §13): then the invocation is bounded by the
+    /// declared summary joined with the effect bounds of the listed
+    /// callables it invokes synchronously.
     may_execute,
     /// The embedding attests the binding executes no Stilla code at all.
     /// Only then is the declared summary used verbatim — so only then is
@@ -751,15 +754,20 @@ pub const ResourceRegistry = struct {
 
 /// The embedding's effect environment (docs/effects.md §13): everything
 /// outside the program text that can change an effect conclusion — the
-/// host-semantics registry generation, the effect-domain registry, and
-/// the symbol-keyed host declaration set (callback contracts included).
-/// It is the semantic half of a compile cache key; the program text is
-/// the other half. Not part of any program.
+/// host-semantics registry generation, the declared effect domains, the
+/// domain relations, and the symbol-keyed host declaration set (callback
+/// contracts included). It is the semantic half of a compile cache key;
+/// the program text is the other half. Not part of any program.
 pub const Environment = struct {
     /// Host-semantics registry generation/version, bumped by the
     /// embedding whenever a registry's *meaning* changes without its
     /// declaration set changing (adapter rewrites, domain-table edits).
     registry_generation: u64 = 0,
+    /// The **domain inventory** (docs/effects.md §5.2, §5.6): every
+    /// effect domain the embedding has registered. `resources` carries
+    /// the per-domain `stable` / `disjoint` facts; this is the registry
+    /// itself, so a domain added or removed by itself moves the digest.
+    domains: []const EffectResource = &.{},
     resources: ResourceRegistry = .{},
     host_decls: []const HostDecl = &.{},
 };
@@ -769,10 +777,11 @@ pub const Environment = struct {
 /// conclusions for the same program — so a cache keyed on it may reuse
 /// phase-2/3 results — and a different fingerprint must not reuse them.
 /// The encoding is explicit and canonical: collections are sorted,
-/// integers are encoded field by field, symbols length-delimited. It
-/// never hashes raw struct bytes, arena pointers, or a session-local
-/// interner id (`ResourceRegistry`'s domain ids are embedding ABI
-/// values, not interned handles, so they are included).
+/// integers are little-endian fixed width (never native byte order),
+/// symbols are length-delimited, and each summary row is canonicalized
+/// before hashing. It never hashes raw struct bytes, arena pointers, or a
+/// session-local interner id (`ResourceRegistry`'s domain ids are
+/// embedding ABI values, not interned handles, so they are included).
 pub const EffectEnvironmentFingerprint = struct {
     value: u64 = 0,
 
@@ -780,66 +789,102 @@ pub const EffectEnvironmentFingerprint = struct {
         return a.value == b.value;
     }
 
-    /// Canonicalize and digest `env`. Declaration order never changes the
-    /// result; adding, removing, or editing any declaration does.
+    /// Canonicalize and digest `env`. Collection order never changes the
+    /// result; adding, removing, or editing any element does.
     pub fn compute(arena: std.mem.Allocator, env: Environment) std.mem.Allocator.Error!EffectEnvironmentFingerprint {
-        const digests = try arena.alloc(u64, env.host_decls.len);
-        for (env.host_decls, 0..) |d, i| digests[i] = declDigest(d);
-        std.mem.sort(u64, digests, {}, std.sort.asc(u64));
-
         var h = std.hash.Wyhash.init(0);
-        h.update(std.mem.asBytes(&env.registry_generation));
+        hashU64(&h, env.registry_generation);
+
+        const domains = try arena.dupe(EffectResource, env.domains);
+        std.mem.sort(EffectResource, domains, {}, resourceLessThan);
+        hashU64(&h, domains.len);
+        for (domains) |r| hashResourceInto(&h, r);
+
         try hashResourceRegistry(&h, arena, env.resources);
-        h.update(std.mem.asBytes(&@as(u64, digests.len)));
-        for (digests) |d| h.update(std.mem.asBytes(&d));
+
+        const digests = try arena.alloc(u64, env.host_decls.len);
+        for (env.host_decls, 0..) |d, i| digests[i] = try declDigest(arena, d);
+        std.mem.sort(u64, digests, {}, std.sort.asc(u64));
+        hashU64(&h, digests.len);
+        for (digests) |d| hashU64(&h, d);
         return .{ .value = h.final() };
     }
 };
 
+// Fixed-width little-endian integer encoding: the fingerprint must not
+// depend on the host's native byte order, or two machines would key the
+// same environment differently. Counts ride `hashU64` even when the
+// natural width is smaller, so a length can never be confused with a
+// neighbouring field.
+fn hashU8(h: *std.hash.Wyhash, v: u8) void {
+    h.update(&.{v});
+}
+
+fn hashU32(h: *std.hash.Wyhash, v: u32) void {
+    var buf: [4]u8 = undefined;
+    std.mem.writeInt(u32, &buf, v, .little);
+    h.update(&buf);
+}
+
+fn hashU64(h: *std.hash.Wyhash, v: u64) void {
+    var buf: [8]u8 = undefined;
+    std.mem.writeInt(u64, &buf, v, .little);
+    h.update(&buf);
+}
+
 fn hashResourceInto(h: *std.hash.Wyhash, r: EffectResource) void {
-    h.update(&.{@as(u8, @intFromEnum(std.meta.activeTag(r)))});
+    hashU8(h, @intFromEnum(std.meta.activeTag(r)));
     switch (r) {
-        .module_const => |x| h.update(std.mem.asBytes(&x)),
-        .host => |x| h.update(std.mem.asBytes(&x)),
-        .runtime => |x| h.update(std.mem.asBytes(&x)),
+        .module_const => |x| hashU32(h, x),
+        .host => |x| hashU32(h, x),
+        .runtime => |x| hashU32(h, x),
         .extension => |x| {
-            h.update(std.mem.asBytes(&x.provider));
-            h.update(std.mem.asBytes(&x.resource));
+            hashU32(h, x.provider);
+            hashU32(h, x.resource);
         },
         .host_any, .top => {},
     }
 }
 
 fn hashAccessInto(h: *std.hash.Wyhash, a: EffectAccess) void {
-    h.update(&.{@as(u8, @intFromEnum(a.mode))});
+    hashU8(h, @intFromEnum(a.mode));
     hashResourceInto(h, a.resource);
 }
 
+/// Hash a *canonical* access row (callers canonicalize first, so an
+/// unsorted or `.top`-bearing hand-built `Summary` cannot collide with a
+/// different canonical row).
+fn hashAccessSetInto(h: *std.hash.Wyhash, set: AccessSet) void {
+    for (set.all) |b| hashU8(h, @intFromBool(b));
+    hashU64(h, set.accesses.len);
+    for (set.accesses) |a| hashAccessInto(h, a);
+}
+
 fn hashSummaryInto(h: *std.hash.Wyhash, s: Summary) void {
-    h.update(std.mem.asBytes(&s.accesses.all));
-    h.update(std.mem.asBytes(&@as(u64, s.accesses.accesses.len)));
-    for (s.accesses.accesses) |a| hashAccessInto(h, a);
-    h.update(&.{
-        @as(u8, @intFromBool(s.may_trap)),
-        @as(u8, @intFromBool(s.may_diverge)),
-        @as(u8, @intFromBool(s.nondeterministic)),
-    });
+    hashAccessSetInto(h, s.accesses);
+    hashU8(h, @intFromBool(s.may_trap));
+    hashU8(h, @intFromBool(s.may_diverge));
+    hashU8(h, @intFromBool(s.nondeterministic));
 }
 
 /// One declaration's digest. Keyed on the full content, so editing a
-/// summary, the attestation, or the callback contract all change it.
-fn declDigest(d: HostDecl) u64 {
+/// summary, the attestation, or the callback contract all change it. The
+/// declared summary is canonicalized first: two declarations that differ
+/// only in row order describe the same environment and must agree.
+fn declDigest(arena: std.mem.Allocator, d: HostDecl) std.mem.Allocator.Error!u64 {
     var h = std.hash.Wyhash.init(0x9e37_79b9_7f4a_7c15);
-    h.update(std.mem.asBytes(&@as(u64, d.key.len)));
+    hashU64(&h, d.key.len);
     h.update(d.key);
-    hashSummaryInto(&h, d.summary);
-    h.update(&.{@as(u8, @intFromEnum(d.stilla_execution))});
+    var canonical = d.summary;
+    canonical.accesses = try canonicalize(arena, d.summary.accesses.accesses, d.summary.accesses.all);
+    hashSummaryInto(&h, canonical);
+    hashU8(&h, @intFromEnum(d.stilla_execution));
     if (d.callbacks) |pos| {
-        h.update(&.{1});
-        h.update(std.mem.asBytes(&@as(u64, pos.len)));
-        for (pos) |p| h.update(std.mem.asBytes(&p));
+        hashU8(&h, 1);
+        hashU64(&h, pos.len);
+        for (pos) |p| hashU32(&h, p);
     } else {
-        h.update(&.{0});
+        hashU8(&h, 0);
     }
     return h.final();
 }
@@ -856,16 +901,16 @@ fn resourcePairLessThan(_: void, a: [2]EffectResource, b: [2]EffectResource) boo
 fn hashResourceRegistry(h: *std.hash.Wyhash, arena: std.mem.Allocator, reg: ResourceRegistry) std.mem.Allocator.Error!void {
     const stable = try arena.dupe(EffectResource, reg.stable);
     std.mem.sort(EffectResource, stable, {}, resourceLessThan);
-    h.update(std.mem.asBytes(&@as(u64, stable.len)));
+    hashU64(h, stable.len);
     for (stable) |r| hashResourceInto(h, r);
 
     const pairs = try arena.alloc([2]EffectResource, reg.disjoint.len);
-    for (reg.disjoint, 0..) |p, i| {
-        pairs[i] = if (p.a.lessThan(p.b)) .{ p.a, p.b } else .{ p.b, p.a };
+    for (reg.disjoint, 0..) |pr, i| {
+        pairs[i] = if (pr.a.lessThan(pr.b)) .{ pr.a, pr.b } else .{ pr.b, pr.a };
     }
     std.mem.sort([2]EffectResource, pairs, {}, resourcePairLessThan);
-    h.update(std.mem.asBytes(&@as(u64, pairs.len)));
-    for (pairs) |p| for (p) |r| hashResourceInto(h, r);
+    hashU64(h, pairs.len);
+    for (pairs) |pr| for (pr) |r| hashResourceInto(h, r);
 }
 
 pub const Conflict = enum { commute, conflict };
@@ -1426,6 +1471,16 @@ test "effects: fingerprint is order independent and tracks every environment dim
         .resources = .{ .stable = &.{host(1)}, .disjoint = &.{.{ .a = host(1), .b = host(2) }} },
         .host_decls = &.{ d1, d2 },
     })));
+    // ...and the domain inventory, independently of the relations.
+    try testing.expect(!canon.eql(try EffectEnvironmentFingerprint.compute(a, .{
+        .registry_generation = 7,
+        .domains = &.{host(1)},
+        .host_decls = &.{ d1, d2 },
+    })));
+    // The domain inventory is canonicalized too.
+    const dom_ab = try EffectEnvironmentFingerprint.compute(a, .{ .domains = &.{ host(1), host(2) } });
+    const dom_ba = try EffectEnvironmentFingerprint.compute(a, .{ .domains = &.{ host(2), host(1) } });
+    try testing.expect(dom_ab.eql(dom_ba));
 
     // The resource registry is canonicalized too.
     const res2 = try EffectEnvironmentFingerprint.compute(a, .{
@@ -1439,6 +1494,27 @@ test "effects: fingerprint is order independent and tracks every environment dim
         .host_decls = &.{ d1, d2 },
     });
     try testing.expect(res2.eql(res3));
+
+    // The execution attestation alone, and a callback position change
+    // alone, both move the digest.
+    const exec_edit = HostDecl{ .key = "random.emit", .summary = may_trap, .stilla_execution = .forbidden, .callbacks = &pos0 };
+    try testing.expect(!canon.eql(try EffectEnvironmentFingerprint.compute(a, .{ .registry_generation = 7, .host_decls = &.{ d1, exec_edit } })));
+    const pos1 = [_]u32{1};
+    const cb_edit = HostDecl{ .key = "random.emit", .summary = may_trap, .stilla_execution = .may_execute, .callbacks = &pos1 };
+    try testing.expect(!canon.eql(try EffectEnvironmentFingerprint.compute(a, .{ .registry_generation = 7, .host_decls = &.{ d1, cb_edit } })));
+
+    // Rows are canonicalized before hashing: the same accesses in a
+    // different order (with a duplicate) describe the same environment.
+    const raw_row = HostDecl{ .key = "same", .summary = .{
+        .accesses = .{ .accesses = &.{ readOf(host(2)), readOf(host(1)), readOf(host(2)) } },
+        .may_trap = false,
+        .may_diverge = false,
+        .nondeterministic = false,
+    } };
+    const canon_row = HostDecl{ .key = "same", .summary = try mks(a, &.{ readOf(host(1)), readOf(host(2)) }) };
+    const raw_fp = try EffectEnvironmentFingerprint.compute(a, .{ .host_decls = &.{raw_row} });
+    const canon_fp = try EffectEnvironmentFingerprint.compute(a, .{ .host_decls = &.{canon_row} });
+    try testing.expect(raw_fp.eql(canon_fp));
 }
 
 test "effects: callback contracts survive resolution and contradicting duplicates degrade to unknown" {

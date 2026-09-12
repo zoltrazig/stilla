@@ -1069,12 +1069,14 @@ host 调用」列在当前范围之外只是范围，不是「永远不会发生
 **缓存指纹（EffectEnvironmentFingerprint）。已落地。** effect metadata 必须
 进入 phase-2/3 结果的缓存键，否则声明从 `Pure` 改成 `Write(OS)` 后，旧缓存里按
 `Pure` 优化的代码会变得 unsound。`effects.Environment` 把 host 语义 registry 的
-generation / 版本、effect-domain 注册表、overlap/disjoint 与 `stable` 声明、
-以及**本次的 host 声明集合**（含回调契约）折叠为一个指纹；编码显式且规范：
-集合排序、整数逐字段、符号带长度前缀，不 hash 原始结构字节、指针或会话内
-interner id。`frontend.Options` 携带 `host_registry_generation` / `resources`，
-二者随 `host_decls` 进入 `hir_effects.Config`；`frontend_cache.zig` 记录最近一次
-编译的指纹并按转换计数。
+generation / 版本、effect-domain 注册表（`domains`）与 `stable` / `disjoint`
+关系、以及**本次的 host 声明集合**（含回调契约）折叠为一个指纹；编码显式且
+规范：集合排序、整数定宽小端编码、符号带长度前缀、每个摘要行先规范化，不 hash
+原始结构字节、指针或会话内 interner id。`frontend.Options` 携带
+`host_registry_generation` / `effect_domains`（仅指纹用）与 `resources` /
+`host_decls`（后两者进入 `hir_effects.Config` 并影响结论）；`frontend_cache.zig`
+记录最近一次编译的指纹，暴露 `SemanticKey`（specifier + 内容 hash + 指纹）并按
+转换计数。
 
 **解析缓存不受影响。** frontend_cache.zig 只缓存**解析产物**（`ast.Program` /
 `ast.Source`，按内容 hash + 逐字节比对校验），解析不依赖 effect 环境，故指纹变化
@@ -1120,10 +1122,12 @@ MayTrap（含 panic）+ MayDiverge + nondeterministic
   `own ⊔ ⨆ effect_bound(target_i)` 收紧（见 §13），`collectCallees` 同步把
   实例化目标并入调用图。
 - `EffectEnvironmentFingerprint`：`effects.Environment`（host 声明集合 + host
-  语义 registry generation + effect-domain registry）经排序规范化折叠为指纹，
-  `frontend.Options` 携带 `host_registry_generation` / `resources`，
-  `frontend_cache` 记录最近一次编译的指纹并按转换计数（解析与 effect 环境
-  无关，故解析缓存不失效；指纹是缓存 phase-2/3 结果的语义键）。
+  语义 registry generation + effect-domain 注册表（`domains`）与 `stable` /
+  `disjoint` 关系）经排序规范化、逐字段小端编码折叠为指纹，
+  `frontend.Options` 携带 `host_registry_generation` / `effect_domains` /
+  `resources`，`frontend_cache` 记录最近一次编译的指纹与 `SemanticKey`
+  （specifier + 内容 hash + 指纹），并按转换计数（解析与 effect 环境无关，
+  故解析缓存不失效；指纹是缓存 phase-2/3 结果的语义键）。
 - host_bind typed registry 接线：模块结构体的 `effects` 表（`MemberEffects`）
   由 `register` 在 comptime 序列化为 `<module>.<member>` 的 `HostDecl`，
   `declarations` 导出所选 registry 的声明，`buildProgram` 把它接入

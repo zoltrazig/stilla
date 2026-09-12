@@ -178,14 +178,18 @@ const mydb_desc: host_bind.ModuleDesc = host_bind.register(mydb);
 Every fn in the module struct is a member — helpers live at file scope.
 A member may also declare its **effect semantics** next to the code
 (docs/effects.md §13) in a `pub const effects` table keyed by member
-name. `register` serializes each entry into the compiler's stable
-`<symbol>.<member>` declaration, so the Zig signature and the effect
-contract can't drift apart; a member absent from the table stays
-undeclared — the compiler's full `Top`. Semantics are **never** inferred
-from a Zig signature (a `forbidden` attestation is a promise about the
-binding's runtime behavior, which only the embedder can make).
+name. `register` serializes each entry under the compiler's stable
+`<symbol>.<member>` key, derived from the same `symbol` the runtime
+resolves against. Co-location keeps the contract next to the code, but
+it is a **trusted attestation**: the compiler never checks it against
+the binding, and a member absent from the table stays undeclared — the
+compiler's full `Top`. Semantics are **never** inferred from a Zig
+signature (a `forbidden` attestation is a promise about the binding's
+runtime behavior, which only the embedder can make).
 
 ```zig
+const fx = @import("stilla").effects; // host_bind's `effects` field shadows a bare import
+
 const mydb = struct {
     pub const symbol = "mydb";
     /// Explicit per-member semantics. `summary` is the embedding's own
@@ -197,7 +201,7 @@ const mydb = struct {
     /// use it (docs/effects.md §13).
     pub const effects = .{
         .query = host_bind.MemberEffects{
-            .summary = effects.host_top,    // declared own effects
+            .summary = fx.host_top,        // declared own effects
             .stilla_execution = .forbidden, // enters no Stilla code
         },
     };

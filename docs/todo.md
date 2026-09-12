@@ -53,12 +53,14 @@
     组合下均通过）。
   - 已完成：(a) `effects.Environment` +
     `EffectEnvironmentFingerprint.compute`：host 声明集合（含回调契约）、
-    resource registry（`stable` / `disjoint`，排序规范化）、registry
-    generation 折叠为规范指纹；声明顺序不变，增删改任一维即变。
-    `frontend.Options.resources` / `host_registry_generation` 贯穿初始分析 /
-    SEG / selective ANF / `revalidateHir`；`frontend_cache.zig` 记录最近一次
-    编译的指纹并按转换计数——解析与 effect 环境无关，解析缓存不随之失效，
-    指纹是「缓存 phase-2/3 结果」的语义键。(b) `HostDecl.callbacks` /
+    effect-domain 注册表（`domains`）与 `stable` / `disjoint` 关系、registry
+    generation 折叠为规范指纹（集合排序、整数定宽小端、摘要行先规范化）；
+    声明顺序不变，增删改任一维即变。`frontend.Options.resources` 贯穿初始分析 /
+    SEG / selective ANF / `revalidateHir`（`effect_domains` /
+    `host_registry_generation` 仅指纹用）；`frontend_cache.zig` 暴露
+    `SemanticKey`（specifier + 内容 hash + 指纹）并记录最近一次编译的指纹与
+    转换计数——解析与 effect 环境无关，解析缓存不随之失效，指纹是
+    「缓存 phase-2/3 结果」的语义键。(b) `HostDecl.callbacks` /
     `HostEffects.Entry.callbacks`：`MayExecute` binding 的「同一次调用内、
     只经列出的实参位置」穷尽契约；`.call` 处收紧为
     `own ⊔ ⨆ effect_bound(target_i)`，直接 `fn_ref` / 内联 λ 之外的目标、

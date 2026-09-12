@@ -53,20 +53,30 @@ pub const Options = struct {
     io: ?std.Io = null,
     /// Host effect declarations, keyed by the binding's stable
     /// `<module>.<member>` symbol (effects.md §13). A binding with no
-    /// declaration is the full `Top`; a declaration is honoured only when
-    /// it attests `StillaExecution.forbidden`, otherwise it is still
-    /// `Top`. The embedding must be using the same contract at run time:
-    /// these declarations are trusted, and `host_top` — the one value
-    /// that omits `Read(ModuleConst)` — is only sound for a binding that
-    /// really cannot execute Stilla code. Symbols that name no binding in
-    /// this program are ignored (a declaration set describes an
-    /// embedding, not one program). Caller-owned.
+    /// declaration is the full `Top`. A declaration is honoured verbatim
+    /// only when it attests `StillaExecution.forbidden`; a
+    /// `StillaExecution.may_execute` declaration stays `Top` unless it
+    /// carries an exhaustive callback contract (`HostDecl.callbacks`), in
+    /// which case the call is bounded by the declared summary joined with
+    /// the effect bounds of the callables it invokes synchronously. The
+    /// embedding must be using the same contract at run time: these
+    /// declarations are trusted, and `host_top` — the one value that omits
+    /// `Read(ModuleConst)` — is only sound for a binding that really cannot
+    /// execute Stilla code. Symbols that name no binding in this program
+    /// are ignored (a declaration set describes an embedding, not one
+    /// program). Caller-owned.
     host_decls: []const effects.HostDecl = &.{},
     /// Effect-domain registry declarations (docs/effects.md §5.5–§5.6):
     /// `stable` domains (deterministic reads) and explicit `disjoint`
     /// resource pairs. Undeclared distinct domains overlap conservatively.
     /// Caller-owned.
     resources: effects.ResourceRegistry = .{},
+    /// The declared effect-domain inventory (docs/effects.md §5.2, §5.6):
+    /// the domains the embedding has registered; `resources` carries the
+    /// per-domain `stable` / `disjoint` facts. Feeds
+    /// `EffectEnvironmentFingerprint` (like `host_registry_generation`) —
+    /// it changes no conclusion by itself. Caller-owned.
+    effect_domains: []const effects.EffectResource = &.{},
     /// Host-semantics registry generation/version (docs/effects.md §13),
     /// bumped by the embedding whenever its host registry's *meaning*
     /// changes without the declaration set changing. It feeds
@@ -240,6 +250,7 @@ pub fn compile(allocator: std.mem.Allocator, options: Options) CompileError!Comp
     if (options.cache) |cache| {
         const fp = effects.EffectEnvironmentFingerprint.compute(arena_alloc, .{
             .registry_generation = options.host_registry_generation,
+            .domains = options.effect_domains,
             .resources = options.resources,
             .host_decls = options.host_decls,
         }) catch return error.OutOfMemory;

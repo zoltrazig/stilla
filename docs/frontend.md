@@ -176,7 +176,8 @@ impossible. The cache also records the last compile's *effect environment*
 fingerprint (`effects.EffectEnvironmentFingerprint`, docs/effects.md §13)
 — the host declarations, effect-domain registry, and host-semantics
 registry generation (`Options.host_decls` / `Options.resources` /
-`Options.host_registry_generation`) folded into one canonical digest.
+`Options.effect_domains` / `Options.host_registry_generation`) folded
+into one canonical digest.
 Parsing is independent of it, so an environment change leaves every cached
 parse reusable but moves the semantic key (`Stats.effect_environment_changes`),
 which a future cache of phase-2/3 results must key on so a changed contract
