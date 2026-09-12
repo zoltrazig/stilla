@@ -5,8 +5,8 @@
 //! (air.md §6.4).
 
 const std = @import("std");
-const ast = @import("stilla").ast;
 const cfg = @import("stilla").cfg;
+const meta = @import("stilla").meta;
 const checker = @import("checker.zig");
 const moduleinfo = @import("stilla").moduleinfo;
 const lower = @import("stilla").lower;
@@ -25,7 +25,7 @@ const LowerError = lower.LowerError;
 /// Lower one Stilla function member to a `cfg.IrFunc`.
 /// the result type already matches the return type.
 pub fn coerceRet(self: *Lowerer, fs: *FuncState, r: *cfg.Value) LowerError!*cfg.Value {
-    if (!(fs.ret == .primitive and fs.ret.primitive == .any) or cfg.Type.eql(r.type_, fs.ret)) return r;
+    if (!(fs.ret == .primitive and fs.ret.primitive == .any) or meta.Type.eql(r.type_, fs.ret)) return r;
     if (r.ownership == .unique) {
         const p = (try cfg_lower_emit.emit(self, fs, r.span, .{ .any_pack_move = r }, fs.ret)).?;
         cfg_lower_emit.markConsumed(self, fs, r);
@@ -40,9 +40,9 @@ pub fn coerceRet(self: *Lowerer, fs: *FuncState, r: *cfg.Value) LowerError!*cfg.
 pub fn newFuncState(
     self: *Lowerer,
     module: *moduleinfo.ModuleInfo,
-    name: ast.Ident,
-    params: []cfg.Param,
-    ret: cfg.Type,
+    name: meta.Ident,
+    params: []meta.Param,
+    ret: meta.Type,
 ) LowerError!FuncState {
     var fs = FuncState{
         .module = module,

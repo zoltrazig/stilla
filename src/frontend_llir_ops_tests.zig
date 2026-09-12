@@ -12,7 +12,7 @@
 //! Run via `zig build test` (wired into `src/root.zig`'s test block).
 
 const std = @import("std");
-const ast = @import("ast.zig");
+const meta = @import("meta.zig");
 const llir = @import("llir.zig");
 const cfg = @import("cfg.zig");
 const frontend = @import("frontend.zig");
@@ -422,7 +422,7 @@ test "2.9 LLIR lowering: indirect calls through function values" {
                             const ft = call.callee.value.type_.function;
                             try testing.expectEqual(@as(u32, @intCast(ft.params.len)), @as(u32, 2));
                             for (ft.params) |p| {
-                                try testing.expectEqual(ast.ParamMode.plain, p.mode);
+                                try testing.expectEqual(meta.ParamMode.plain, p.mode);
                                 try testing.expect(p.type_ == .primitive and p.type_.primitive == .int32);
                             }
                             try testing.expect(ft.ret.* == .primitive and ft.ret.*.primitive == .int32);

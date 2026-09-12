@@ -27,8 +27,7 @@
 
 const std = @import("std");
 const hir = @import("stilla").hir;
-const cfg = @import("stilla").cfg;
-const ast = @import("stilla").ast;
+const meta = @import("stilla").meta;
 
 const ParseError = error{ Syntax, OutOfMemory };
 
@@ -40,9 +39,9 @@ pub const Diag = struct {
     col: u32,
 };
 
-const fake_span = ast.Span{ .source = 0, .start = 0, .end = 0 };
+const fake_span = meta.Span{ .source = 0, .start = 0, .end = 0 };
 
-fn primByWord(word: []const u8) ?ast.PrimitiveKind {
+fn primByWord(word: []const u8) ?meta.PrimitiveKind {
     if (std.mem.eql(u8, word, "i32") or std.mem.eql(u8, word, "int32")) return .int32;
     if (std.mem.eql(u8, word, "i64") or std.mem.eql(u8, word, "int64")) return .int64;
     if (std.mem.eql(u8, word, "u32") or std.mem.eql(u8, word, "uint32")) return .uint32;
@@ -357,14 +356,14 @@ pub const Parser = struct {
     // -- literals ------------------------------------------------------------
 
     const Literal = struct {
-        value: cfg.ConstValue,
-        ty: cfg.Type,
+        value: meta.ConstValue,
+        ty: meta.Type,
     };
 
-    fn litConst(self: *Parser, value: cfg.ConstValue, kind: ast.PrimitiveKind) ParseError!hir.ExprId {
+    fn litConst(self: *Parser, value: meta.ConstValue, kind: meta.PrimitiveKind) ParseError!hir.ExprId {
         return self.program.addExpr(.{
             .op = try self.opId("const"),
-            .ty = cfg.Type{ .primitive = kind },
+            .ty = meta.Type{ .primitive = kind },
             .payload = .{ .const_value = value },
         });
     }
@@ -377,9 +376,9 @@ pub const Parser = struct {
         if (c == '-' or std.ascii.isDigit(c)) return self.parseNumeric(false);
         const start = self.pos;
         const w = self.wordToken() orelse return self.fail("bad literal");
-        if (std.mem.eql(u8, w, "true")) return .{ .value = .{ .bool = true }, .ty = cfg.Type{ .primitive = .bool } };
-        if (std.mem.eql(u8, w, "false")) return .{ .value = .{ .bool = false }, .ty = cfg.Type{ .primitive = .bool } };
-        if (std.mem.eql(u8, w, "void")) return .{ .value = .void, .ty = cfg.Type{ .primitive = .void } };
+        if (std.mem.eql(u8, w, "true")) return .{ .value = .{ .bool = true }, .ty = meta.Type{ .primitive = .bool } };
+        if (std.mem.eql(u8, w, "false")) return .{ .value = .{ .bool = false }, .ty = meta.Type{ .primitive = .bool } };
+        if (std.mem.eql(u8, w, "void")) return .{ .value = .void, .ty = meta.Type{ .primitive = .void } };
         self.pos = start;
         return self.fail("bad literal");
     }
@@ -407,7 +406,7 @@ pub const Parser = struct {
                 try buf.append(self.arena, ch);
             }
         }
-        return .{ .value = .{ .string = try buf.toOwnedSlice(self.arena) }, .ty = cfg.Type{ .primitive = .str } };
+        return .{ .value = .{ .string = try buf.toOwnedSlice(self.arena) }, .ty = meta.Type{ .primitive = .str } };
     }
 
     /// `[-]?digits[.digits](i32|i64|u32|u64|f32|f64)`, hex allowed. The
@@ -448,15 +447,15 @@ pub const Parser = struct {
             const f: f64 = std.fmt.parseFloat(f64, core) catch return self.fail("bad float literal");
             if (suffix.len == 0) {
                 if (!allow_bare) return self.fail("numeric literal missing type suffix");
-                return .{ .value = .{ .float = if (neg) -f else f }, .ty = cfg.Type{ .primitive = .float64 } };
+                return .{ .value = .{ .float = if (neg) -f else f }, .ty = meta.Type{ .primitive = .float64 } };
             }
-            const kind: ast.PrimitiveKind = if (std.mem.eql(u8, suffix, "f32"))
+            const kind: meta.PrimitiveKind = if (std.mem.eql(u8, suffix, "f32"))
                 .float32
             else if (std.mem.eql(u8, suffix, "f64"))
                 .float64
             else
                 return self.fail("bad float literal suffix");
-            return .{ .value = .{ .float = if (neg) -f else f }, .ty = cfg.Type{ .primitive = kind } };
+            return .{ .value = .{ .float = if (neg) -f else f }, .ty = meta.Type{ .primitive = kind } };
         }
         const magnitude = std.fmt.parseInt(u64, core, 0) catch return self.fail("bad integer literal");
         if (suffix.len == 0) {
@@ -465,12 +464,12 @@ pub const Parser = struct {
                 if (magnitude > @as(u64, @bitCast(@as(i64, std.math.minInt(i64))))) {
                     return self.fail("integer literal out of range");
                 }
-                return .{ .value = .{ .int = -@as(i64, @intCast(magnitude)) }, .ty = cfg.Type{ .primitive = .int64 } };
+                return .{ .value = .{ .int = -@as(i64, @intCast(magnitude)) }, .ty = meta.Type{ .primitive = .int64 } };
             }
             if (magnitude > std.math.maxInt(i64)) return self.fail("integer literal out of range");
-            return .{ .value = .{ .int = @intCast(magnitude) }, .ty = cfg.Type{ .primitive = .int64 } };
+            return .{ .value = .{ .int = @intCast(magnitude) }, .ty = meta.Type{ .primitive = .int64 } };
         }
-        const kind: ast.PrimitiveKind = if (std.mem.eql(u8, suffix, "i32"))
+        const kind: meta.PrimitiveKind = if (std.mem.eql(u8, suffix, "i32"))
             .int32
         else if (std.mem.eql(u8, suffix, "i64"))
             .int64
@@ -490,32 +489,32 @@ pub const Parser = struct {
                 if (suffix[1] == '3' and (v < std.math.minInt(i32) or v > std.math.maxInt(i32))) {
                     return self.fail("integer literal out of range");
                 }
-                return .{ .value = .{ .int = v }, .ty = cfg.Type{ .primitive = kind } };
+                return .{ .value = .{ .int = v }, .ty = meta.Type{ .primitive = kind } };
             }
             if (suffix[1] == '6') {
                 if (magnitude > std.math.maxInt(i64)) return self.fail("integer literal out of range");
-                return .{ .value = .{ .int = @intCast(magnitude) }, .ty = cfg.Type{ .primitive = kind } };
+                return .{ .value = .{ .int = @intCast(magnitude) }, .ty = meta.Type{ .primitive = kind } };
             }
             if (magnitude > std.math.maxInt(i32)) return self.fail("integer literal out of range");
-            return .{ .value = .{ .int = @intCast(magnitude) }, .ty = cfg.Type{ .primitive = kind } };
+            return .{ .value = .{ .int = @intCast(magnitude) }, .ty = meta.Type{ .primitive = kind } };
         }
         // unsigned
         if (neg) return self.fail("negative unsigned literal");
         if (suffix[1] == '3') {
             if (magnitude > std.math.maxInt(u32)) return self.fail("integer literal out of range");
-            return .{ .value = .{ .int = @intCast(magnitude) }, .ty = cfg.Type{ .primitive = kind } };
+            return .{ .value = .{ .int = @intCast(magnitude) }, .ty = meta.Type{ .primitive = kind } };
         }
-        return .{ .value = .{ .int = @bitCast(magnitude) }, .ty = cfg.Type{ .primitive = kind } };
+        return .{ .value = .{ .int = @bitCast(magnitude) }, .ty = meta.Type{ .primitive = kind } };
     }
 
     // -- types (hir.md §4.5) -------------------------------------------------
 
-    fn parseType(self: *Parser) ParseError!cfg.Type {
+    fn parseType(self: *Parser) ParseError!meta.Type {
         try self.skipWs();
         const c = self.peek();
         if (c == '(') {
             _ = self.advance();
-            var elems: std.ArrayList(cfg.Type) = .empty;
+            var elems: std.ArrayList(meta.Type) = .empty;
             if (try self.atByte(')')) {
                 _ = self.advance();
             } else {
@@ -535,7 +534,7 @@ pub const Parser = struct {
             _ = self.advance();
             const inner = try self.parseType();
             try self.expectByte(']');
-            const ptr = try self.arena.create(cfg.Type);
+            const ptr = try self.arena.create(meta.Type);
             ptr.* = inner;
             return .{ .list = ptr };
         }
@@ -543,11 +542,11 @@ pub const Parser = struct {
         const w = self.wordToken() orelse return self.fail("expected type");
         if (std.mem.eql(u8, w, "fn")) {
             try self.expectByte('(');
-            var params: std.ArrayList(cfg.Param) = .empty;
+            var params: std.ArrayList(meta.Param) = .empty;
             if (!(try self.atByte(')'))) {
                 while (true) {
                     const pt = try self.parseType();
-                    try params.append(self.arena, cfg.syntheticParam(fake_span, .plain, pt));
+                    try params.append(self.arena, meta.syntheticParam(fake_span, .plain, pt));
                     if (try self.atByte(',')) {
                         _ = self.advance();
                         continue;
@@ -558,11 +557,11 @@ pub const Parser = struct {
             try self.expectByte(')');
             try self.expectWord("->");
             const ret = try self.parseType();
-            const ret_ptr = try self.arena.create(cfg.Type);
+            const ret_ptr = try self.arena.create(meta.Type);
             ret_ptr.* = ret;
             return .{ .function = .{ .params = try params.toOwnedSlice(self.arena), .ret = ret_ptr } };
         }
-        if (primByWord(w)) |k| return cfg.Type{ .primitive = k };
+        if (primByWord(w)) |k| return meta.Type{ .primitive = k };
         // Nominal type: resolve the dotted name through the SerCtx decls.
         self.pos = start;
         const path = self.wordToken() orelse return self.fail("expected nominal type");
@@ -580,7 +579,7 @@ pub const Parser = struct {
             }
         }
         if (id == self.ctx.types.len) return self.fail("unknown nominal type");
-        var args: std.ArrayList(cfg.Type) = .empty;
+        var args: std.ArrayList(meta.Type) = .empty;
         if (try self.atByte('[')) {
             _ = self.advance();
             if (!(try self.atByte(']'))) {
@@ -603,7 +602,7 @@ pub const Parser = struct {
 
     const BinderDecl = struct {
         text_no: u32,
-        ty: cfg.Type,
+        ty: meta.Type,
         mode: hir.BinderMode,
         binder: hir.BinderId,
     };
@@ -666,7 +665,7 @@ pub const Parser = struct {
         if (std.mem.eql(u8, w, "match")) return self.parseMatch();
         if (std.mem.eql(u8, w, "call")) return self.parseCall();
         if (std.mem.eql(u8, w, "panic")) {
-            return self.program.addExpr(.{ .op = try self.opId("panic"), .ty = cfg.Type{ .primitive = .never } });
+            return self.program.addExpr(.{ .op = try self.opId("panic"), .ty = meta.Type{ .primitive = .never } });
         }
         if (std.mem.eql(u8, w, "fnref")) return self.parseFnRef();
         if (std.mem.eql(u8, w, "module")) return self.parseModuleConst();
@@ -714,7 +713,7 @@ pub const Parser = struct {
         const annotated = std.mem.eql(u8, name, "num_cast") or
             std.mem.eql(u8, name, "any_cast") or
             (std.mem.eql(u8, name, "list_make") and ops.items.len == 0);
-        var ty: cfg.Type = undefined;
+        var ty: meta.Type = undefined;
         if (annotated) {
             try self.expectByte(':');
             ty = try self.parseType();
@@ -727,7 +726,7 @@ pub const Parser = struct {
 
     /// Result type derived from opcode + operands (used when the node is
     /// not type-annotated in text).
-    fn opResultType(self: *Parser, name: []const u8, desc: hir.OpDescriptor, ops: []const hir.ExprId) ParseError!cfg.Type {
+    fn opResultType(self: *Parser, name: []const u8, desc: hir.OpDescriptor, ops: []const hir.ExprId) ParseError!meta.Type {
         const p = &self.program;
         if (desc.typed) return desc.rep.?.toCfgType();
         if (std.mem.eql(u8, name, "seq")) {
@@ -737,14 +736,14 @@ pub const Parser = struct {
         if (std.mem.eql(u8, name, "move") or std.mem.eql(u8, name, "borrow") or std.mem.eql(u8, name, "drop")) {
             return p.node(ops[0]).ty;
         }
-        if (std.mem.eql(u8, name, "any_pack")) return cfg.Type{ .primitive = .any };
+        if (std.mem.eql(u8, name, "any_pack")) return meta.Type{ .primitive = .any };
         if (std.mem.eql(u8, name, "tuple_make")) {
-            const elems = try self.arena.alloc(cfg.Type, ops.len);
+            const elems = try self.arena.alloc(meta.Type, ops.len);
             for (ops, 0..) |o, i| elems[i] = p.node(o).ty;
             return .{ .tuple = elems };
         }
         if (std.mem.eql(u8, name, "list_make")) {
-            const ptr = try self.arena.create(cfg.Type);
+            const ptr = try self.arena.create(meta.Type);
             ptr.* = p.node(ops[0]).ty;
             return .{ .list = ptr };
         }
@@ -845,24 +844,24 @@ pub const Parser = struct {
         try self.expectArrow();
         try self.openRegion();
         var params: std.ArrayList(hir.BinderId) = .empty;
-        var fn_params: std.ArrayList(cfg.Param) = .empty;
+        var fn_params: std.ArrayList(meta.Param) = .empty;
         for (binds.items) |b| {
             try self.declare(b.text_no, b.binder);
             try params.append(self.arena, b.binder);
-            const mode: ast.ParamMode = switch (b.mode) {
+            const mode: meta.ParamMode = switch (b.mode) {
                 .value => .plain,
                 .move => .move,
                 .borrow => .borrow,
             };
-            try fn_params.append(self.arena, cfg.syntheticParam(fake_span, mode, b.ty));
+            try fn_params.append(self.arena, meta.syntheticParam(fake_span, mode, b.ty));
         }
         const body = try self.parseExpr();
         try self.closeRegion();
         const region = try self.program.addRegion(params.items, body, null);
         const regions = try self.program.addRegions(&.{region});
-        const ret_ptr = try self.arena.create(cfg.Type);
+        const ret_ptr = try self.arena.create(meta.Type);
         ret_ptr.* = self.program.node(body).ty;
-        const fn_ty = cfg.Type{ .function = .{ .params = try fn_params.toOwnedSlice(self.arena), .ret = ret_ptr } };
+        const fn_ty = meta.Type{ .function = .{ .params = try fn_params.toOwnedSlice(self.arena), .ret = ret_ptr } };
         return self.program.addExpr(.{
             .op = try self.opId("lambda"),
             .ty = fn_ty,
@@ -937,7 +936,7 @@ pub const Parser = struct {
 
     const Arm = struct { region: hir.RegionId, body: hir.ExprId };
 
-    fn parseArm(self: *Parser, scrutinee_ty: cfg.Type) ParseError!Arm {
+    fn parseArm(self: *Parser, scrutinee_ty: meta.Type) ParseError!Arm {
         var params: std.ArrayList(hir.BinderId) = .empty;
         var pattern_id: ?hir.PatternId = null;
         var body: hir.ExprId = undefined;
@@ -1009,7 +1008,7 @@ pub const Parser = struct {
     /// leaves declare their text name (visible to the arm body — the arm
     /// is inside an open region frame) and append to `params` in text
     /// order: those are the arm region's params (§5.4).
-    fn parsePatternFor(self: *Parser, sub_ty: cfg.Type, params: *std.ArrayList(hir.BinderId)) ParseError!hir.PatternId {
+    fn parsePatternFor(self: *Parser, sub_ty: meta.Type, params: *std.ArrayList(hir.BinderId)) ParseError!hir.PatternId {
         try self.skipWs();
         const c = self.peek();
         if (c == '_') {
@@ -1127,7 +1126,7 @@ pub const Parser = struct {
     }
 
     /// The discriminant (decl index) of variant `name` in a union decl.
-    fn variantTag(self: *Parser, named: cfg.Type.Named, name: []const u8) ParseError!u32 {
+    fn variantTag(self: *Parser, named: meta.Type.Named, name: []const u8) ParseError!u32 {
         const decl = self.ctxDecl(named.id) orelse return self.fail("nominal type outside serialization context");
         if (decl != .union_) return self.fail("variant pattern on a non-union nominal type");
         for (decl.union_.variants, 0..) |v, i| {
@@ -1139,7 +1138,7 @@ pub const Parser = struct {
     /// The concrete payload subtype of variant `tag` of the scrutinee
     /// instantiation (type params substituted), or null for a payload-less
     /// variant.
-    fn variantPayloadTy(self: *Parser, named: cfg.Type.Named, tag: u32, vname: []const u8) ParseError!?cfg.Type {
+    fn variantPayloadTy(self: *Parser, named: meta.Type.Named, tag: u32, vname: []const u8) ParseError!?meta.Type {
         const decl = (self.ctxDecl(named.id) orelse return self.fail("nominal type outside serialization context")).union_;
         if (tag >= decl.variants.len or !std.mem.eql(u8, decl.variants[tag].name, vname)) {
             return self.fail("variant index/name mismatch");
@@ -1147,14 +1146,14 @@ pub const Parser = struct {
         const payloads = decl.variants[tag].payloads;
         if (payloads.len == 0) return null;
         if (payloads.len == 1) {
-            return cfg.substParams(self.arena, decl.type_params, named.args, payloads[0]);
+            return meta.substParams(self.arena, decl.type_params, named.args, payloads[0]);
         }
-        const tys = try self.arena.alloc(cfg.Type, payloads.len);
-        for (payloads, 0..) |pt, i| tys[i] = cfg.substParams(self.arena, decl.type_params, named.args, pt);
+        const tys = try self.arena.alloc(meta.Type, payloads.len);
+        for (payloads, 0..) |pt, i| tys[i] = meta.substParams(self.arena, decl.type_params, named.args, pt);
         return .{ .tuple = tys };
     }
 
-    fn parseStructPattern(self: *Parser, named: cfg.Type.Named, params: *std.ArrayList(hir.BinderId)) ParseError!hir.PatternId {
+    fn parseStructPattern(self: *Parser, named: meta.Type.Named, params: *std.ArrayList(hir.BinderId)) ParseError!hir.PatternId {
         const decl = (self.ctxDecl(named.id) orelse return self.fail("nominal type outside serialization context")).struct_;
         try self.expectByte('{');
         var fields: std.ArrayList(hir.Pattern.FieldPattern) = .empty;
@@ -1170,7 +1169,7 @@ pub const Parser = struct {
                     return self.fail("struct field shorthand is not serializable; write `field: pattern`");
                 }
                 _ = self.advance();
-                const field_ty = cfg.substParams(self.arena, decl.type_params, named.args, decl.fields[index.?].type_);
+                const field_ty = meta.substParams(self.arena, decl.type_params, named.args, decl.fields[index.?].type_);
                 const child = try self.parsePatternFor(field_ty, params);
                 try fields.append(self.arena, .{ .field = @intCast(index.?), .pat = child });
                 if (try self.atByte(',')) {
@@ -1184,7 +1183,7 @@ pub const Parser = struct {
         return self.program.addPattern(.{ .struct_ = .{ .fields = try fields.toOwnedSlice(self.arena) } });
     }
 
-    fn ctxDecl(self: *Parser, id: cfg.TypeId) ?cfg.TypeDecl {
+    fn ctxDecl(self: *Parser, id: meta.TypeId) ?meta.TypeDecl {
         if (id >= self.ctx.types.len) return null;
         return self.ctx.types[id];
     }

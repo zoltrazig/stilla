@@ -1,7 +1,7 @@
 //! Pass: module-scope const type inference and generic specialization —
 //! checker.md, Expression inference — Generic expansion.
 //! In: `Resolve` view + `from` module + `ast.Expr` / function signature.
-//! Out: the inferred `cfg.Type` of a module-constant initializer, the
+//! Out: the inferred `meta.Type` of a module-constant initializer, the
 //! module value member behind a dotted path (with or without its owning
 //! module), and a specialized generic (host-binding) signature.
 //!
@@ -14,7 +14,7 @@
 
 const std = @import("std");
 const ast = @import("stilla").ast;
-const cfg = @import("stilla").cfg;
+const meta = @import("stilla").meta;
 const moduleinfo = @import("stilla").moduleinfo;
 const type_resolve = @import("type_resolve.zig");
 const type_shape = @import("type_shape.zig");
@@ -26,7 +26,7 @@ const Resolve = type_resolve.Resolve;
 /// Infer the type of a module-level constant initializer. Only module
 /// scope is in play (no locals): paths resolve against the module's value
 /// members, imports, and aliases. Returns null when not inferable.
-pub fn inferExprType(resolve: Resolve, from: *ModuleInfo, e: *const ast.Expr) ?cfg.Type {
+pub fn inferExprType(resolve: Resolve, from: *ModuleInfo, e: *const ast.Expr) ?meta.Type {
     return switch (e.*) {
         .int => .{ .primitive = .int32 },
         .float => .{ .primitive = .float32 },
@@ -37,7 +37,7 @@ pub fn inferExprType(resolve: Resolve, from: *ModuleInfo, e: *const ast.Expr) ?c
         .path => |p| inferPathType(resolve, from, &p),
         .paren => |p| inferExprType(resolve, from, p.inner),
         .tuple => |t| blk: {
-            var elems = std.ArrayList(cfg.Type).empty;
+            var elems = std.ArrayList(meta.Type).empty;
             for (t.elems) |*el| {
                 const et = inferExprType(resolve, from, el) orelse break :blk null;
                 elems.append(resolve.arena, et) catch break :blk null;
@@ -48,8 +48,8 @@ pub fn inferExprType(resolve: Resolve, from: *ModuleInfo, e: *const ast.Expr) ?c
             const elem_t = if (l.elems.len > 0)
                 inferExprType(resolve, from, &l.elems[0]) orelse break :blk null
             else
-                cfg.Type{ .primitive = .int32 };
-            const ptr = resolve.arena.create(cfg.Type) catch break :blk null;
+                meta.Type{ .primitive = .int32 };
+            const ptr = resolve.arena.create(meta.Type) catch break :blk null;
             ptr.* = elem_t;
             break :blk .{ .list = ptr };
         },
@@ -91,7 +91,7 @@ pub fn inferExprType(resolve: Resolve, from: *ModuleInfo, e: *const ast.Expr) ?c
     };
 }
 
-fn inferPathType(resolve: Resolve, from: *ModuleInfo, p: *const ast.PathExpr) ?cfg.Type {
+fn inferPathType(resolve: Resolve, from: *ModuleInfo, p: *const ast.PathExpr) ?meta.Type {
     if (p.tail != .none) {
         // Struct or union-variant construction: the path is a type name.
         const name = type_resolve.joinPath(resolve.arena, p.path) orelse return null;
@@ -105,7 +105,7 @@ fn inferPathType(resolve: Resolve, from: *ModuleInfo, p: *const ast.PathExpr) ?c
 
 /// Resolve a dotted value path to the module value member it names
 /// (`math.sqrt`, `app.greeting`, chained module values).
-pub fn resolvePathMember(resolve: Resolve, from: *ModuleInfo, path: []const ast.Ident) ?*const ValueMember {
+pub fn resolvePathMember(resolve: Resolve, from: *ModuleInfo, path: []const meta.Ident) ?*const ValueMember {
     if (path.len == 1) {
         return from.valueMember(path[0].text);
     }
@@ -126,7 +126,7 @@ pub const PathTarget = struct {
     module: *ModuleInfo,
 };
 
-pub fn resolvePathTarget(resolve: Resolve, from: *ModuleInfo, path: []const ast.Ident) ?PathTarget {
+pub fn resolvePathTarget(resolve: Resolve, from: *ModuleInfo, path: []const meta.Ident) ?PathTarget {
     if (path.len == 1) {
         const vm = from.valueMember(path[0].text) orelse return null;
         return .{ .vm = vm, .module = from };
@@ -142,13 +142,13 @@ pub fn resolvePathTarget(resolve: Resolve, from: *ModuleInfo, path: []const ast.
     return .{ .vm = vm, .module = mod };
 }
 
-fn inferBlockType(resolve: Resolve, from: *ModuleInfo, b: *const ast.Block) ?cfg.Type {
+fn inferBlockType(resolve: Resolve, from: *ModuleInfo, b: *const ast.Block) ?meta.Type {
     if (b.result) |*r| return inferExprType(resolve, from, r);
     return .{ .primitive = .void };
 }
 
-fn lambdaType(resolve: Resolve, from: *ModuleInfo, lam: *const ast.Lambda) ?cfg.Type {
-    var params = std.ArrayList(cfg.Param).empty;
+fn lambdaType(resolve: Resolve, from: *ModuleInfo, lam: *const ast.Lambda) ?meta.Type {
+    var params = std.ArrayList(meta.Param).empty;
     for (lam.params) |p| {
         const t = type_resolve.resolveType(resolve, from, &p.type_) orelse return null;
         params.append(resolve.arena, .{
@@ -161,7 +161,7 @@ fn lambdaType(resolve: Resolve, from: *ModuleInfo, lam: *const ast.Lambda) ?cfg.
     // A lambda declares its return type (Core §6.3): it is resolved, never
     // inferred from the body.
     const ret = type_resolve.resolveType(resolve, from, &lam.ret) orelse return null;
-    const ret_ptr = resolve.arena.create(cfg.Type) catch return null;
+    const ret_ptr = resolve.arena.create(meta.Type) catch return null;
     ret_ptr.* = ret;
     return .{ .function = .{
         .params = params.toOwnedSlice(resolve.arena) catch return null,
@@ -169,7 +169,7 @@ fn lambdaType(resolve: Resolve, from: *ModuleInfo, lam: *const ast.Lambda) ?cfg.
     } };
 }
 
-fn inferBinaryType(resolve: Resolve, from: *ModuleInfo, b: *const ast.Binary) ?cfg.Type {
+fn inferBinaryType(resolve: Resolve, from: *ModuleInfo, b: *const ast.Binary) ?meta.Type {
     switch (b.op) {
         .or_, .and_, .eq, .ne, .lt, .le, .gt, .ge => return .{ .primitive = .bool },
         else => {},
@@ -187,7 +187,7 @@ fn inferBinaryType(resolve: Resolve, from: *ModuleInfo, b: *const ast.Binary) ?c
 /// The return type of a call, from the callee's resolved signature.
 /// Generic (host) bindings are specialized from the argument types
 /// (checker.md, Generic expansion; the syscall carries the concrete signature).
-fn callReturnType(resolve: Resolve, from: *ModuleInfo, c: *const ast.Call) ?cfg.Type {
+fn callReturnType(resolve: Resolve, from: *ModuleInfo, c: *const ast.Call) ?meta.Type {
     var callee = c.callee;
     while (true) switch (callee.*) {
         .specialize => |s| callee = s.operand,
@@ -199,7 +199,7 @@ fn callReturnType(resolve: Resolve, from: *ModuleInfo, c: *const ast.Call) ?cfg.
             const vm = resolvePathMember(resolve, from, p.path) orelse return null;
             const sig = vm.type_;
             if (sig != .function) return null;
-            var arg_types = std.ArrayList(cfg.Type).empty;
+            var arg_types = std.ArrayList(meta.Type).empty;
             for (c.args) |*arg| {
                 const at = inferExprType(resolve, from, arg) orelse return null;
                 arg_types.append(resolve.arena, at) catch return null;
@@ -222,7 +222,7 @@ fn callReturnType(resolve: Resolve, from: *ModuleInfo, c: *const ast.Call) ?cfg.
 /// True when the named type string denotes an unresolved name in `from` —
 /// the signature of a generic binding uses such names for its type
 /// parameters (`list[T]`, `fn(move A) -> B`).
-fn isTypeVar(resolve: Resolve, from: *ModuleInfo, t: cfg.Type) bool {
+fn isTypeVar(resolve: Resolve, from: *ModuleInfo, t: meta.Type) bool {
     _ = resolve;
     _ = from;
     return switch (t) {
@@ -242,10 +242,10 @@ fn isTypeVar(resolve: Resolve, from: *ModuleInfo, t: cfg.Type) bool {
 pub fn specializeSignature(
     resolve: Resolve,
     from: *ModuleInfo,
-    sig: cfg.FunctionType,
-    arg_types: []const cfg.Type,
-) cfg.Type {
-    var env = std.StringHashMapUnmanaged(cfg.Type).empty;
+    sig: meta.FunctionType,
+    arg_types: []const meta.Type,
+) meta.Type {
+    var env = std.StringHashMapUnmanaged(meta.Type).empty;
     _ = bindTypeArgs(resolve, from, sig, arg_types, &env);
     return substSignature(resolve, from, sig, &env);
 }
@@ -258,9 +258,9 @@ pub fn specializeSignature(
 pub fn bindTypeArgs(
     resolve: Resolve,
     from: *ModuleInfo,
-    sig: cfg.FunctionType,
-    arg_types: []const cfg.Type,
-    env: *std.StringHashMapUnmanaged(cfg.Type),
+    sig: meta.FunctionType,
+    arg_types: []const meta.Type,
+    env: *std.StringHashMapUnmanaged(meta.Type),
 ) bool {
     var ok = true;
     const count = @min(sig.params.len, arg_types.len);
@@ -276,11 +276,11 @@ pub fn bindTypeArgs(
 pub fn substSignature(
     resolve: Resolve,
     from: *ModuleInfo,
-    sig: cfg.FunctionType,
-    env: *const std.StringHashMapUnmanaged(cfg.Type),
-) cfg.Type {
+    sig: meta.FunctionType,
+    env: *const std.StringHashMapUnmanaged(meta.Type),
+) meta.Type {
     if (env.count() == 0) return .{ .function = sig };
-    var params = std.ArrayList(cfg.Param).empty;
+    var params = std.ArrayList(meta.Param).empty;
     for (sig.params) |p| {
         params.append(resolve.arena, .{
             .span = p.span,
@@ -289,7 +289,7 @@ pub fn substSignature(
             .type_ = substType(resolve, from, p.type_, env),
         }) catch return .{ .function = sig };
     }
-    const ret_ptr = resolve.arena.create(cfg.Type) catch return .{ .function = sig };
+    const ret_ptr = resolve.arena.create(meta.Type) catch return .{ .function = sig };
     ret_ptr.* = substType(resolve, from, sig.ret.*, env);
     return .{ .function = .{ .params = params.toOwnedSlice(resolve.arena) catch return .{ .function = sig }, .ret = ret_ptr } };
 }
@@ -300,11 +300,11 @@ pub fn substSignature(
 pub fn specializeSignatureExplicit(
     resolve: Resolve,
     from: *ModuleInfo,
-    type_params: []const ast.Ident,
-    args: []const cfg.Type,
-    sig: cfg.FunctionType,
-) cfg.Type {
-    var env = std.StringHashMapUnmanaged(cfg.Type).empty;
+    type_params: []const meta.Ident,
+    args: []const meta.Type,
+    sig: meta.FunctionType,
+) meta.Type {
+    var env = std.StringHashMapUnmanaged(meta.Type).empty;
     const count = @min(type_params.len, args.len);
     for (type_params[0..count], args[0..count]) |tp, a| {
         env.put(resolve.arena, tp.text, a) catch {};
@@ -315,14 +315,14 @@ pub fn specializeSignatureExplicit(
 pub fn unifyType(
     resolve: Resolve,
     from: *ModuleInfo,
-    pat: cfg.Type,
-    arg: cfg.Type,
-    env: *std.StringHashMapUnmanaged(cfg.Type),
+    pat: meta.Type,
+    arg: meta.Type,
+    env: *std.StringHashMapUnmanaged(meta.Type),
 ) bool {
     return switch (pat) {
         .param => |n| {
             // A type parameter: always a type variable (consistency-checked).
-            if (env.get(n)) |prev| return cfg.Type.eql(prev, arg);
+            if (env.get(n)) |prev| return meta.Type.eql(prev, arg);
             env.put(resolve.arena, n, arg) catch return false;
             return true;
         },
@@ -373,11 +373,11 @@ pub fn unifyType(
             },
             else => false,
         },
-        else => cfg.Type.eql(pat, arg),
+        else => meta.Type.eql(pat, arg),
     };
 }
 
-fn substType(resolve: Resolve, from: *ModuleInfo, t: cfg.Type, env: *const std.StringHashMapUnmanaged(cfg.Type)) cfg.Type {
+fn substType(resolve: Resolve, from: *ModuleInfo, t: meta.Type, env: *const std.StringHashMapUnmanaged(meta.Type)) meta.Type {
     return switch (t) {
         .param => |n| if (env.get(n)) |r| return r else return t,
         .named => |n| blk: {
@@ -385,53 +385,53 @@ fn substType(resolve: Resolve, from: *ModuleInfo, t: cfg.Type, env: *const std.S
             // instantiation (`HashMap[K, V]` → `HashMap[str, int32]`).
             if (n.args.len == 0) break :blk t;
             var changed = false;
-            const out = resolve.arena.alloc(cfg.Type, n.args.len) catch break :blk t;
+            const out = resolve.arena.alloc(meta.Type, n.args.len) catch break :blk t;
             for (n.args, 0..) |a, i| {
                 out[i] = substType(resolve, from, a, env);
-                if (!cfg.Type.eql(out[i], a)) changed = true;
+                if (!meta.Type.eql(out[i], a)) changed = true;
             }
             if (!changed) break :blk t;
             break :blk .{ .named = .{ .id = n.id, .args = out } };
         },
         .list => |inner| blk: {
             const sub = substType(resolve, from, inner.*, env);
-            if (cfg.Type.eql(sub, inner.*)) break :blk t;
-            const ptr = resolve.arena.create(cfg.Type) catch break :blk t;
+            if (meta.Type.eql(sub, inner.*)) break :blk t;
+            const ptr = resolve.arena.create(meta.Type) catch break :blk t;
             ptr.* = sub;
-            break :blk cfg.Type{ .list = ptr };
+            break :blk meta.Type{ .list = ptr };
         },
         .box => |inner| blk: {
             const sub = substType(resolve, from, inner.*, env);
-            if (cfg.Type.eql(sub, inner.*)) break :blk t;
-            const ptr = resolve.arena.create(cfg.Type) catch break :blk t;
+            if (meta.Type.eql(sub, inner.*)) break :blk t;
+            const ptr = resolve.arena.create(meta.Type) catch break :blk t;
             ptr.* = sub;
-            break :blk cfg.Type{ .box = ptr };
+            break :blk meta.Type{ .box = ptr };
         },
         .tuple => |elems| blk: {
             var changed = false;
-            var out = std.ArrayList(cfg.Type).empty;
+            var out = std.ArrayList(meta.Type).empty;
             for (elems) |e| {
                 const sub = substType(resolve, from, e, env);
-                if (!cfg.Type.eql(sub, e)) changed = true;
+                if (!meta.Type.eql(sub, e)) changed = true;
                 out.append(resolve.arena, sub) catch break :blk t;
             }
             if (!changed) break :blk t;
-            break :blk cfg.Type{ .tuple = out.items };
+            break :blk meta.Type{ .tuple = out.items };
         },
         .function => |ft| blk: {
             var changed = false;
-            var params = std.ArrayList(cfg.Param).empty;
+            var params = std.ArrayList(meta.Param).empty;
             for (ft.params) |p| {
                 const sub = substType(resolve, from, p.type_, env);
-                if (!cfg.Type.eql(sub, p.type_)) changed = true;
+                if (!meta.Type.eql(sub, p.type_)) changed = true;
                 params.append(resolve.arena, .{ .span = p.span, .name = p.name, .mode = p.mode, .type_ = sub }) catch break :blk t;
             }
             const rsub = substType(resolve, from, ft.ret.*, env);
-            if (!cfg.Type.eql(rsub, ft.ret.*)) changed = true;
+            if (!meta.Type.eql(rsub, ft.ret.*)) changed = true;
             if (!changed) break :blk t;
-            const ret_ptr = resolve.arena.create(cfg.Type) catch break :blk t;
+            const ret_ptr = resolve.arena.create(meta.Type) catch break :blk t;
             ret_ptr.* = rsub;
-            break :blk cfg.Type{ .function = .{ .params = params.items, .ret = ret_ptr } };
+            break :blk meta.Type{ .function = .{ .params = params.items, .ret = ret_ptr } };
         },
         else => t,
     };

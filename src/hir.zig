@@ -26,12 +26,12 @@
 //! Documented layout choices where the target schema (hir.md §3) leaves a
 //! degree of freedom:
 //!
-//! - **Types are `cfg.Type` values, inline** (`ExprNode.ty`, `Binder.ty`).
+//! - **Types are `meta.Type` values, inline** (`ExprNode.ty`, `Binder.ty`).
 //!   The thin canonical `HIRTypeId` table of hir.md §3.8 is a *Target*
 //!   form (SEG needs O(1) type equality) and is deliberately absent in
-//!   M1a — no second type world (cfg.Type stays the ground truth that
-//!   emits to AIR/LLIR). `cfg.TypeId` remains only the nominal-declaration
-//!   id inside `cfg.Type.named`.
+//!   M1a — no second type world (meta.Type stays the ground truth that
+//!   emits to AIR/LLIR). `meta.TypeId` remains only the nominal-declaration
+//!   id inside `meta.Type.named`.
 //! - **Op-specific data rides a typed `ExprNode.payload`** (constants,
 //!   `local` binder ids, resolved `fn_ref`/`module_const` references,
 //!   field indices, variant tags). `ExprNode` stays a generic node — this
@@ -47,7 +47,7 @@
 //!   none); the span side table arrives with the AST builder (S4).
 
 const std = @import("std");
-const cfg = @import("cfg.zig");
+const meta = @import("meta.zig");
 /// The effect-semantics model (docs/effects.md §5) — M1b. The HIR owns
 /// the *interned* summaries (`Program`); the model itself is pass-free.
 pub const effects = @import("effects.zig");
@@ -136,7 +136,7 @@ pub const BinderMode = enum {
 };
 
 pub const Binder = struct {
-    ty: cfg.Type,
+    ty: meta.Type,
     mode: BinderMode = .value,
     // hir.md §3.4 `source` (diagnostic binding ref) arrives with the
     // AST builder.
@@ -159,9 +159,9 @@ pub const Region = struct {
 
 pub const ExprNode = struct {
     op: OpId,
-    /// The monomorphic result type — an inline `cfg.Type` (see header:
+    /// The monomorphic result type — an inline `meta.Type` (see header:
     /// no HIR type interner in M1a, hir.md §3.8).
-    ty: cfg.Type,
+    ty: meta.Type,
     /// Operands: range into the expr buffer, source order (LTR).
     operands: Range = .{},
     /// Child regions: range into the region buffer.
@@ -203,9 +203,9 @@ pub const AccessHop = struct {
 /// the structural validator (S3) checks the pairing.
 pub const Payload = union(enum) {
     none,
-    /// `const` — typed literal (reuses `cfg.ConstValue`, so no second
+    /// `const` — typed literal (reuses `meta.ConstValue`, so no second
     /// literal representation; strings are arena-owned).
-    const_value: cfg.ConstValue,
+    const_value: meta.ConstValue,
     /// `local` — the referenced binder.
     binder: BinderId,
     /// `fn_ref` — resolved function / host-binding target.
@@ -252,7 +252,7 @@ pub const Pattern = union(enum) {
     /// Binding leaf: references one of the arm region's `params`
     /// (hir.md §5.4 — binding identity always goes through params).
     bind: BinderId,
-    literal: cfg.ConstValue,
+    literal: meta.ConstValue,
     tuple: []PatternId,
     list: ListPattern,
     struct_: StructPattern,
@@ -282,7 +282,7 @@ pub const Pattern = union(enum) {
     };
 
     pub const TypeTestPattern = struct {
-        ty: cfg.Type,
+        ty: meta.Type,
         bind: BinderId,
     };
 };
@@ -305,7 +305,7 @@ pub const ScalarRep = enum {
     bool,
     str,
 
-    pub fn toCfgType(self: ScalarRep) cfg.Type {
+    pub fn toCfgType(self: ScalarRep) meta.Type {
         return .{ .primitive = switch (self) {
             .byte => .byte,
             .i32 => .int32,
@@ -787,11 +787,11 @@ pub fn opId(name: []const u8) ?OpId {
 // real module tables in (same shape).
 
 pub const SerCtx = struct {
-    /// Nominal type declarations, indexed by `cfg.Type.Named.id`. The
+    /// Nominal type declarations, indexed by `meta.Type.Named.id`. The
     /// printer renders `.named` decl ids through this table (written
     /// name + type arguments); the parser resolves nominal type names
     /// and derives pattern-binder types through it.
-    types: []const cfg.TypeDecl = &.{},
+    types: []const meta.TypeDecl = &.{},
     /// Function targets, indexed by FuncId: stable semantic key (hir.md
     /// §4.8) and the function's monomorphic type (for `call` result
     /// types through a `fnref` callee).
@@ -801,9 +801,9 @@ pub const SerCtx = struct {
     /// Host bindings, indexed by HostBindingId.
     hosts: []const HostDecl = &.{},
 
-    pub const FuncDecl = struct { key: []const u8, type_: cfg.Type };
-    pub const ConstDecl = struct { key: []const u8, type_: cfg.Type };
-    pub const HostDecl = struct { key: []const u8, type_: cfg.Type };
+    pub const FuncDecl = struct { key: []const u8, type_: meta.Type };
+    pub const ConstDecl = struct { key: []const u8, type_: meta.Type };
+    pub const HostDecl = struct { key: []const u8, type_: meta.Type };
 };
 
 // ---------------------------------------------------------------------------
@@ -907,7 +907,7 @@ pub const Program = struct {
         return @intCast(self.regions.items.len - 1);
     }
 
-    pub fn addBinder(self: *Program, ty: cfg.Type, mode: BinderMode) !BinderId {
+    pub fn addBinder(self: *Program, ty: meta.Type, mode: BinderMode) !BinderId {
         try self.binders.append(self.arena, .{ .ty = ty, .mode = mode });
         return @intCast(self.binders.items.len - 1);
     }
@@ -1075,15 +1075,16 @@ pub const FuncRecord = struct {
     kind: FuncKind,
     module: u32,
     /// Function type: params (name/mode/type) + return type. Types are
-    /// resolved `cfg.Type`s; names are the written param names (used by
+    /// resolved `meta.Type`s; names are the written param names (used by
     /// the builder for lookup only).
-    params: []cfg.Param,
-    ret: cfg.Type,
+    params: []meta.Param,
+    ret: meta.Type,
     /// The body: a `lambda` node whose region params are the function's
     /// params (id 0.. are dense in this program).
     root: ExprId,
     /// The source span of the declaration (function name / λ / drop
-    /// decl); `ast.Span` is imported via cfg.ast — keep span light.
+    /// decl); kept as raw `u32` offsets rather than `meta.Span` — keep span
+    /// light.
     span_start: u32 = 0,
     span_end: u32 = 0,
     /// Emission position within the owning module: the index in the
@@ -1102,7 +1103,7 @@ pub const FuncRecord = struct {
 pub const ConstRecord = struct {
     name: []const u8,
     module: u32,
-    type_: cfg.Type,
+    type_: meta.Type,
     /// Index of this module's const in `BuiltProgram.consts` (dense).
     key: []const u8, // stable key for the text refs dictionary
     /// Non-null when the const has a Stilla initializer expression
@@ -1139,10 +1140,10 @@ pub const BuiltProgram = struct {
     funcs: std.ArrayListUnmanaged(FuncRecord) = .empty,
     consts: std.ArrayListUnmanaged(ConstRecord) = .empty,
     hosts: std.ArrayListUnmanaged(HostRecord) = .empty,
-    /// cfg.TypeDecl layout table indexed by cfg.TypeId — the real
+    /// meta.TypeDecl layout table indexed by meta.TypeId — the real
     /// nominal-type side table (same shape the SerCtx printer/parser
-    /// consume; cfg.TypeId is the ground truth for `.named` types).
-    types: []cfg.TypeDecl = &.{},
+    /// consume; meta.TypeId is the ground truth for `.named` types).
+    types: []meta.TypeDecl = &.{},
 
     /// Convenience: the serialization context over this built program's
     /// real tables. Call only after the build is complete (no further
@@ -1150,7 +1151,7 @@ pub const BuiltProgram = struct {
     /// each record's return type, and `consts`/`hosts`/`types` come from
     /// the frozen tables.
     pub fn serCtx(self: *const BuiltProgram) !SerCtx {
-        const rets = try self.arena.alloc(cfg.Type, self.funcs.items.len);
+        const rets = try self.arena.alloc(meta.Type, self.funcs.items.len);
         for (self.funcs.items, 0..) |f, i| rets[i] = f.ret;
         var funcs = std.ArrayList(SerCtx.FuncDecl).empty;
         for (self.funcs.items, 0..) |f, i| {
@@ -1179,7 +1180,7 @@ pub const BuiltProgram = struct {
 pub const HostRecord = struct {
     module: u32,
     name: []const u8,
-    signature: cfg.Type,
+    signature: meta.Type,
     key: []const u8,
 };
 
@@ -1215,8 +1216,8 @@ fn program() !Program {
     return Program.init(arena.allocator());
 }
 
-const ty_int = cfg.Type{ .primitive = .int32 };
-const ty_bool = cfg.Type{ .primitive = .bool };
+const ty_int = meta.Type{ .primitive = .int32 };
+const ty_bool = meta.Type{ .primitive = .bool };
 
 test "handles are fresh and flat ranges stay ordered across growth" {
     var arena = std.heap.ArenaAllocator.init(t.allocator);
@@ -1432,8 +1433,8 @@ test "registry: typed instances carry their scalar rep" {
     }
     // Distinct from core space and from each other.
     try t.expect(registry.id("add.i32").? != registry.id("add.u32").?);
-    // The rep maps to the cfg.Type the node will carry.
-    try t.expectEqual(cfg.Type{ .primitive = .uint64 }, ScalarRep.u64.toCfgType());
+    // The rep maps to the meta.Type the node will carry.
+    try t.expectEqual(meta.Type{ .primitive = .uint64 }, ScalarRep.u64.toCfgType());
 }
 
 test "registry: the M2a SEG island set carries `seg`, nothing else does" {

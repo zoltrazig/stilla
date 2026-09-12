@@ -7,7 +7,7 @@
 //! The two module-reference helpers both paths share survive here.
 
 const cfg = @import("stilla").cfg;
-const ast = @import("stilla").ast;
+const meta = @import("stilla").meta;
 const lower = @import("stilla").lower;
 const cfg_lower_emit = @import("cfg_lower_emit.zig");
 
@@ -16,7 +16,7 @@ const FuncState = lower.FuncState;
 const LowerError = lower.LowerError;
 
 /// The function's own module reference, created once per function.
-pub fn selfModuleRef(self: *Lowerer, fs: *FuncState, span: ast.Span) LowerError!?*cfg.Value {
+pub fn selfModuleRef(self: *Lowerer, fs: *FuncState, span: meta.Span) LowerError!?*cfg.Value {
     if (fs.self_module) |v| return v;
     const v = try emitModuleRef(self, fs, span, fs.module.specifier);
     fs.self_module = v;
@@ -24,7 +24,7 @@ pub fn selfModuleRef(self: *Lowerer, fs: *FuncState, span: ast.Span) LowerError!
 }
 
 /// `module_ref "spec"` with module identity recorded.
-pub fn emitModuleRef(self: *Lowerer, fs: *FuncState, span: ast.Span, specifier: []const u8) LowerError!?*cfg.Value {
+pub fn emitModuleRef(self: *Lowerer, fs: *FuncState, span: meta.Span, specifier: []const u8) LowerError!?*cfg.Value {
     const v = try cfg_lower_emit.emit(self, fs, span, .{ .module_ref = specifier }, .module);
     if (v) |vv| {
         if (self.graph.module(specifier)) |target| try self.module_of.put(self.arena, vv, target);

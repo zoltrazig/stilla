@@ -1,6 +1,6 @@
-//! Pass: type resolution (ast.Type → cfg.Type) — checker.md, Type resolution.
+//! Pass: type resolution (ast.Type → meta.Type) — checker.md, Type resolution.
 //! In: `Resolve` view (arena + specifier → ModuleInfo map) and a `from`
-//! module. Out: a `cfg.Type` for a written `ast.Type`, module-member lookups
+//! module. Out: a `meta.Type` for a written `ast.Type`, module-member lookups
 //! for written names, alias chains to the underlying declaration, and the
 //! monomorphic signature of a function declaration.
 //!
@@ -18,7 +18,7 @@
 
 const std = @import("std");
 const ast = @import("stilla").ast;
-const cfg = @import("stilla").cfg;
+const meta = @import("stilla").meta;
 const moduleinfo = @import("stilla").moduleinfo;
 
 const ModuleInfo = moduleinfo.ModuleInfo;
@@ -60,8 +60,8 @@ pub fn resolveOf(graph: *ModuleGraph) Resolve {
     return .{ .arena = graph.arena, .by_specifier = &graph.by_specifier, .type_ids = &graph.type_interner };
 }
 
-/// pass-internal: join a dotted `ast.Ident` path into a dotted name string.
-pub fn joinPath(arena: std.mem.Allocator, path: []const ast.Ident) ?[]const u8 {
+/// pass-internal: join a dotted `meta.Ident` path into a dotted name string.
+pub fn joinPath(arena: std.mem.Allocator, path: []const meta.Ident) ?[]const u8 {
     var buf = std.ArrayList(u8).empty;
     for (path, 0..) |id, i| {
         if (i > 0) buf.append(arena, '.') catch return null;
@@ -123,10 +123,10 @@ pub fn resolveAliasTarget(resolve: Resolve, info: *ModuleInfo, u: *const ast.Usi
 /// become named references in the AIR-native type (`list[T]` etc.),
 /// resolved later by syscall specialization. Used by the phase-1
 /// builder to fill function members' resolved signatures.
-pub fn funcSignature(resolve: Resolve, info: *ModuleInfo, f: *const ast.FuncDef) !cfg.Type {
-    var params = std.ArrayList(cfg.Param).empty;
+pub fn funcSignature(resolve: Resolve, info: *ModuleInfo, f: *const ast.FuncDef) !meta.Type {
+    var params = std.ArrayList(meta.Param).empty;
     for (f.params) |p| {
-        const t = resolveType(resolve, info, &p.type_) orelse cfg.Type{ .primitive = .any };
+        const t = resolveType(resolve, info, &p.type_) orelse meta.Type{ .primitive = .any };
         try params.append(resolve.arena, .{
             .span = p.span,
             .name = p.name,
@@ -134,10 +134,10 @@ pub fn funcSignature(resolve: Resolve, info: *ModuleInfo, f: *const ast.FuncDef)
             .type_ = t,
         });
     }
-    const ret = resolveType(resolve, info, &f.ret) orelse cfg.Type{ .primitive = .any };
-    const ret_ptr = try resolve.arena.create(cfg.Type);
+    const ret = resolveType(resolve, info, &f.ret) orelse meta.Type{ .primitive = .any };
+    const ret_ptr = try resolve.arena.create(meta.Type);
     ret_ptr.* = ret;
-    return .{ .function = .{ .params = try resolve.arena.dupe(cfg.Param, params.items), .ret = ret_ptr } };
+    return .{ .function = .{ .params = try resolve.arena.dupe(meta.Param, params.items), .ret = ret_ptr } };
 }
 
 /// Resolve a written type name against a module: local type members first
@@ -233,7 +233,7 @@ pub const QualifiedType = struct {
 /// Resolve a written type name (alias chains expanded) to its interned
 /// `TypeId` under the canonical `<spec>.<decl>` name. Returns null when
 /// the name is unresolvable or no interner is attached.
-pub fn resolveTypeId(resolve: Resolve, from: *ModuleInfo, name: []const u8) ?cfg.TypeId {
+pub fn resolveTypeId(resolve: Resolve, from: *ModuleInfo, name: []const u8) ?meta.TypeId {
     const qt = resolveQualifiedTypeName(resolve, from, name) orelse return null;
     return resolve.intern(qt.qualified);
 }
@@ -265,11 +265,11 @@ pub fn followAlias(resolve: Resolve, from: *ModuleInfo, tm0: *TypeMember) ?*Type
 /// struct/union references keep their written name (decl lookup and
 /// ownership defer to the graph). Returns null when a component cannot be
 /// resolved.
-pub fn resolveType(resolve: Resolve, from: *ModuleInfo, t: *const ast.Type) ?cfg.Type {
+pub fn resolveType(resolve: Resolve, from: *ModuleInfo, t: *const ast.Type) ?meta.Type {
     return resolveTypeDepth(resolve, from, t, 0);
 }
 
-fn resolveTypeDepth(resolve: Resolve, from: *ModuleInfo, t: *const ast.Type, depth: u32) ?cfg.Type {
+fn resolveTypeDepth(resolve: Resolve, from: *ModuleInfo, t: *const ast.Type, depth: u32) ?meta.Type {
     if (depth > 64) return null;
     return switch (t.*) {
         .primitive => |p| .{ .primitive = p.kind },
@@ -291,18 +291,18 @@ fn resolveTypeDepth(resolve: Resolve, from: *ModuleInfo, t: *const ast.Type, dep
         },
         .list => |l| blk: {
             const inner = resolveTypeDepth(resolve, from, l.elem, depth + 1) orelse break :blk null;
-            const ptr = resolve.arena.create(cfg.Type) catch break :blk null;
+            const ptr = resolve.arena.create(meta.Type) catch break :blk null;
             ptr.* = inner;
             break :blk .{ .list = ptr };
         },
         .box => |b| blk: {
             const inner = resolveTypeDepth(resolve, from, b.inner, depth + 1) orelse break :blk null;
-            const ptr = resolve.arena.create(cfg.Type) catch break :blk null;
+            const ptr = resolve.arena.create(meta.Type) catch break :blk null;
             ptr.* = inner;
             break :blk .{ .box = ptr };
         },
         .tuple => |tup| blk: {
-            var elems = std.ArrayList(cfg.Type).empty;
+            var elems = std.ArrayList(meta.Type).empty;
             for (tup.elems) |*el| {
                 const et = resolveTypeDepth(resolve, from, el, depth + 1) orelse break :blk null;
                 elems.append(resolve.arena, et) catch break :blk null;
@@ -310,7 +310,7 @@ fn resolveTypeDepth(resolve: Resolve, from: *ModuleInfo, t: *const ast.Type, dep
             break :blk .{ .tuple = elems.toOwnedSlice(resolve.arena) catch break :blk null };
         },
         .function => |ft| blk: {
-            var params = std.ArrayList(cfg.Param).empty;
+            var params = std.ArrayList(meta.Param).empty;
             for (ft.params) |fp| {
                 const pt = resolveTypeDepth(resolve, from, fp.type_, depth + 1) orelse break :blk null;
                 params.append(resolve.arena, .{
@@ -321,7 +321,7 @@ fn resolveTypeDepth(resolve: Resolve, from: *ModuleInfo, t: *const ast.Type, dep
                 }) catch break :blk null;
             }
             const ret = resolveTypeDepth(resolve, from, ft.ret, depth + 1) orelse break :blk null;
-            const ret_ptr = resolve.arena.create(cfg.Type) catch break :blk null;
+            const ret_ptr = resolve.arena.create(meta.Type) catch break :blk null;
             ret_ptr.* = ret;
             break :blk .{ .function = .{
                 .params = params.toOwnedSlice(resolve.arena) catch break :blk null,
@@ -336,9 +336,9 @@ fn resolveTypeDepth(resolve: Resolve, from: *ModuleInfo, t: *const ast.Type, dep
 /// arguments are resolved recursively, so they may themselves be
 /// instantiations (`Option[list[File]]`) or type parameters (in generic
 /// signatures: `Array[T]` → `[.param "T"]`).
-fn resolveTypeArgs(resolve: Resolve, from: *ModuleInfo, n: *const ast.NamedType, depth: u32) ?[]cfg.Type {
+fn resolveTypeArgs(resolve: Resolve, from: *ModuleInfo, n: *const ast.NamedType, depth: u32) ?[]meta.Type {
     const written = n.type_args orelse return &.{};
-    const out = resolve.arena.alloc(cfg.Type, written.len) catch return null;
+    const out = resolve.arena.alloc(meta.Type, written.len) catch return null;
     for (written, 0..) |*w, i| {
         out[i] = resolveTypeDepth(resolve, from, w, depth + 1) orelse return null;
     }
@@ -353,15 +353,15 @@ fn resolveTypeArgs(resolve: Resolve, from: *ModuleInfo, n: *const ast.NamedType,
 /// `int32`). Parameters not present in `params` are left unresolved.
 pub fn substParams(
     arena: std.mem.Allocator,
-    params: []const ast.Ident,
-    args: []const cfg.Type,
-    t: cfg.Type,
-) cfg.Type {
-    // Single implementation lives in `cfg.substParams` (the data layer);
+    params: []const meta.Ident,
+    args: []const meta.Type,
+    t: meta.Type,
+) meta.Type {
+    // Single implementation lives in `meta.substParams` (the data layer);
     // the declaration's parameter names here are source idents, so copy
     // the name strings into a names slice and delegate. Best-effort like
     // the underlying pass: on OOM the type is returned unchanged.
     const names = arena.alloc([]const u8, params.len) catch return t;
     for (params, 0..) |p, i| names[i] = p.text;
-    return cfg.substParams(arena, names, args, t);
+    return meta.substParams(arena, names, args, t);
 }

@@ -29,12 +29,11 @@
 
 const std = @import("std");
 const hir = @import("stilla").hir;
-const cfg = @import("stilla").cfg;
-const ast = @import("stilla").ast;
+const meta = @import("stilla").meta;
 
 const PrintError = error{ OutOfMemory, NotSerializable };
 
-const fake_span = ast.Span{ .source = 0, .start = 0, .end = 0 };
+const fake_span = meta.Span{ .source = 0, .start = 0, .end = 0 };
 
 const Printer = struct {
     alloc: std.mem.Allocator,
@@ -77,7 +76,7 @@ const Printer = struct {
 
     // -- types (hir.md §4.5, short spellings) ------------------------------
 
-    fn printType(self: *Printer, ty: cfg.Type) PrintError!void {
+    fn printType(self: *Printer, ty: meta.Type) PrintError!void {
         switch (ty) {
             .primitive => |k| try self.put(switch (k) {
                 .int32 => "i32",
@@ -139,7 +138,7 @@ const Printer = struct {
 
     // -- literals -----------------------------------------------------------
 
-    fn printConstValue(self: *Printer, c: cfg.ConstValue, ty: cfg.Type) PrintError!void {
+    fn printConstValue(self: *Printer, c: meta.ConstValue, ty: meta.Type) PrintError!void {
         switch (c) {
             .int => |v| {
                 // The literal's suffix comes from the const node type.
@@ -169,7 +168,7 @@ const Printer = struct {
     /// Pattern literals carry no type in the arena, so they print bare
     /// and parse back as the default rep (documented; the pattern stores
     /// only the value).
-    fn printPatternConst(self: *Printer, c: cfg.ConstValue) PrintError!void {
+    fn printPatternConst(self: *Printer, c: meta.ConstValue) PrintError!void {
         switch (c) {
             .int => |v| try self.printFmt("{d}", .{v}),
             .float => |f| {
@@ -200,7 +199,7 @@ const Printer = struct {
     }
 };
 
-fn primSuffix(kind: ast.PrimitiveKind) ?[]const u8 {
+fn primSuffix(kind: meta.PrimitiveKind) ?[]const u8 {
     return switch (kind) {
         .int32 => "i32",
         .int64 => "i64",
@@ -509,7 +508,7 @@ fn needsAnnotation(name: []const u8, operand_count: usize) bool {
 // Arm patterns (hir.md §4.3, §5.4)
 // ---------------------------------------------------------------------------
 
-fn printArm(p: *Printer, program: *const hir.Program, rid: hir.RegionId, scrutinee_ty: cfg.Type, numbers: *const RefNumbers) PrintError!void {
+fn printArm(p: *Printer, program: *const hir.Program, rid: hir.RegionId, scrutinee_ty: meta.Type, numbers: *const RefNumbers) PrintError!void {
     const r = program.region(rid);
     if (r.pattern) |pid| {
         var cursor: usize = 0;
@@ -522,7 +521,7 @@ fn printArm(p: *Printer, program: *const hir.Program, rid: hir.RegionId, scrutin
 
 /// Binder leaves consume the arm's region params in order (leaf order ==
 /// params order, hir.md §5.4); the printer numbers each consumed param.
-fn printPattern(p: *Printer, program: *const hir.Program, pid: hir.PatternId, sub_ty: cfg.Type, binders: []const hir.BinderId, cursor: *usize, numbers: *const RefNumbers) PrintError!void {
+fn printPattern(p: *Printer, program: *const hir.Program, pid: hir.PatternId, sub_ty: meta.Type, binders: []const hir.BinderId, cursor: *usize, numbers: *const RefNumbers) PrintError!void {
     const pat = program.pattern(pid);
     switch (pat) {
         .wildcard => try p.put("_"),
@@ -595,15 +594,15 @@ fn printPattern(p: *Printer, program: *const hir.Program, pid: hir.PatternId, su
     }
 }
 
-fn variantPayloadType(p: *Printer, decl: cfg.UnionDecl, named: cfg.Type.Named, tag: u32) PrintError!cfg.Type {
+fn variantPayloadType(p: *Printer, decl: meta.UnionDecl, named: meta.Type.Named, tag: u32) PrintError!meta.Type {
     const payloads = decl.variants[tag].payloads;
     if (payloads.len == 0) return PrintError.NotSerializable;
     const allocator = p.alloc;
     if (payloads.len == 1) {
-        return cfg.substParams(allocator, decl.type_params, named.args, payloads[0]);
+        return meta.substParams(allocator, decl.type_params, named.args, payloads[0]);
     }
-    const tys = try allocator.alloc(cfg.Type, payloads.len);
-    for (payloads, 0..) |pt, i| tys[i] = cfg.substParams(allocator, decl.type_params, named.args, pt);
+    const tys = try allocator.alloc(meta.Type, payloads.len);
+    for (payloads, 0..) |pt, i| tys[i] = meta.substParams(allocator, decl.type_params, named.args, pt);
     return .{ .tuple = tys };
 }
 
@@ -615,7 +614,7 @@ const hir_parse = @import("hir_parse.zig");
 
 const t = std.testing;
 
-fn constEql(a: cfg.ConstValue, b: cfg.ConstValue) bool {
+fn constEql(a: meta.ConstValue, b: meta.ConstValue) bool {
     return switch (a) {
         .int => |ia| switch (b) {
             .int => |ib| ia == ib,
@@ -745,7 +744,7 @@ fn patternEq(pa: hir.PatternId, pb: hir.PatternId, a: *const hir.Program, b: *co
         },
         .type_test => |ta| switch (y) {
             .type_test => |tb| {
-                if (!cfg.Type.eql(ta.ty, tb.ty)) return false;
+                if (!meta.Type.eql(ta.ty, tb.ty)) return false;
                 return (mapGet(map, ta.bind) orelse return false) == tb.bind;
             },
             else => false,
@@ -757,7 +756,7 @@ fn exprEq(a: *const hir.Program, aid: hir.ExprId, b: *const hir.Program, bid: hi
     const na = a.node(aid);
     const nb = b.node(bid);
     if (na.op != nb.op) return false;
-    if (!cfg.Type.eql(na.ty, nb.ty)) return false;
+    if (!meta.Type.eql(na.ty, nb.ty)) return false;
     if (!payloadEq(na.payload, nb.payload, map)) return false;
     const a_ops = a.operands(aid);
     const b_ops = b.operands(bid);
@@ -876,9 +875,9 @@ test "text forms without S2 member identity are rejected, not degraded" {
     var arena = std.heap.ArenaAllocator.init(t.allocator);
     defer arena.deinit();
     var prog = try hir.Program.init(arena.allocator());
-    const lit = try prog.addExpr(.{ .op = hir.opId("const").?, .ty = cfg.Type{ .primitive = .int32 }, .payload = .{ .const_value = .{ .int = 1 } } });
+    const lit = try prog.addExpr(.{ .op = hir.opId("const").?, .ty = meta.Type{ .primitive = .int32 }, .payload = .{ .const_value = .{ .int = 1 } } });
     const ops = try prog.addOperands(&.{lit});
-    const fg = try prog.addExpr(.{ .op = hir.opId("field_get").?, .ty = cfg.Type{ .primitive = .int32 }, .operands = ops, .payload = .{ .field = 0 } });
+    const fg = try prog.addExpr(.{ .op = hir.opId("field_get").?, .ty = meta.Type{ .primitive = .int32 }, .operands = ops, .payload = .{ .field = 0 } });
     try t.expectError(error.NotSerializable, print(&prog, fg, arena.allocator(), .{}));
 }
 
@@ -908,13 +907,13 @@ fn optionFixture(allocator: std.mem.Allocator) !Fixture {
     errdefer arena.deinit();
     const a = arena.allocator();
     const t_param = "T";
-    const param_ty = cfg.Type{ .param = t_param };
-    const some_payload = try a.dupe(cfg.Type, &.{param_ty});
-    var variants = try a.alloc(cfg.VariantDecl, 2);
+    const param_ty = meta.Type{ .param = t_param };
+    const some_payload = try a.dupe(meta.Type, &.{param_ty});
+    var variants = try a.alloc(meta.VariantDecl, 2);
     variants[0] = .{ .name = "Some", .payloads = some_payload };
     variants[1] = .{ .name = "None", .payloads = &.{} };
     const type_params = try a.dupe([]const u8, &.{t_param});
-    const decls = try a.alloc(cfg.TypeDecl, 1);
+    const decls = try a.alloc(meta.TypeDecl, 1);
     decls[0] = .{ .union_ = .{
         .name = "Option",
         .module = "test",
@@ -930,10 +929,10 @@ fn refFixture(allocator: std.mem.Allocator) !Fixture {
     errdefer arena.deinit();
     const a = arena.allocator();
     // fn (i32) -> i32
-    const ret_ptr = try a.create(cfg.Type);
-    ret_ptr.* = cfg.Type{ .primitive = .int32 };
-    const params = try a.dupe(cfg.Param, &.{cfg.syntheticParam(fake_span, .plain, cfg.Type{ .primitive = .int32 })});
-    const fn_ty = cfg.Type{ .function = .{ .params = params, .ret = ret_ptr } };
+    const ret_ptr = try a.create(meta.Type);
+    ret_ptr.* = meta.Type{ .primitive = .int32 };
+    const params = try a.dupe(meta.Param, &.{meta.syntheticParam(fake_span, .plain, meta.Type{ .primitive = .int32 })});
+    const fn_ty = meta.Type{ .function = .{ .params = params, .ret = ret_ptr } };
     const funcs = try a.alloc(hir.SerCtx.FuncDecl, 1);
     funcs[0] = .{ .key = "string.concat", .type_ = fn_ty };
     return .{ .arena = arena, .ctx = .{ .funcs = funcs } };
@@ -943,13 +942,13 @@ test "printer determinism over constructed programs (S1 structures)" {
     var arena = std.heap.ArenaAllocator.init(t.allocator);
     defer arena.deinit();
     var p = try hir.Program.init(arena.allocator());
-    const b_x = try p.addBinder(cfg.Type{ .primitive = .int32 }, .value);
-    const init = try p.addExpr(.{ .op = hir.opId("const").?, .ty = cfg.Type{ .primitive = .int32 }, .payload = .{ .const_value = .{ .int = 42 } } });
-    const body = try p.addExpr(.{ .op = hir.opId("local").?, .ty = cfg.Type{ .primitive = .int32 }, .payload = .{ .binder = b_x } });
+    const b_x = try p.addBinder(meta.Type{ .primitive = .int32 }, .value);
+    const init = try p.addExpr(.{ .op = hir.opId("const").?, .ty = meta.Type{ .primitive = .int32 }, .payload = .{ .const_value = .{ .int = 42 } } });
+    const body = try p.addExpr(.{ .op = hir.opId("local").?, .ty = meta.Type{ .primitive = .int32 }, .payload = .{ .binder = b_x } });
     const region = try p.addRegion(&.{b_x}, body, null);
     const regions = try p.addRegions(&.{region});
     const operands = try p.addOperands(&.{init});
-    const let_id = try p.addExpr(.{ .op = hir.opId("let").?, .ty = cfg.Type{ .primitive = .int32 }, .operands = operands, .regions = regions });
+    const let_id = try p.addExpr(.{ .op = hir.opId("let").?, .ty = meta.Type{ .primitive = .int32 }, .operands = operands, .regions = regions });
     const out = try print(&p, let_id, arena.allocator(), .{});
     try t.expectEqualStrings("let B0: i32 = 42i32 in %B0", out);
     // And it round-trips.

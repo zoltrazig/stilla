@@ -14,6 +14,7 @@
 
 const std = @import("std");
 const ast = @import("ast.zig");
+const meta = @import("meta.zig");
 const cfg = @import("cfg.zig");
 const frontend_cache = @import("frontend_cache.zig");
 const lower = @import("lower.zig");
@@ -174,19 +175,19 @@ fn failed(
 fn revalidateHir(arena_alloc: std.mem.Allocator, graph: *moduleinfo.ModuleGraph, built: *hir.BuiltProgram, host_decls: []const effects.HostDecl) CompileError!?moduleinfo.Diag {
     for (built.funcs.items) |rec| {
         if (hir.validate(&built.program, rec.root, arena_alloc) catch return error.OutOfMemory) |msg| {
-            return moduleinfo.Diag{ .span = ast.Span.init(0, 0, 0), .message = msg };
+            return moduleinfo.Diag{ .span = meta.Span.init(0, 0, 0), .message = msg };
         }
     }
     for (built.consts.items) |c| {
         const root = c.init orelse continue;
         if (hir.validate(&built.program, root, arena_alloc) catch return error.OutOfMemory) |msg| {
-            return moduleinfo.Diag{ .span = ast.Span.init(0, 0, 0), .message = msg };
+            return moduleinfo.Diag{ .span = meta.Span.init(0, 0, 0), .message = msg };
         }
     }
     var an = hir_effects.Analysis.init(arena_alloc, built, .{ .graph = graph, .host_decls = host_decls }) catch return error.OutOfMemory;
     an.analyze() catch return error.OutOfMemory;
     if (an.validate(arena_alloc) catch return error.OutOfMemory) |msg| {
-        return moduleinfo.Diag{ .span = ast.Span.init(0, 0, 0), .message = msg };
+        return moduleinfo.Diag{ .span = meta.Span.init(0, 0, 0), .message = msg };
     }
     return null;
 }
@@ -253,7 +254,7 @@ pub fn compile(allocator: std.mem.Allocator, options: Options) CompileError!Comp
         const built = hir_build.buildProgramDiag(arena_alloc, graph, &ck.annotation, &bdiag) catch |err| switch (err) {
             error.Diagnostic => {
                 const diag = if (bdiag.message.len > 0) bdiag else moduleinfo.Diag{
-                    .span = ast.Span.init(0, 0, 0),
+                    .span = meta.Span.init(0, 0, 0),
                     .message = "HIR build failed",
                 };
                 return failed(arena, &.{diag}, graph, builder.loaded_sources.items);
@@ -268,20 +269,20 @@ pub fn compile(allocator: std.mem.Allocator, options: Options) CompileError!Comp
         // and do not change the canonical HIR text or the lowered AIR.
         for (built.funcs.items) |rec| {
             if (hir.validate(&built.program, rec.root, arena_alloc) catch return error.OutOfMemory) |msg| {
-                return failed(arena, &.{.{ .span = ast.Span.init(0, 0, 0), .message = msg }}, graph, builder.loaded_sources.items);
+                return failed(arena, &.{.{ .span = meta.Span.init(0, 0, 0), .message = msg }}, graph, builder.loaded_sources.items);
             }
         }
         for (built.consts.items) |c| {
             const root = c.init orelse continue;
             if (hir.validate(&built.program, root, arena_alloc) catch return error.OutOfMemory) |msg| {
-                return failed(arena, &.{.{ .span = ast.Span.init(0, 0, 0), .message = msg }}, graph, builder.loaded_sources.items);
+                return failed(arena, &.{.{ .span = meta.Span.init(0, 0, 0), .message = msg }}, graph, builder.loaded_sources.items);
             }
         }
         var effect_analysis = hir_effects.Analysis.init(arena_alloc, built, .{ .graph = graph, .host_decls = options.host_decls }) catch return error.OutOfMemory;
         effect_analysis.analyze() catch return error.OutOfMemory;
         if (effect_analysis.validate(arena_alloc) catch return error.OutOfMemory) |msg| {
             return failed(arena, &.{.{
-                .span = ast.Span.init(0, 0, 0),
+                .span = meta.Span.init(0, 0, 0),
                 .message = msg,
             }}, graph, builder.loaded_sources.items);
         }
@@ -292,7 +293,7 @@ pub fn compile(allocator: std.mem.Allocator, options: Options) CompileError!Comp
         // not be used to launder a violating read (docs/effects.md §7.1).
         if (effect_analysis.checkModuleDependencies(arena_alloc) catch return error.OutOfMemory) |msg| {
             return failed(arena, &.{.{
-                .span = ast.Span.init(0, 0, 0),
+                .span = meta.Span.init(0, 0, 0),
                 .message = msg,
             }}, graph, builder.loaded_sources.items);
         }
@@ -335,7 +336,7 @@ pub fn compile(allocator: std.mem.Allocator, options: Options) CompileError!Comp
         error.OutOfMemory => return error.OutOfMemory,
     }) |msg| {
         return failed(arena, &.{.{
-            .span = ast.Span.init(0, 0, 0),
+            .span = meta.Span.init(0, 0, 0),
             .message = msg,
         }}, graph, builder.loaded_sources.items);
     }
@@ -355,7 +356,7 @@ pub fn compile(allocator: std.mem.Allocator, options: Options) CompileError!Comp
                 // The air.md §13 validator rejected the program after a
                 // rewrite: an optimizer invariant violation.
                 return failed(arena, &.{.{
-                    .span = ast.Span.init(0, 0, 0),
+                    .span = meta.Span.init(0, 0, 0),
                     .message = "internal error: optimized AIR failed validation (optimizer invariant violation)",
                 }}, graph, builder.loaded_sources.items);
             },
@@ -375,7 +376,7 @@ pub fn compile(allocator: std.mem.Allocator, options: Options) CompileError!Comp
             error.OutOfMemory => return error.OutOfMemory,
         }) |msg| {
             return failed(arena, &.{.{
-                .span = ast.Span.init(0, 0, 0),
+                .span = meta.Span.init(0, 0, 0),
                 .message = msg,
             }}, graph, builder.loaded_sources.items);
         }
@@ -388,7 +389,7 @@ pub fn compile(allocator: std.mem.Allocator, options: Options) CompileError!Comp
                 // The optimized program failed its structural
                 // re-validation: an optimizer invariant violation.
                 return failed(arena, &.{.{
-                    .span = ast.Span.init(0, 0, 0),
+                    .span = meta.Span.init(0, 0, 0),
                     .message = "internal error: optimized AIR failed to re-parse (optimizer invariant violation)",
                 }}, graph, builder.loaded_sources.items);
             },

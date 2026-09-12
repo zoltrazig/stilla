@@ -37,7 +37,7 @@ Driver: `checker.Checker.check(graph)`. Sequence:
 | validate | `checker_validate.zig` | the consumer checks (type mismatch, match exhaustiveness, ownership transfer, …) — only when annotation produced no errors |
 | ownership merging | `checker_ownership.zig` | conditional-release state merging through `if`/`match`/`and`/`or` (Types & Ownership) |
 | generic expansion | `monomorphize.zig` + `type_infer.zig` | deep-copy monomorphization of template bodies under concrete substitutions |
-| type resolution | `type_resolve.zig` + `type_shape.zig` | syntactic `ast.Type` → `cfg.Type`; structural ownership classification |
+| type resolution | `type_resolve.zig` + `type_shape.zig` | syntactic `ast.Type` → `meta.Type`; structural ownership classification |
 
 Detail: [checker.md](checker.md).
 

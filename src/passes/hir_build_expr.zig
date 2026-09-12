@@ -5,7 +5,7 @@
 
 const std = @import("std");
 const ast = @import("stilla").ast;
-const cfg = @import("stilla").cfg;
+const meta = @import("stilla").meta;
 const hir = @import("stilla").hir;
 const moduleinfo = @import("stilla").moduleinfo;
 const type_resolve = @import("type_resolve.zig");
@@ -19,7 +19,7 @@ const hir_build_control = @import("hir_build_control.zig");
 // Expressions
 // ---------------------------------------------------------------------------
 
-pub fn voidLiteral(b: *hir_build.Builder, span: ast.Span) hir_build.BuildError!hir.ExprId {
+pub fn voidLiteral(b: *hir_build.Builder, span: meta.Span) hir_build.BuildError!hir.ExprId {
     return b.built.program.addExpr(.{ .op = try b.op(span, "const"), .ty = .{ .primitive = .void }, .payload = .{ .const_value = .void } });
 }
 
@@ -50,14 +50,14 @@ pub fn buildExpr(b: *hir_build.Builder, info: *moduleinfo.ModuleInfo, e: *const 
 }
 
 fn buildInt(b: *hir_build.Builder, lit: *const ast.IntLiteral) hir_build.BuildError!hir.ExprId {
-    var ty: cfg.Type = .{ .primitive = .int32 };
+    var ty: meta.Type = .{ .primitive = .int32 };
     if (b.ann.int_widths.get(lit)) |k| ty = .{ .primitive = k };
     const bits: i64 = @bitCast(lit.value);
     return b.built.program.addExpr(.{ .op = try b.op(lit.span, "const"), .ty = ty, .payload = .{ .const_value = .{ .int = bits } } });
 }
 
 fn buildFloat(b: *hir_build.Builder, lit: *const ast.FloatLiteral) hir_build.BuildError!hir.ExprId {
-    var ty: cfg.Type = .{ .primitive = .float32 };
+    var ty: meta.Type = .{ .primitive = .float32 };
     var v: f64 = lit.value;
     if (b.ann.float_widths.get(lit) != null) ty = .{ .primitive = .float64 };
     if (!(ty == .primitive and ty.primitive == .float64)) {
@@ -72,7 +72,7 @@ fn buildFloat(b: *hir_build.Builder, lit: *const ast.FloatLiteral) hir_build.Bui
 
 fn buildTuple(b: *hir_build.Builder, info: *moduleinfo.ModuleInfo, e: *const ast.Expr, t: *const ast.TupleExpr) hir_build.BuildError!hir.ExprId {
     var ids = std.ArrayList(hir.ExprId).empty;
-    var elems = std.ArrayList(cfg.Type).empty;
+    var elems = std.ArrayList(meta.Type).empty;
     for (t.elems) |*el| {
         const v = try buildExpr(b, info, el);
         try ids.append(b.arena, v);
@@ -84,20 +84,20 @@ fn buildTuple(b: *hir_build.Builder, info: *moduleinfo.ModuleInfo, e: *const ast
 
 fn buildList(b: *hir_build.Builder, info: *moduleinfo.ModuleInfo, e: *const ast.Expr, l: *const ast.ListExpr) hir_build.BuildError!hir.ExprId {
     var ids = std.ArrayList(hir.ExprId).empty;
-    var elem_type: cfg.Type = .{ .primitive = .int32 };
+    var elem_type: meta.Type = .{ .primitive = .int32 };
     for (l.elems) |*el| {
         const v = try buildExpr(b, info, el);
         if (ids.items.len == 0) elem_type = b.built.program.node(v).ty;
         try ids.append(b.arena, v);
     }
     const ops = try b.built.program.addOperands(ids.items);
-    const inner = try b.arena.create(cfg.Type);
+    const inner = try b.arena.create(meta.Type);
     inner.* = elem_type;
     return b.built.program.addExpr(.{ .op = try b.op(l.span, "list_make"), .ty = b.annotatedType(info, e) orelse .{ .list = inner }, .operands = ops });
 }
 
 /// Scalar-rep suffix for a primitive type (typed-op naming).
-fn repSuffix(t: cfg.Type) ?[]const u8 {
+fn repSuffix(t: meta.Type) ?[]const u8 {
     return switch (t) {
         .primitive => |k| switch (k) {
             .byte => "byte",
@@ -129,17 +129,17 @@ fn buildUnary(b: *hir_build.Builder, info: *moduleinfo.ModuleInfo, u: *const ast
         .not => "not.bool",
     };
     const ops = try b.built.program.addOperands(&.{v});
-    const ty: cfg.Type = if (u.op == .neg) vt else .{ .primitive = .bool };
+    const ty: meta.Type = if (u.op == .neg) vt else .{ .primitive = .bool };
     return b.built.program.addExpr(.{ .op = try b.op(u.span, name), .ty = ty, .operands = ops });
 }
 
-fn tyName(b: *hir_build.Builder, t: cfg.Type) []const u8 {
+fn tyName(b: *hir_build.Builder, t: meta.Type) []const u8 {
     var buf = std.ArrayList(u8).empty;
     appendTyName(b, &buf, t) catch return "?";
     return buf.items;
 }
 
-fn appendTyName(b: *hir_build.Builder, buf: *std.ArrayList(u8), t: cfg.Type) !void {
+fn appendTyName(b: *hir_build.Builder, buf: *std.ArrayList(u8), t: meta.Type) !void {
     switch (t) {
         .primitive => |k| try buf.appendSlice(b.arena, @tagName(k)),
         .named => |n| {
@@ -227,7 +227,7 @@ fn buildBinary(b: *hir_build.Builder, info: *moduleinfo.ModuleInfo, bin: *const 
     }
     const name = try std.fmt.allocPrint(b.arena, "{s}.{s}", .{ base, rep });
     const ops = try b.built.program.addOperands(&.{ lhs, rhs });
-    const ty: cfg.Type = switch (bin.op) {
+    const ty: meta.Type = switch (bin.op) {
         .eq, .ne, .lt, .le, .gt, .ge => .{ .primitive = .bool },
         else => lt,
     };
@@ -303,7 +303,7 @@ fn resolveModuleChain(b: *hir_build.Builder, info: *moduleinfo.ModuleInfo, ex: *
 
 /// One field/element read: index by declaration (struct) or position
 /// (tuple); S5 dispatches on the base type.
-pub fn fieldRead(b: *hir_build.Builder, info: *moduleinfo.ModuleInfo, e: ?*const ast.Expr, span: ast.Span, base: hir.ExprId, bt: cfg.Type, name: []const u8) hir_build.BuildError!hir.ExprId {
+pub fn fieldRead(b: *hir_build.Builder, info: *moduleinfo.ModuleInfo, e: ?*const ast.Expr, span: meta.Span, base: hir.ExprId, bt: meta.Type, name: []const u8) hir_build.BuildError!hir.ExprId {
     const ops = try b.built.program.addOperands(&.{base});
     switch (bt) {
         .named => |td| {

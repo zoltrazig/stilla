@@ -15,7 +15,7 @@
 
 const std = @import("std");
 const ast = @import("stilla").ast;
-const cfg = @import("stilla").cfg;
+const meta = @import("stilla").meta;
 const moduleinfo = @import("stilla").moduleinfo;
 
 const annotate = @import("checker_annotate.zig");
@@ -41,8 +41,8 @@ pub const BindingState = enum { owned, borrowed, consumed, released, maybe };
 /// per (declaration, type arguments).
 pub const FuncInstance = struct {
     decl: *const ast.FuncDef,
-    type_args: []cfg.Type,
-    signature: cfg.Type,
+    type_args: []meta.Type,
+    signature: meta.Type,
     mono: ?*const ast.FuncDef = null,
     /// The module that declares the generic function (the instance's
     /// monomorphized body is annotated and lowered against it).
@@ -56,18 +56,18 @@ pub const FuncInstance = struct {
 /// Phase-2 side tables for one module (checker.md, Data structures).
 pub const ModuleAnnotation = struct {
     module: *moduleinfo.ModuleInfo,
-    /// Written `ast.Type` → resolved `cfg.Type` (checker.md, Type resolution).
-    type_of: std.AutoHashMapUnmanaged(*const ast.Type, cfg.Type) = .empty,
-    /// `ast.Expr` → produced `cfg.Type` (checker.md, Expression inference).
-    expr_of: std.AutoHashMapUnmanaged(*const ast.Expr, cfg.Type) = .empty,
+    /// Written `ast.Type` → resolved `meta.Type` (checker.md, Type resolution).
+    type_of: std.AutoHashMapUnmanaged(*const ast.Type, meta.Type) = .empty,
+    /// `ast.Expr` → produced `meta.Type` (checker.md, Expression inference).
+    expr_of: std.AutoHashMapUnmanaged(*const ast.Expr, meta.Type) = .empty,
     /// Binding id → resolved type.
-    binding_of: std.AutoHashMapUnmanaged(u32, cfg.Type) = .empty,
+    binding_of: std.AutoHashMapUnmanaged(u32, meta.Type) = .empty,
     /// Binding id → static ownership state (checker.md, Ownership analysis).
     bindings: std.AutoHashMapUnmanaged(u32, BindingState) = .empty,
     /// Call → the callee's concrete signature, when the callee resolves
     /// statically to a non-generic function. The validate pass checks
     /// argument count and types against it (Checks enabled by annotation: type mismatch).
-    call_sig: std.AutoHashMapUnmanaged(*const ast.Call, cfg.Type) = .empty,
+    call_sig: std.AutoHashMapUnmanaged(*const ast.Call, meta.Type) = .empty,
     /// Call → the generic specialization it triggers (checker.md, Generic expansion): the
     /// `FuncInstance` whose signature and (checked) monomorphized body the
     /// call uses. Present for calls to generic functions only.
@@ -77,7 +77,7 @@ pub const ModuleAnnotation = struct {
     /// function value (Core §12.4).
     spec_of: std.AutoHashMapUnmanaged(*const ast.Specialize, *FuncInstance) = .empty,
     /// Module-member name → its declared identifier (name annotation).
-    names: std.StringHashMapUnmanaged(*const ast.Ident) = .empty,
+    names: std.StringHashMapUnmanaged(*const meta.Ident) = .empty,
     next_binding_id: u32 = 0,
 };
 
@@ -100,7 +100,7 @@ pub const Annotation = struct {
     /// Integer literals typed at 64-bit width by their expected-type
     /// context (Core Types §16.3: typed bindings/returns/fields widen
     /// the literal at its target width; no suffix forms exist).
-    int_widths: std.AutoHashMapUnmanaged(*const ast.IntLiteral, ast.PrimitiveKind) = .empty,
+    int_widths: std.AutoHashMapUnmanaged(*const ast.IntLiteral, meta.PrimitiveKind) = .empty,
     /// Float literals typed `float64` by their expected-type context.
     float_widths: std.AutoHashMapUnmanaged(*const ast.FloatLiteral, void) = .empty,
 
@@ -113,7 +113,7 @@ pub const Annotation = struct {
 /// state (checker.md, Ownership analysis).
 pub const Local = struct {
     name: []const u8,
-    type_: cfg.Type,
+    type_: meta.Type,
     id: u32,
     state: BindingState = .owned,
     /// A non-owning view (checker.md, Ownership analysis): a `borrow` parameter or an unique
@@ -151,17 +151,17 @@ pub const Frame = struct {
     /// cannot be inferred from its payloads alone fills the unbound ones
     /// from this expected type (`Result::Break(r)` inside a function
     /// returning `Result[S,R]`). `null` when there is no goal.
-    expect: ?cfg.Type = null,
+    expect: ?meta.Type = null,
     /// The type-parameter names of the function being checked, for
     /// diagnosing unresolved type names that are not in scope (an empty
     /// slice at module scope). Module-scope frames share the same
     /// `Frame`, so callers must save and restore this (like `expect`).
-    func_params: []const ast.Ident = &.{},
+    func_params: []const meta.Ident = &.{},
 };
 
 /// Whether a value of type `t` is owned (not Copy): unique types are
 /// subject to move/drop/conditional-release tracking (Core §18).
-pub fn isUnique(frame: *Frame, t: cfg.Type) bool {
+pub fn isUnique(frame: *Frame, t: meta.Type) bool {
     return if (t.ownership()) |ow|
         ow == .unique
     else
@@ -206,7 +206,7 @@ pub const Checker = struct {
     }
 
     /// Report a semantic error: record it and abort the current check.
-    pub fn fail(self: *Checker, span: ast.Span, comptime fmt: []const u8, args: anytype) CheckError {
+    pub fn fail(self: *Checker, span: meta.Span, comptime fmt: []const u8, args: anytype) CheckError {
         const message = std.fmt.allocPrint(self.alloc(), fmt, args) catch return error.OutOfMemory;
         self.recordDiag(span, message);
         return error.Diagnostic;
@@ -214,7 +214,7 @@ pub const Checker = struct {
 
     /// Append one diagnostic with a pre-formatted message, keeping `diag`
     /// as the first.
-    pub fn recordDiag(self: *Checker, span: ast.Span, message: []const u8) void {
+    pub fn recordDiag(self: *Checker, span: meta.Span, message: []const u8) void {
         self.diags.append(self.alloc(), .{ .span = span, .message = message }) catch {};
         if (self.diag == null) self.diag = self.diags.items[self.diags.items.len - 1];
     }
@@ -230,13 +230,13 @@ pub const Checker = struct {
         return gop.value_ptr.*;
     }
 
-    /// Resolve a written `ast.Type` to a `cfg.Type`, cached per node
+    /// Resolve a written `ast.Type` to a `meta.Type`, cached per node
     /// (checker.md, Type resolution). Unresolvable types fall back to `any`, matching
     /// `funcSignature`'s convention; the lowerer reports resolution errors.
-    pub fn resolveTypeOf(self: *Checker, ma: *ModuleAnnotation, info: *moduleinfo.ModuleInfo, t: *const ast.Type) CheckError!cfg.Type {
+    pub fn resolveTypeOf(self: *Checker, ma: *ModuleAnnotation, info: *moduleinfo.ModuleInfo, t: *const ast.Type) CheckError!meta.Type {
         if (ma.type_of.get(t)) |rt| return rt;
         const resolve = moduleinfo.Resolve{ .arena = self.alloc(), .by_specifier = &self.graph.?.by_specifier, .type_ids = &self.graph.?.type_interner };
-        const rt = moduleinfo.resolveType(resolve, info, t) orelse cfg.Type{ .primitive = .any };
+        const rt = moduleinfo.resolveType(resolve, info, t) orelse meta.Type{ .primitive = .any };
         try ma.type_of.put(self.alloc(), t, rt);
         return rt;
     }

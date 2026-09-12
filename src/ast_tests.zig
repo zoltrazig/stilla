@@ -8,6 +8,7 @@
 
 const std = @import("std");
 const ast = @import("ast.zig");
+const meta = @import("meta.zig");
 const parser = @import("parser.zig");
 const testing = std.testing;
 
@@ -32,10 +33,10 @@ fn parseProgram(text: []const u8) !struct { arena: std.heap.ArenaAllocator, sour
     return .{ .arena = arena, .source = source, .program = program };
 }
 
-test "ast.Span measures and merges byte ranges" {
-    var s = ast.Span.init(0, 3, 10);
+test "meta.Span measures and merges byte ranges" {
+    var s = meta.Span.init(0, 3, 10);
     try testing.expectEqual(@as(u32, 7), s.len());
-    const m = ast.Span.merge(ast.Span.init(0, 5, 12), ast.Span.init(0, 1, 8));
+    const m = meta.Span.merge(meta.Span.init(0, 5, 12), meta.Span.init(0, 1, 8));
     try testing.expectEqual(@as(u32, 1), m.start);
     try testing.expectEqual(@as(u32, 12), m.end);
     try testing.expectEqual(@as(u32, 0), m.source);

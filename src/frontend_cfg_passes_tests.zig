@@ -14,8 +14,8 @@
 //! Run via `zig build test` (wired into `src/root.zig`'s test block).
 
 const std = @import("std");
-const ast = @import("ast.zig");
 const cfg = @import("cfg.zig");
+const meta = @import("meta.zig");
 const frontend = @import("frontend.zig");
 const moduleinfo = @import("moduleinfo.zig");
 const lower = @import("lower.zig");
@@ -1091,7 +1091,7 @@ fn typeIdOf(program: *const cfg.IrProgram, module: []const u8, name: []const u8)
 }
 
 /// The `TypeDecl` of a named type by (module, written name), or null.
-fn typeDeclOf(program: *const cfg.IrProgram, module: []const u8, name: []const u8) ?cfg.TypeDecl {
+fn typeDeclOf(program: *const cfg.IrProgram, module: []const u8, name: []const u8) ?meta.TypeDecl {
     const id = typeIdOf(program, module, name) orelse return null;
     return program.typeDecl(@intCast(id));
 }
@@ -1148,9 +1148,9 @@ test "frontend type environment carries concrete TypeDecls (fields, variants, ow
     try testing.expectEqual(@as(usize, 0), sd.type_params.len);
     try testing.expectEqual(@as(usize, 2), sd.fields.len);
     try testing.expectEqualStrings("fd", sd.fields[0].name);
-    try testing.expectEqual(@as(cfg.Type, .{ .primitive = .int32 }), sd.fields[0].type_);
+    try testing.expectEqual(@as(meta.Type, .{ .primitive = .int32 }), sd.fields[0].type_);
     try testing.expectEqualStrings("path", sd.fields[1].name);
-    try testing.expectEqual(@as(cfg.Type, .{ .primitive = .str }), sd.fields[1].type_);
+    try testing.expectEqual(@as(meta.Type, .{ .primitive = .str }), sd.fields[1].type_);
 
     // Union: variants in declaration order with payload types; Copy
     // ownership (all payloads Copy).
@@ -1161,9 +1161,9 @@ test "frontend type environment carries concrete TypeDecls (fields, variants, ow
     try testing.expectEqual(@as(usize, 2), ud.variants.len);
     try testing.expectEqualStrings("Ok", ud.variants[0].name);
     try testing.expectEqual(@as(usize, 1), ud.variants[0].payloads.len);
-    try testing.expectEqual(@as(cfg.Type, .{ .primitive = .int32 }), ud.variants[0].payloads[0]);
+    try testing.expectEqual(@as(meta.Type, .{ .primitive = .int32 }), ud.variants[0].payloads[0]);
     try testing.expectEqualStrings("Err", ud.variants[1].name);
-    try testing.expectEqual(@as(cfg.Type, .{ .primitive = .str }), ud.variants[1].payloads[0]);
+    try testing.expectEqual(@as(meta.Type, .{ .primitive = .str }), ud.variants[1].payloads[0]);
 
     // Opaque host type (Core §11.8): unique by declaration, host identity
     // naming the declaring module and the written type name.
@@ -1191,11 +1191,11 @@ test "frontend type environment carries concrete TypeDecls (fields, variants, ow
     const file_id = typeIdOf(&program, "app", "File") orelse return error.TestUnexpectedResult;
     const option_id = typeIdOf(&program, "builtin", "Option") orelse return error.TestUnexpectedResult;
     const arena = c.arena.allocator();
-    var int_args = [_]cfg.Type{.{ .primitive = .int32 }};
-    const int_arg: []cfg.Type = &int_args;
+    var int_args = [_]meta.Type{.{ .primitive = .int32 }};
+    const int_arg: []meta.Type = &int_args;
     try testing.expect(program.namedOwnership(arena, .{ .id = @intCast(option_id), .args = int_arg }) == .copy);
-    var file_args = [_]cfg.Type{.{ .named = .{ .id = @intCast(file_id), .args = &.{} } }};
-    const file_arg: []cfg.Type = &file_args;
+    var file_args = [_]meta.Type{.{ .named = .{ .id = @intCast(file_id), .args = &.{} } }};
+    const file_arg: []meta.Type = &file_args;
     try testing.expect(program.namedOwnership(arena, .{ .id = @intCast(option_id), .args = file_arg }) == .unique);
 }
 
@@ -1235,15 +1235,15 @@ test "frontend materializes the module member table with distinct member and slo
     try testing.expectEqualStrings("builtin", members[2].name);
     try testing.expect(members[2].kind == .module_ref);
     try testing.expectEqualStrings("builtin", members[2].kind.module_ref);
-    try testing.expectEqual(@as(cfg.Type, .module), members[2].type_);
+    try testing.expectEqual(@as(meta.Type, .module), members[2].type_);
     try testing.expectEqualStrings("greeting", members[3].name);
     try testing.expect(members[3].kind == .const_slot);
     try testing.expectEqual(@as(?u32, 0), members[3].kind.const_slot);
-    try testing.expectEqual(@as(cfg.Type, .{ .primitive = .str }), members[3].type_);
+    try testing.expectEqual(@as(meta.Type, .{ .primitive = .str }), members[3].type_);
     // The storage layout holds exactly the constant member, in slot
     // order — slot 0, distinct from member index 3.
     try testing.expectEqual(@as(usize, 1), app.slots.len);
-    try testing.expectEqual(@as(cfg.Type, .{ .primitive = .str }), app.slots[0].type_);
+    try testing.expectEqual(@as(meta.Type, .{ .primitive = .str }), app.slots[0].type_);
 
     // `load_member` resolves through the module identity of its base
     // (a `module_ref` value here): main's `greeting` read is member #3.
@@ -1344,7 +1344,7 @@ test "store_member into an any-typed constant slot validates" {
     const app = moduleByName2(&program, "app") orelse return error.TestUnexpectedResult;
     const x_member = app.members.?[2]; // [main, builtin, x]
     try testing.expect(x_member.kind == .const_slot);
-    try testing.expectEqual(@as(cfg.Type, .{ .primitive = .any }), x_member.type_);
+    try testing.expectEqual(@as(meta.Type, .{ .primitive = .any }), x_member.type_);
     try testing.expectEqual(@as(?u32, 0), x_member.kind.const_slot);
 }
 
@@ -1430,11 +1430,11 @@ test "compiled syscalls carry the specialized signature" {
     try testing.expectEqual(@as(usize, 1), sig.params.len);
     try testing.expect(sig.params[0].mode == .plain);
     // T specialized to int32 from the literal argument.
-    try testing.expectEqual(@as(cfg.Type, .{ .primitive = .int32 }), sig.params[0].type_);
-    try testing.expectEqual(@as(cfg.Type, .{ .primitive = .str }), sig.ret.*);
+    try testing.expectEqual(@as(meta.Type, .{ .primitive = .int32 }), sig.params[0].type_);
+    try testing.expectEqual(@as(meta.Type, .{ .primitive = .str }), sig.ret.*);
     const p = print_sc orelse return error.TestUnexpectedResult;
-    try testing.expectEqual(@as(cfg.Type, .{ .primitive = .str }), p.sig.?.params[0].type_);
-    try testing.expectEqual(@as(cfg.Type, .{ .primitive = .void }), p.sig.?.ret.*);
+    try testing.expectEqual(@as(meta.Type, .{ .primitive = .str }), p.sig.?.params[0].type_);
+    try testing.expectEqual(@as(meta.Type, .{ .primitive = .void }), p.sig.?.ret.*);
 }
 
 test "validator rejects a syscall mode/type/return mismatch from its signature alone" {
@@ -1477,17 +1477,17 @@ test "validator rejects a syscall mode/type/return mismatch from its signature a
             testing.allocator.destroy(t.p);
         }
         const sc = &t.syscall.op.syscall;
-        const ret_ptr = try testing.allocator.create(cfg.Type);
-        const box_inner = try testing.allocator.create(cfg.Type);
+        const ret_ptr = try testing.allocator.create(meta.Type);
+        const box_inner = try testing.allocator.create(meta.Type);
         ret_ptr.* = .{ .box = box_inner };
         ret_ptr.*.box.* = .{ .named = .{ .id = 0, .args = &.{} } };
-        const params = try testing.allocator.alloc(cfg.Param, 1);
+        const params = try testing.allocator.alloc(meta.Param, 1);
         defer testing.allocator.free(params);
         defer testing.allocator.destroy(box_inner);
         defer testing.allocator.destroy(ret_ptr);
         params[0] = .{
-            .span = ast.Span.init(0, 0, 0),
-            .name = .{ .span = ast.Span.init(0, 0, 0), .text = "" },
+            .span = meta.Span.init(0, 0, 0),
+            .name = .{ .span = meta.Span.init(0, 0, 0), .text = "" },
             .mode = .move,
             .type_ = .{ .named = .{ .id = 0, .args = &.{} } },
         };
@@ -1516,15 +1516,15 @@ test "validator rejects a syscall mode/type/return mismatch from its signature a
             testing.allocator.destroy(t.p);
         }
         const sc = &t.syscall.op.syscall;
-        const ret_ptr = try testing.allocator.create(cfg.Type);
+        const ret_ptr = try testing.allocator.create(meta.Type);
         ret_ptr.* = .{ .primitive = .int32 };
-        const params = try testing.allocator.alloc(cfg.Param, 1);
+        const params = try testing.allocator.alloc(meta.Param, 1);
         defer testing.allocator.free(params);
         defer testing.allocator.destroy(ret_ptr);
         const xs_type = t.syscall.op.syscall.args[0].type_;
         params[0] = .{
-            .span = ast.Span.init(0, 0, 0),
-            .name = .{ .span = ast.Span.init(0, 0, 0), .text = "" },
+            .span = meta.Span.init(0, 0, 0),
+            .name = .{ .span = meta.Span.init(0, 0, 0), .text = "" },
             .mode = .borrow,
             .type_ = xs_type,
         };

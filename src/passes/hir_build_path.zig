@@ -5,7 +5,7 @@
 
 const std = @import("std");
 const ast = @import("stilla").ast;
-const cfg = @import("stilla").cfg;
+const meta = @import("stilla").meta;
 const hir = @import("stilla").hir;
 const moduleinfo = @import("stilla").moduleinfo;
 const hir_build = @import("hir_build.zig");
@@ -87,7 +87,7 @@ fn buildPathValue(b: *hir_build.Builder, info: *moduleinfo.ModuleInfo, e: *const
     return leaf;
 }
 
-pub fn joinPath(b: *hir_build.Builder, path: []const ast.Ident) hir_build.BuildError![]const u8 {
+pub fn joinPath(b: *hir_build.Builder, path: []const meta.Ident) hir_build.BuildError![]const u8 {
     var buf = std.ArrayList(u8).empty;
     for (path, 0..) |id, i| {
         if (i > 0) try buf.append(b.arena, '.');
@@ -136,7 +136,7 @@ fn buildStructConstruct(b: *hir_build.Builder, info: *moduleinfo.ModuleInfo, e: 
         }
     }
     const decl_reads = try b.arena.alloc(hir.ExprId, sd.fields.len);
-    var value_ty: cfg.Type = undefined;
+    var value_ty: meta.Type = undefined;
     if (b.annotatedType(info, e)) |at| {
         value_ty = at;
     } else {
@@ -182,7 +182,7 @@ fn buildVariantConstruct(b: *hir_build.Builder, info: *moduleinfo.ModuleInfo, e:
         try args.append(b.arena, try hir_build_expr.buildExpr(b, info, arg));
     };
     const ops = try b.built.program.addOperands(args.items);
-    var result_ty: cfg.Type = undefined;
+    var result_ty: meta.Type = undefined;
     if (b.annotatedType(info, e)) |at| {
         result_ty = at;
     } else {

@@ -14,6 +14,7 @@
 
 const std = @import("std");
 const ast = @import("stilla").ast;
+const meta = @import("stilla").meta;
 const parser = @import("stilla").parser;
 const stdbundle = @import("stilla").stdbundle;
 const frontend_cache = @import("stilla").frontend_cache;
@@ -28,7 +29,7 @@ const ModuleKind = moduleinfo.ModuleKind;
 /// Resolve a written specifier to exactly one module (Runtime §2.6),
 /// loading and parsing it if new. Returns null (with `diag` set) when
 /// resolution fails.
-pub fn load(self: *Builder, written: []const u8, span: ast.Span) !?*RawModule {
+pub fn load(self: *Builder, written: []const u8, span: meta.Span) !?*RawModule {
     // Canonicalize before any lookup: `import("m")`, `import("./m")`,
     // and `import("m.st")` are the same module (Runtime §2.1 dedups by
     // resolved specifier), and the search dirs read `<dir>/<spec>.st`, so
@@ -85,7 +86,7 @@ fn validSpecifier(s: []const u8) bool {
 /// Resolve a written specifier through the search directories, in
 /// order: read `<dir>/<specifier>.st` and load the first that exists.
 /// Returns null when no directory contains the file.
-fn loadFromSearchDirs(self: *Builder, written: []const u8, span: ast.Span) !?*RawModule {
+fn loadFromSearchDirs(self: *Builder, written: []const u8, span: meta.Span) !?*RawModule {
     const io = self.io orelse return null;
     for (self.sources.search_dirs) |dir| {
         const file_name = std.fmt.allocPrint(self.arena, "{s}.st", .{written}) catch return error.OutOfMemory;

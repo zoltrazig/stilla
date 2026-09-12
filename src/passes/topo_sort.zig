@@ -19,7 +19,7 @@
 //! own nodes.
 
 const std = @import("std");
-const ast = @import("stilla").ast;
+const meta = @import("stilla").meta;
 
 /// A directed edge from one node to another, carrying the source span
 /// that created it (for cycle diagnostics).
@@ -28,7 +28,7 @@ pub const Edge = struct {
     dep: usize,
     /// Where the edge was written (the importing module's `import(...)`
     /// expression), for the cycle diagnostic's span.
-    span: ast.Span,
+    span: meta.Span,
 };
 
 pub const Result = union(enum) {
@@ -40,7 +40,7 @@ pub const Result = union(enum) {
     /// full cycle in import order, **with the closing node repeated** —
     /// `[a, b, c, a]` reads "a imports b imports c imports a".
     cycle: struct {
-        span: ast.Span,
+        span: meta.Span,
         path: []usize,
     },
 };
@@ -116,8 +116,8 @@ test "topo_sort orders dependencies before dependents" {
     const testing = std.testing;
     // a imports b and c; b imports c; c imports nothing.
     const children = [_][]const Edge{
-        &.{ .{ .dep = 1, .span = ast.Span.init(0, 0, 0) }, .{ .dep = 2, .span = ast.Span.init(0, 0, 0) } },
-        &.{.{ .dep = 2, .span = ast.Span.init(0, 0, 0) }},
+        &.{ .{ .dep = 1, .span = meta.Span.init(0, 0, 0) }, .{ .dep = 2, .span = meta.Span.init(0, 0, 0) } },
+        &.{.{ .dep = 2, .span = meta.Span.init(0, 0, 0) }},
         &.{},
     };
     const result = try reversePostorder(testing.allocator, 3, 0, &children);
@@ -130,8 +130,8 @@ test "topo_sort rejects a cycle with the full path" {
     const testing = std.testing;
     // a imports b, b imports a.
     const children = [_][]const Edge{
-        &.{.{ .dep = 1, .span = ast.Span.init(0, 0, 0) }},
-        &.{.{ .dep = 0, .span = ast.Span.init(0, 0, 0) }},
+        &.{.{ .dep = 1, .span = meta.Span.init(0, 0, 0) }},
+        &.{.{ .dep = 0, .span = meta.Span.init(0, 0, 0) }},
     };
     const result = try reversePostorder(testing.allocator, 2, 0, &children);
     try testing.expect(result == .cycle);
@@ -145,11 +145,11 @@ test "topo_sort reports a longer cycle in import order" {
     // a imports b, b imports c, c imports a (and c imports d, d imports
     // nothing).
     const children = [_][]const Edge{
-        &.{.{ .dep = 1, .span = ast.Span.init(0, 0, 0) }},
-        &.{.{ .dep = 2, .span = ast.Span.init(0, 0, 0) }},
+        &.{.{ .dep = 1, .span = meta.Span.init(0, 0, 0) }},
+        &.{.{ .dep = 2, .span = meta.Span.init(0, 0, 0) }},
         &.{
-            .{ .dep = 3, .span = ast.Span.init(0, 0, 0) },
-            .{ .dep = 0, .span = ast.Span.init(0, 0, 0) },
+            .{ .dep = 3, .span = meta.Span.init(0, 0, 0) },
+            .{ .dep = 0, .span = meta.Span.init(0, 0, 0) },
         },
         &.{},
     };

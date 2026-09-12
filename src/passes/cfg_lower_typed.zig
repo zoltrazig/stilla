@@ -14,6 +14,7 @@
 
 const std = @import("std");
 const cfg = @import("stilla").cfg;
+const meta = @import("stilla").meta;
 const llir = @import("stilla").llir;
 const ast = @import("stilla").ast;
 
@@ -24,8 +25,8 @@ const ast = @import("stilla").ast;
 /// the unary arithmetic ops.
 pub const TypedOp = struct {
     kind: llir.TypedKind,
-    type_: cfg.Type,
-    result_type: cfg.Type,
+    type_: meta.Type,
+    result_type: meta.Type,
     a: *const cfg.Value,
     b: ?*const cfg.Value,
     result: *const cfg.Value,
@@ -33,7 +34,7 @@ pub const TypedOp = struct {
 
 /// The rep suffix of an arithmetic primitive type, or null for a
 /// non-arithmetic type (the typed layer only carries arithmetic ops).
-fn repName(t: cfg.Type) ?[]const u8 {
+fn repName(t: meta.Type) ?[]const u8 {
     return switch (t) {
         .primitive => |k| switch (k) {
             .int32 => "i32",
@@ -162,7 +163,7 @@ pub fn typedKindOf(tag: cfg.OpTag) ?llir.TypedKind {
 /// the shift/mask forms always zero-extend; floats never fuse. Integer
 /// equality is the exception: its only immediate form is `seqi`/`snei`,
 /// which sign-extend the field on every integer type.
-pub fn immOf(cv: cfg.ConstValue, kind: llir.TypedKind, t: cfg.Type) ?u8 {
+pub fn immOf(cv: meta.ConstValue, kind: llir.TypedKind, t: meta.Type) ?u8 {
     if (kind == .ge) return switch (cv) {
         .int => |i| if (i == std.math.minInt(i64)) null else immOf(.{ .int = i - 1 }, .gt, t),
         else => null,
@@ -227,7 +228,7 @@ pub const FusedImm = struct {
 /// form for the kind/type, or the value does not fit the 7-bit window).
 /// Shared by the fusion pass (rewrites the register form to the immediate
 /// form and kills the const record).
-pub fn fusedImmR(kind: llir.TypedKind, t: cfg.Type, cv: cfg.ConstValue) ?FusedImm {
+pub fn fusedImmR(kind: llir.TypedKind, t: meta.Type, cv: meta.ConstValue) ?FusedImm {
     const op = llir.typedOpcodeImm(kind, t) orelse return null;
     const raw = immOf(cv, kind, t) orelse return null;
     return .{ .op = op, .imm = shiftImm(op, raw) };
@@ -235,7 +236,7 @@ pub fn fusedImmR(kind: llir.TypedKind, t: cfg.Type, cv: cfg.ConstValue) ?FusedIm
 
 /// The constant payload of a value whose defining instruction is a `const_`,
 /// or null for every other value.
-pub fn constOf(v: *const cfg.Value) ?cfg.ConstValue {
+pub fn constOf(v: *const cfg.Value) ?meta.ConstValue {
     const d = v.def orelse return null;
     return switch (d.op) {
         .const_ => |cv| cv,
@@ -257,8 +258,8 @@ test "shiftImm pre-reduces a fused count at the 32-bit reps only" {
 }
 
 test "fusedImmR picks the typed immediate opcode" {
-    const ti32 = cfg.Type{ .primitive = .int32 };
-    const tu32 = cfg.Type{ .primitive = .uint32 };
+    const ti32 = meta.Type{ .primitive = .int32 };
+    const tu32 = meta.Type{ .primitive = .uint32 };
 
     // Signed: sign-extended window [-64, 63]; unsigned: [0, 127].
     const f1 = fusedImmR(.add, ti32, .{ .int = -1 }).?;
@@ -276,9 +277,9 @@ test "fusedImmR picks the typed immediate opcode" {
 }
 
 test "fusedImmR gates equality to the sign-extending seqi/snei window" {
-    const ti32 = cfg.Type{ .primitive = .int32 };
-    const tu32 = cfg.Type{ .primitive = .uint32 };
-    const tu64 = cfg.Type{ .primitive = .uint64 };
+    const ti32 = meta.Type{ .primitive = .int32 };
+    const tu32 = meta.Type{ .primitive = .uint32 };
+    const tu64 = meta.Type{ .primitive = .uint64 };
 
     // Equality fuses to seqi/snei, which sign-extend the 7-bit field on
     // every integer type: only [-64, 63] fits, even for unsigned operands.

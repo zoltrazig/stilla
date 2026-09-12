@@ -4,7 +4,7 @@
 //! and the host-selected entry function ({spec}.{fn} qualified name).
 const std = @import("std");
 const ast = @import("stilla").ast;
-const cfg = @import("stilla").cfg;
+const meta = @import("stilla").meta;
 const moduleinfo = @import("stilla").moduleinfo;
 const lower = @import("stilla").lower;
 const cfg_lower_module = @import("cfg_lower_module.zig");
@@ -12,9 +12,9 @@ const cfg_lower_module = @import("cfg_lower_module.zig");
 const Lowerer = lower.Lowerer;
 const LowerError = lower.LowerError;
 
-pub fn collectTypeEnv(self: *Lowerer) LowerError![]cfg.TypeDecl {
+pub fn collectTypeEnv(self: *Lowerer) LowerError![]meta.TypeDecl {
     const count = self.graph.type_interner.to_name.items.len;
-    const decls = try self.arena.alloc(cfg.TypeDecl, count);
+    const decls = try self.arena.alloc(meta.TypeDecl, count);
     for (decls) |*d| d.* = .{ .unknown = "" }; // defensive: every id is filled below
     for (self.graph.modules) |info| {
         for (info.types) |*tm| {
@@ -37,8 +37,8 @@ fn lowerTypeDecl(
     info: *moduleinfo.ModuleInfo,
     tm: *moduleinfo.TypeMember,
     qname: []const u8,
-    id: cfg.TypeId,
-) LowerError!cfg.TypeDecl {
+    id: meta.TypeId,
+) LowerError!meta.TypeDecl {
     const module = info.specifier;
     const name = tm.name.text;
     const generic = switch (tm.decl) {
@@ -86,7 +86,7 @@ fn lowerTypeDecl(
 }
 
 /// The declaration's type-parameter names, in declaration order.
-fn typeParamNames(self: *Lowerer, params: []const ast.Ident) LowerError![]const []const u8 {
+fn typeParamNames(self: *Lowerer, params: []const meta.Ident) LowerError![]const []const u8 {
     const names = try self.arena.alloc([]const u8, params.len);
     for (params, 0..) |p, i| names[i] = p.text;
     return names;
@@ -94,8 +94,8 @@ fn typeParamNames(self: *Lowerer, params: []const ast.Ident) LowerError![]const 
 
 /// Resolve a struct's field declarations to AIR-native types (generic
 /// declarations keep their type parameters as `Type.param`).
-fn lowerFields(self: *Lowerer, info: *moduleinfo.ModuleInfo, fields: []const ast.FieldDecl) LowerError![]cfg.FieldDecl {
-    const out = try self.arena.alloc(cfg.FieldDecl, fields.len);
+fn lowerFields(self: *Lowerer, info: *moduleinfo.ModuleInfo, fields: []const ast.FieldDecl) LowerError![]meta.FieldDecl {
+    const out = try self.arena.alloc(meta.FieldDecl, fields.len);
     for (fields, 0..) |f, i| {
         const ft = moduleinfo.resolveType(self.resolve, info, &f.type_) orelse
             return self.fail(f.span, "cannot resolve field type", .{});
@@ -106,10 +106,10 @@ fn lowerFields(self: *Lowerer, info: *moduleinfo.ModuleInfo, fields: []const ast
 
 /// Resolve a union's variant payload types to AIR-native types (generic
 /// declarations keep their type parameters as `Type.param`).
-fn lowerVariants(self: *Lowerer, info: *moduleinfo.ModuleInfo, variants: []const ast.VariantDecl) LowerError![]cfg.VariantDecl {
-    const out = try self.arena.alloc(cfg.VariantDecl, variants.len);
+fn lowerVariants(self: *Lowerer, info: *moduleinfo.ModuleInfo, variants: []const ast.VariantDecl) LowerError![]meta.VariantDecl {
+    const out = try self.arena.alloc(meta.VariantDecl, variants.len);
     for (variants, 0..) |v, i| {
-        var payloads = std.ArrayList(cfg.Type).empty;
+        var payloads = std.ArrayList(meta.Type).empty;
         if (v.types) |types| for (types) |*t| {
             const pt = moduleinfo.resolveType(self.resolve, info, t) orelse
                 return self.fail(t.span(), "cannot resolve variant payload type", .{});

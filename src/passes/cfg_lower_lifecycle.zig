@@ -17,7 +17,7 @@
 //! into `s`, and one outside is released on every edge that still held
 //! it).
 const std = @import("std");
-const ast = @import("stilla").ast;
+const meta = @import("stilla").meta;
 const cfg = @import("stilla").cfg;
 const llir = @import("stilla").llir;
 const lower = @import("cfg_lower_llir.zig");
@@ -602,7 +602,7 @@ fn consumedOf(bld: *Builder, ins: *const cfg.Instr, out: *std.ArrayList(*const c
         .call => |c| {
             const params = bld.calleeParamList(c.callee);
             for (c.args, 0..) |a, k| {
-                const mode: ast.ParamMode = if (k < params.len) params[k].mode else .plain;
+                const mode: meta.ParamMode = if (k < params.len) params[k].mode else .plain;
                 if (mode == .move or (mode == .plain and a.ownership == .unique and a.state == .owned)) {
                     try out.append(arena, a);
                 }
@@ -611,7 +611,7 @@ fn consumedOf(bld: *Builder, ins: *const cfg.Instr, out: *std.ArrayList(*const c
         .syscall => |sc| {
             const sig = sc.sig orelse return;
             for (sc.args, 0..) |a, k| {
-                const mode: ast.ParamMode = if (k < sig.params.len) sig.params[k].mode else .plain;
+                const mode: meta.ParamMode = if (k < sig.params.len) sig.params[k].mode else .plain;
                 if (mode == .move or (mode == .plain and a.ownership == .unique and a.state == .owned)) {
                     try out.append(arena, a);
                 }

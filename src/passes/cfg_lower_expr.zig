@@ -7,8 +7,8 @@
 //! both paths share survive here.
 
 const std = @import("std");
-const ast = @import("stilla").ast;
 const cfg = @import("stilla").cfg;
+const meta = @import("stilla").meta;
 const lower = @import("stilla").lower;
 const cfg_lower_emit = @import("cfg_lower_emit.zig");
 
@@ -16,10 +16,10 @@ const Lowerer = lower.Lowerer;
 const FuncState = lower.FuncState;
 const LowerError = lower.LowerError;
 
-/// A typed literal: `const` ops carry a `cfg.ConstValue` (strings are
+/// A typed literal: `const` ops carry a `meta.ConstValue` (strings are
 /// arena-owned) and a type; a void-typed `()` never emits (see
 /// `emitVoid`).
-pub fn emitConst(self: *Lowerer, fs: *FuncState, span: ast.Span, value: cfg.ConstValue, type_: cfg.Type) LowerError!?*cfg.Value {
+pub fn emitConst(self: *Lowerer, fs: *FuncState, span: meta.Span, value: meta.ConstValue, type_: meta.Type) LowerError!?*cfg.Value {
     return cfg_lower_emit.emit(self, fs, span, .{ .const_ = value }, type_);
 }
 
@@ -32,7 +32,7 @@ pub fn emitConst(self: *Lowerer, fs: *FuncState, span: ast.Span, value: cfg.Cons
 /// lowerer emits no `const void` op for it.
 /// `emitDrop`/`exitScope`/`discardValue` treat it as Copy and skip it,
 /// so nothing downstream dereferences the missing definition.
-pub fn emitVoid(self: *Lowerer, fs: *FuncState, span: ast.Span) LowerError!?*cfg.Value {
+pub fn emitVoid(self: *Lowerer, fs: *FuncState, span: meta.Span) LowerError!?*cfg.Value {
     _ = fs;
     const v = try self.arena.create(cfg.Value);
     v.* = .{

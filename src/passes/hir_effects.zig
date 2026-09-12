@@ -44,7 +44,7 @@
 //! exact drop planner.
 
 const std = @import("std");
-const cfg = @import("stilla").cfg;
+const meta = @import("stilla").meta;
 const hir = @import("stilla").hir;
 const moduleinfo = @import("stilla").moduleinfo;
 const effects = @import("stilla").effects;
@@ -306,13 +306,13 @@ pub const Analysis = struct {
     /// fixpoint without an explicit iteration (docs/effects.md §11.1).
     /// No result is memoized: a value computed while a cycle was cut is
     /// an under-approximation that must not be reused at the top level.
-    pub fn dropEffectOf(self: *Analysis, ty: cfg.Type) Error!Summary {
-        var visiting = std.ArrayListUnmanaged(cfg.Type).empty;
+    pub fn dropEffectOf(self: *Analysis, ty: meta.Type) Error!Summary {
+        var visiting = std.ArrayListUnmanaged(meta.Type).empty;
         defer visiting.deinit(self.arena);
         return self.dropEffectInner(ty, &visiting);
     }
 
-    fn dropEffectInner(self: *Analysis, ty: cfg.Type, visiting: *std.ArrayListUnmanaged(cfg.Type)) Error!Summary {
+    fn dropEffectInner(self: *Analysis, ty: meta.Type, visiting: *std.ArrayListUnmanaged(meta.Type)) Error!Summary {
         // A Copy value's destruction has no interaction (§11.1), and a
         // Copy result short-circuits regardless of structure. A *stuck*
         // ownership (null) is not Copy: fall through to the structural
@@ -333,7 +333,7 @@ pub const Analysis = struct {
             },
             .param => return effects.top,
             .named => |n| {
-                for (visiting.items) |v| if (cfg.Type.eql(v, ty)) return effects.pure;
+                for (visiting.items) |v| if (meta.Type.eql(v, ty)) return effects.pure;
                 if (visiting.items.len >= max_drop_type_depth) return effects.top;
                 if (n.id >= self.built.types.len) return effects.top;
                 try visiting.append(self.arena, ty);
@@ -349,7 +349,7 @@ pub const Analysis = struct {
                         var i = d.fields.len;
                         while (i > 0) {
                             i -= 1;
-                            const ft = cfg.substParams(self.arena, d.type_params, n.args, d.fields[i].type_);
+                            const ft = meta.substParams(self.arena, d.type_params, n.args, d.fields[i].type_);
                             if (try self.isCopyType(ft)) continue;
                             acc = try effects.sequence(self.arena, acc, try self.dropEffectInner(ft, visiting));
                         }
@@ -362,7 +362,7 @@ pub const Analysis = struct {
                             var i = v.payloads.len;
                             while (i > 0) {
                                 i -= 1;
-                                const pt = cfg.substParams(self.arena, d.type_params, n.args, v.payloads[i]);
+                                const pt = meta.substParams(self.arena, d.type_params, n.args, v.payloads[i]);
                                 if (try self.isCopyType(pt)) continue;
                                 vsum = try effects.sequence(self.arena, vsum, try self.dropEffectInner(pt, visiting));
                             }
@@ -383,8 +383,8 @@ pub const Analysis = struct {
     /// that depends on it.
     fn collectTypeHooks(
         self: *Analysis,
-        ty: cfg.Type,
-        visiting: *std.ArrayListUnmanaged(cfg.Type),
+        ty: meta.Type,
+        visiting: *std.ArrayListUnmanaged(meta.Type),
         out: *std.ArrayListUnmanaged(hir.FuncId),
     ) Error!void {
         if (ty.ownership()) |ow| if (ow == .copy) return;
@@ -397,7 +397,7 @@ pub const Analysis = struct {
                 // (a type argument that changes on unrolling is a distinct
                 // node in the type graph). The depth cap is the safety net
                 // for an uninhabited non-regular instantiation chain.
-                for (visiting.items) |v| if (cfg.Type.eql(v, ty)) return;
+                for (visiting.items) |v| if (meta.Type.eql(v, ty)) return;
                 if (visiting.items.len >= max_drop_type_depth) return;
                 if (n.id >= self.built.types.len) return;
                 try visiting.append(self.arena, ty);
@@ -411,9 +411,9 @@ pub const Analysis = struct {
                                 if (!std.mem.containsAtLeastScalar(hir.FuncId, out.items, 1, fid)) try out.append(self.arena, fid);
                             }
                         }
-                        for (d.fields) |f| try self.collectTypeHooks(cfg.substParams(self.arena, d.type_params, n.args, f.type_), visiting, out);
+                        for (d.fields) |f| try self.collectTypeHooks(meta.substParams(self.arena, d.type_params, n.args, f.type_), visiting, out);
                     },
-                    .union_ => |d| for (d.variants) |v| for (v.payloads) |payload| try self.collectTypeHooks(cfg.substParams(self.arena, d.type_params, n.args, payload), visiting, out),
+                    .union_ => |d| for (d.variants) |v| for (v.payloads) |payload| try self.collectTypeHooks(meta.substParams(self.arena, d.type_params, n.args, payload), visiting, out),
                     .opaque_, .unknown => {},
                 }
             },
@@ -484,7 +484,7 @@ pub const Analysis = struct {
         return self.checkReadSet(c, cur, de, origin orelse 0, true, reject_unknown, allocator);
     }
 
-    fn typeIsNominal(self: *Analysis, ty: cfg.Type) bool {
+    fn typeIsNominal(self: *Analysis, ty: meta.Type) bool {
         if (ty != .named) return false;
         const id = ty.named.id;
         if (id >= self.built.types.len) return false;
@@ -607,7 +607,7 @@ pub const Analysis = struct {
         return null;
     }
 
-    fn isCopyType(self: *Analysis, ty: cfg.Type) Error!bool {
+    fn isCopyType(self: *Analysis, ty: meta.Type) Error!bool {
         const cap = try self.capabilityOf(ty) orelse return false;
         return cap == .copy;
     }
@@ -623,7 +623,7 @@ pub const Analysis = struct {
     /// host domain (docs/effects.md §11.1). The domain id is a stable
     /// hash of the host identity; a collision only merges two release
     /// domains, which conservatively adds conflicts, never removes them.
-    fn hostRelease(self: *Analysis, h: cfg.HostTypeId) Error!Summary {
+    fn hostRelease(self: *Analysis, h: meta.HostTypeId) Error!Summary {
         var wh = std.hash.Wyhash.init(0);
         wh.update(h.host_module);
         wh.update(h.type_name);
@@ -924,7 +924,7 @@ pub const Analysis = struct {
             if (node.op == drop_op) {
                 const ops = pr.operands(id);
                 if (ops.len > 0) {
-                    var vids = std.ArrayListUnmanaged(cfg.Type).empty;
+                    var vids = std.ArrayListUnmanaged(meta.Type).empty;
                     defer vids.deinit(self.arena);
                     try self.collectTypeHooks(pr.node(ops[0]).ty, &vids, out);
                 }
@@ -1016,7 +1016,7 @@ pub const Analysis = struct {
 
     /// The structural ownership class of a monomorphic HIR type, or null
     /// when it cannot be classified (callers treat null as Unique).
-    pub fn capabilityOf(self: *Analysis, ty: cfg.Type) Error!?cfg.Ownership {
+    pub fn capabilityOf(self: *Analysis, ty: meta.Type) Error!?meta.Ownership {
         if (ty.ownership()) |ow| return ow;
         if (ty == .named) {
             const n = ty.named;
@@ -1037,7 +1037,7 @@ pub const Analysis = struct {
         return null;
     }
 
-    fn declModule(self: *Analysis, g: *moduleinfo.ModuleGraph, type_id: cfg.TypeId) ?*moduleinfo.ModuleInfo {
+    fn declModule(self: *Analysis, g: *moduleinfo.ModuleGraph, type_id: meta.TypeId) ?*moduleinfo.ModuleInfo {
         if (type_id >= self.built.types.len) return null;
         const spec = switch (self.built.types[type_id]) {
             .struct_ => |d| d.module,
@@ -1594,7 +1594,7 @@ test "hir_effects: drop_effect walks the field/hook chain (teardown closed over 
     try testing.expect((try an.checkModuleDependencies(testing.allocator)) == null);
 }
 
-fn findStructTy(f: *Fixture, name: []const u8) ?cfg.Type {
+fn findStructTy(f: *Fixture, name: []const u8) ?meta.Type {
     for (f.built.types, 0..) |d, i| {
         const dname = switch (d) {
             .struct_ => |s| s.name,

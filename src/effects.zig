@@ -36,7 +36,7 @@
 //! information — see `sequence` (an alias of `join`) and the law tests.
 
 const std = @import("std");
-const cfg = @import("cfg.zig");
+const meta = @import("meta.zig");
 
 /// Dense ids owned by the surrounding program; mirrored so this module
 /// stays independent of the HIR (hir.md §3.5 category 3).
@@ -788,7 +788,7 @@ fn stableReadPair(a: Summary, b: Summary, reg: ResourceRegistry) bool {
 /// makes unknown cleanup block deletion/floating/duplication/SEG
 /// admission. `capability` is `null` when the type could not be
 /// classified — also Top.
-pub fn dropEffect(capability: ?cfg.Ownership) Summary {
+pub fn dropEffect(capability: ?meta.Ownership) Summary {
     const cap = capability orelse return top;
     return switch (cap) {
         .copy => pure,

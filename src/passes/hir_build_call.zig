@@ -5,7 +5,7 @@
 
 const std = @import("std");
 const ast = @import("stilla").ast;
-const cfg = @import("stilla").cfg;
+const meta = @import("stilla").meta;
 const hir = @import("stilla").hir;
 const moduleinfo = @import("stilla").moduleinfo;
 const checker = @import("stilla").checker;
@@ -21,7 +21,7 @@ const hir_build_expr = @import("hir_build_expr.zig");
 /// `cfg_lower_intrinsic.intrinsicFnRef`) from *call-position* leaves
 /// (the call lowers to the inline expansion — syscall — at S5; the
 /// leaf stays a host fn_ref).
-pub fn memberLeaf(b: *hir_build.Builder, info: *moduleinfo.ModuleInfo, specifier: []const u8, name: []const u8, span: ast.Span, value_pos: bool) hir_build.BuildError!hir.ExprId {
+pub fn memberLeaf(b: *hir_build.Builder, info: *moduleinfo.ModuleInfo, specifier: []const u8, name: []const u8, span: meta.Span, value_pos: bool) hir_build.BuildError!hir.ExprId {
     const owner = b.graph.module(specifier) orelse
         return b.fail(span, "module '{s}' is not loaded", .{specifier});
     const vm = owner.valueMember(name) orelse
@@ -82,7 +82,7 @@ fn cfgIntrinsicConstBits(module_spec: []const u8, member: []const u8) ?u32 {
 pub fn buildLambda(b: *hir_build.Builder, info: *moduleinfo.ModuleInfo, lam: *const ast.Lambda) hir_build.BuildError!hir.ExprId {
     const name = try std.fmt.allocPrint(b.arena, "{s}.lambda{d}", .{ b.fn_name, b.next_lambda_id });
     b.next_lambda_id += 1;
-    const params = try b.arena.alloc(cfg.Param, lam.params.len);
+    const params = try b.arena.alloc(meta.Param, lam.params.len);
     for (lam.params, 0..) |*p, i| {
         params[i] = .{ .span = p.span, .name = p.name, .mode = p.mode, .type_ = try b.resolveType(info, &p.type_) };
     }
@@ -97,7 +97,7 @@ pub fn buildLambda(b: *hir_build.Builder, info: *moduleinfo.ModuleInfo, lam: *co
 }
 pub fn buildCall(b: *hir_build.Builder, info: *moduleinfo.ModuleInfo, e: *const ast.Expr, c: *const ast.Call) hir_build.BuildError!hir.ExprId {
     const ann_inst = if (b.ann.per_module.get(info.specifier)) |ma| ma.call_of.get(c) else null;
-    var callee_ty: ?cfg.Type = null;
+    var callee_ty: ?meta.Type = null;
     var callee: hir.ExprId = undefined;
     if (ann_inst) |inst| {
         if (inst.mono != null) {
@@ -133,7 +133,7 @@ pub fn buildCall(b: *hir_build.Builder, info: *moduleinfo.ModuleInfo, e: *const 
         try ids.append(b.arena, try hir_build_expr.buildExpr(b, info, arg));
     }
     const ops = try b.built.program.addOperands(ids.items);
-    var ty: cfg.Type = undefined;
+    var ty: meta.Type = undefined;
     if (b.annotatedType(info, e)) |at| {
         ty = at;
     } else if (callee_ty) |ct| {
@@ -151,7 +151,7 @@ pub fn buildCall(b: *hir_build.Builder, info: *moduleinfo.ModuleInfo, e: *const 
 /// function (non-generic member / host / intrinsic → `memberLeaf`; a
 /// bodyful generic must be instance-keyed by the annotation's
 /// `call_of`), or a function-value callee (local / alias).
-fn resolvePathCallee(b: *hir_build.Builder, info: *moduleinfo.ModuleInfo, e: *const ast.Expr, span: ast.Span, callee_ty: *?cfg.Type) hir_build.BuildError!hir.ExprId {
+fn resolvePathCallee(b: *hir_build.Builder, info: *moduleinfo.ModuleInfo, e: *const ast.Expr, span: meta.Span, callee_ty: *?meta.Type) hir_build.BuildError!hir.ExprId {
     const p: *const ast.PathExpr = &e.path;
     const path = p.path;
     var owner = info;
@@ -211,7 +211,7 @@ fn resolvePathCallee(b: *hir_build.Builder, info: *moduleinfo.ModuleInfo, e: *co
 
 /// A single-name callee that is not a module member: a local binding
 /// (fn-typed value) or a module-level alias.
-fn localCallee(b: *hir_build.Builder, info: *moduleinfo.ModuleInfo, id: ast.Ident) hir_build.BuildError!hir.ExprId {
+fn localCallee(b: *hir_build.Builder, info: *moduleinfo.ModuleInfo, id: meta.Ident) hir_build.BuildError!hir.ExprId {
     if (b.lookup(id.text)) |bind| return hir_build_block.localNode(b, info, bind);
     if (info.alias(id.text)) |a| {
         switch (a.target) {
@@ -246,7 +246,7 @@ pub fn buildSpecialize(b: *hir_build.Builder, info: *moduleinfo.ModuleInfo, s: *
 /// bodyless (host/intrinsic) member: a host fn_ref (the concrete
 /// signature is derived at S5 from the arguments). Bodyful generic
 /// specializations are keyed in `call_of` and handled earlier.
-fn specializeCalleeLeaf(b: *hir_build.Builder, info: *moduleinfo.ModuleInfo, s: *const ast.Specialize, span: ast.Span) hir_build.BuildError!hir.ExprId {
+fn specializeCalleeLeaf(b: *hir_build.Builder, info: *moduleinfo.ModuleInfo, s: *const ast.Specialize, span: meta.Span) hir_build.BuildError!hir.ExprId {
     var operand = s.operand;
     while (operand.* == .paren) operand = operand.paren.inner;
     if (operand.* != .path) return b.fail(s.span, "cannot specialize a non-path callee", .{});
@@ -275,10 +275,10 @@ fn specializeCalleeLeaf(b: *hir_build.Builder, info: *moduleinfo.ModuleInfo, s: 
     return memberLeaf(b, info, mod.specifier, tail.text, span, false);
 }
 
-fn intrinsicWrapperFnRef(b: *hir_build.Builder, info: *moduleinfo.ModuleInfo, span: ast.Span, owner: *moduleinfo.ModuleInfo, vm: *const moduleinfo.ValueMember, spec: ?*checker.FuncInstance) hir_build.BuildError!hir.ExprId {
+fn intrinsicWrapperFnRef(b: *hir_build.Builder, info: *moduleinfo.ModuleInfo, span: meta.Span, owner: *moduleinfo.ModuleInfo, vm: *const moduleinfo.ValueMember, spec: ?*checker.FuncInstance) hir_build.BuildError!hir.ExprId {
     const sig = if (spec) |s| s.signature else vm.type_;
     const key = hir_build.WrapperKey{
-        .owner = try b.modIdx(owner.specifier),
+        .owner = @intFromPtr(owner),
         .slot = vm.slot,
         .spec = if (spec) |s| s.id else std.math.maxInt(u32),
     };
@@ -292,7 +292,7 @@ fn intrinsicWrapperFnRef(b: *hir_build.Builder, info: *moduleinfo.ModuleInfo, sp
         .function => |f| f,
         else => return b.fail(span, "intrinsic '{s}.{s}' is not a function", .{ owner.specifier, vm.name.text }),
     };
-    const params = try b.arena.alloc(cfg.Param, ft.params.len);
+    const params = try b.arena.alloc(meta.Param, ft.params.len);
     for (ft.params, 0..) |*p, i| {
         params[i] = .{ .span = p.span, .name = .{ .span = p.span, .text = try std.fmt.allocPrint(b.arena, "p{d}", .{i}) }, .mode = p.mode, .type_ = p.type_ };
     }
@@ -332,14 +332,14 @@ fn synthIntrinsicRoot(b: *hir_build.Builder, fid: hir.FuncId, hid: hir.HostBindi
         if (hir_build.isVoid(prm.type_)) continue;
         try args.append(b.arena, try hir_build_block.localNode(b, info, bind));
     }
-    const callee_leaf = try b.built.program.addExpr(.{ .op = try b.op(ast.Span.init(0, 0, 0), "fn_ref"), .ty = host_rec.signature, .payload = .{ .func = .{ .host = hid } } });
+    const callee_leaf = try b.built.program.addExpr(.{ .op = try b.op(meta.Span.init(0, 0, 0), "fn_ref"), .ty = host_rec.signature, .payload = .{ .func = .{ .host = hid } } });
     var all = std.ArrayList(hir.ExprId).empty;
     try all.append(b.arena, callee_leaf);
     for (args.items) |a| try all.append(b.arena, a);
     const ops = try b.built.program.addOperands(all.items);
-    const body = try b.built.program.addExpr(.{ .op = try b.op(ast.Span.init(0, 0, 0), "call"), .ty = rec.ret, .operands = ops });
+    const body = try b.built.program.addExpr(.{ .op = try b.op(meta.Span.init(0, 0, 0), "call"), .ty = rec.ret, .operands = ops });
     b.popScope();
     const rid = try b.built.program.addRegion(binder_ids.items, body, null);
     const regs = try b.built.program.addRegions(&.{rid});
-    return b.built.program.addExpr(.{ .op = try b.op(ast.Span.init(0, 0, 0), "lambda"), .ty = try b.funcType(rec.params, rec.ret), .regions = regs });
+    return b.built.program.addExpr(.{ .op = try b.op(meta.Span.init(0, 0, 0), "lambda"), .ty = try b.funcType(rec.params, rec.ret), .regions = regs });
 }

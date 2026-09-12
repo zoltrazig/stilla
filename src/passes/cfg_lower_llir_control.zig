@@ -18,6 +18,7 @@
 
 const std = @import("std");
 const cfg = @import("stilla").cfg;
+const meta = @import("stilla").meta;
 const llir = @import("stilla").llir;
 const lower = @import("cfg_lower_llir.zig");
 const intern = @import("cfg_lower_llir_intern.zig");
@@ -259,7 +260,7 @@ pub fn fusedBranchReads(cond: *const cfg.Value) ?BranchReads {
 /// branches (`beqi`/`bnei`) sign-extend on every integer type
 /// (Instruction Set §4) — there is no unsigned equality variant — so
 /// `equality` selects the signed window on the unsigned reps too.
-fn imm7Of(cv: cfg.ConstValue, type_: cfg.Type, equality: bool) ?u8 {
+fn imm7Of(cv: meta.ConstValue, type_: meta.Type, equality: bool) ?u8 {
     const i = switch (cv) {
         .int => |i| i,
         else => return null,
@@ -285,7 +286,7 @@ fn imm7Of(cv: cfg.ConstValue, type_: cfg.Type, equality: bool) ?u8 {
 /// immediate branch, so every other ordering
 /// falls back to the register form with the constant materialized.
 /// The immediate family is chosen by the value operand's type.
-fn immBranchOf(tag: cfg.OpTag, value: *const cfg.Value, cv: cfg.ConstValue, const_left: bool) ?FusedBranch {
+fn immBranchOf(tag: cfg.OpTag, value: *const cfg.Value, cv: meta.ConstValue, const_left: bool) ?FusedBranch {
     const equality = tag == .eq or tag == .ne;
     const imm7 = imm7Of(cv, value.type_, equality) orelse return null;
     const base: ?[]const u8 = if (const_left)
@@ -420,7 +421,7 @@ pub fn invertBranch(op: llir.Opcode) ?BranchInverse {
 
 /// The constant payload of a value whose defining instruction is a
 /// `const_`, or null for every other value.
-fn constOf(v: *const cfg.Value) ?cfg.ConstValue {
+fn constOf(v: *const cfg.Value) ?meta.ConstValue {
     const d = v.def orelse return null;
     return switch (d.op) {
         .const_ => |cv| cv,

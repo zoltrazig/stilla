@@ -83,6 +83,7 @@ pub const LoadResult = interp_loader.LoadResult;
 pub const LoadError = interp_loader.LoadError;
 pub const RuntimeModule = interp_loader.RuntimeModule;
 pub const readHeader = interp_types.readHeader;
+pub const checkHeader = interp_types.checkHeader;
 pub const Termination = interp_types.Termination;
 pub const RunError = interp_types.RunError;
 pub const HostResult = interp_types.HostResult;

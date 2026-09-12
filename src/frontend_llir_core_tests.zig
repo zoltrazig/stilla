@@ -14,6 +14,7 @@
 const std = @import("std");
 const llir = @import("llir.zig");
 const cfg = @import("cfg.zig");
+const meta = @import("meta.zig");
 const lower = @import("lower.zig");
 const cfg_parse = @import("passes/cfg_parse.zig");
 const cfg_lower_llir = @import("passes/cfg_lower_llir.zig");
@@ -781,14 +782,14 @@ test "2.3 LLIR lowering: scratch budget covers phi swap-cycle staging" {
     var saw_bool_stage = false;
     for (mlist) |copy| {
         if (copy.src_type) |st| {
-            if (cfg.Type.eql(st.*, mf.params[0].type_)) saw_int_stage = true;
-            if (cfg.Type.eql(st.*, mf.params[1].type_)) saw_bool_stage = true;
+            if (meta.Type.eql(st.*, mf.params[0].type_)) saw_int_stage = true;
+            if (meta.Type.eql(st.*, mf.params[1].type_)) saw_bool_stage = true;
         }
     }
     try testing.expect(saw_int_stage);
     try testing.expect(saw_bool_stage);
-    try testing.expect(cfg.Type.eql(b.scratch_cycle_types.items[b.func_ids.get(mf).?].items[0].*, mf.params[0].type_));
-    try testing.expect(cfg.Type.eql(b.scratch_cycle_types.items[b.func_ids.get(mf).?].items[1].*, mf.params[1].type_));
+    try testing.expect(meta.Type.eql(b.scratch_cycle_types.items[b.func_ids.get(mf).?].items[0].*, mf.params[0].type_));
+    try testing.expect(meta.Type.eql(b.scratch_cycle_types.items[b.func_ids.get(mf).?].items[1].*, mf.params[1].type_));
 }
 
 // ---------------------------------------------------------------------------
@@ -1315,7 +1316,7 @@ test "2.4 LLIR lowering: named instantiation interning and generic template decl
     // The `Option` template TypeId: the index of its declaration in both
     // program.types and image.type_decls (the shared index space of
     // TypeDesc.named.a, spec §8).
-    const opt_id: cfg.TypeId = blk: {
+    const opt_id: meta.TypeId = blk: {
         for (program.types, 0..) |decl, id| {
             if (decl == .struct_ and std.mem.eql(u8, decl.struct_.name, "Option")) break :blk @intCast(id);
         }

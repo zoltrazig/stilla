@@ -11,7 +11,7 @@
 //! Run via `zig build test` (wired into `src/root.zig`'s test block).
 
 const std = @import("std");
-const ast = @import("ast.zig");
+const meta = @import("meta.zig");
 const llir = @import("llir.zig");
 const cfg = @import("cfg.zig");
 const frontend = @import("frontend.zig");
@@ -1279,7 +1279,7 @@ test "2.15 LLIR lowering: lifecycle fusion requires release src == move dst" {
     var program = std.mem.zeroes(cfg.IrProgram);
     var blk = cfg.BasicBlock{
         .id = 0,
-        .span = ast.Span.init(0, 0, 0),
+        .span = meta.Span.init(0, 0, 0),
         .name = "blk",
         .instrs = &.{},
         .terminator = .{ .ret = null },

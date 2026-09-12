@@ -262,7 +262,7 @@ test "frame header: root carries sentinels; normal calls record the caller frame
     try testing.expectEqual(interpreter.invalid_pc, @as(u32, @truncate(vm.runtime.stack.items[1])));
     try testing.expectEqual(interpreter.invalid_pc, @as(u32, @truncate(vm.runtime.stack.items[2])));
     const root_hdr = interpreter.readHeader(vm.runtime.stack.items, 3);
-    try testing.expect(root_hdr.check(vm.loaded.funcs.items, 3));
+    try testing.expect(interpreter.checkHeader(root_hdr, vm.loaded.funcs.items, 3));
 
     // The callee frame sits below main's window; its three-cell header
     // records the caller's frame base, function index, and the resume pc
@@ -271,7 +271,7 @@ test "frame header: root carries sentinels; normal calls record the caller frame
     const a: u32 = @max(2, 1); // P=2 params, R=1 result
     const callee_fp = llir.frameEnd(3, main_fd) - a; // the value area aliases the window top
     const hdr = interpreter.readHeader(vm.runtime.stack.items, callee_fp);
-    try testing.expect(hdr.check(vm.loaded.funcs.items, callee_fp));
+    try testing.expect(interpreter.checkHeader(hdr, vm.loaded.funcs.items, callee_fp));
     try testing.expectEqual(@as(u32, 3), hdr.saved_fp); // the caller's frame base (root fp)
     try testing.expectEqual(entry, hdr.saved_fn); // the caller's function registry index
     // The recorded return pc names main's instruction after its call.
@@ -305,14 +305,14 @@ test "frame header: internal-continuation sentinel validates by position" {
     // continuation machinery (modules/drop hooks) will consume this.
     vm.runtime.stack.items[1] = 0; // saved_fn: a valid registry index (root fn)
     vm.runtime.stack.items[2] = interpreter.vm_internal_pc;
-    try testing.expect(interpreter.readHeader(vm.runtime.stack.items, vm.runtime.fp).check(vm.loaded.funcs.items, vm.runtime.fp));
+    try testing.expect(interpreter.checkHeader(interpreter.readHeader(vm.runtime.stack.items, vm.runtime.fp), vm.loaded.funcs.items, vm.runtime.fp));
     // A corrupt header — saved_fp not below the current fp — fails validation.
     vm.runtime.stack.items[0] = 999999;
-    try testing.expect(!interpreter.readHeader(vm.runtime.stack.items, vm.runtime.fp).check(vm.loaded.funcs.items, vm.runtime.fp));
+    try testing.expect(!interpreter.checkHeader(interpreter.readHeader(vm.runtime.stack.items, vm.runtime.fp), vm.loaded.funcs.items, vm.runtime.fp));
     // A saved_fn out of range (with a real return pc) fails validation.
     vm.runtime.stack.items[0] = 0;
     vm.runtime.stack.items[1] = 999999;
-    try testing.expect(!interpreter.readHeader(vm.runtime.stack.items, vm.runtime.fp).check(vm.loaded.funcs.items, vm.runtime.fp));
+    try testing.expect(!interpreter.checkHeader(interpreter.readHeader(vm.runtime.stack.items, vm.runtime.fp), vm.loaded.funcs.items, vm.runtime.fp));
     // A saved_fn whose range does NOT contain the saved_ra fails too —
     // the O(1) position-consistent check is stronger than the old
     // "any function contains the pc" scan. saved_ra is a real pc
@@ -321,10 +321,10 @@ test "frame header: internal-continuation sentinel validates by position" {
     vm.runtime.stack.items[0] = interpreter.invalid_pc;
     vm.runtime.stack.items[1] = entry;
     vm.runtime.stack.items[2] = leaf_fd.entry_pc;
-    try testing.expect(interpreter.readHeader(vm.runtime.stack.items, vm.runtime.fp).check(vm.loaded.funcs.items, vm.runtime.fp));
+    try testing.expect(interpreter.checkHeader(interpreter.readHeader(vm.runtime.stack.items, vm.runtime.fp), vm.loaded.funcs.items, vm.runtime.fp));
     // Out of range with a real return pc fails validation.
     vm.runtime.stack.items[1] = 999999;
-    try testing.expect(!interpreter.readHeader(vm.runtime.stack.items, vm.runtime.fp).check(vm.loaded.funcs.items, vm.runtime.fp));
+    try testing.expect(!interpreter.checkHeader(interpreter.readHeader(vm.runtime.stack.items, vm.runtime.fp), vm.loaded.funcs.items, vm.runtime.fp));
 }
 
 test "frame header: a corrupted saved_fn traps at return" {

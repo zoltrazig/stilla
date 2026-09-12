@@ -5,6 +5,7 @@
 
 const std = @import("std");
 const ast = @import("stilla").ast;
+const meta = @import("stilla").meta;
 const lex = @import("stilla").lex;
 const parser = @import("stilla").parser;
 const parse_type = @import("type.zig");
@@ -48,7 +49,7 @@ pub fn parsePattern(self: *parser.Parser) ParseError!ast.Pattern {
 pub fn parseTypeTestPattern(self: *parser.Parser) ParseError!ast.Pattern {
     const start = self.mark();
     const type_ = try parse_type.parseType(self);
-    var binding: ?ast.Ident = null;
+    var binding: ?meta.Ident = null;
     if (self.at(.ident)) binding = try self.expectIdent();
     return .{ .type_test = .{ .span = self.spanFrom(start), .type_ = type_, .binding = binding } };
 }
@@ -109,7 +110,7 @@ pub fn parseListPattern(self: *parser.Parser) ParseError!ast.Pattern {
     const start = self.mark();
     _ = self.advance(); // '['
     var items = std.ArrayList(ast.Pattern).empty;
-    var rest: ?ast.Ident = null;
+    var rest: ?meta.Ident = null;
     if (self.eat(.ellipsis)) {
         rest = try self.expectIdent();
     } else if (!self.at(.rbracket)) {

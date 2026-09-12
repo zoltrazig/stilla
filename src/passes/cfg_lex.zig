@@ -12,7 +12,7 @@
 //! own diagnostics in the same shape.
 
 const std = @import("std");
-const ast = @import("stilla").ast;
+const meta = @import("stilla").meta;
 
 pub const TokKind = enum {
     ident,
@@ -38,7 +38,7 @@ pub const TokKind = enum {
 
 pub const Token = struct {
     kind: TokKind,
-    span: ast.Span,
+    span: meta.Span,
     text: []const u8,
 };
 
@@ -240,8 +240,8 @@ pub const Lexer = struct {
     }
 };
 
-fn sp(start: usize, end: usize) ast.Span {
-    return ast.Span.init(0, @intCast(start), @intCast(end));
+fn sp(start: usize, end: usize) meta.Span {
+    return meta.Span.init(0, @intCast(start), @intCast(end));
 }
 
 fn isIdentStart(c: u8) bool {

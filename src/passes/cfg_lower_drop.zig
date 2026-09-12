@@ -55,6 +55,7 @@
 const std = @import("std");
 const ast = @import("stilla").ast;
 const cfg = @import("stilla").cfg;
+const meta = @import("stilla").meta;
 const moduleinfo = @import("stilla").moduleinfo;
 const type_resolve = @import("type_resolve.zig");
 
@@ -111,7 +112,7 @@ const Seq = struct {
     /// and return the results. `op` must be an op the schema classifies
     /// as producing owned results (or a pure effect with zero result
     /// types — `drop`, a void `call`, `store_member`, …).
-    fn appendOp(seq: *Seq, span: ast.Span, op: cfg.Op, result_types: []const cfg.Type) ![]*cfg.Value {
+    fn appendOp(seq: *Seq, span: meta.Span, op: cfg.Op, result_types: []const meta.Type) ![]*cfg.Value {
         const c = seq.c;
         const results = try c.allocator.alloc(*cfg.Value, result_types.len);
         for (result_types, 0..) |t, i| {
@@ -242,7 +243,7 @@ fn lowerFunc(resolve: moduleinfo.Resolve, program: *cfg.IrProgram, graph: *modul
 
 /// Whether a `drop` of a value of type `t` should be expanded by this
 /// pass (vs. kept as a single runtime instruction).
-fn expandable(c: *Ctx, t: cfg.Type) bool {
+fn expandable(c: *Ctx, t: meta.Type) bool {
     return switch (t) {
         .named => |n| blk: {
             const ref = c.decls[n.id] orelse break :blk false;
@@ -362,10 +363,10 @@ fn emitDestroy(seq: *Seq, v: *cfg.Value) error{OutOfMemory}!void {
             // expansion's own consumption, no separate `move` is needed.
             const args = try seq.c.allocator.alloc(*cfg.Value, 1);
             args[0] = v;
-            const ret_ptr = try seq.c.allocator.create(cfg.Type);
+            const ret_ptr = try seq.c.allocator.create(meta.Type);
             ret_ptr.* = inner.*;
-            const params = try seq.c.allocator.alloc(cfg.Param, 1);
-            params[0] = cfg.syntheticParam(span, .move, v.type_);
+            const params = try seq.c.allocator.alloc(meta.Param, 1);
+            params[0] = meta.syntheticParam(span, .move, v.type_);
             const r = try seq.appendOp(span, .{ .syscall = .{ .span = span, .target = .{ .builtin = .unbox }, .args = args, .sig = .{ .params = params, .ret = ret_ptr } } }, &.{inner.*});
             try emitDestroy(seq, r[0]);
         },
@@ -399,13 +400,13 @@ fn emitDestroy(seq: *Seq, v: *cfg.Value) error{OutOfMemory}!void {
 
 /// A struct drop: hook call (when declared), `unpack_struct`, then
 /// per-field drops in reverse declaration order (*Copy* fields skip).
-fn emitStructDrop(seq: *Seq, v: *cfg.Value, ref: DeclRef, args: []const cfg.Type, s: *const ast.StructDef, span: ast.Span) error{OutOfMemory}!void {
+fn emitStructDrop(seq: *Seq, v: *cfg.Value, ref: DeclRef, args: []const meta.Type, s: *const ast.StructDef, span: meta.Span) error{OutOfMemory}!void {
     // The instantiated field types (a generic declaration's fields
     // reference its type parameters; substitute the instantiation's
     // args). Resolved before anything is emitted: an unresolvable field
     // (defensive; a checked program always resolves) keeps the drop
     // unexpanded instead of half-expanding it.
-    var ftypes = std.ArrayList(cfg.Type).empty;
+    var ftypes = std.ArrayList(meta.Type).empty;
     defer ftypes.deinit(seq.c.allocator);
     for (s.fields) |*fd| {
         const ft = moduleinfo.resolveType(seq.c.resolve, ref.module, &fd.type_) orelse {
@@ -438,14 +439,14 @@ fn emitStructDrop(seq: *Seq, v: *cfg.Value, ref: DeclRef, args: []const cfg.Type
 /// A union drop: `read_tag`, a `switch` over the variants, per-variant
 /// arms destroying the active payload (reverse payload order), converging
 /// on a join block that continues the sequence.
-fn emitUnionDrop(seq: *Seq, v: *cfg.Value, ref: DeclRef, args: []const cfg.Type, u: *const ast.UnionDef, span: ast.Span) error{OutOfMemory}!void {
+fn emitUnionDrop(seq: *Seq, v: *cfg.Value, ref: DeclRef, args: []const meta.Type, u: *const ast.UnionDef, span: meta.Span) error{OutOfMemory}!void {
     // Pre-resolve every variant's payload types before emitting anything
     // (same defensive reasoning as the struct case).
-    const ptypes_of = try seq.c.allocator.alloc([]const cfg.Type, u.variants.len);
+    const ptypes_of = try seq.c.allocator.alloc([]const meta.Type, u.variants.len);
     defer seq.c.allocator.free(ptypes_of);
     for (u.variants, 0..) |*vari, vi| {
         if (vari.types) |vtypes| {
-            var ptypes = std.ArrayList(cfg.Type).empty;
+            var ptypes = std.ArrayList(meta.Type).empty;
             defer ptypes.deinit(seq.c.allocator);
             for (vtypes) |*vt| {
                 const pt = moduleinfo.resolveType(seq.c.resolve, ref.module, vt) orelse {

@@ -225,9 +225,9 @@ pub const ModuleInfo = struct {
 
     /// The compiler-generated nominal struct type (Core): its
     /// members are the module's runtime value members. There is no
-    /// `typeinfo` module — resolved types are the AIR-native `cfg.Type`
+    /// `typeinfo` module — resolved types are the AIR-native `meta.Type`
     /// (see [checker.md](checker.md)).
-    struct_type: *cfg.Type,
+    struct_type: *meta.Type,
 
     /// Dependency edges in declaration order (Runtime).
     imports: []*ModuleInfo,
@@ -251,10 +251,10 @@ pub const ModuleInfo = struct {
 };
 
 pub const HostBinding = struct {
-    span: ast.Span,
-    name: ast.Ident,
+    span: meta.Span,
+    name: meta.Ident,
     /// The declaration's resolved monomorphic signature.
-    signature: *cfg.Type,
+    signature: *meta.Type,
     /// Index of the binding in its module's member table (a `MemberId`,
     /// air.md); stable, so the runtime can dispatch syscalls by
     /// (module, member).

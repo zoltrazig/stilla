@@ -44,6 +44,7 @@
 
 const std = @import("std");
 const ast = @import("ast.zig");
+const meta = @import("meta.zig");
 const parser = @import("parser.zig");
 const testing = std.testing;
 
@@ -185,10 +186,10 @@ test "grammar: const-def's three forms" {
     try testing.expect(a.type_ == null);
     try testing.expect(a.init != null);
     const b = t.program.items[1].const_def;
-    try testing.expectEqual(ast.PrimitiveKind.int32, b.type_.?.primitive.kind);
+    try testing.expectEqual(meta.PrimitiveKind.int32, b.type_.?.primitive.kind);
     try testing.expect(b.init != null);
     const c = t.program.items[2].const_def;
-    try testing.expectEqual(ast.PrimitiveKind.str, c.type_.?.primitive.kind);
+    try testing.expectEqual(meta.PrimitiveKind.str, c.type_.?.primitive.kind);
     try testing.expect(c.init == null);
 }
 
@@ -202,17 +203,17 @@ test "grammar: func-def — generics, param modes, required return, host binding
 
     const one = t.program.items[0].func_def;
     try testing.expectEqualStrings("T", one.type_params[0].text);
-    try testing.expectEqual(ast.ParamMode.borrow, one.params[0].mode);
-    try testing.expectEqual(ast.ParamMode.move, one.params[1].mode);
+    try testing.expectEqual(meta.ParamMode.borrow, one.params[0].mode);
+    try testing.expectEqual(meta.ParamMode.move, one.params[1].mode);
     try testing.expectEqualStrings("T", one.ret.named.path[0].text);
     try testing.expect(one.body != null);
     const two = t.program.items[1].func_def;
-    try testing.expectEqual(ast.PrimitiveKind.int32, two.ret.primitive.kind);
+    try testing.expectEqual(meta.PrimitiveKind.int32, two.ret.primitive.kind);
     try testing.expect(two.body != null);
     const host = t.program.items[2].func_def;
     try testing.expect(host.body == null);
     try testing.expectEqualStrings("T", host.type_params[0].text);
-    try testing.expectEqual(ast.PrimitiveKind.str, host.ret.primitive.kind);
+    try testing.expectEqual(meta.PrimitiveKind.str, host.ret.primitive.kind);
 }
 
 test "grammar: func-def — a missing return type is a parse error" {
@@ -238,8 +239,8 @@ test "grammar: lambda — modes, required return, immediate call" {
 
     const body = t.program.items[0].func_def.body.?;
     const g = body.stmts[0].let.init.lambda;
-    try testing.expectEqual(ast.ParamMode.borrow, g.params[0].mode);
-    try testing.expectEqual(ast.PrimitiveKind.int32, g.ret.primitive.kind);
+    try testing.expectEqual(meta.ParamMode.borrow, g.params[0].mode);
+    try testing.expectEqual(meta.PrimitiveKind.int32, g.ret.primitive.kind);
     // A lambda is a primary, so a call suffix applies directly to it.
     const call = body.result.?.call;
     try testing.expect(call.callee.* == .lambda);
@@ -269,11 +270,11 @@ test "grammar: function types — zero params, modes, nesting" {
 
     const z = t.program.items[0].type_def.target.function;
     try testing.expectEqual(@as(usize, 0), z.params.len);
-    try testing.expectEqual(ast.PrimitiveKind.void, z.ret.primitive.kind);
+    try testing.expectEqual(meta.PrimitiveKind.void, z.ret.primitive.kind);
     const n = t.program.items[1].type_def.target.function;
     try testing.expectEqual(@as(usize, 1), n.params[0].type_.function.params.len);
-    try testing.expectEqual(ast.ParamMode.borrow, n.params[1].mode);
-    try testing.expectEqual(ast.PrimitiveKind.bool, n.ret.primitive.kind);
+    try testing.expectEqual(meta.ParamMode.borrow, n.params[1].mode);
+    try testing.expectEqual(meta.PrimitiveKind.bool, n.ret.primitive.kind);
 }
 
 // ---------------------------------------------------------------------------
@@ -282,19 +283,19 @@ test "grammar: function types — zero params, modes, nesting" {
 
 test "grammar: all thirteen primitive types parse in type position" {
     const cases = .{
-        .{ "any", ast.PrimitiveKind.any },
-        .{ "byte", ast.PrimitiveKind.byte },
-        .{ "hostdata", ast.PrimitiveKind.hostdata },
-        .{ "int32", ast.PrimitiveKind.int32 },
-        .{ "uint32", ast.PrimitiveKind.uint32 },
-        .{ "int64", ast.PrimitiveKind.int64 },
-        .{ "uint64", ast.PrimitiveKind.uint64 },
-        .{ "float32", ast.PrimitiveKind.float32 },
-        .{ "float64", ast.PrimitiveKind.float64 },
-        .{ "bool", ast.PrimitiveKind.bool },
-        .{ "str", ast.PrimitiveKind.str },
-        .{ "void", ast.PrimitiveKind.void },
-        .{ "never", ast.PrimitiveKind.never },
+        .{ "any", meta.PrimitiveKind.any },
+        .{ "byte", meta.PrimitiveKind.byte },
+        .{ "hostdata", meta.PrimitiveKind.hostdata },
+        .{ "int32", meta.PrimitiveKind.int32 },
+        .{ "uint32", meta.PrimitiveKind.uint32 },
+        .{ "int64", meta.PrimitiveKind.int64 },
+        .{ "uint64", meta.PrimitiveKind.uint64 },
+        .{ "float32", meta.PrimitiveKind.float32 },
+        .{ "float64", meta.PrimitiveKind.float64 },
+        .{ "bool", meta.PrimitiveKind.bool },
+        .{ "str", meta.PrimitiveKind.str },
+        .{ "void", meta.PrimitiveKind.void },
+        .{ "never", meta.PrimitiveKind.never },
     };
     inline for (cases) |c| {
         const text = try std.fmt.allocPrint(testing.allocator, "type T = {s};", .{c[0]});
@@ -317,8 +318,8 @@ test "grammar: named types — dotted paths and type arguments" {
     const c = t.program.items[2].type_def.target.named;
     try testing.expectEqual(@as(usize, 2), c.path.len);
     try testing.expectEqual(@as(usize, 2), c.type_args.?.len);
-    try testing.expectEqual(ast.PrimitiveKind.int32, c.type_args.?[0].primitive.kind);
-    try testing.expectEqual(ast.PrimitiveKind.str, c.type_args.?[1].primitive.kind);
+    try testing.expectEqual(meta.PrimitiveKind.int32, c.type_args.?[0].primitive.kind);
+    try testing.expectEqual(meta.PrimitiveKind.str, c.type_args.?[1].primitive.kind);
 }
 
 test "grammar: list, box, and tuple types nest; a one-element tuple type is distinct" {
@@ -328,7 +329,7 @@ test "grammar: list, box, and tuple types nest; a one-element tuple type is dist
     defer t.arena.deinit();
 
     const tdef = t.program.items[0].type_def.target;
-    try testing.expectEqual(ast.PrimitiveKind.int32, tdef.list.elem.box.inner.tuple.elems[0].primitive.kind);
+    try testing.expectEqual(meta.PrimitiveKind.int32, tdef.list.elem.box.inner.tuple.elems[0].primitive.kind);
     const u = t.program.items[1].type_def.target.tuple;
     try testing.expectEqual(@as(usize, 1), u.elems.len);
 }
@@ -361,7 +362,7 @@ test "grammar: struct-def — fields, function fields, generics, drop-decl" {
     try testing.expectEqual(@as(usize, 1), s.type_params.len);
     try testing.expectEqual(@as(usize, 2), s.fields.len);
     try testing.expectEqual(@as(usize, 1), s.fields[1].type_.function.params.len);
-    try testing.expectEqual(ast.ParamMode.borrow, s.fields[1].type_.function.params[0].mode);
+    try testing.expectEqual(meta.ParamMode.borrow, s.fields[1].type_.function.params[0].mode);
     const d = s.drop.?;
     try testing.expectEqualStrings("c", d.param.text);
     try testing.expectEqual(@as(usize, 1), d.body.stmts.len);
@@ -386,7 +387,7 @@ test "grammar: a union variant may carry several payload types" {
 
     const p = t.program.items[0].union_def.variants[0];
     try testing.expectEqual(@as(usize, 2), p.types.?.len);
-    try testing.expectEqual(ast.PrimitiveKind.str, p.types.?[1].primitive.kind);
+    try testing.expectEqual(meta.PrimitiveKind.str, p.types.?[1].primitive.kind);
 }
 
 test "grammar: empty struct, empty union, and a parameterless opaque type" {
@@ -444,7 +445,7 @@ test "grammar: let takes a pattern with an optional type annotation" {
 
     const stmts = t.program.items[0].func_def.body.?.stmts;
     const first = stmts[0].let;
-    try testing.expectEqual(ast.PrimitiveKind.int32, first.type_.?.primitive.kind);
+    try testing.expectEqual(meta.PrimitiveKind.int32, first.type_.?.primitive.kind);
     try testing.expectEqualStrings("x", first.pattern.path.path[0].text);
     const second = stmts[1].let;
     try testing.expect(second.type_ == null);
@@ -547,11 +548,11 @@ test "grammar: specialization — the two `::` disambiguations (Binding Power Ta
 
     const a = t.program.items[0].const_def.init.?.specialize;
     try testing.expectEqual(@as(usize, 1), a.type_args.len);
-    try testing.expectEqual(ast.PrimitiveKind.str, a.type_args[0].primitive.kind);
+    try testing.expectEqual(meta.PrimitiveKind.str, a.type_args[0].primitive.kind);
     try testing.expectEqual(@as(usize, 1), a.operand.path.type_args.?.len);
     const b = t.program.items[1].const_def.init.?.specialize;
     try testing.expect(b.operand.* == .call);
-    try testing.expectEqual(ast.PrimitiveKind.int32, b.type_args[0].primitive.kind);
+    try testing.expectEqual(meta.PrimitiveKind.int32, b.type_args[0].primitive.kind);
 }
 
 test "grammar: paren, one-element tuple, and multi-element tuple" {
@@ -652,7 +653,7 @@ test "grammar: cast binds tighter than arithmetic and chains right" {
 
     const a = t.program.items[0].const_def.init.?.binary;
     try testing.expectEqual(ast.BinaryOp.add, a.op);
-    try testing.expectEqual(ast.PrimitiveKind.int32, a.lhs.cast.target.primitive.kind);
+    try testing.expectEqual(meta.PrimitiveKind.int32, a.lhs.cast.target.primitive.kind);
     try testing.expectEqual(@as(u64, 1), a.rhs.int.value);
 }
 
@@ -766,11 +767,11 @@ test "grammar: unary chains nest and cast binds tighter than unary" {
     // -(x as int32), the cast inside the negation.
     const c = initOf(t.program.items[2]).unary;
     try testing.expectEqual(ast.UnaryOp.neg, c.op);
-    try testing.expectEqual(ast.PrimitiveKind.int32, c.operand.cast.target.primitive.kind);
+    try testing.expectEqual(meta.PrimitiveKind.int32, c.operand.cast.target.primitive.kind);
     // Repeated `as` nest right: cast(cast(n, int32), str).
     const d = initOf(t.program.items[3]).cast;
-    try testing.expectEqual(ast.PrimitiveKind.str, d.target.primitive.kind);
-    try testing.expectEqual(ast.PrimitiveKind.int32, d.operand.cast.target.primitive.kind);
+    try testing.expectEqual(meta.PrimitiveKind.str, d.target.primitive.kind);
+    try testing.expectEqual(meta.PrimitiveKind.int32, d.operand.cast.target.primitive.kind);
 }
 
 test "grammar: move names a complete local binding in every unary position" {
@@ -880,15 +881,15 @@ test "grammar: keyword-led type-test patterns — every test type" {
     // box, tuple, and fn constructors (`any`, `never`, and `hostdata` are
     // excluded; rejecting them is covered in `parser.zig`).
     const prims = .{
-        .{ "byte", ast.PrimitiveKind.byte },
-        .{ "int32", ast.PrimitiveKind.int32 },
-        .{ "uint32", ast.PrimitiveKind.uint32 },
-        .{ "int64", ast.PrimitiveKind.int64 },
-        .{ "uint64", ast.PrimitiveKind.uint64 },
-        .{ "float32", ast.PrimitiveKind.float32 },
-        .{ "float64", ast.PrimitiveKind.float64 },
-        .{ "bool", ast.PrimitiveKind.bool },
-        .{ "str", ast.PrimitiveKind.str },
+        .{ "byte", meta.PrimitiveKind.byte },
+        .{ "int32", meta.PrimitiveKind.int32 },
+        .{ "uint32", meta.PrimitiveKind.uint32 },
+        .{ "int64", meta.PrimitiveKind.int64 },
+        .{ "uint64", meta.PrimitiveKind.uint64 },
+        .{ "float32", meta.PrimitiveKind.float32 },
+        .{ "float64", meta.PrimitiveKind.float64 },
+        .{ "bool", meta.PrimitiveKind.bool },
+        .{ "str", meta.PrimitiveKind.str },
     };
     inline for (prims) |c| {
         const text = try std.fmt.allocPrint(testing.allocator, "const r = match (a) {{ {s} n => 1, _ => 0 }};", .{c[0]});
@@ -912,8 +913,8 @@ test "grammar: keyword-led type-test patterns — every test type" {
     defer t.arena.deinit();
 
     const arms = t.program.items[0].const_def.init.?.match.arms;
-    try testing.expectEqual(ast.PrimitiveKind.int32, arms[0].pattern.type_test.type_.list.elem.primitive.kind);
-    try testing.expectEqual(ast.PrimitiveKind.str, arms[1].pattern.type_test.type_.box.inner.primitive.kind);
+    try testing.expectEqual(meta.PrimitiveKind.int32, arms[0].pattern.type_test.type_.list.elem.primitive.kind);
+    try testing.expectEqual(meta.PrimitiveKind.str, arms[1].pattern.type_test.type_.box.inner.primitive.kind);
     try testing.expectEqual(@as(usize, 2), arms[2].pattern.type_test.type_.tuple.elems.len);
     try testing.expectEqual(@as(usize, 1), arms[3].pattern.type_test.type_.function.params.len);
     try testing.expectEqualStrings("f", arms[3].pattern.type_test.binding.?.text);
@@ -1075,7 +1076,7 @@ test "spec §2.1: the calc module parses to three members" {
 
     try testing.expectEqual(@as(usize, 3), t.program.items.len);
     const pi = t.program.items[0].const_def;
-    try testing.expectEqual(ast.PrimitiveKind.float32, pi.type_.?.primitive.kind);
+    try testing.expectEqual(meta.PrimitiveKind.float32, pi.type_.?.primitive.kind);
     try testing.expectEqual(@as(f64, 3.141592653589793), pi.init.?.float.value);
     const add = t.program.items[1].func_def;
     try testing.expectEqual(@as(usize, 2), add.params.len);
@@ -1259,7 +1260,7 @@ test "spec §6.1: a function field is stored and called explicitly — no implic
     try testing.expectEqual(@as(usize, 2), construct.fields.len);
     try testing.expectEqual(@as(u64, 10), construct.fields[0].value.int.value);
     const lambda = construct.fields[1].value.lambda;
-    try testing.expectEqual(ast.ParamMode.borrow, lambda.params[0].mode);
+    try testing.expectEqual(meta.ParamMode.borrow, lambda.params[0].mode);
     try testing.expectEqual(ast.BinaryOp.add, lambda.body.result.?.binary.op);
     // `counter.next(counter)`: the callee is the dotted access
     // `counter.next` (a two-segment path in primary position); the
@@ -1355,7 +1356,7 @@ test "spec §17: the resource module and its consumer parse verbatim" {
     try testing.expectEqualStrings("os", f.program.items[0].const_def.init.?.import.module);
     const file = f.program.items[2].struct_def;
     try testing.expectEqual(@as(usize, 2), file.fields.len);
-    try testing.expectEqual(ast.PrimitiveKind.str, file.fields[1].type_.primitive.kind);
+    try testing.expectEqual(meta.PrimitiveKind.str, file.fields[1].type_.primitive.kind);
     const drop = file.drop.?;
     try testing.expectEqualStrings("file", drop.param.text);
     const close = drop.body.stmts[0].expr.expr.call;
@@ -1368,7 +1369,7 @@ test "spec §17: the resource module and its consumer parse verbatim" {
     try testing.expectEqualStrings("fd", opened.fields[0].name.text);
     try testing.expectEqualStrings("os.open(path)", f.source.text[opened.fields[0].value.span().start..opened.fields[0].value.span().end]);
     const inspect = f.program.items[5].func_def;
-    try testing.expectEqual(ast.ParamMode.borrow, inspect.params[0].mode);
+    try testing.expectEqual(meta.ParamMode.borrow, inspect.params[0].mode);
 
     const consumer =
         \\const file = import("file");

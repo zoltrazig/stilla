@@ -14,7 +14,7 @@
 
 const std = @import("std");
 const cfg = @import("stilla").cfg;
-const ast = @import("stilla").ast;
+const meta = @import("stilla").meta;
 const llir = @import("stilla").llir;
 const lower = @import("cfg_lower_llir.zig");
 
@@ -74,7 +74,7 @@ pub fn internString(bld: *Builder, s: []const u8) error{OutOfMemory}!u32 {
 /// (`int` carries an `i64` in `{a, b}`, `float` its `f32`
 /// bits in `a`, `bool` 0/1 in `a`, `string` a `{start, len}` range
 /// into `strings`, `void` both zero).
-pub fn internConst(bld: *Builder, v: cfg.ConstValue, t: cfg.Type) error{OutOfMemory}!llir.ConstId {
+pub fn internConst(bld: *Builder, v: meta.ConstValue, t: meta.Type) error{OutOfMemory}!llir.ConstId {
     // v1: every constant row names its TypeId — the
     // validator's source for the destination cell's exact type.
     const type_id = try internType(bld, t);
@@ -121,7 +121,7 @@ pub fn internConst(bld: *Builder, v: cfg.ConstValue, t: cfg.Type) error{OutOfMem
 /// contiguous copies even when the type already has a row elsewhere
 /// (the range is the canonical reference; identical sequences share
 /// one range, so identical `named`/`tuple` types dedup to one row).
-fn internArgRange(bld: *Builder, args: []const cfg.Type) error{OutOfMemory}!ParamRange {
+fn internArgRange(bld: *Builder, args: []const meta.Type) error{OutOfMemory}!ParamRange {
     for (bld.arg_ranges.items) |r| {
         if (r.len != args.len) continue;
         var ok = true;
@@ -149,7 +149,7 @@ fn internArgRange(bld: *Builder, args: []const cfg.Type) error{OutOfMemory}!Para
     return r;
 }
 
-/// Intern a `cfg.Type` to a `TypeDesc` row. `void`/`never`
+/// Intern a `meta.Type` to a `TypeDesc` row. `void`/`never`
 /// have no row (no `PrimitiveId`) and return `no_index` — the caller
 /// writes the sentinel (signature rets, void module members). A
 /// generic type parameter (`Type.param`) is a post-monomorphization
@@ -157,7 +157,7 @@ fn internArgRange(bld: *Builder, args: []const cfg.Type) error{OutOfMemory}!Para
 /// `TypeDesc` row equality; `named`/`tuple` argument ranges are
 /// canonical (see `internArgRange`), so identical types always
 /// intern to identical rows.
-pub fn internType(bld: *Builder, t: cfg.Type) error{OutOfMemory}!llir.TypeId {
+pub fn internType(bld: *Builder, t: meta.Type) error{OutOfMemory}!llir.TypeId {
     var desc: llir.TypeDesc = undefined;
     switch (t) {
         .primitive => |k| switch (k) {
@@ -196,27 +196,17 @@ pub fn internType(bld: *Builder, t: cfg.Type) error{OutOfMemory}!llir.TypeId {
     return @intCast(bld.types.items.len - 1);
 }
 
-/// The `ParamMode` of a declared parameter mode (1:1 with the
-/// LLIR enum).
-fn paramMode(m: ast.ParamMode) llir.ParamMode {
-    return switch (m) {
-        .plain => .plain,
-        .borrow => .borrow,
-        .move => .move,
-    };
-}
-
 /// Intern a parameter list to a deduped `{ start, len }` range into
 /// the flat `params` table: identical `(mode, type)` sequences share
 /// one range, so identical signatures get identical `params_start`.
-fn internParams(bld: *Builder, params: []const cfg.Param) error{OutOfMemory}!ParamRange {
+fn internParams(bld: *Builder, params: []const meta.Param) error{OutOfMemory}!ParamRange {
     for (bld.param_ranges.items) |r| {
         if (r.len != params.len) continue;
         var ok = true;
         for (0..r.len) |i| {
             const row = bld.params.items[r.start + i];
             const want = llir.ParamDesc{
-                .mode = paramMode(params[i].mode),
+                .mode = params[i].mode,
                 .type_ = try internType(bld, params[i].type_),
             };
             if (row.mode != want.mode or row.type_ != want.type_) {
@@ -237,7 +227,7 @@ fn internParams(bld: *Builder, params: []const cfg.Param) error{OutOfMemory}!Par
     // the call descriptor's signature).
     const rows = try bld.arena.alloc(llir.ParamDesc, params.len);
     for (params, 0..) |p, i| {
-        rows[i] = .{ .mode = paramMode(p.mode), .type_ = try internType(bld, p.type_) };
+        rows[i] = .{ .mode = p.mode, .type_ = try internType(bld, p.type_) };
     }
     const start: u32 = @intCast(bld.params.items.len);
     try bld.params.appendSlice(bld.arena, rows);
@@ -249,7 +239,7 @@ fn internParams(bld: *Builder, params: []const cfg.Param) error{OutOfMemory}!Par
 /// Intern a function signature (parameter rows + result type); equal
 /// signatures share one row. `ret` is `no_index` for `void`/`never`
 /// (no `TypeDesc` row).
-fn internSignature(bld: *Builder, params: []const cfg.Param, ret: cfg.Type) error{OutOfMemory}!llir.SignatureId {
+fn internSignature(bld: *Builder, params: []const meta.Param, ret: meta.Type) error{OutOfMemory}!llir.SignatureId {
     const ps = try internParams(bld, params);
     const desc = llir.SignatureDesc{
         .params_start = ps.start,
@@ -266,7 +256,7 @@ fn internSignature(bld: *Builder, params: []const cfg.Param, ret: cfg.Type) erro
 /// Intern an opaque type's `(host_module, type_name)` identity —
 /// both byte ranges into the strings blob, no numeric module id.
 /// Equal pairs share one `HostTypeId`.
-fn internHostType(bld: *Builder, ht: cfg.HostTypeId) error{OutOfMemory}!llir.HostTypeId {
+fn internHostType(bld: *Builder, ht: meta.HostTypeId) error{OutOfMemory}!llir.HostTypeId {
     const host_start = try internString(bld, ht.host_module);
     for (bld.host_types.items, 0..) |row, i| {
         if (row.host_len != ht.host_module.len or row.name_len != ht.type_name.len) continue;
@@ -350,7 +340,7 @@ fn serializeDecls(bld: *Builder) error{OutOfMemory}!void {
 /// The `OwnershipId` of a declared ownership; `null` (a generic
 /// template, deferred to the instantiation) serializes as
 /// `no_index`.
-fn internOwnership(bld: *Builder, o: ?cfg.Ownership) error{OutOfMemory}!u32 {
+fn internOwnership(bld: *Builder, o: ?meta.Ownership) error{OutOfMemory}!u32 {
     _ = bld;
     return if (o) |ow| switch (ow) {
         .copy => @intFromEnum(OwnershipId.copy),
@@ -363,7 +353,7 @@ fn internOwnership(bld: *Builder, o: ?cfg.Ownership) error{OutOfMemory}!u32 {
 /// cannot encode. The member row stays (member index space) with
 /// `no_index` type and ref: a template is never a runtime value
 /// (the checker rejects using it as one).
-fn containsParam(t: cfg.Type) bool {
+fn containsParam(t: meta.Type) bool {
     switch (t) {
         .param => return true,
         .named => |n| for (n.args) |a| if (containsParam(a)) return true,
@@ -455,7 +445,7 @@ fn serializeArtifact(bld: *Builder) error{OutOfMemory}!void {
 /// one register per argument — sharing the `call_args` table the
 /// call descs use. Identical `(binding, signature,
 /// args)` triples share one row.
-pub fn internSyscallDesc(bld: *Builder, binding: u32, sig: cfg.FunctionType, args: []const *cfg.Value) error{OutOfMemory}!llir.SyscallDescId {
+pub fn internSyscallDesc(bld: *Builder, binding: u32, sig: meta.FunctionType, args: []const *cfg.Value) error{OutOfMemory}!llir.SyscallDescId {
     const signature_id = try internSignature(bld, sig.params, sig.ret.*);
     for (bld.syscall_descs.items, 0..) |d, i| {
         if (d.host_binding_id != binding or d.signature_id != signature_id or d.args_len != args.len) continue;
@@ -486,7 +476,7 @@ pub fn internSyscallDesc(bld: *Builder, binding: u32, sig: cfg.FunctionType, arg
 /// (the same table the call and syscall descs range
 /// into; there is no separate construct table in the frozen model).
 /// Identical `(tag, args)` pairs share one row.
-pub fn internConstructDesc(bld: *Builder, tag: ?u32, args: []const *cfg.Value, result_type: *const cfg.Type) error{OutOfMemory}!llir.ConstructDescId {
+pub fn internConstructDesc(bld: *Builder, tag: ?u32, args: []const *cfg.Value, result_type: *const meta.Type) error{OutOfMemory}!llir.ConstructDescId {
     const want_tag = tag orelse llir.no_tag;
     const want_result = try internType(bld, result_type.*);
     for (bld.construct_descs.items, 0..) |d, i| {
@@ -514,7 +504,7 @@ pub fn internConstructDesc(bld: *Builder, tag: ?u32, args: []const *cfg.Value, r
 /// Intern one v1 `MemberDesc`: base/result TypeIds
 /// plus the member/slot/index reference. Equal rows share one id.
 /// `base_type` may be null only for the write-only `store_member`.
-pub fn internMemberDesc(bld: *Builder, base_type: ?cfg.Type, res_type: ?cfg.Type, ref: u32) error{OutOfMemory}!u32 {
+pub fn internMemberDesc(bld: *Builder, base_type: ?meta.Type, res_type: ?meta.Type, ref: u32) error{OutOfMemory}!u32 {
     const base_id: llir.TypeId = if (base_type) |bt| try internType(bld, bt) else llir.no_index;
     const res_id: llir.TypeId = if (res_type) |rt| try internType(bld, rt) else llir.no_index;
     for (bld.member_descs.items, 0..) |d, i| {
@@ -527,7 +517,7 @@ pub fn internMemberDesc(bld: *Builder, base_type: ?cfg.Type, res_type: ?cfg.Type
 /// Intern one v1 `DropDesc`: a typed drop of an `any`
 /// / `hostdata` value names its TypeId; a host-backed opaque names
 /// its HostTypeId. Exactly one side is set.
-pub fn internDropDesc(bld: *Builder, t: cfg.Type) error{OutOfMemory}!u32 {
+pub fn internDropDesc(bld: *Builder, t: meta.Type) error{OutOfMemory}!u32 {
     switch (t) {
         .named => |n| {
             // A host-backed opaque declaration drops through the host.

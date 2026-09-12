@@ -5,8 +5,8 @@
 //! CFG blocks, `br`/`switch`/`branch` terminators, and join phis.
 
 const std = @import("std");
-const ast = @import("stilla").ast;
 const cfg = @import("stilla").cfg;
+const meta = @import("stilla").meta;
 const moduleinfo = @import("stilla").moduleinfo;
 const type_resolve = @import("type_resolve.zig");
 const lower = @import("stilla").lower;
@@ -59,7 +59,7 @@ pub fn makeJoinPhi(
     self: *Lowerer,
     fs: *FuncState,
     join: *cfg.BasicBlock,
-    span: ast.Span,
+    span: meta.Span,
     incoming: []const JoinIn,
 ) LowerError!?*cfg.Value {
     std.debug.assert(fs.cur == join);
@@ -82,12 +82,12 @@ pub fn makeJoinPhi(
     // The join type: unify the non-null incoming types exactly as phase 2
     // does (never contributes nothing, equal types join to themselves,
     // anything else joins as `any`).
-    var join_type: ?cfg.Type = null;
+    var join_type: ?meta.Type = null;
     for (sorted.items) |inc| {
         const v = inc.v orelse continue;
         join_type = if (join_type) |jt| unifyType(jt, v.type_) else v.type_;
     }
-    const jt = join_type orelse cfg.Type{ .primitive = .void };
+    const jt = join_type orelse meta.Type{ .primitive = .void };
     if (cfg_lower_emit.isVoid(jt)) return cfg_lower_expr.emitVoid(self, fs, span);
     // Materialize the `T → any` coercion on each predecessor edge whose
     // incoming type differs from the join type (air.md §4.4). The packed
@@ -99,7 +99,7 @@ pub fn makeJoinPhi(
             packed_v[i] = null;
             continue;
         };
-        if (cfg.Type.eql(v.type_, jt)) {
+        if (meta.Type.eql(v.type_, jt)) {
             packed_v[i] = v;
             continue;
         }
@@ -137,9 +137,9 @@ pub fn makeJoinPhi(
 /// The join type of two branch values (Core §13.2, mirroring phase 2's
 /// `unify`): `never` contributes nothing; equal types join to themselves;
 /// a mixed pair joins as the top type `any`.
-fn unifyType(a: cfg.Type, b: cfg.Type) cfg.Type {
+fn unifyType(a: meta.Type, b: meta.Type) meta.Type {
     if (a == .primitive and a.primitive == .never) return b;
     if (b == .primitive and b.primitive == .never) return a;
-    if (cfg.Type.eql(a, b)) return a;
-    return cfg.Type{ .primitive = .any };
+    if (meta.Type.eql(a, b)) return a;
+    return meta.Type{ .primitive = .any };
 }

@@ -9,7 +9,7 @@
 //! Run via `zig build test` (wired into `src/root.zig`'s test block).
 
 const std = @import("std");
-const cfg = @import("cfg.zig");
+const meta = @import("meta.zig");
 const llir = @import("llir.zig");
 const typed = @import("passes/cfg_lower_typed.zig");
 const cfg_lower_llir = @import("passes/cfg_lower_llir.zig");
@@ -40,7 +40,7 @@ test "typed printer is faithful to the typed record" {
     try testing.expectEqual(@as(usize, 1), ops.len);
     const op = ops[0];
     try testing.expectEqual(llir.TypedKind.add, op.kind);
-    try testing.expectEqual(cfg.Type{ .primitive = .int32 }, op.type_);
+    try testing.expectEqual(meta.Type{ .primitive = .int32 }, op.type_);
 
     // The typed opcode for the type is the rep-carrying member, and the
     // record count of the arithmetic is exactly one (no canonicalization

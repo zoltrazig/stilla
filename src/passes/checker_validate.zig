@@ -16,7 +16,7 @@
 
 const std = @import("std");
 const ast = @import("stilla").ast;
-const cfg = @import("stilla").cfg;
+const meta = @import("stilla").meta;
 const moduleinfo = @import("stilla").moduleinfo;
 const type_resolve = @import("type_resolve.zig");
 const checker = @import("checker.zig");
@@ -115,12 +115,12 @@ fn validateConst(frame: *Frame, c: *const ast.ConstDef) CheckError!void {
 /// declaration like `fn f() -> int32 {}` is a mismatch, not a silently
 /// defaulted return. `never` and `any` coercion follow the existing
 /// `compatible` rule.
-fn validateReturn(frame: *Frame, span: ast.Span, declared: *const ast.Type, body: *const ast.Block) CheckError!void {
+fn validateReturn(frame: *Frame, span: meta.Span, declared: *const ast.Type, body: *const ast.Block) CheckError!void {
     const expected = frame.ma.type_of.get(declared) orelse return;
     const actual = if (body.result) |*r|
         frame.ma.expr_of.get(r) orelse return
     else
-        cfg.Type{ .primitive = .void };
+        meta.Type{ .primitive = .void };
     if (!compatible(expected, actual)) {
         return frame.ck.fail(span, "return type mismatch: expected {s}, found {s}", .{
             try fmtType(frame.ck.alloc(), frame.resolve, expected),
@@ -264,7 +264,7 @@ fn validateVariantConstruct(frame: *Frame, e: *const ast.Expr, p: *const ast.Pat
         const declared = if (i < types.len)
             try frame.ck.resolveTypeOf(frame.ma, frame.info, &types[i])
         else
-            cfg.Type{ .primitive = .any };
+            meta.Type{ .primitive = .any };
         const payload_t = type_resolve.substParams(frame.ck.alloc(), ud.type_params, t.named.args, declared);
         const vt = frame.ma.expr_of.get(a) orelse continue;
         if (compatible(payload_t, vt)) continue;
@@ -310,13 +310,13 @@ fn validateBinary(frame: *Frame, b: *const ast.Binary) CheckError!void {
         // bool, and str — never for `any`, structs, unions, tuples,
         // lists, boxes, functions, or modules (Core §16.3).
         .eq, .ne => {
-            if (!(never or (isEqScalar(l) and isEqScalar(r) and cfg.Type.eql(l, r)))) {
+            if (!(never or (isEqScalar(l) and isEqScalar(r) and meta.Type.eql(l, r)))) {
                 return frame.ck.fail(b.span, "equality is defined for byte, int32, uint32, float32, bool, and str only (Core §16.3)", .{});
             }
         },
         // Ordering accepts operands of the same numeric type (Core §16.3).
         .lt, .le, .gt, .ge => {
-            if (!(never or (isOrderNumeric(l) and isOrderNumeric(r) and cfg.Type.eql(l, r)))) {
+            if (!(never or (isOrderNumeric(l) and isOrderNumeric(r) and meta.Type.eql(l, r)))) {
                 return frame.ck.fail(b.span, "ordering comparison requires matching numeric operands (Core §16.3)", .{});
             }
         },
@@ -326,7 +326,7 @@ fn validateBinary(frame: *Frame, b: *const ast.Binary) CheckError!void {
         // `byte` has no arithmetic, `float32`/`bool`/`str` have no
         // bit pattern (Core §16.3).
         .bitand, .bitor, .bitxor => {
-            if (!(never or (isInt(l) and isInt(r) and cfg.Type.eql(l, r)))) {
+            if (!(never or (isInt(l) and isInt(r) and meta.Type.eql(l, r)))) {
                 return frame.ck.fail(b.span, "bitwise operator requires matching int32/uint32 operands (Core §16.3)", .{});
             }
         },
@@ -335,7 +335,7 @@ fn validateBinary(frame: *Frame, b: *const ast.Binary) CheckError!void {
         // arithmetic, `float32`/`bool`/`str` have no bit patterns to
         // shift (Core §16.3).
         .shl, .shr => {
-            if (!(never or (isInt(l) and isInt(r) and cfg.Type.eql(l, r)))) {
+            if (!(never or (isInt(l) and isInt(r) and meta.Type.eql(l, r)))) {
                 return frame.ck.fail(b.span, "shift operator requires matching int32/uint32 operands (Core §16.3)", .{});
             }
         },
@@ -343,7 +343,7 @@ fn validateBinary(frame: *Frame, b: *const ast.Binary) CheckError!void {
             // Core §16.3: `%` is the truncated remainder for `int32`/
             // `uint32`/`float32` alike; `float32 %` follows IEEE binary32
             // (C `fmod`, Rust `%`) and never traps (Runtime §7.2).
-            const numeric = never or (isNumeric(l) and isNumeric(r) and cfg.Type.eql(l, r));
+            const numeric = never or (isNumeric(l) and isNumeric(r) and meta.Type.eql(l, r));
             const str_concat = b.op == .add and isStr(l) and isStr(r);
             if (!numeric and !str_concat) {
                 return frame.ck.fail(b.span, "type mismatch in operator (Core §16.3)", .{});
@@ -394,7 +394,7 @@ fn validateCast(frame: *Frame, c: *const ast.Cast) CheckError!void {
 /// arithmetic `isNumeric` set: `byte + byte` and `uint32 + uint32` are
 /// not defined by Core §16.3 (that is Phase 5 numeric-semantics work), so
 /// enabling a cast must not enable arithmetic.
-fn validNumCast(src: cfg.Type, dst: cfg.Type) bool {
+fn validNumCast(src: meta.Type, dst: meta.Type) bool {
     if (src != .primitive or dst != .primitive) return false;
     const s = src.primitive;
     const d = dst.primitive;
@@ -420,7 +420,7 @@ fn validateCall(frame: *Frame, c: *const ast.Call) CheckError!void {
     for (c.args) |*a| try validateExpr(frame, a);
     // Generic calls are checked against their FuncInstance's monomorphic
     // signature; non-generic calls against the recorded call signature.
-    const sig_t: ?cfg.Type = if (frame.ma.call_of.get(c)) |inst|
+    const sig_t: ?meta.Type = if (frame.ma.call_of.get(c)) |inst|
         inst.signature
     else
         frame.ma.call_sig.get(c);
@@ -547,7 +547,7 @@ const LocalRef = union(enum) {
 /// parameters and its target written type. The target is walked with the
 /// parameters bound to the reference's type arguments.
 const AliasRef = struct {
-    params: []const ast.Ident,
+    params: []const meta.Ident,
     target: ast.Type,
 };
 
@@ -648,7 +648,7 @@ const SubEnv = struct {
 /// reference's written arguments, each substituted under `env`. An identity
 /// binding (a parameter passed itself, `B[T]` inside `B`) is dropped: it
 /// adds no information and would let the walk loop on `T` -> `T`.
-fn buildEnv(ck: *checker.Checker, env: ?*const SubEnv, params: []const ast.Ident, args: []const ast.Type) CheckError!SubEnv {
+fn buildEnv(ck: *checker.Checker, env: ?*const SubEnv, params: []const meta.Ident, args: []const ast.Type) CheckError!SubEnv {
     var result = SubEnv{};
     for (params, args) |*p, *a| {
         const sub = try substType(ck, env, a);
@@ -924,7 +924,7 @@ fn visitTypeEdge(
 /// Arguments and return values must match exactly, except that the source
 /// type `never` coerces to anything and anything coerces to the top type
 /// `any` (the sole implicit widening, Core §11.6).
-fn compatible(expected: cfg.Type, actual: cfg.Type) bool {
+fn compatible(expected: meta.Type, actual: meta.Type) bool {
     // Coercion to the top type `any` is the sole implicit widening
     // (Core §11.6) — except that `hostdata` does not coerce to `any`
     // (Core §11.6, §11.7: a tagless payload cannot be an `any` value), and
@@ -934,7 +934,7 @@ fn compatible(expected: cfg.Type, actual: cfg.Type) bool {
     if (expected == .primitive and expected.primitive == .any)
         return !(actual == .primitive and actual.primitive == .hostdata) and actual != .module;
     if (actual == .primitive and actual.primitive == .never) return true;
-    if (cfg.Type.eql(expected, actual)) return true;
+    if (meta.Type.eql(expected, actual)) return true;
     return compatibleRecur(expected, actual);
 }
 
@@ -945,7 +945,7 @@ fn compatible(expected: cfg.Type, actual: cfg.Type) bool {
 /// the structural frontend treats named types as opaque strings, so this
 /// is no looser than the exact comparison while it spans module
 /// boundaries.
-fn compatibleRecur(expected: cfg.Type, actual: cfg.Type) bool {
+fn compatibleRecur(expected: meta.Type, actual: meta.Type) bool {
     if (expected == .named and actual == .named) {
         // The same interned declaration, with compatible type arguments.
         // Empty arguments are a wildcard: an uninstantiated construction
@@ -993,14 +993,14 @@ fn compatibleRecur(expected: cfg.Type, actual: cfg.Type) bool {
     }
 }
 
-fn isNever(t: cfg.Type) bool {
+fn isNever(t: meta.Type) bool {
     return t == .primitive and t.primitive == .never;
 }
 
 /// The equality domain of Core §16.3: byte, int32, uint32, float32,
 /// bool, and str. Everything else (any, never, hostdata, structs,
 /// unions, tuples, lists, boxes, functions, modules) has no `==`/`!=`.
-fn isEqScalar(t: cfg.Type) bool {
+fn isEqScalar(t: meta.Type) bool {
     if (t != .primitive) return false;
     return switch (t.primitive) {
         .byte, .int32, .uint32, .int64, .uint64, .float32, .float64, .bool, .str => true,
@@ -1010,19 +1010,19 @@ fn isEqScalar(t: cfg.Type) bool {
 
 /// The ordering domain of Core §16.3 (`< <= > >=`): the numeric types.
 /// `byte` is numeric for ordering but has no arithmetic.
-fn isOrderNumeric(t: cfg.Type) bool {
+fn isOrderNumeric(t: meta.Type) bool {
     return t == .primitive and (t.primitive == .byte or t.primitive == .int32 or t.primitive == .uint32 or t.primitive == .int64 or t.primitive == .uint64 or t.primitive == .float32 or t.primitive == .float64);
 }
 
-fn isBool(t: cfg.Type) bool {
+fn isBool(t: meta.Type) bool {
     return t == .primitive and t.primitive == .bool;
 }
 
-fn isStr(t: cfg.Type) bool {
+fn isStr(t: meta.Type) bool {
     return t == .primitive and t.primitive == .str;
 }
 
-fn isNumeric(t: cfg.Type) bool {
+fn isNumeric(t: meta.Type) bool {
     // Core §16.3: arithmetic is defined for `int32`, `uint32`, `i64`,
     // `u64`, and `float32`; `byte` has no arithmetic. Integer
     // arithmetic wraps modulo 2^width and never traps (Runtime §7.2).
@@ -1033,12 +1033,12 @@ fn isNumeric(t: cfg.Type) bool {
 /// the two integer types. `byte` has no arithmetic (its ordering is
 /// defined, but shifting or masking an 8-bit pattern has no bit to
 /// move into) and `float32` has no bit pattern.
-fn isInt(t: cfg.Type) bool {
+fn isInt(t: meta.Type) bool {
     return t == .primitive and (t.primitive == .int32 or t.primitive == .uint32 or t.primitive == .int64 or t.primitive == .uint64);
 }
 
 /// A human-readable type name for diagnostics.
-fn fmtType(alloc: std.mem.Allocator, resolve: moduleinfo.Resolve, t: cfg.Type) ![]const u8 {
+fn fmtType(alloc: std.mem.Allocator, resolve: moduleinfo.Resolve, t: meta.Type) ![]const u8 {
     return switch (t) {
         .primitive => |k| std.fmt.allocPrint(alloc, "{s}", .{@tagName(k)}),
         .named => |n| blk: {

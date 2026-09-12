@@ -2,10 +2,13 @@
 //!
 //! `cfg` owns the in-memory control-flow-graph structures of air.md §11 —
 //! `IrProgram`, `IrModule`, `IrFunc`, `BasicBlock`, `Instr`, `Value`,
-//! `Terminator` — the AIR-native resolved `Type`, and the ownership/state
-//! tags values carry. The two *algorithms* that act on these structures
-//! live in `src/passes/` and are re-exported here so the public surface
-//! (`cfg.Parser`, `cfg.print`) is unchanged:
+//! `Terminator` — and the ownership/state tags values carry. The resolved
+//! type/metadata layer those structures are built on lives in `meta.zig`
+//! (`meta.Type`, `meta.TypeDecl`, `meta.ConstValue`, …); `cfg` imports it
+//! and aliases the names file-locally rather than re-exporting them. The
+//! two *algorithms* that act on these structures live in `src/passes/` and
+//! are re-exported here so the public surface (`cfg.Parser`, `cfg.print`)
+//! is unchanged:
 //!
 //! - `src/passes/cfg_parse.zig` — the `Parser` that turns the textual
 //!   form of air.md §9 into these structures;
@@ -17,8 +20,8 @@
 //! this file substitutes AIR-native equivalents so the parser stays
 //! testable in isolation:
 //!
-//! - the checker's resolved-type annotation → `Type` (AIR-native resolved
-//!   type, §4.2);
+//! - the checker's resolved-type annotation → `meta.Type` (AIR-native
+//!   resolved type, §4.2);
 //! - `checker.FuncInstance`, `ast.FuncDef` → omitted from `IrFunc` (the
 //!   frontend lowering populates them when it builds the CFG from AST);
 //! - `ModuleInfo` → module / member **names** (`module_ref`, syscall
@@ -52,275 +55,20 @@
 //! - syscall targets are `builtin#member` or `module#member`.
 
 const std = @import("std");
-const ast = @import("ast.zig");
 
-/// Ownership classification of a value type (Core §10.1–§10.3).
-/// `Copy` values may be implicitly copied; `unique` values may be
-/// used at most once and must be destroyed exactly once.
-pub const Ownership = enum {
-    copy,
-    unique,
-};
+const meta = @import("meta.zig");
 
-// ---------------------------------------------------------------------------
-// Types
-// ---------------------------------------------------------------------------
-
-/// An AIR-native resolved type (air.md §4.2, §11). The AIR text carries no
-/// type declarations, so `named` types defer ownership to their
-/// declaration, mirroring the checker's `null`-means-deferred convention.
-pub const TypeId = u32;
-
-pub const Type = union(enum) {
-    primitive: ast.PrimitiveKind,
-    /// A named struct or union reference: the declaration's `TypeId` plus
-    /// the type arguments of this instantiation (empty for non-generic
-    /// types). Canonical identity is the declaration `TypeId` together with
-    /// the arguments (`Named`); the declaration name strings are for
-    /// printing and diagnostics only.
-    named: Named,
-    /// A generic type parameter of an enclosing declaration, e.g. the
-    /// `T` of `fn foo[T](x: T) -> T` (Core §12). `null` ownership
-    /// (deferred) until a monomorphic substitution fixes it. Distinct
-    /// from `named` so a type parameter is never confused with a
-    /// nominal struct/union reference.
-    param: []const u8,
-    /// The static module type of `module_ref` values (Core §2.3).
-    module,
-    list: *Type,
-    box: *Type,
-    tuple: []Type,
-    function: FunctionType,
-    /// The type of a cleanup token (air.md §6.4): a compiler-only value
-    /// that schedules the conditional destruction of a maybe-unique
-    /// owner. Not a Core type — no source expression, parameter, or
-    /// binding ever has this type; only `cleanup_arm` produces it and
-    /// only `cleanup_disarm` / `cleanup_drop` consume it. Classified
-    /// Copy so ordinary scope-end machinery never drops it.
-    cleanup,
-
-    /// A named struct or union reference with its type arguments: the
-    /// declaration `TypeId` and the instantiation's arguments, in the
-    /// declaration's parameter order.
-    pub const Named = struct {
-        id: TypeId,
-        args: []Type,
-    };
-
-    /// Structural ownership (air.md §6.1): primitives are Copy except
-    /// the top type `any` and the opaque payload type `hostdata`, which are
-    /// unique (Core §11.6, §11.7); function values and module values are
-    /// Copy; containers join their components; cleanup tokens are
-    /// scheduler-only values; named types defer (`null`).
-    pub fn ownership(self: Type) ?Ownership {
-        return switch (self) {
-            .primitive => |k| if (k == .any or k == .hostdata) Ownership.unique else Ownership.copy,
-            .module, .cleanup => Ownership.copy,
-            .named, .param => null,
-            .list, .box => |inner| inner.ownership(),
-            .tuple => |elems| blk: {
-                var acc: ?Ownership = Ownership.copy;
-                for (elems) |e| {
-                    const ow = e.ownership() orelse break :blk null;
-                    if (ow == .unique) acc = Ownership.unique;
-                }
-                break :blk acc;
-            },
-            .function => Ownership.copy,
-        };
-    }
-
-    /// Whether two named references denote the same instantiation: the
-    /// same declaration with structurally equal type arguments.
-    fn namedEql(a: Named, b: Named) bool {
-        if (a.id != b.id) return false;
-        if (a.args.len != b.args.len) return false;
-        for (a.args, b.args) |x, y| {
-            if (!eql(x, y)) return false;
-        }
-        return true;
-    }
-
-    pub fn eql(a: Type, b: Type) bool {
-        return switch (a) {
-            .primitive => |ka| switch (b) {
-                .primitive => |kb| ka == kb,
-                else => false,
-            },
-            .module => b == .module,
-            .named => |na| switch (b) {
-                .named => |nb| namedEql(na, nb),
-                else => false,
-            },
-            .param => |pa| switch (b) {
-                .param => |pb| std.mem.eql(u8, pa, pb),
-                else => false,
-            },
-            .list => |la| switch (b) {
-                .list => |lb| eql(la.*, lb.*),
-                else => false,
-            },
-            .box => |la| switch (b) {
-                .box => |lb| eql(la.*, lb.*),
-                else => false,
-            },
-            .tuple => |ta| switch (b) {
-                .tuple => |tb| tupleEql(ta, tb),
-                else => false,
-            },
-            .function => |fa| switch (b) {
-                .function => |fb| funcEql(fa, fb),
-                else => false,
-            },
-            .cleanup => b == .cleanup,
-        };
-    }
-
-    fn tupleEql(a: []Type, b: []Type) bool {
-        if (a.len != b.len) return false;
-        for (a, b) |x, y| if (!eql(x, y)) return false;
-        return true;
-    }
-
-    fn funcEql(a: FunctionType, b: FunctionType) bool {
-        if (a.params.len != b.params.len) return false;
-        for (a.params, b.params) |x, y| {
-            if (x.mode != y.mode or !eql(x.type_, y.type_)) return false;
-        }
-        return eql(a.ret.*, b.ret.*);
-    }
-};
-
-/// One parameter: `[borrow|move] name: type` (air.md §11). In function
-/// *types* the name is empty.
-pub const Param = struct {
-    span: ast.Span,
-    name: ast.Ident,
-    mode: ast.ParamMode,
-    type_: Type,
-};
-
-/// A synthetic parameter for a syscall signature the frontend itself
-/// constructs (the list `len` in list patterns, `unbox` in drop
-/// lowering): no written name.
-pub fn syntheticParam(span: ast.Span, mode: ast.ParamMode, type_: Type) Param {
-    return .{ .span = span, .name = .{ .span = span, .text = "" }, .mode = mode, .type_ = type_ };
-}
-
-pub const FunctionType = struct {
-    params: []Param,
-    ret: *Type,
-};
-
-// ---------------------------------------------------------------------------
-// Type environment (air.md §9.1)
-// ---------------------------------------------------------------------------
-
-/// One nominal type declaration behind a `TypeId` (air.md §9.1): the
-/// concrete layout, declared ownership, and destruction information a
-/// backend needs to interpret `construct` / `unpack_*` / `drop` over a
-/// named type — without reference to the source module graph. The
-/// frontend lowering fills these from the module graph; the AIR text
-/// parser interns only `.unknown` names (the text form carries no type
-/// declarations, air.md §10), so a text-parsed program's layout queries
-/// return null.
-pub const TypeDecl = union(enum) {
-    struct_: StructDecl,
-    union_: UnionDecl,
-    opaque_: OpaqueDecl,
-    /// A name interned by the AIR text parser (air.md §10): the text form
-    /// carries no type declarations, so the layout is unknown. The
-    /// frontend never emits this form.
-    unknown: []const u8,
-
-    /// The written declaration name (printing and diagnostics only;
-    /// canonical identity is the `TypeId`, air.md §9.1).
-    pub fn name(self: TypeDecl) []const u8 {
-        return switch (self) {
-            .struct_ => |d| d.name,
-            .union_ => |d| d.name,
-            .opaque_ => |d| d.name,
-            .unknown => |n| n,
-        };
-    }
-};
-
-/// A struct declaration (air.md §9.1 `StructDecl`): fields in declaration
-/// order, the declared ownership, and the hidden drop-hook function.
-pub const StructDecl = struct {
-    /// Written declaration name (printing/diagnostics only).
-    name: []const u8,
-    /// The declaring module's resolved specifier.
-    module: []const u8,
-    /// Declaration type-parameter names, in declaration order (empty for
-    /// non-generic structs). Field types reference them as `Type.param`;
-    /// an instantiation's concrete layout substitutes the arguments.
-    type_params: []const []const u8,
-    /// The declared ownership class, concrete for non-generic structs.
-    /// Null when the struct is generic: the class of an instantiation
-    /// depends on its type arguments (`Option[int32]` is Copy,
-    /// `Option[File]` is unique) — resolve via `IrProgram.namedOwnership`.
-    ownership: ?Ownership,
-    /// The hidden drop-hook function name (`{module}.{Type}.drop`, air.md
-    /// §6.4), when the struct declares a hook (Core §9.1); null otherwise.
-    /// A struct with a hook is unique by declaration.
-    drop: ?[]const u8,
-    /// Fields in declaration order.
-    fields: []FieldDecl,
-};
-
-/// One struct field: the written name and the resolved field type (a
-/// generic declaration's field types may reference its type parameters
-/// as `Type.param`).
-pub const FieldDecl = struct {
-    name: []const u8,
-    type_: Type,
-};
-
-/// A union declaration (air.md §9.1 `UnionDecl`): variants in declaration
-/// order, the declared ownership, and the discriminant layout.
-pub const UnionDecl = struct {
-    name: []const u8,
-    /// The declaring module's resolved specifier.
-    module: []const u8,
-    /// Declaration type-parameter names, in declaration order (see
-    /// `StructDecl.type_params`; null ownership when generic).
-    type_params: []const []const u8,
-    ownership: ?Ownership,
-    /// Variants in declaration order; the discriminant of a variant is
-    /// its position.
-    variants: []VariantDecl,
-};
-
-/// One union variant: the written name and its payload types in
-/// declaration order (empty for a payload-less variant).
-pub const VariantDecl = struct {
-    name: []const u8,
-    payloads: []Type,
-};
-
-/// A host-backed opaque nominal type declaration (air.md §9.1
-/// `OpaqueDecl`, Core §11.8): no fields, no variants, unique by
-/// declaration; the host type implementation is named by `host_id`.
-pub const OpaqueDecl = struct {
-    name: []const u8,
-    /// The declaring module's resolved specifier.
-    module: []const u8,
-    /// Unique by declaration (Core §11.8): opaque types never take type
-    /// arguments that change their ownership.
-    ownership: Ownership,
-    /// The host type implementation behind the opaque type (Runtime
-    /// §3.1): the declaring module's specifier plus the type's written
-    /// name — a stable (host_module, type_name) pair.
-    host_id: HostTypeId,
-};
-
-/// The host identity of an opaque nominal type (air.md §9.1 `HostTypeId`):
-/// names the host type implementation of the declaring module.
-pub const HostTypeId = struct {
-    host_module: []const u8,
-    type_name: []const u8,
-};
+// The shared type/metadata layer lives in `meta.zig`; these local aliases
+// keep the CFG code reading as before without re-exporting the names.
+const Ownership = meta.Ownership;
+const TypeId = meta.TypeId;
+const Type = meta.Type;
+const Param = meta.Param;
+const syntheticParam = meta.syntheticParam;
+const FunctionType = meta.FunctionType;
+const TypeDecl = meta.TypeDecl;
+const ConstValue = meta.ConstValue;
+const substParams = meta.substParams;
 
 // ---------------------------------------------------------------------------
 // CFG data structures (air.md §11)
@@ -347,20 +95,12 @@ pub const BorrowOrigin = union(enum) {
     call,
 };
 
-pub const ConstValue = union(enum) {
-    int: i64, // int32 / uint32 payload; sign per type
-    float: f64, // float32 payloads narrow into the low word at interning
-    bool: bool,
-    string: []const u8,
-    void,
-};
-
 /// One SSA value: the result of exactly one instruction (air.md §4.1).
 /// Parameter values have no defining instruction (`def == null`).
 pub const Value = struct {
     /// SSA name — per function, in definition order (`%0..%k-1` params).
     id: u32,
-    span: ast.Span,
+    span: meta.Span,
     type_: Type,
     /// Ownership class from the type (Copy / unique), `null` when
     /// deferred by a named type.
@@ -385,7 +125,7 @@ pub const Value = struct {
 /// position (air.md §9): the printer re-inlines them so their ids never
 /// leak into the text form.
 pub const Instr = struct {
-    span: ast.Span,
+    span: meta.Span,
     results: []*Value,
     op: Op,
     synth: bool = false,
@@ -866,7 +606,7 @@ pub const SysCallTarget = union(enum) {
 };
 
 pub const SysCall = struct {
-    span: ast.Span,
+    span: meta.Span,
     target: SysCallTarget,
     args: []*Value,
     /// The host binding's specialized concrete signature (air.md §8.2,
@@ -916,7 +656,7 @@ pub const SwitchArm = struct { tag: u32, block: *BasicBlock };
 
 pub const BasicBlock = struct {
     id: u32,
-    span: ast.Span,
+    span: meta.Span,
     /// Text-form label; layout order is `IrFunc.blocks` order.
     name: []const u8,
     instrs: []*Instr,
@@ -927,8 +667,8 @@ pub const BasicBlock = struct {
 
 pub const IrFunc = struct {
     id: u32,
-    span: ast.Span,
-    name: ast.Ident,
+    span: meta.Span,
+    name: meta.Ident,
     params: []Param,
     ret: Type,
     entry: *BasicBlock,
@@ -941,12 +681,9 @@ pub const IrFunc = struct {
     module_spec: ?[]const u8 = null,
 };
 
-/// A block-finalization diagnostic: the offending span and a pre-formatted
-/// message (allocated from the caller's arena).
-pub const FinalizeDiag = struct {
-    span: ast.Span,
-    message: []const u8,
-};
+/// A block-finalization diagnostic (`meta.Diagnostic`): the offending span
+/// and a pre-formatted message allocated from the caller's arena.
+pub const FinalizeDiag = meta.Diagnostic;
 
 /// Finalize a function's blocks (air.md §3, §4.3): dupe each block's
 /// instruction slice from the parallel builder list, compute predecessor
@@ -1211,7 +948,7 @@ pub const MemberKind = union(enum) {
 };
 
 pub const IrModule = struct {
-    span: ast.Span,
+    span: meta.Span,
     /// Resolved specifier of the module.
     name: []const u8,
     /// The module init function (a `func @init`), when one is defined.
@@ -1322,7 +1059,7 @@ fn ownershipNamed(self: *const IrProgram, allocator: std.mem.Allocator, n: Type.
             // Generic: substitute the instantiation's arguments and walk
             // the fields (the fixpoint guard must see the instantiated
             // form, not the raw declaration).
-            for (visited.items) |anc| if (Type.namedEql(n, anc)) break :blk .unique;
+            for (visited.items) |anc| if (Type.eql(.{ .named = n }, .{ .named = anc })) break :blk .unique;
             visited.append(allocator, n) catch break :blk null;
             defer _ = visited.pop();
             var acc: ?Ownership = .copy;
@@ -1338,7 +1075,7 @@ fn ownershipNamed(self: *const IrProgram, allocator: std.mem.Allocator, n: Type.
         },
         .union_ => |u| blk: {
             if (u.ownership) |ow| break :blk ow;
-            for (visited.items) |anc| if (Type.namedEql(n, anc)) break :blk .unique;
+            for (visited.items) |anc| if (Type.eql(.{ .named = n }, .{ .named = anc })) break :blk .unique;
             visited.append(allocator, n) catch break :blk null;
             defer _ = visited.pop();
             var acc: ?Ownership = .copy;
@@ -1374,77 +1111,6 @@ fn ownershipType(self: *const IrProgram, allocator: std.mem.Allocator, t: Type, 
             break :blk acc;
         },
         .named => |nn| ownershipNamed(self, allocator, nn, visited),
-    };
-}
-
-/// Substitute a type's `.param` occurrences with the instantiation's
-/// type arguments (air.md §9.1): a generic struct/union declaration's
-/// fields and payloads reference the declaration's type parameters, and
-/// resolving an instantiation replaces each `.param` with its argument
-/// (`Option[int32]`'s `Some` payload becomes `int32`). Parameters with
-/// no matching argument are left unresolved. Best-effort allocation: on
-/// OOM the original type is returned unchanged (the queries run in
-/// arena contexts where OOM is not recoverable anyway).
-pub fn substParams(allocator: std.mem.Allocator, params: []const []const u8, args: []const Type, t: Type) Type {
-    return switch (t) {
-        .param => |p| blk: {
-            // `args` may be shorter than `params` for a wildcard
-            // instantiation; parameters past the provided arguments are
-            // left unresolved rather than crashing the zip.
-            for (params, 0..) |prm, i| {
-                if (i >= args.len) break;
-                if (std.mem.eql(u8, p, prm)) break :blk args[i];
-            }
-            break :blk t;
-        },
-        .named => |n| blk: {
-            if (n.args.len == 0) break :blk t;
-            const out = allocator.alloc(Type, n.args.len) catch break :blk t;
-            for (n.args, 0..) |a, i| out[i] = substParams(allocator, params, args, a);
-            break :blk .{ .named = .{ .id = n.id, .args = out } };
-        },
-        .list => |inner| blk: {
-            const sub = substParams(allocator, params, args, inner.*);
-            if (Type.eql(sub, inner.*)) break :blk t;
-            const ptr = allocator.create(Type) catch break :blk t;
-            ptr.* = sub;
-            break :blk .{ .list = ptr };
-        },
-        .box => |inner| blk: {
-            const sub = substParams(allocator, params, args, inner.*);
-            if (Type.eql(sub, inner.*)) break :blk t;
-            const ptr = allocator.create(Type) catch break :blk t;
-            ptr.* = sub;
-            break :blk .{ .box = ptr };
-        },
-        .tuple => |elems| blk: {
-            var changed = false;
-            const out = allocator.alloc(Type, elems.len) catch break :blk t;
-            for (elems, 0..) |e, i| {
-                out[i] = substParams(allocator, params, args, e);
-                if (!Type.eql(out[i], e)) changed = true;
-            }
-            break :blk if (changed) .{ .tuple = out } else t;
-        },
-        .function => |f| blk: {
-            var changed = false;
-            const params_out = allocator.alloc(Param, f.params.len) catch break :blk t;
-            for (f.params, 0..) |*p, i| {
-                params_out[i] = .{
-                    .span = p.span,
-                    .name = p.name,
-                    .mode = p.mode,
-                    .type_ = substParams(allocator, params, args, p.type_),
-                };
-                if (!Type.eql(params_out[i].type_, p.type_)) changed = true;
-            }
-            const ret_ptr = allocator.create(Type) catch break :blk t;
-            ret_ptr.* = substParams(allocator, params, args, f.ret.*);
-            if (!Type.eql(ret_ptr.*, f.ret.*)) changed = true;
-            if (!changed) break :blk t;
-            break :blk .{ .function = .{ .params = params_out, .ret = ret_ptr } };
-        },
-        .primitive, .module, .cleanup => t,
     };
 }
 

@@ -25,8 +25,8 @@
 //! span; S5's gate is textual equality, and spans never print (air.md §9).
 
 const std = @import("std");
-const ast = @import("stilla").ast;
 const cfg = @import("stilla").cfg;
+const meta = @import("stilla").meta;
 const hir = @import("stilla").hir;
 const moduleinfo = @import("stilla").moduleinfo;
 const lower = @import("stilla").lower;
@@ -48,7 +48,7 @@ const FuncState = lower.FuncState;
 const LowerError = lower.LowerError;
 
 /// The zero span: HIR nodes carry no source spans in M1a (see header).
-pub const no_span = ast.Span.init(0, 0, 0);
+pub const no_span = meta.Span.init(0, 0, 0);
 
 /// Per-function lowering context: the built program plus the binder →
 /// local map. The cfg `FuncState` stays the single source of emission
@@ -268,7 +268,7 @@ fn lowerFuncRecord(self: *Lowerer, built: *hir.BuiltProgram, info: *moduleinfo.M
             if (cfg_lower_emit.isVoid(local.value.type_)) continue;
             try args.append(self.arena, local.value);
         }
-        const sig = cfg.FunctionType{ .params = rec.params, .ret = dupType(self, rec.ret) };
+        const sig = meta.FunctionType{ .params = rec.params, .ret = dupType(self, rec.ret) };
         // The str/hash supported-type constraint applies to the wrapper
         // too — mirror `cfg_lower_intrinsic.intrinsicFnRef`, which checks
         // before synthesizing (Runtime §4.2/§4.9): a wrapper would carry
@@ -341,8 +341,8 @@ fn lowerFuncRecord(self: *Lowerer, built: *hir.BuiltProgram, info: *moduleinfo.M
 }
 
 /// An arena copy of a type (syscall signatures own their ret pointer).
-fn dupType(self: *Lowerer, t: cfg.Type) *cfg.Type {
-    const p = self.arena.create(cfg.Type) catch unreachable;
+fn dupType(self: *Lowerer, t: meta.Type) *meta.Type {
+    const p = self.arena.create(meta.Type) catch unreachable;
     p.* = t;
     return p;
 }

@@ -11,6 +11,7 @@
 const std = @import("std");
 const ast = @import("ast.zig");
 const cfg = @import("cfg.zig");
+const meta = @import("meta.zig");
 const frontend = @import("frontend.zig");
 const lower = @import("lower.zig");
 const moduleinfo = @import("moduleinfo.zig");
@@ -92,9 +93,9 @@ test "generic intrinsics synthesize one wrapper per concrete specialization" {
     const float_body = funcBody(text, "func @app.str.intrinsic.1");
     try testing.expect(std.mem.indexOf(u8, float_body, "syscall builtin#str") != null);
     const f0 = findFunc(program, "app.str.intrinsic.0");
-    try testing.expectEqual(cfg.Type{ .primitive = .int32 }, f0.params[0].type_);
+    try testing.expectEqual(meta.Type{ .primitive = .int32 }, f0.params[0].type_);
     const f1 = findFunc(program, "app.str.intrinsic.1");
-    try testing.expectEqual(cfg.Type{ .primitive = .float32 }, f1.params[0].type_);
+    try testing.expectEqual(meta.Type{ .primitive = .float32 }, f1.params[0].type_);
 }
 
 test "cross-module uses share one synthesized wrapper" {
@@ -295,7 +296,7 @@ test "math constants materialize as typed literals with the specified bits" {
                         const bits: u32 = @bitCast(@as(f32, @floatCast(x)));
                         try testing.expectEqual(case.bits, bits);
                         try testing.expect(ins.results.len == 1);
-                        try testing.expectEqual(ast.PrimitiveKind.float32, ins.results[0].type_.primitive);
+                        try testing.expectEqual(meta.PrimitiveKind.float32, ins.results[0].type_.primitive);
                     },
                     else => {},
                 },
@@ -464,7 +465,7 @@ test "first-class synthesis validates against the expansion table too" {
     var lw = lower.Lowerer.init(arena, &graph, null, false, null);
     try testing.expectError(
         error.Diagnostic,
-        cfg_lower_intrinsic.intrinsicSyscallTarget(&lw, ast.Span.init(0, 0, 0), "math", "hypot"),
+        cfg_lower_intrinsic.intrinsicSyscallTarget(&lw, meta.Span.init(0, 0, 0), "math", "hypot"),
     );
 }
 

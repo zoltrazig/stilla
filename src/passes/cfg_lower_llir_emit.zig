@@ -18,7 +18,7 @@
 
 const std = @import("std");
 const cfg = @import("stilla").cfg;
-const ast = @import("stilla").ast;
+const meta = @import("stilla").meta;
 const llir = @import("stilla").llir;
 const lower = @import("cfg_lower_llir.zig");
 const lifecycle = @import("cfg_lower_lifecycle.zig");
@@ -177,7 +177,7 @@ fn emitInterned(bld: *Builder) error{OutOfMemory}!void {
 /// result type. `byte` has no arithmetic and `bool`/`str`/`any`/
 /// `hostdata` are not arithmetic — a miss here is a
 /// lowering invariant violation.
-fn arithOpcode(kind: llir.TypedKind, t: cfg.Type) llir.Opcode {
+fn arithOpcode(kind: llir.TypedKind, t: meta.Type) llir.Opcode {
     return llir.typedOpcode(kind, t, undefined) orelse unreachable;
 }
 
@@ -194,7 +194,7 @@ fn makeBinOp(tag: cfg.OpTag, bin: cfg.Bin, result: *cfg.Value) typed.TypedOp {
 }
 
 /// Build the typed lowering op for a unary CFG instruction.
-fn makeUnOp(tag: cfg.OpTag, t: cfg.Type, a: *cfg.Value, result: *cfg.Value) typed.TypedOp {
+fn makeUnOp(tag: cfg.OpTag, t: meta.Type, a: *cfg.Value, result: *cfg.Value) typed.TypedOp {
     return .{
         .kind = typed.typedKindOf(tag) orelse unreachable,
         .type_ = t,
@@ -314,7 +314,7 @@ fn emitCompare(bld: *Builder) error{OutOfMemory}!void {
 /// `num_cast` to exactly this set (Core §16.3); the identity entries
 /// are unreachable here (the checker and the CFG validator reject
 /// them).
-fn castOpcode(src: cfg.Type, dst: cfg.Type) llir.Opcode {
+fn castOpcode(src: meta.Type, dst: meta.Type) llir.Opcode {
     return llir.typedOpcode(.cast, src, dst) orelse unreachable;
 }
 
@@ -404,7 +404,7 @@ fn emitCalls(bld: *Builder) error{ OutOfMemory, SyscallWithoutSignature }!void {
 /// value's type. Shared with the lifecycle pass's argument-mode
 /// classification (`cfg_lower_lifecycle.plan` reads it through the
 /// Builder shim).
-pub fn calleeParamList(bld: *Builder, callee: cfg.Callee) []const cfg.Param {
+pub fn calleeParamList(bld: *Builder, callee: cfg.Callee) []const meta.Param {
     return switch (callee) {
         .direct => |d| blk: {
             if (d.func) |f| break :blk f.params;
@@ -443,7 +443,7 @@ pub fn callArgMoves(bld: *Builder, blk: *const cfg.BasicBlock, ins: *const cfg.I
     const base = fd.window_count - a;
     var out = std.ArrayList(edges.EdgeCopy).empty;
     for (c.args, 0..) |arg, k| {
-        const mode: ast.ParamMode = if (k < params.len) params[k].mode else .plain;
+        const mode: meta.ParamMode = if (k < params.len) params[k].mode else .plain;
         const op: llir.Opcode = if (mode == .borrow or (mode != .move and arg.state == .borrowed))
             .slot_borrow
         else if (mode == .move or (arg.ownership == .unique and arg.state == .owned))

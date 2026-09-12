@@ -4,7 +4,7 @@
 
 const std = @import("std");
 const ast = @import("stilla").ast;
-const cfg = @import("stilla").cfg;
+const meta = @import("stilla").meta;
 const hir = @import("stilla").hir;
 const moduleinfo = @import("stilla").moduleinfo;
 const type_resolve = @import("type_resolve.zig");
@@ -19,14 +19,14 @@ pub fn buildPattern(
     b: *hir_build.Builder,
     info: *moduleinfo.ModuleInfo,
     p: *const ast.Pattern,
-    scrut_ty: cfg.Type,
+    scrut_ty: meta.Type,
     consuming: bool,
     leaves: *std.ArrayList(hir.BinderId),
 ) hir_build.BuildError!hir.PatternId {
     switch (p.*) {
         .wildcard => return b.built.program.addPattern(.wildcard),
         .literal => |lp| {
-            const value: cfg.ConstValue = switch (lp.value) {
+            const value: meta.ConstValue = switch (lp.value) {
                 .int => |i| .{ .int = @intCast(i) },
                 .neg_int => |i| .{ .int = -@as(i64, @intCast(i)) },
                 .float => |f| .{ .float = try narrowFloat(b, lp.span, f) },
@@ -139,8 +139,8 @@ pub fn buildPattern(
             }
             var rest: ?hir.PatternId = null;
             if (lp.rest) |rest_name| {
-                const tail_ty = try b.arena.create(cfg.Type);
-                tail_ty.* = .{ .list = try b.arena.create(cfg.Type) };
+                const tail_ty = try b.arena.create(meta.Type);
+                tail_ty.* = .{ .list = try b.arena.create(meta.Type) };
                 tail_ty.list.* = elem_ty;
                 const bid = try b.built.program.addBinder(tail_ty.*, leafMode(b, info, tail_ty.*, consuming));
                 try leaves.append(b.arena, bid);
@@ -155,12 +155,12 @@ pub fn buildPattern(
 /// The binder mode of one pattern leaf: Copy leaves bind as ordinary
 /// values; unique leaves of a consuming destructure are `.move`, of a
 /// non-consuming one `.borrow` (view).
-fn leafMode(b: *hir_build.Builder, info: *moduleinfo.ModuleInfo, ty: cfg.Type, consuming: bool) hir.BinderMode {
+fn leafMode(b: *hir_build.Builder, info: *moduleinfo.ModuleInfo, ty: meta.Type, consuming: bool) hir.BinderMode {
     if (!hir_build_block.typeIsUnique(b, info, ty)) return .value;
     return if (consuming) .move else .borrow;
 }
 
-fn narrowFloat(b: *hir_build.Builder, span: ast.Span, v: f64) hir_build.BuildError!f64 {
+fn narrowFloat(b: *hir_build.Builder, span: meta.Span, v: f64) hir_build.BuildError!f64 {
     const f: f32 = @floatCast(v);
     if (!std.math.isFinite(f)) {
         return b.fail(span, "float literal out of range for float32", .{});

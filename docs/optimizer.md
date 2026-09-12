@@ -260,7 +260,7 @@ renumbered in text order (air.md).
 compares only the operand, but a cast's *target type* lives on its
 result value — two casts of the same operand to different types are
 different computations. The pass therefore requires result-type
-equality (`cfg.Type.eql`) in addition to `cfg.identical` when matching
+equality (`meta.Type.eql`) in addition to `cfg.identical` when matching
 a `num_cast` against a predecessor's computation; the other candidates
 cannot hit this, because their opcode plus operand values fix the
 result type.

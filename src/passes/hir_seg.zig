@@ -40,7 +40,7 @@
 //! rewritten and leave the donor node unreachable.
 
 const std = @import("std");
-const cfg = @import("stilla").cfg;
+const meta = @import("stilla").meta;
 const hir = @import("stilla").hir;
 const moduleinfo = @import("stilla").moduleinfo;
 const effects = @import("stilla").effects;
@@ -682,18 +682,18 @@ fn isIntegerRep(rep: hir.ScalarRep) bool {
 // refused: the runtime owns the trap.
 // ---------------------------------------------------------------------------
 
-fn constVal(pr: *hir.Program, id: hir.ExprId) cfg.ConstValue {
+fn constVal(pr: *hir.Program, id: hir.ExprId) meta.ConstValue {
     return pr.node(id).payload.const_value;
 }
 
-fn foldNumeric(base: []const u8, rep: hir.ScalarRep, pr: *hir.Program, ops: []const hir.ExprId) ?cfg.ConstValue {
+fn foldNumeric(base: []const u8, rep: hir.ScalarRep, pr: *hir.Program, ops: []const hir.ExprId) ?meta.ConstValue {
     const a = constVal(pr, ops[0]);
     if (ops.len == 1) return foldUnary(base, rep, a);
     const b = constVal(pr, ops[1]);
     return foldBinary(base, rep, a, b);
 }
 
-fn foldUnary(base: []const u8, rep: hir.ScalarRep, a: cfg.ConstValue) ?cfg.ConstValue {
+fn foldUnary(base: []const u8, rep: hir.ScalarRep, a: meta.ConstValue) ?meta.ConstValue {
     if (std.mem.eql(u8, base, "neg")) {
         return switch (rep) {
             .i32 => intCV(i32, -%(asInt(i32, a) orelse return null)),
@@ -743,7 +743,7 @@ fn foldUnary(base: []const u8, rep: hir.ScalarRep, a: cfg.ConstValue) ?cfg.Const
     return null;
 }
 
-fn foldBinary(base: []const u8, rep: hir.ScalarRep, a: cfg.ConstValue, b: cfg.ConstValue) ?cfg.ConstValue {
+fn foldBinary(base: []const u8, rep: hir.ScalarRep, a: meta.ConstValue, b: meta.ConstValue) ?meta.ConstValue {
     if (std.mem.eql(u8, base, "add") or std.mem.eql(u8, base, "sub") or
         std.mem.eql(u8, base, "mul") or std.mem.eql(u8, base, "div") or std.mem.eql(u8, base, "rem"))
     {
@@ -811,7 +811,7 @@ fn foldBinary(base: []const u8, rep: hir.ScalarRep, a: cfg.ConstValue, b: cfg.Co
     return null;
 }
 
-fn cmpResult(base: []const u8, rep: hir.ScalarRep, a: cfg.ConstValue, b: cfg.ConstValue) ?cfg.ConstValue {
+fn cmpResult(base: []const u8, rep: hir.ScalarRep, a: meta.ConstValue, b: meta.ConstValue) ?meta.ConstValue {
     const eq = std.mem.eql(u8, base, "eq");
     const ne = std.mem.eql(u8, base, "ne");
     const eq_style = eq or ne;
@@ -849,7 +849,7 @@ fn cmpResult(base: []const u8, rep: hir.ScalarRep, a: cfg.ConstValue, b: cfg.Con
     return .{ .bool = r };
 }
 
-fn cmpInt(comptime T: type, base: []const u8, a: cfg.ConstValue, b: cfg.ConstValue) ?bool {
+fn cmpInt(comptime T: type, base: []const u8, a: meta.ConstValue, b: meta.ConstValue) ?bool {
     const x = asInt(T, a) orelse return null;
     const y = asInt(T, b) orelse return null;
     if (std.mem.eql(u8, base, "eq")) return x == y;
@@ -861,7 +861,7 @@ fn cmpInt(comptime T: type, base: []const u8, a: cfg.ConstValue, b: cfg.ConstVal
     return null;
 }
 
-fn cmpFloat(base: []const u8, a: cfg.ConstValue, b: cfg.ConstValue) ?bool {
+fn cmpFloat(base: []const u8, a: meta.ConstValue, b: meta.ConstValue) ?bool {
     const x = asF64(a) orelse return null;
     const y = asF64(b) orelse return null;
     if (std.mem.eql(u8, base, "eq")) return x == y;
@@ -873,7 +873,7 @@ fn cmpFloat(base: []const u8, a: cfg.ConstValue, b: cfg.ConstValue) ?bool {
     return null;
 }
 
-fn intArith(comptime T: type, base: []const u8, a: cfg.ConstValue, b: cfg.ConstValue) ?cfg.ConstValue {
+fn intArith(comptime T: type, base: []const u8, a: meta.ConstValue, b: meta.ConstValue) ?meta.ConstValue {
     const x = asInt(T, a) orelse return null;
     const y = asInt(T, b) orelse return null;
     if (std.mem.eql(u8, base, "add")) return intCV(T, x +% y);
@@ -891,7 +891,7 @@ fn intArith(comptime T: type, base: []const u8, a: cfg.ConstValue, b: cfg.ConstV
     return intCV(T, @rem(x, y));
 }
 
-fn intShift(comptime T: type, is_shl: bool, a: cfg.ConstValue, b: cfg.ConstValue) ?cfg.ConstValue {
+fn intShift(comptime T: type, is_shl: bool, a: meta.ConstValue, b: meta.ConstValue) ?meta.ConstValue {
     const bits = @typeInfo(T).int.bits;
     const U = std.meta.Int(.unsigned, bits);
     const x = asInt(T, a) orelse return null;
@@ -901,7 +901,7 @@ fn intShift(comptime T: type, is_shl: bool, a: cfg.ConstValue, b: cfg.ConstValue
     return intCV(T, x >> s);
 }
 
-fn intBit(comptime T: type, base: []const u8, a: cfg.ConstValue, b: cfg.ConstValue) ?cfg.ConstValue {
+fn intBit(comptime T: type, base: []const u8, a: meta.ConstValue, b: meta.ConstValue) ?meta.ConstValue {
     const x = asInt(T, a) orelse return null;
     const y = asInt(T, b) orelse return null;
     if (std.mem.eql(u8, base, "band")) return intCV(T, x & y);
@@ -909,7 +909,7 @@ fn intBit(comptime T: type, base: []const u8, a: cfg.ConstValue, b: cfg.ConstVal
     return intCV(T, x ^ y);
 }
 
-fn floatArith(comptime T: type, base: []const u8, a: cfg.ConstValue, b: cfg.ConstValue) ?cfg.ConstValue {
+fn floatArith(comptime T: type, base: []const u8, a: meta.ConstValue, b: meta.ConstValue) ?meta.ConstValue {
     const x = asF64(a) orelse return null;
     const y = asF64(b) orelse return null;
     if (std.mem.eql(u8, base, "add")) return floatCV(T, @as(T, @floatCast(x)) + @as(T, @floatCast(y)));
@@ -920,10 +920,10 @@ fn floatArith(comptime T: type, base: []const u8, a: cfg.ConstValue, b: cfg.Cons
     return floatCV(T, @rem(@as(T, @floatCast(x)), @as(T, @floatCast(y))));
 }
 
-// --- constant-value helpers (cfg.ConstValue keeps integers as i64 bit
+// --- constant-value helpers (meta.ConstValue keeps integers as i64 bit
 // patterns) ---------------------------------------------------------------
 
-fn asInt(comptime T: type, c: cfg.ConstValue) ?T {
+fn asInt(comptime T: type, c: meta.ConstValue) ?T {
     const U = std.meta.Int(.unsigned, @typeInfo(T).int.bits);
     return switch (c) {
         .int => |i| @bitCast(@as(U, @truncate(@as(u64, @bitCast(i))))),
@@ -931,28 +931,28 @@ fn asInt(comptime T: type, c: cfg.ConstValue) ?T {
     };
 }
 
-fn asF64(c: cfg.ConstValue) ?f64 {
+fn asF64(c: meta.ConstValue) ?f64 {
     return switch (c) {
         .float => |f| f,
         else => null,
     };
 }
 
-fn asBool(c: cfg.ConstValue) ?bool {
+fn asBool(c: meta.ConstValue) ?bool {
     return switch (c) {
         .bool => |b| b,
         else => null,
     };
 }
 
-fn asStr(c: cfg.ConstValue) ?[]const u8 {
+fn asStr(c: meta.ConstValue) ?[]const u8 {
     return switch (c) {
         .string => |s| s,
         else => null,
     };
 }
 
-fn intCV(comptime T: type, v: T) cfg.ConstValue {
+fn intCV(comptime T: type, v: T) meta.ConstValue {
     if (comptime @typeInfo(T).int.signedness == .signed) {
         return .{ .int = v };
     } else {
@@ -960,7 +960,7 @@ fn intCV(comptime T: type, v: T) cfg.ConstValue {
     }
 }
 
-fn floatCV(comptime T: type, v: T) cfg.ConstValue {
+fn floatCV(comptime T: type, v: T) meta.ConstValue {
     return .{ .float = @floatCast(v) };
 }
 
@@ -986,7 +986,7 @@ const AlgebraResult = union(enum) {
     /// Keep operand `keep` (0 or 1) as the result.
     keep: usize,
     /// The result is this constant (drops both operands).
-    value: cfg.ConstValue,
+    value: meta.ConstValue,
 };
 
 fn integerAlgebra(base: []const u8, rep: hir.ScalarRep, pr: *hir.Program, l: hir.ExprId, r: hir.ExprId) ?AlgebraResult {
@@ -1002,12 +1002,12 @@ fn integerAlgebra(base: []const u8, rep: hir.ScalarRep, pr: *hir.Program, l: hir
     };
 }
 
-fn maybeConst(pr: *hir.Program, id: hir.ExprId) ?cfg.ConstValue {
+fn maybeConst(pr: *hir.Program, id: hir.ExprId) ?meta.ConstValue {
     if (!std.mem.eql(u8, hir.registry.get(pr.node(id).op).name, "const")) return null;
     return pr.node(id).payload.const_value;
 }
 
-fn intAlgebraT(comptime T: type, base: []const u8, lc: ?cfg.ConstValue, rc: ?cfg.ConstValue) ?AlgebraResult {
+fn intAlgebraT(comptime T: type, base: []const u8, lc: ?meta.ConstValue, rc: ?meta.ConstValue) ?AlgebraResult {
     const lz = if (lc) |c| (asInt(T, c) orelse return null) == 0 else false;
     const rz = if (rc) |c| (asInt(T, c) orelse return null) == 0 else false;
     const lo = if (lc) |c| (asInt(T, c) orelse return null) == 1 else false;
@@ -1088,9 +1088,9 @@ test "unary folding: neg wraps, abs clears the sign, not/clz/popcount" {
 }
 
 test "integer algebra identities are declared, not guessed" {
-    const z = cfg.ConstValue{ .int = 0 };
-    const one = cfg.ConstValue{ .int = 1 };
-    const allones_i32 = cfg.ConstValue{ .int = -1 };
+    const z = meta.ConstValue{ .int = 0 };
+    const one = meta.ConstValue{ .int = 1 };
+    const allones_i32 = meta.ConstValue{ .int = -1 };
     try testing.expectEqual(@as(usize, 1), intAlgebraT(i32, "add", z, null).?.keep);
     try testing.expectEqual(@as(usize, 0), intAlgebraT(i32, "add", null, z).?.keep);
     try testing.expectEqual(@as(usize, 0), intAlgebraT(i32, "sub", null, z).?.keep);

@@ -18,6 +18,7 @@
 //! result coalescing is `llir_result_coalesce.zig`).
 const std = @import("std");
 const cfg = @import("stilla").cfg;
+const meta = @import("stilla").meta;
 const llir = @import("stilla").llir;
 const patterns = @import("llir_patterns.zig");
 const lower = @import("cfg_lower_llir.zig");
@@ -26,7 +27,7 @@ const cfg_order = @import("llir_cfg_order.zig");
 const Builder = lower.Builder;
 
 const SlotInfo = struct {
-    type_: *const cfg.Type,
+    type_: *const meta.Type,
     end: u32,
     active: bool,
 };
@@ -74,7 +75,7 @@ pub fn allocateSlots(bld: *Builder) error{OutOfMemory}!void {
         // `detect_cycle_types` armed; each distinct staging type gets a
         // dedicated cell after the value cells (the 2.8 semantics — v1
         // keeps the cells, drops the type rows).
-        var cycle_types = std.ArrayList(*const cfg.Type).empty;
+        var cycle_types = std.ArrayList(*const meta.Type).empty;
         bld.detect_cycle_types = &cycle_types;
         for (f.blocks) |blk| {
             switch (blk.terminator) {
@@ -531,7 +532,7 @@ fn coalesceSource(f: *const cfg.IrFunc, value: *const cfg.Value, uses: []const u
     const def = value.def orelse return null;
     switch (def.op) {
         .copy, .move_ => |source| {
-            if (cfg.Type.eql(source.type_, value.type_)) return source;
+            if (meta.Type.eql(source.type_, value.type_)) return source;
             return null;
         },
         .add => |bin| {

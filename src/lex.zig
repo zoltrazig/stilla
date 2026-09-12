@@ -20,6 +20,7 @@
 
 const std = @import("std");
 const ast = @import("ast.zig");
+const meta = @import("meta.zig");
 const unicode_case = @import("unicode_case.zig");
 
 /// Kinds of lexical tokens. Reserved words are distinct token kinds so the
@@ -108,7 +109,7 @@ pub const TokenKind = enum {
 /// (identifiers, keywords, numbers) or decoded value (strings).
 pub const Token = struct {
     kind: TokenKind,
-    span: ast.Span,
+    span: meta.Span,
     text: []const u8,
 };
 
@@ -149,7 +150,7 @@ pub const Lexer = struct {
         const len = @as(u32, @intCast(text.len));
         try self.tokens.append(self.arena, .{
             .kind = .eof,
-            .span = ast.Span.init(self.source.id, len, len),
+            .span = meta.Span.init(self.source.id, len, len),
             .text = "",
         });
         if (self.diags.items.len > 0) return error.Syntax;
@@ -470,15 +471,15 @@ pub const Lexer = struct {
         return if (self.pos + 1 < self.source.text.len) self.source.text[self.pos + 1] else 0;
     }
 
-    fn spanAt(self: *Lexer, start: usize, end: usize) ast.Span {
-        return ast.Span.init(self.source.id, @intCast(start), @intCast(end));
+    fn spanAt(self: *Lexer, start: usize, end: usize) meta.Span {
+        return meta.Span.init(self.source.id, @intCast(start), @intCast(end));
     }
 
     /// Record one lexical diagnostic (appending to `diags`, keeping
     /// `diag` as the first) and continue lexing. Recovery sites advance
     /// `pos` past the offending construct before returning, so a
     /// diagnostic never loops.
-    fn record(self: *Lexer, span: ast.Span, comptime fmt: []const u8, args: anytype) void {
+    fn record(self: *Lexer, span: meta.Span, comptime fmt: []const u8, args: anytype) void {
         const message = std.fmt.allocPrint(self.arena, fmt, args) catch "out of memory";
         const d = ast.Diagnostic{ .span = span, .message = message };
         if (self.diag == null) self.diag = d;

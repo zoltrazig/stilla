@@ -12,6 +12,7 @@
 const std = @import("std");
 const ast = @import("stilla").ast;
 const cfg = @import("stilla").cfg;
+const meta = @import("stilla").meta;
 const cfg_parse = @import("cfg_parse.zig");
 
 /// The round-trip tests parse and print; the parser itself lives in
@@ -20,11 +21,11 @@ const parseText = cfg_parse.parseText;
 
 // AIR structures (cfg.zig), brought into scope under the bare names the
 // printer uses.
-const Type = cfg.Type;
-const TypeDecl = cfg.TypeDecl;
-const Param = cfg.Param;
+const Type = meta.Type;
+const TypeDecl = meta.TypeDecl;
+const Param = meta.Param;
 const ValueState = cfg.ValueState;
-const ConstValue = cfg.ConstValue;
+const ConstValue = meta.ConstValue;
 const Value = cfg.Value;
 const Instr = cfg.Instr;
 const Op = cfg.Op;

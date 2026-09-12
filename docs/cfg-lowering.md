@@ -312,14 +312,14 @@ The lowering applies one rule:
 /// contract is static (Core). It is independent of the
 /// AIR member table (air.md): intrinsic declarations never occupy it.
 pub const SysCall = struct {
-    span: ast.Span,
+    span: meta.Span,
     target: SysCallTarget,
     /// Arguments, evaluated left-to-right before the call (Runtime),
     /// with parameter modes applied: plain/borrow pass views or copies,
     /// move passes ownership (Core).
     args: []*Value,
     /// Result type; `never` for panicking bindings (builtin.panic).
-    ret: *cfg.Type,
+    ret: *meta.Type,
 };
 
 pub const SysCallTarget = union(enum) {
@@ -402,7 +402,7 @@ iterates `Annotation.instances`):
 pub const IrProgram = struct {
     modules: []*IrModule,        // topological order
     funcs: []*IrFunc,            // all monomorphic functions + instances
-    types: []cfg.TypeDecl,       // the AIR type environment (air.md)
+    types: []meta.TypeDecl,       // the AIR type environment (air.md)
     entry: ?*IrFunc,             // the host-selected entry, when present
 };
 ```
@@ -411,7 +411,7 @@ Lowering populates `IrProgram.types` from the module graph's type
 environment (`cfg_lower_program.collectTypeEnv`): one written name per
 `Type` in use — including monomorphic generic specializations — indexed
 by the same `TypeId` that `Type.named` carries, with aliases expanding
-and leaving no entry. The AIR is self-contained in AIR-native `cfg.Type`s
+and leaving no entry. The AIR is self-contained in AIR-native `meta.Type`s
 and never consumes the checker's source-level types (air.md).
 
 Consumers of the CFG:
@@ -432,7 +432,8 @@ Consumers of the CFG:
 
 | File | Role |
 | --- | --- |
-| `src/cfg.zig` | Op schema (`opInfo`), types, `IrProgram` |
+| `src/meta.zig` | the shared type/metadata layer: `Type`, `Ownership`, `TypeId`, `Param`, `FunctionType`, the `TypeDecl` family, `HostTypeId`, `ConstValue`, `substParams` |
+| `src/cfg.zig` | Op schema (`opInfo`), `IrProgram` |
 | `src/lower.zig` | Lowerer context and top-level driver |
 | `src/passes/cfg_lower_program.zig` | Program-level lowering, type env collection |
 | `src/passes/cfg_lower_module.zig` | Module-level lowering, init functions |

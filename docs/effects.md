@@ -1,100 +1,87 @@
 # Stilla Effects System — 语义交互摘要模型
 
-> **Status：效果模型与三个消费者已实现。** 本文定义编译前端与优化器的
-> 内部效果语义模型，统一 trap/panic、host 调用、module-const 依赖、drop、
-> 函数摘要与 SEG 准入的合法性判定，替代 `switch(op)` 特判（求值序是独立
-> 语言约束，优化合法性由 EvalPolicy、ownership 与效果摘要共同判定）。已实现
-> 固定乘积格与派生查询、函数摘要 SCC least fixpoint、精确 `drop_effect(T)`、
-> module-const 检查，以及 dead-let / selective ANF（`--simplify`，默认关）与
-> SEG v1（`--seg`，默认关）。保守边界与未落地项见 §14 与 [todo.md](todo.md)。
+> **Status：效果模型与三个消费者已实现。**
 >
-> 配套文档：使用该模型的中间表示（HIR）设计见 [hir.md](hir.md)；本文自含
-> 效果模型所需的全部定义，不依赖其章节细节。两者的重叠概念（求值序、
-> 值使用、效果）在本文给出权威定义，HIR 侧保留一份便于阅读的自含摘要。
+> - **已实现**：固定乘积格与派生查询、函数摘要 SCC least fixpoint、精确
+>   `drop_effect(T)` 全链、module-const 检查、`StillaExecution` 三态与符号键
+>   host 声明解析。
+> - **opt-in 消费者（默认关）**：dead-let + selective ANF（`--simplify`）、
+>   SEG v1（`--seg`）。
+> - **设计已定但未实现**（§14、[todo.md](todo.md)）：`never_returns` must 事实、
+>   `RewriteRule` / `Requirement` 统一接口、`RewriteContract` 类型、
+>   `CleanupFootprint` token、间接调用目标收窄、回调参数化摘要、
+>   `EffectEnvironmentFingerprint` 缓存指纹、host_bind 自动声明接线。
 >
-> 规范依据（追踪 v1.3 草案）：Core Module Constants（初始化与 teardown
-> 的对称依赖规则）、Core（不捕获、顺序无关与互递归）、
-> Types & Ownership（Copy/Unique、参数模式、借用、临时量）、
-> Runtime（初始化与逆序 teardown）、Runtime（求值序）、
-> Runtime（确定性销毁）、Runtime（trap 与数值行为）、
-> LLIR Instruction Set（`cvt` 转换语义）、air.md（drop 语义与校验）。
+> 配套文档：使用该模型的 IR 见 [hir.md](hir.md)。本文自含效果模型所需的全部
+> 定义；两者重叠的概念（求值序、值使用、效果）在本文给出权威定义，[hir.md](hir.md) 保留
+> 一份便于阅读的自含摘要。
+>
+> 规范依据（追踪 v1.3 草案）：Core（Module Constants、不捕获、顺序无关与互递归）；
+> Types & Ownership（Copy/Unique、参数模式、借用、临时量）；Runtime（初始化与
+> 逆序 teardown、求值序、确定性销毁、trap 与数值行为）；LLIR Instruction Set
+> （`cvt` 转换语义）；air.md（drop 语义与校验）。
 
 ## 1. 问题
 
 ### 1.1 一位 `pure / impure` 不够
 
-很多编译器把表达式标成 `pure / impure` 两个位，再据此派生一批互相打架
-的布尔标志（`is_pure`、`has_side_effects`、`can_speculate`、
-`is_safe_to_remove`、`can_duplicate`）。每加一个优化 pass，就要为这些
-标志各自补一套规则，而这些规则往往只能靠 `switch(opcode)` 白名单硬编码。
-
-Stilla 需要区分的东西远多于一位。一个表达式「有没有副作用」回答不了
-下面这些问题：
+把表达式标成 `pure / impure` 两位，再派生一批互相打架的布尔标志
+（`is_pure`、`has_side_effects`、`can_speculate`、`is_safe_to_remove`、
+`can_duplicate`），每加一个优化 pass 就要补一套规则，最终只能靠
+`switch(opcode)` 白名单硬编码。Stilla 需要区分的东西远多于一位：
 
 | 需要区分 | 例 | 单一位表达不了的原因 |
 | --- | --- | --- |
-| **trap / panic 与正常返回** | `10 / y` 除零 trap | 需知求值**可能异常终止**，且异常终止时不跑清理 |
-| **host 访问的是哪个资源域** | `os.read` 与 `audio.get_volume` | 同为「host 调用」，前者写文件、后者读音频，可交换性不同 |
-| **module constant 依赖方向** | 初始化/teardown 读较早/较晚常量 | Core 规则是**跨函数 transitive** 的，按函数/依赖序判定 |
-| **drop 是否可观察** | 带 `drop` hook 的临时值 | drop 有可观察效果，不等价于「无副作用」 |
-| **求值顺序** | `a() + b()` 必须 a 先 b 后 | 语言语义（从左到右、恰好一次），不是可从效果推的 |
-| **是否非确定** | `clock.now()` | 两次求值结果可不同，影响 CSE / 复制 |
+| trap / panic 与正常返回 | `10 / y` 除零 trap | 需知求值**可能异常终止**，且异常终止时不跑清理 |
+| host 访问的资源域 | `os.read` 与 `audio.get_volume` | 同为 host 调用，写文件与读音频可交换性不同 |
+| module constant 依赖方向 | 初始化 / teardown 读较早 / 较晚常量 | Core 规则**跨函数 transitive**，按依赖序判定 |
+| drop 是否可观察 | 带 drop hook 的临时值 | drop 有可观察效果，不等价于「无副作用」 |
+| 求值顺序 | `a() + b()` 必须 a 先 b 后 | 语言语义（LTR、恰好一次），不可从效果推 |
+| 是否非确定 | `clock.now()` | 两次求值结果可不同，影响 CSE / 复制 |
 
 ### 1.2 想统一的那些散落规则
 
-目标是把以下「靠 op 特判」的前端判定统一成**由同一模型派生的查询**：
-
-1. 求值顺序、trap/panic、host 调用、module-const 依赖、调用摘要不再
-   各自特判；
-2. Core 的模块初始化与 teardown 两条对称依赖规则由同一份函数摘要
-   驱动；
-3. dead-let、selective A-Normal Form、SEG-safe、CSE/DCE 的合法性全部
-   **派生**出来，而不是 `switch(op)` 白名单。
+1. 求值顺序、trap/panic、host 调用、module-const 依赖、调用摘要不再各自特判；
+2. Core 的模块初始化与 teardown 两条对称规则由同一份函数摘要驱动；
+3. dead-let、selective ANF、SEG-safe、CSE/DCE 的合法性全部**派生**出来，而不是
+   `switch(op)` 白名单。
 
 ### 1.3 非目标
 
-- **不做 source-level effect type**（如 `fn(int32) -> int32 !{IO}`）：
-  语言类型保持 `fn(int32) -> int32`，效果摘要只是编译器内部的
-  metadata / refinement，不进入语言。
-- **不做低层内存效果**（别名、store buffer 一类）：资源是**抽象语义
-  资源**，不是地址。
-- **不做可扩展的通用 lattice 引擎**：用一套固定的乘积格即可（见 §5.4），
-  只覆盖有限的几种 mode 与 `Host(resource, Read/Write)` +
-  `ModuleConst(Read)` 这一小集。
+- **不做 source-level effect type**（如 `!{IO}`）：效果摘要只是编译器内部的
+  metadata / refinement，不进入语言类型。
+- **不做低层内存效果**（别名、store buffer）：资源是**抽象语义资源**，不是地址。
+- **不做可扩展的通用 lattice 引擎**：用一套固定乘积格，只覆盖有限的 mode 与
+  `Host(resource, Read/Write)` + `ModuleConst(Read)`。
 
 ## 2. 解决方案概览
 
 ### 2.1 一句话
 
-> **EffectSummary = 一个表达式与表达式之外的语义状态发生了哪些交互。**
+> EffectSummary = 一个表达式与**表达式之外**的语义状态发生了哪些交互。
 
-表达式内部的词法 / 数据流（`read local x`、`move local x`、
-`borrow local x`）**不进入** EffectSummary——它们属于 ownership /
-数据流维度（Unique 至多 move/drop 一次、borrow 不转移 ownership，由
-独立维度负责）。EffectSummary 只描述「越出表达式边界」的交互。
+表达式内部的词法 / 数据流（read / move / borrow local）**不进入** EffectSummary
+——它们属于 ownership / 数据流维度（Unique 至多 move/drop 一次、borrow 不转移
+ownership，由独立维度负责）。
 
 ### 2.2 一个 op 的语义是四个正交维度
-
-不要把效果与其它语义塞进同一个集合。一个 HIR op 的语义按四维正交组织：
 
 ```text
 HIR semantics(op) =
     Type                // capability（Copy/Unique）与具体类型
   × EvalPolicy          // 求值顺序：语言语义（§3）
-  × OperandUse         // 每个 operand 的值使用 / ownership（§4）
+  × OperandUse          // 每个 operand 的值使用 / ownership（§4）
   × EffectSummary       // 与表达式外部语义状态的交互（§5）
 ```
-
-四个维度各自的职责与归属：
 
 | 维度 | 回答什么 | 归属 | 关键区分 |
 | --- | --- | --- | --- |
 | `Type` | 值能复制吗、具体类型 | 类型系统 | Copy / Unique |
 | `EvalPolicy` | 子表达式以什么顺序、求值几次 | op descriptor | 语言语义，与效果正交 |
-| `OperandUse` | 这个 operand 是被读、借用还是 consume | operand 位 | 每个 operand 一个 |
+| `OperandUse` | operand 是被读、借用还是 consume | operand 位 | 每个 operand 一个 |
 | `EffectSummary` | 求值会与外部状态交互吗 | 节点 interned 摘要 | 资源访问 + 控制位 |
 
-两个说明正交性的关键例子：
+两个正交性例子：
 
 - `move.effects == {}` 完全合理：move 的重要语义是 `OperandUse = Consume`
   （linearity 属于 ownership，不是 runtime effect）；
@@ -104,17 +91,17 @@ HIR semantics(op) =
 
 ```text
 EffectSummary {
-    accesses:  EffectRow,     // 资源访问集合（∅ / All，见 §5.4）
-    may_trap:  bool,          // 可能异常终止（含 panic）
-    may_diverge: bool,        // 可能发散（非终止调用 / 递归）
-    nondeterministic: bool,   // 两次求值结果可不同
+    accesses:  AccessSet,     // 资源访问集合（∅ / All，见 §5.4）
+    may_trap:  bool,
+    may_diverge: bool,
+    nondeterministic: bool,
 }
 
 EffectAccess { resource, mode }     mode = Read | Write | Allocate | Release
 ```
 
-资源是抽象语义域而非地址（`ModuleConst(C)`、`Host(域)`、
-`Runtime(域)`、`Extension(ProviderId, ResourceId)`、`Top`）。典型行：
+资源是抽象语义域而非地址（`ModuleConst(C)`、`Host(域)`、`Runtime(域)`、
+`Extension(ProviderId, ResourceId)`、`HostAny`（host 资源通配）、`Top`）。典型行：
 
 ```text
 builtin.print(...)   Write(Host.Output)
@@ -128,84 +115,72 @@ host.unknown(...)    TOP
 ### 2.4 由此派生的优化属性
 
 模型只存**事实**（EffectSummary + 派生所需的类型 / use / view），不存
-`is_pure = true` 这类布尔。所有优化属性由查询函数从摘要推导：
+`is_pure = true` 这类布尔；所有优化属性由查询函数推导（详表见 §10.1）：
 
 | 属性 | 判定要点 |
 | --- | --- |
 | `total` | `!may_trap ∧ !may_diverge` |
-| `observable_effect_free` | 无 `Write/Allocate/Release`、无未知资源（Top）；资源**读**默认不构成可观察交互（Q 不在此判定内，见 §10.1） |
-| `discardable` | `total` + 无可观察效果 + 清理上下文下 `discard_view(observed_effect) == Pure`（§11，忽略 Q）+ ownership 门——**不要求 !Q** |
-| `duplicable` | `discardable` + 结果 Copy + operand 全 `Read` + **无 Q**（求值可重复） |
-| `speculatable` | `total` + 无有序 / 可观察效果 + **无 Q**；**上下文属性**：可移动性相对移动目标判定，不是表达式自身属性（§10.5） |
-| `reorderable(a,b)` | **位置上下文**：sibling 对能否交换由父 EvalPolicy + operand 位判定（§10.5）；输入是资源访问无冲突 + 无顺序可观察差异 |
-| `seg_safe` | Copy + total + 无可观察效果 + 无 Q（结果稳定）+ cleanup 安全 + 递归子树同判 + ownership 门 |
+| `observable_effect_free` | 无 `Write/Allocate/Release`、无未知资源；读默认不构成可观察交互 |
+| `discardable` | `total` + 无可观察效果 + 清理上下文下 `discard_view(observed_effect) == Pure` + ownership 门——**不要求 !Q** |
+| `duplicable` | `discardable` + 结果 Copy + operand 全 `Read` + **无 Q** |
+| `speculatable` | `total` + 无有序 / 可观察效果 + **无 Q**；**上下文属性** |
+| `reorderable(a,b)` | **位置上下文**：sibling 对能否交换由父 EvalPolicy + operand 位判定 |
+| `seg_safe` | Copy + total + 无可观察效果 + 无 Q + cleanup 安全 + 递归子树同判 + ownership 门 |
 
 每个查询都组合「效果 × operand uses × 结果 capability/view × ownership /
 lifetime 门」——`move.effects == {}` **不**使 move 变得 discardable /
-duplicable / speculatable，缺一不可（详表见 §10.1）。注意 `speculatable` /
-`reorderable` 两行不是表达式自身的 unary/binary 属性：**能否 speculate /
-重排是相对「移动到哪里」的上下文属性**，查询须参数化目标位置（§10.5 的
-`canMove` / `canSwapOperands`），本节表格只为可读性保留简写。
+duplicable / speculatable。`speculatable` / `reorderable` 不是表达式自身的
+unary / binary 属性：查询须参数化目标位置（§10.5 的 `canMove` /
+`canSwapOperands`），本节表格只为可读性简写。
 
 ### 2.5 模型消费方与文档导航
 
-这套模型的用户（也是它「有没有价值」的判据）：
-
 - **dead-let / selective ANF / SEG 准入**：用 `discardable` /
   `can_float_as_tree` / `seg_safe` 派生判定，替代 `switch(op)`（§12）；
-- **module constant 依赖检查**：用 `Read(ModuleConst)` 读集驱动 Core
-  两条对称规则（§7）；
-- **优化重写合法性**：所有 rewrite 的效果要求走统一接口（§10.3–§10.4）。
+- **module constant 依赖检查**：用 `Read(ModuleConst)` 读集驱动 Core 两条对称
+  规则（§7）；
+- **优化重写合法性**：所有 rewrite 的效果要求走派生查询（§10.3–§10.4）。
 
-阅读顺序：先读 §3–§5（求值序、值使用两个语义维度 + 效果核心模型），再读 §6（效果在
-表达式上怎么组合）、§7–§9（module 依赖与函数调用摘要）、§10（派生查询）、
-§11–§12（销毁可观察性与效果驱动的前端变换）、§13–§14（host metadata 与
-模型范围/验收）。
+阅读顺序：§3–§5（求值序、值使用 + 效果核心）→ §6（组合）→ §7–§9（module 依赖
+与调用摘要）→ §10（派生查询）→ §11–§12（销毁可观察性与消费者）→ §13–§14
+（host metadata 与范围 / 验收）→ §15（开放问题）。
 
 ## 3. EvalPolicy：求值顺序维度
 
-Stilla 规范规定子表达式**恰好一次、从左到右**求值（Runtime）。因此
-`a() + b()` 即便 `effects(a) = effects(b) = {}`，语义仍是 a 先 b 后。
-求值顺序是**语言语义**，效果摘要是**优化 legality 事实**，二者不互相
-归约。
-
-EvalPolicy 是 op descriptor 上的属性，描述该 op 的子表达式如何求值：
+Stilla 规定子表达式**恰好一次、从左到右**求值。`a() + b()` 即便
+`effects(a) = effects(b) = {}`，语义仍是 a 先 b 后。求值顺序是**语言语义**，
+效果摘要是**优化 legality 事实**，二者不互相归约。
 
 ```text
 EvalPolicy =
     StrictLTR     // operands 按序恰好一次（call / add / struct / tuple / list …）
-  | ShortCircuit  // and / or：第二个 operand 按条件才求值
+  | ShortCircuit  // and / or
   | Branch        // cond 先；只求值一个 region（if）
   | Match         // scrutinee 先；只求值一个 arm region（match）
-  | Region        // region 体按需/延迟求值的其余情形（descriptor 自声明）
+  | Region        // region 体按需 / 延迟求值的其余情形（descriptor 自声明）
 ```
 
-两个要点：
-
 - **region 是惰性分支**：`if` / `match` 的 region 体只在被选中时求值；
-  `call` 与聚合构造的 operands 全部求值且 LTR。两者合起来，求值顺序与
-  求值次数由**结构**决定。
-- **可交换是可证明的派生事实**：effect 分析可能证明某两个 operand 可
-  交换（`reorderable`），但**语义默认仍保持 LTR**；要利用交换的重写，
-  必须走显式的 `reorderable` 查询，不能用「两者摘要相等」来推断。
+  `call` 与聚合构造的 operands 全部求值且 LTR。两者合起来，求值顺序与次数由
+  **结构**决定。
+- **可交换是可证明的派生事实**：`reorderable` 可能证明某两个 operand 可交换，
+  但语义默认仍保持 LTR；要利用交换的重写必须走显式的 `reorderable` 查询，不能
+  用「两者摘要相等」推断。
 
 ## 4. OperandUse：值使用 / ownership 维度
 
-每个 operand 声明一个值使用模式（occurrence 级）：`Read` / `Borrow` /
-`Consume`。ownership 的 law（Unique 至多 move/drop 一次、borrow 不转移
-所有权）由独立维度负责，不进入 EffectSummary。
-
-**术语（全文统一，废除 `UseKind` / `UseMode` 两套旧名）**：
+每个 operand 声明一个 occurrence 级值使用模式。ownership 的 law（Unique 至多
+move/drop 一次、borrow 不转移所有权）由独立维度负责，不进入 EffectSummary。
 
 ```text
 OperandUse = Read | Borrow | Consume    // 一个具体 operand occurrence 如何消费值
-BinderMode = Value | Move | Borrow      // 源级 parameter / binder 契约（hir.md §3.4）
+BinderMode = Value | Move | Borrow      // 源级 parameter / binder 契约（[hir.md](hir.md) §3.4）
 ```
 
-`OperandUse` 是 operand 位的 occurrence 事实（每个 operand 一个）；
-`BinderMode` 是声明侧契约（`move` 参数 / consuming pattern 绑定为 `Move`、
-borrow 参数为 `Borrow`，定义见 [hir.md](hir.md) §3.4）。两者分层，不再
-有第三套 `CopyRead / Move` 词汇。
+- `OperandUse` 是 operand 位的 occurrence 事实（每个 operand 一个）；
+- `BinderMode` 是声明侧契约（move 参数 / consuming pattern 绑定为 `Move`、
+  borrow 参数为 `Borrow`）。
+- 两者分层，不再有第三套 `CopyRead / Move` 词汇。
 
 ```text
 move         uses = [Consume]    effects = {}
@@ -214,13 +189,13 @@ add.i32      uses = [Read, Read] effects = {}
 drop File    uses = [Consume]    effects = drop_effect(File)   // §11
 ```
 
-结论：`move` 是 **linear effect** 但不是 **runtime effect**；`print` 是
-runtime effect 但不一定 consume。两者正交。
+结论：`move` 是 **linear effect** 但不是 **runtime effect**；`print` 是 runtime
+effect 但不一定 consume。两者正交。
 
-结果侧还有 capability / view 规则（`result_policy`：Copy 结果、借用视图、
-销毁视图等），它与 operand 的 use 共同构成 ownership 门，被 §2.4 的每个
-派生查询消费。本文不展开 view 的完整数据流——那是所有权系统的事；效果
-模型只要求在派生查询里**组合** ownership 门，不代为实现它。
+结果侧还有 capability / view 规则（Copy 结果、借用视图、销毁视图等），与
+operand 的 use 共同构成 ownership 门，被 §2.4 的每个派生查询消费。本文不展开
+view 的完整数据流——那是所有权系统的事；效果模型只要求在派生查询里**组合**
+ownership 门。
 
 ## 5. EffectSummary：资源访问 + 控制摘要
 
@@ -228,184 +203,140 @@ runtime effect 但不一定 consume。两者正交。
 
 ```text
 EffectSummary {
-    accesses: EffectRow,       // 访问集合的规范化存储；∅ / All 见 §5.4
+    accesses: AccessSet,       // 规范化访问集合；∅ / All 见 §5.4
     may_trap: bool,
     may_diverge: bool,
-    nondeterministic: bool,    // 同式两次求值结果可不同（clock/random/volatile）
+    nondeterministic: bool,    // 同式两次求值结果可不同
 }
 
 EffectAccess { resource: EffectResource, mode: EffectMode }
 
-EffectMode =
-    Read
-  | Write
-  | Allocate
-  | Release
+EffectMode = Read | Write | Allocate | Release
 ```
 
-控制摘要使用 **may 语义**——所有实际结果必须被收敛后的摘要覆盖：
+控制摘要使用 **may 语义**——所有实际结果必须被收敛后的摘要覆盖。
 
-```text
-may_trap      可能异常终止，包含 panic 和 trap
-may_diverge   可能发散（非终止调用 / 递归 SCC，见 §8.2）
-```
-
-**effect 层中 panic = trap**：二者都置 `may_trap = true`；运行时都不
-正常返回、跳过销毁。此合并只服务于优化合法性，不改变 Runtime / Core 里
-的指令、诊断或终止行为；不另设 `may_panic`。
+**effect 层中 panic = trap**：二者都置 `may_trap = true`，运行时都不正常返回、
+跳过销毁。此合并只服务于优化合法性，不改变 Runtime / Core 的指令、诊断或终止
+行为；不另设 `may_panic`。
 
 ### 5.2 资源是抽象语义资源，不是地址
 
 ```text
 EffectResource =
-    ModuleConst(ConstId)             // 模块常量槽（§7）
-  | Host(HostDomainId)               // host 域：Output / FileSystem / Clock / OS / GPU …
-  | Runtime(RuntimeDomainId)         // 运行时域（如执行上下文存储）
-  | Extension(ProviderId, ResourceId) // 扩展模块/宿主扩展绑定自注册的域
-  | Top                              // 未知资源（TOP 摘要用）
+    ModuleConst(ConstId)                // 模块常量槽（§7）
+  | Host(HostDomainId)                  // host 域：Output / FileSystem / Clock / OS / GPU …
+  | Runtime(RuntimeDomainId)            // 运行时域
+  | Extension(ProviderId, ResourceId)   // 扩展模块自注册的域
+  | HostAny                             // host 资源的通配
+  | Top                                 // 未知资源（TOP 摘要用）
 ```
 
-资源间的关系不能只按 Id 判等——两个域是否重叠需要一张 alias/overlap
-表（§5.6）。
+资源间的关系不能只按 Id 判等——两个域是否重叠需要一张 alias / overlap 表
+（§5.6）。
 
 ### 5.3 摘要层记法
 
-`{}` **只表示 `Pure`**；`{ MayTrap }` 等简写是在 `Pure` 上增加可能
-效果（故除法仍可能正常返回）；无条件 panic 的摘要即 `{ MayTrap }`。
+`{}` **只表示 `Pure`**；`{ MayTrap }` 等简写是在 `Pure` 上增加可能效果（故除法
+仍可能正常返回）；无条件 panic 的摘要即 `{ MayTrap }`。
 
 ### 5.4 乘积格、偏序、join/meet 与顺序 / 候选组合
 
-**格与偏序。** 设 `K` 是本轮分析已注册的有限资源 Id 集，`M` 是固定的
-四种 mode。每个 mode 的资源集合格为 `P(K) ∪ {All_m}`：普通集合按包含序
-排列，`All_m` 严格高于所有普通集合（包括 `K` 本身），并覆盖未知 / 后续
-资源。`AccessSet = ∏(m ∈ M) (P(K) ∪ {All_m})`，join/meet 按 mode 做
-并/交：`All_m ∪ S = All_m`、`All_m ∩ S = S`。下文把集合写成访问原子
-`(resource, mode)` 的行；`∅` 表示所有 mode 为空，`All` 表示所有 mode
-均为 `All_m`。
+**格与偏序。** 设 `K` 是已注册的有限资源 Id 集，`M` 是固定的四种 mode。每个
+mode 的资源集合格为 `P(K) ∪ {All_m}`：普通集合按包含序，`All_m` 严格高于所有
+普通集合（包括 `K` 本身），并覆盖未知 / 后续资源。
+`AccessSet = ∏(m ∈ M) (P(K) ∪ {All_m})`，join/meet 按 mode 做并/交：
+`All_m ∪ S = All_m`、`All_m ∩ S = S`。
 
-行的排序只为规范化与 interning，**不表示执行顺序**。`Read(Top)` 是
-Read 分量的 `All_Read`，不能当作与具体资源不相交的普通原子；缺失摘要
-直接使用完整 `Top`。资源 overlap 只影响冲突查询，不改变格的包含序；
-普通域 Id 按标识集合计算，Top 才按通配规则计算。
+行的排序只为规范化与 interning，**不表示执行顺序**。`Read(Top)` 是 Read 分量的
+`All_Read`；缺失摘要直接使用完整 `Top`。资源 overlap 只影响冲突查询，不改变格
+的包含序；普通域 Id 按标识集合计算，Top 才按通配规则计算。
 
 ```text
-E = (A, T, D, Q)
-    A = accesses     T = may_trap
-    D = may_diverge  Q = nondeterministic
+E = (A, T, D, Q)     A = accesses  T = may_trap  D = may_diverge  Q = nondeterministic
 
 L = AccessSet × Bool × Bool × Bool
 E ≤ F  iff  A_E ⊆ A_F 且每一布尔位 E_i ≤ F_i（false ≤ true）
 E ⊔ F  = (A_E ∪ A_F, T_E ∨ T_F, D_E ∨ D_F, Q_E ∨ Q_F)
 E ⊓ F  = (A_E ∩ A_F, T_E ∧ T_F, D_E ∧ D_F, Q_E ∧ Q_F)
 
-Pure = (∅,   false, false, false)   // 格底，兼「已证明纯」见下）
+Pure = (∅,   false, false, false)   // 格底，兼「已证明纯」
 Top  = (All, true,  true,  true)    // 所有资源、控制与非确定性均未知
 ```
 
-`All ∪ A = All`、`All ∩ A = A`。`⊔` 是候选路径 / 目标的最小上界，`⊓`
-是最大下界，二者满足交换、结合、幂等与吸收律。只有每个输入都覆盖实际
-行为时，meet 才能用于**合并独立证明**，不能拿 meet 代替分支 join。实现
-可用按 mode 的通配行表示集合；对当前分析固定有限的资源注册表与 mode
-集，格为有限高度，新资源注册后须失效重算。未知资源始终保留通配，不得
-因当前注册表中没有对应项而消失。
-
-**meet 不进入业务 API**：`⊓` 的公式与格律保留给 law test（内部
-`latticeMeet()`）；优化 / 分析查询面只暴露 join、sequence、conflict 与
-投影。meet 只有在「两个独立 sound proof 都覆盖实际行为」时才有意义，
-极易被误用成合并 control-flow 的 join——等出现真实 consumer 再开放。
-
-**摘要不跟踪 `may_return_normally`。** 正常返回是默认假设，格不携带
-「必然不返回」信息（panic 在 effect 层已并入 `may_trap`，无单独的
-panic-return 摘要事实）。`Bottom` 与 `Pure` 同值
-（`(∅, false, false, false)`，格底）；「推导下界 ≠ 已证明纯」的区分由
-§8.2 的 `Pending` / `Ready(summary)` 状态机承担（不在格内）——`Ready`
-下的 `(∅, false, false, false)` 才是已证明纯。后缀 DCE 的合法性由独立
-的 must 事实 `never_returns` 恢复（§10.1）：摘要代数不变，`;` 合并仍
-保守并入后缀位；优化器先按 `never_returns` 删除调用后同一直行区域内的
-不可达后缀，并入的位随之消失。
+- `⊔` 是候选路径 / 目标的最小上界，`⊓` 是最大下界；二者满足交换、结合、幂等与
+  吸收律。只有每个输入都覆盖实际行为时，meet 才能用于**合并独立证明**，不能拿
+  meet 代替分支 join。
+- 对当前分析固定有限的资源注册表与 mode 集，格为有限高度；新资源注册后须失效
+  重算。未知资源始终保留通配。
+- **meet 不进入业务 API**：`⊓` 的公式与格律保留给 law test（内部
+  `latticeMeet()`）；优化 / 分析查询面只暴露 join、sequence、conflict 与投影。
+- **摘要不跟踪 `may_return_normally`。** 正常返回是默认假设；`Bottom` 与
+  `Pure` 同值，「推导下界 ≠ 已证明纯」的区分由 §8.2 的 `Pending` /
+  `Ready(summary)` 状态机承担（不在格内）。后缀 DCE 的合法性由独立 must 事实
+  `never_returns` 恢复——**该 must 事实设计已定，尚未实现**（§10.1）；当前
+  摘要代数不变，`;` 合并仍保守并入后缀位。
 
 **顺序组合与候选 join：语义角色不同，may-公式同式。**
-
-`E ; F` 表示先求值 E、只有 E 正常返回才求值 F；`E ⊔ F` 表示二者是候选
-（二选一）。两者的**语义角色不同**，但当前 may-摘要的公式完全相同：
 
 ```text
 E ; F = (A_E ∪ A_F, T_E ∨ T_F, D_E ∨ D_F, Q_E ∨ Q_F)
 E ⊔ F = (A_E ∪ A_F, T_E ∨ T_F, D_E ∨ D_F, Q_E ∨ Q_F)
 ```
 
-访问集合、非确定性位与控制位都保守地并入整个后缀 / 候选，即使后缀
-不可达或候选未选中；它们只会阻止更多优化，也保留 module-const 依赖
-检查所需的保守读集合。不再按正常返回门控后缀——正常返回是默认假设，
-故 panic/发散之后代码的控制位一律并入（纯精度损失）。
+- 访问集合、非确定性位与控制位都保守地并入整个后缀 / 候选，即使后缀不可达或
+  候选未选中；它们只会阻止更多优化，也保留 module-const 依赖检查所需的保守
+  读集合。
+- **may-摘要遗忘顺序**：上式全由并 / 或构成，`E ; F == F ; E`——`;` 与 `⊔`
+  同式、可交换、结合、幂等，`Pure` 是左右单位元兼格底。这只说明摘要不携带顺序
+  信息，**绝不**表示两个程序可互换；程序级可交换一律由 `reorderable(a, b)`
+  判定（§10.1）。
+- descriptor 仍必须按 EvalPolicy 写出真实的组合结构（顺序用 `;`、候选用 `⊔`）：
+  这是模型的保真性要求——未来引入顺序敏感事实时二者会再次分化。
 
-**may-摘要遗忘顺序。** 上式全部由并/或构成，因此作为集合运算
-`E ; F == F ; E`——`;` 与 `⊔` 同式、可交换、结合、幂等，`Pure` 是左右
-单位元兼格底，**不是**顺序组合的零元。这只说明摘要不携带顺序信息，
-**绝不**表示 `a(); b()` 与 `b(); a()` 两个程序可互换——具体执行序列的
-语义由 EvalPolicy 与程序结构持有。优化器不得据「摘要相等」交换或改变
-实际求值次数；程序级可交换一律由 `reorderable(a, b)` 查询判定
-（§10.1）。descriptor 仍必须按 EvalPolicy 写出真实的组合结构（顺序用
-`;`、候选用 `⊔`，角色不得混用）：这是模型的保真性要求——未来引入顺序
-敏感事实（must 类、清理精确化）时，二者将再次分化。
+组合法则：分支摘要为 `effects(cond) ; (effects(then) ⊔ effects(else))`；有限
+callee 集用 join；有序 drop / cleanup 用 `;`。空 join（不可达）与空顺序（零步
+执行）同值于 `Pure`。
 
-组合法则：分支摘要为 `effects(cond) ; (effects(then) ⊔ effects(else))`；
-有限 callee 集用 join；有序 drop/cleanup 用 `;`。空 join（无候选路径，
-不可达）与空顺序（零步执行）同值于 `Pure`。
-
-**total 与最小代数验收例。** 正常终止、异常终止、发散覆盖全部执行结果，
-故对**已完成且保守**的摘要，`total = !T ∧ !D` 保证必然正常终止；`Pending`
-中间近似不能参与此查询（不在格内，查询失败关闭，见 §8.2）。
+**total 与最小代数验收例。** 正常终止、异常终止、发散覆盖全部执行结果，故对
+已完成且保守的摘要，`total = !T ∧ !D` 保证必然正常终止；`Pending` 中间近似不能
+参与此查询（查询失败关闭，§8.2）。
 
 ```text
 Panic   = (∅, true,  false, false)
 Diverge = (∅, false, true,  false)
 
-Panic ⊔ Pure                 = (∅, true, false, false)      // 不 total
-Panic ; Pure                 = Panic
-Panic ; Diverge              = (∅, true, true, false)       // 后缀控制位并入
-Diverge ; Panic              = (∅, true, true, false)       // 顺序差异不再可表达
-Pure ; E = E ; Pure          = E
-Pure ⊔ E                     = E                            // Pure 是格底
-Pure ; (Panic ⊔ Pure)        // 条件 panic，不 total；调用摘要也必须保留 T
+Panic ⊔ Pure            = (∅, true, false, false)    // 不 total
+Panic ; Pure            = Panic
+Panic ; Diverge         = (∅, true, true, false)     // 后缀控制位并入
+Diverge ; Panic         = (∅, true, true, false)     // 顺序差异不再可表达
+Pure ; E = E ; Pure     = E
+Pure ⊔ E                = E                          // Pure 是格底
 ```
 
-实现时除上述例子外，还须检查 join/meet 格律、两参数的单调性、`;` 与
-`⊔` 的同式及摘要层交换（`E ; F == F ; E`），并配负例：**摘要相等不得
-单独放行交换/删除/复制**——程序级变换必须组合 `reorderable` /
-`discardable` 等门；另测异常终止后资源访问仍被保守保留。
+实现时除上述例子外，还须检查 join/meet 格律、两参数单调性、`;` 与 `⊔` 的同式
+及摘要层交换，并配负例：**摘要相等不得单独放行交换 / 删除 / 复制**——程序级
+变换必须组合 `reorderable` / `discardable` 等门。
 
 ### 5.5 nondeterministic 与域稳定性
 
-`clock.now()`、随机数等两次求值可给不同结果：置 `nondeterministic =
-true`。它阻断 `Read(R) vs Read(R)` 的 commute 与 CSE（同形合并），也
-阻断 duplicable；**不阻断 discardable**（删除未使用结果与 Q 无关：结果
-不稳定只影响被丢弃的结果，§10.1）。与「稳定读」区分对待，不当作普通
-Read 参与 Read/Read 交换。
-
-**表示位置**：`nondeterministic` 放在摘要控制位 `Q`，不做 access 级或
-域级标注——位版本让 join/interning 零改动，并能覆盖无法绑定到单一资源
-的非确定性（如 host 实现相关的 op）。已知精度损失：同一摘要内混有稳定
-与不稳定读时（如 `clock.now()` 与 `stat()` 同体），稳定读的 Read/Read
-交换被连坐。恢复手段是域级 `stable` 声明；access 级标注仅在其仍不足时
-引入。
-
-**域稳定性声明。** host/extension 域声明可**可选**携带 `stable`（默认
-mixed）——`stable` 域内所有 op 均稳定（无 nondeterministic）。对声明
-`stable` 的域 `R`，Read/Read 交换与 CSE 查询不受摘要级 `Q` 连坐：即使
-摘要因其他域（如 Clock）置 `Q = 1`，`R` 上的读对仍按稳定处理。声明只在
-查询层消费，格与 interning 不变；mixed 域保持现状（`Q` 连坐）。声明
-错误是 host 的 bug（受信契约，见 §13），与 op 级效果声明同级。
-
-`stable` 只细化**资源对查询**（同一 stable 域上两个读的可交换 / 可合并
-判定），**不撤销摘要级 `Q` 对表达式整体的否决**：表达式任一子项非确定
-（`Q = 1`）时，整体仍不可 duplicable、不可作整体 CSE、不可跨其重排。
-`stable` 也不表示跨 `Write` 不变——同一域上夹有写操作的两个读仍按冲突
-处理。
+- `clock.now()`、随机数等两次求值可给不同结果：置 `nondeterministic = true`。
+- 它阻断 `Read(R) vs Read(R)` 的 commute 与 CSE（同形合并），也阻断
+  duplicable；**不阻断 discardable**（结果不稳定只影响被丢弃的结果，§10.1）。
+- **表示位置**：`nondeterministic` 放在摘要控制位 `Q`，不做 access 级或域级
+  标注——位版本让 join / interning 零改动。已知精度损失：同一摘要内混有稳定与
+  不稳定读时（如 `clock.now()` 与 `stat()` 同体），稳定读的 Read/Read 交换被
+  连坐。
+- **域稳定性声明**：host / extension 域声明可**可选**携带 `stable`（默认
+  mixed）。对声明 `stable` 的域 `R`，Read/Read 交换与 CSE 查询不受摘要级 `Q`
+  连坐；声明只在查询层消费，格与 interning 不变。声明错误是 host 的 bug
+  （受信契约，§13）。
+- `stable` 只细化**资源对查询**，**不撤销摘要级 `Q` 对表达式整体的否决**；也
+  不表示跨 `Write` 不变。
 
 ### 5.6 冲突、可交换与资源域粒度
 
-**冲突规则。** 这是派生 `reorderable(a, b)` 的输入：
+**冲突规则**（派生 `reorderable(a, b)` 的输入）：
 
 ```text
 Read(R)  vs Read(R)   => 可交换   （且 R 稳定：无 nondeterministic）
@@ -415,22 +346,17 @@ Allocate/Release       => 与其他域内操作冲突（对同一资源域）
 R1 != R2               => 默认可交换，**前提是可证不相交**
 ```
 
-两条澄清：
+- **不同 Id ≠ 自动不相交**：需要资源域的 overlap / alias 关系表；未解析的
+  overlap 一律按冲突处理（安全优先）。
+- 实现：`Conflict` / `conflictOf` / `orderCompatible` / `stableReadPair` +
+  `ResourceRegistry`（`stable`、`disjoint` 对）。
+- **注册表形式**：域 Id 由各宿主 / 扩展模块在自身 metadata 中声明（§13），
+  会话开始时统一 intern 并**冻结**。落地形态只有两项：**`stable` 域集合**与
+  **显式 `disjoint` 对**（`ResourceRegistry`）；没有层级 / alias 表。disjoint
+  不具传递性；跨提供方或未声明的对一律按冲突处理——disjoint 声明是 opt-in
+  精度：漏声明只少优化、不损 soundness。域内层级 / alias 例外是 Target。
 
-- **不同 Id ≠ 自动不相交**：需要资源域的 overlap/alias 关系表。域支持
-  通配与 TOP；**未解析的 overlap 一律按冲突处理**（安全优先）。
-- 冲突判定是派生 `reorderable(a, b)` 的输入（§10.1）。
-
-**注册表形式。** 域 Id 由各宿主模块与扩展模块在自身 metadata 中声明
-（§13），编译会话开始时统一 intern 并在该会话分析期间**冻结**——§5.4
-的「新资源注册后失效重算」只适用于冻结前的注册。overlap/alias 表用
-**域内层级**（父 ⊇ 子，判包含求公共祖先）加**显式 disjoint/alias 例外
-对**表达；层级不同根分支**不**天然不相交，需显式声明或独立证明；
-overlap 不具传递性。跨提供方或未声明的对一律按冲突处理（安全默认）——
-disjoint 声明是 opt-in 精度：漏声明只少优化、不损 soundness。
-
-**为什么域粒度、而不是单个 IO bit。** 若只有 `HAS_SIDE_EFFECT`，
-`audio.get_volume()` 与 `filesystem.stat()` 永远不能互调顺序。带域后：
+**为什么域粒度、而不是单个 IO bit**：
 
 ```text
 Read(Host.Audio)      vs Read(Host.FileSystem)  → 可交换
@@ -439,20 +365,13 @@ Write(Host.Output)    vs Read(Host.FileSystem)  → 可交换
 Write(Host.OS)        vs Read(Host.OS)          → 冲突
 ```
 
-域注册表（含通配/TOP 与 overlap 表）由宿主模块与扩展模块持有，核心
-前端不用改。
-
 ## 6. 效果在表达式上的组合
 
-一个 op 的效果由其 descriptor 的 `effect_transfer` 递归汇总得出：按
-EvalPolicy 写出真实组合结构（顺序用 `;`、候选用 `⊔`），并处理对 callee
-等子结构的查询。表达式内部词法不产生效果。
+一个 op 的效果由其 descriptor 的 `own_effect` + `transfer` 递归汇总得出。
 
 ### 6.1 组合公式
 
-记 `effects(expr)` 为求值该表达式的效果（`eval_effect` 的简写），不隐式
-附加当前 full-expression 的清理。`seq(...)` 按实参顺序折叠 `;`，空序列
-为 `Pure`：
+记 `effects(expr)` 为求值该表达式的效果，不隐式附加当前 full-expression 的清理：
 
 ```text
 effects(seq e1; e2)        = effects(e1) ; effects(e2)
@@ -462,179 +381,132 @@ effects(match s, arms)     = effects(s) ; ⨆ effects(arm_i)
 effects(a and b / a or b)  = effects(a) ; (Pure ⊔ effects(b))
 ```
 
-`effects(f)` 是**求出函数值**的效果；`effect_bound(f)` 是**调用所得函数
-值**的效果——二者不得互相替代。callee 即便会 print/trap，也必须先于
-实参求值；已由 A-Normal Form 绑定的 callee 引用本身可以是 `Pure`。
-
-当前 full-expression 的清理由其边界恰好组合一次：
-
-```text
-observed_effect(expr, ctx) = effects(expr) ; cleanup_effect(expr, ctx)
-```
-
-内部嵌套的 full-expression 边界仍递归计入各自清理；函数体摘要也必须
-包含体内正常退出的自动销毁。**不得给每个 call 重复附加同一清理栈**
-（见 §11）。
+- `effects(f)` 是**求出函数值**的效果；`effect_bound(f)` 是**调用所得函数值**的
+  效果——二者不得互相替代。
+- callee 即便会 print / trap，也必须先于实参求值；已由 ANF 绑定的 callee 引用
+  本身可以是 `Pure`。
+- 当前 full-expression 的清理由其边界恰好组合一次：
+  `observed_effect(expr, ctx) = effects(expr) ; cleanup_effect(expr, ctx)`。
+  内部嵌套 FE 边界仍递归计入各自清理；函数体摘要也必须包含体内正常退出的自动
+  销毁。**不得给每个 call 重复附加同一清理栈**（§11）。
 
 ### 6.2 descriptor 样例
 
-每个 typed op 的效果大多是可静态写死的常量行；少数（`if`、`call`、
-聚合）需要递归组合。例：
-
 ```text
-add.i32
-    eval      = StrictLTR
-    uses      = [Read, Read]
-    result    = Copy
-    effects   = {}                    // control: 必然正常返回
-
-div.i32
-    eval      = StrictLTR
-    uses      = [Read, Read]
-    result    = Copy
-    effects   = { MayTrap }           // 除零 trap；i32 溢出回绕、永不 trap（Runtime）
-
-move
-    eval      = StrictLTR
-    uses      = [Consume]
-    effects   = {}                    // linear 效果在 OperandUse，不在 effects
-
-host.print
-    eval      = StrictLTR
-    uses      = [Read]                // 视签名；不 consume
-    effects   = { Write(Host.Output) }
-
-if
-    eval      = Branch                // cond 先；一次只求值一个 region
-    effects   = effects(cond) ; (effects(then) ⊔ effects(else))
+add.i32   eval = StrictLTR  uses = [Read, Read]  result = Copy  effects = {}
+div.i32   eval = StrictLTR  uses = [Read, Read]  result = Copy  effects = { MayTrap }
+move      eval = StrictLTR  uses = [Consume]                    effects = {}   // linear 效果在 OperandUse
+host.print eval = StrictLTR uses = [Read]                       effects = { Write(Host.Output) }
+if        eval = Branch     effects = effects(cond) ; (effects(then) ⊔ effects(else))
 ```
 
 ### 6.3 typed opcode 的效果表
 
-类型专门化后的 opcode 让 descriptor 可以表化——每个 typed op 的摘要基本
-是静态常量。这也是数值 trap 语义只写一处、随 spec 演化自动正确的关键：
+类型专门化后的 opcode 让 descriptor 可以表化——每个 typed op 的摘要基本是静态
+常量。数值 trap 语义因此只写一处：
 
 ```text
-add.i32 / mul.i32 / add.i64 …        {}                 // wrapping 语义、无 trap
-div.i32 / rem.i32                     MayTrap            // 仅除零（Runtime：min/-1 回绕，不 trap）
-div.i64                               MayTrap            // 除零 + int64_min / -1（Runtime）
-rem.i64                               MayTrap            // 仅除零（int64_min rem -1 = 0）
-u32/u64 的 div 与 rem                  MayTrap            // 仅除零（无符号无溢出情形）
-div.f32 / div.f64 / rem.f32 …         {}                 // IEEE 754：x/0.0 得 ±inf/NaN
-num_cast（数值转换）                    {}                 // LLIR cvt：截断/就近舍入，永不 trap
-any 恢复（any → T 不匹配）              MayTrap            // Runtime：invalid any recovery
-host binding 调用（call → syscall）     TOP 或 host metadata
+add.i32 / mul.i32 / add.i64 …      {}            // wrapping、无 trap
+div.i32 / rem.i32                  MayTrap       // 仅除零（min/-1 回绕）
+div.i64                            MayTrap       // 除零 + int64_min / -1
+rem.i64                            MayTrap       // 仅除零（int64_min rem -1 = 0）
+u32/u64 的 div 与 rem               MayTrap       // 仅除零
+div.f32 / div.f64 / rem.f32 …      {}            // IEEE 754
+num_cast（数值转换）                 {}            // LLIR cvt：截断 / 就近舍入，永不 trap
+any 恢复（any → T 不匹配）           MayTrap       // invalid any recovery
+host binding 调用（call → syscall）  TOP 或 host metadata
 ```
 
-两点澄清：
-
-- **数值转换永不 trap** 依据 LLIR Instruction Set 的 `cvt` 定义
-  （integer↔integer 截断、int→float 就近舍入等）；即便如此，每个 typed
-  转换 opcode 仍走 descriptor，便于未来 spec 变化或新转换域。
-- **整数型代数恒等式与 float 准入分离**：float 可进 SEG 不代表整数规则
-  （如 wrapping 位恒等式）自动适用于 float；SEG 规则集按 typed opcode
-  写死合法性。
+- **数值转换永不 trap** 依据 LLIR Instruction Set 的 `cvt` 定义；即便如此每个
+  typed 转换 opcode 仍走 descriptor，便于未来 spec 变化。
+- **整数型代数恒等式与 float 准入分离**：float 可进 SEG 不代表整数规则自动适用；
+  SEG 规则集按 typed opcode 写死合法性。
 
 ## 7. Module constant 依赖（Core 两条对称规则）
 
-把 module constant 读放进效果框架，直接统一规范的两条对称规则（Core
-Module Constants）。
+把 module constant 读放进效果框架，统一规范的两条对称规则。
 
 ### 7.1 初始化顺序限制（含跨函数传递）
 
-> 初始器只可引用较早声明的模块常量；**不得 transitive 调用一个会读取
-> 声明较晚常量的函数**（Core，编译期拒绝）。
+> 初始器只可引用较早声明的模块常量；**不得 transitive 调用一个会读取声明较晚
+> 常量的函数**（Core，编译期拒绝）。
 
-用函数摘要：`Read(ModuleConst(C))` 集合 + 按**已解析的模块身份与其
-初始化/销毁 schedule** 判定（不是跨模块的全局 `const_index` 大小比较；
-同一模块内按声明序，跨模块按依赖序与 schedule，Runtime）。模块
-常量初始器的检查变成：
+用函数摘要：`Read(ModuleConst(C))` 集合 + 按**已解析的模块身份与 schedule** 判定
+（不是跨模块的全局 `const_index` 大小比较）。检查：
 
 ```text
 对 effects.reads(ModuleConst) 中每一项 C：
     要求 C 在本模块声明序中先于当前初始器，或属于已初始化模块
 ```
 
-间接调用若含未知目标（`Read(Top)` 可能指向较晚常量），按最坏假设拒绝
-或要求独立证明（不能把未知 read set 当空，见 §9.4）。
-
-**规范归口（Core）**：规则禁止的是初始化期可证明地观察较晚常量；
-对目标不可判定的调用（间接调用 / 未知回调），编译器按最坏假设处理并
-拒绝。放行仅经两条通道——**编译期证明**（§9.2 的目标收窄是 sound 的决策
-过程）或 **embedding host 声明**（§13，受信契约，声明 callable 的模块
-常量读集合）。teardown 检查（§7.2）同此归口。
-
-语言级检查的判定对象是**源程序形态**（checker 阶段先行完成）；HIR
-优化（死代码消除、常量折叠、内联）不得作为规避通道——先删除含违规读
-的路径再检查不构成放行；变换后的重验证必须在新程序形态上从头进行。
+- 间接调用若含未知目标（`Read(Top)` 可能指向较晚常量），按最坏假设拒绝或要求
+  独立证明（不能把未知 read set 当空，§9.4）。
+- 放行仅经两条通道——**编译期证明**（§9.2 的目标收窄）或 **embedding host
+  声明**（§13，受信契约）。
+- 语言级检查的判定对象是**源程序形态**；HIR 优化不得作为规避通道——先删除含
+  违规读的路径再检查不构成放行；变换后的重验证必须在新程序形态上从头进行。
 
 ### 7.2 teardown 的对称限制
 
-> teardown 按**逆声明序**销毁 Unique 常量（Runtime）；某常量的
-> drop hook 及其传递调用不得读取已先被销毁的较晚常量（Core）。
+> teardown 按**逆声明序**销毁 Unique 常量；某常量的 drop hook 及其传递调用不得
+> 读取已先被销毁的较晚常量（Core）。
 
-检查对象是**完整销毁链**：运行期销毁一个 Unique 模块常量按 Runtime 执行该类型值的结构销毁——hook（若有）之后还有 Unique 字段与
-容器元素的逆序销毁；嵌套字段/元素的类型若有自己的 drop hook，同样在
-teardown 期间运行并读模块常量，与 hook 本体同一危害类。因此判定用类型
-级 `drop_effect(type of C)` 的读集合（§11.1，hook 与结构销毁一并计入），
-**不是只查 hook 的读**：
+检查对象是**完整销毁链**：hook（若有）之后还有 Unique 字段与容器元素的逆序
+销毁；嵌套字段 / 元素的类型若有自己的 drop hook，同样在 teardown 期间运行并读
+模块常量。因此判定用类型级 `drop_effect(type of C)` 的读集合（§11.1，hook 与
+结构销毁一并计入），**不是只查 hook 的读**：
 
 ```text
 对 drop_effect(type(C)) 的读集合中每一项 D：
     要求 D 在逆序销毁 schedule 中晚于 C 被销毁（即尚未销毁）
 ```
 
-检查由 `Analysis.checkModuleDependencies` 执行，以
-`drop_effect(type(C))` 全链为对象（`hir_effects.zig`），取代了
-checker_validate.zig 的 AST 级 `InitOrder` walk——后者只走查类型直
-hook 及其传递调用，容器元素携带的 drop hook（如 `list[File]` 常量）
-未走查，完整 `drop_effect` 链闭合了该缺口。实现选择：未知读集（来自
-间接调用/模块链的 read 通配）在 **nominal** 类型上保守拒绝；
-`any`/`hostdata`/未解析 named 的 drop_effect 本身为 `Top`，其通配
-不对应具体常量、无归因，退回与旧 walker 相同的「不归因」位置。
+- 实现：`Analysis.checkModuleDependencies`（hir_effects.zig）；`checkInitReads`
+  读函数摘要，`checkTeardownReads` 用 `drop_effect(type(C))` 全链；`initOrderOf`
+  比较同模块声明序。它取代了 checker_validate.zig 的 AST 级 `InitOrder` walk
+  ——后者只走查类型直 hook 及其传递调用，容器元素携带的 drop hook（如
+  `list[File]` 常量）未走查，完整 `drop_effect` 链闭合了该缺口。`InitOrder` 已
+  从 checker 删除。
+- 实现选择：未知读集（来自间接调用 / 模块链的 read 通配）在 **nominal** 类型上
+  保守拒绝；`any` / `hostdata` / 未解析 named 的 drop_effect 本身为 `Top`，其
+  通配不对应具体常量、无归因，退回与旧 walker 相同的「不归因」位置。
 
-两点与规范措辞相关的待决事项（见 §15）：
+**两点与规范措辞相关的待决事项**（§15）：
 
-- Core 现措辞只提「hook 及其传递调用」，按字面会漏掉字段/元素级
-  hook 的读；
-- teardown schedule 只含 Unique 常量——Copy 常量从不销毁、teardown 期
-  读取并无运行期危害，而 Core 现措辞按字面禁止读一切较晚常量
-  （含 Copy）。保留该过保守读法还是收紧为「仅较晚 Unique」待规范决定；
-  编译器检查先按规范字面执行。
+- Core 现措辞只提「hook 及其传递调用」，按字面会漏掉字段 / 元素级 hook 的读；
+- teardown schedule 只含 Unique 常量——Copy 常量从不销毁、teardown 期读取并无
+  运行期危害，而 Core 现措辞按字面禁止读一切较晚常量（含 Copy）。编译器检查
+  先按规范字面执行。
 
 ### 7.3 相关不变量
 
-- **函数引用与初始化序无关**（Core：函数是 monomorphic 代码引用、
-  不捕获）：`fn_ref` 本身不产生 `Read(ModuleConst)`；只有函数**体**的
-  执行摘要里会含它，且由调用关系推导。
-- **未知目标的保守**：间接调用或缺失 host metadata 的读集合取
-  `Read(Top)`——在初始化/teardown 检查里 `Top` 与「可能读任意较晚常量」
-  同义，按违反或需证明处理。
-- **`module_const(ConstId)` 引用仍非字面量**：读它依赖 module init 已
-  按 schedule 执行。只有该 const 的求值已被 constant folding 具体化、
-  且无可观察的初始化依赖时，才允许折叠；v1 的 SEG 不碰 `module_const`。
+- **函数引用与初始化序无关**：`fn_ref` 本身不产生 `Read(ModuleConst)`；只有
+  函数**体**的执行摘要里会含它，由调用关系推导。
+- **未知目标的保守**：间接调用或缺失 host metadata 的读集合取 `Read(Top)`——
+  与「可能读任意较晚常量」同义。
+- **`module_const(ConstId)` 仍非字面量**：读它依赖 module init 已按 schedule
+  执行。只有求值已被 constant folding 具体化且无可观察初始化依赖时才允许折叠；
+  v1 的 SEG 不碰 `module_const`。
 
 ## 8. 函数摘要与调用
 
-### 8.1 CallableInfo：效果是内部 metadata
+### 8.1 效果是内部 metadata
 
-v1 不把 effect 写进 source 函数类型。函数值在编译器内部附带：
+v1 不把 effect 写进 source 函数类型。函数值在编译器内部附带摘要：
 
-```text
-CallableInfo {
-    signature:    FnTypeId,
-    effect_bound: EffectSummaryId,   // 见 §9
-}
-```
+- **概念形态**：`CallableInfo { signature, effect_bound }`；
+- **落地形态**：**没有 `CallableInfo` 结构**——摘要在 `Analysis` 的
+  `summary` / `known` / `cur` / `comp_of` 表中按函数索引，`effect_bound` 由
+  `effectBound` 查询得到（`fn_ref→func` 取函数摘要、`fn_ref→host` 取 host
+  声明、`lambda` 取体摘要、其余取 `Top`）。
 
-Source 类型仍是 `fn(int32) -> int32`；HIR refinement 才是
-`fn(int32) -> int32 + effect_summary`。未来若加 source effect typing，
-直接建在这层上；摘要保持内部、不进语言。
+Source 类型仍是 `fn(int32) -> int32`；HIR refinement 才是「类型 + effect_summary」。
+未来若加 source effect typing，直接建在这层上。
 
 ### 8.2 SCC least fixpoint（含递归发散）
 
-函数体摘要在模块/调用图上推导。允许 direct 与 mutual recursion
-（Core），因此在函数 call graph 的 SCC 上做 least fixed point：
+函数体摘要在调用图上推导。允许 direct 与 mutual recursion，因此在函数 call
+graph 的 SCC 上做 least fixed point：
 
 ```text
 E_f := Bottom                          // 对 SCC 中每个函数
@@ -645,51 +517,53 @@ repeat simultaneously:
 until stable
 ```
 
-`summary` 按 §5.4 组合：有序求值用 `;`，候选分支/目标用 `⊔`；函数体的
-正常退出清理也计入。注册表在本轮推导期间固定，单调 transfer 与有限高度
-保证收敛；这求的是加入递归保守 seed 后的最小不动点。
+- **实现**：`solveSummaries`（Kosaraju `finishOrder` / `dfsCollect` 排序，
+  `solveComponent` 做 callee-first Kleene / Jacobi 迭代；同 SCC 读 `cur`、已完成
+  读 final），递归 SCC 播种 `may_diverge`。注册表在本轮推导期间固定，单调
+  transfer 与有限高度保证收敛。
+- **调用图构成**：SCC 建在分析实际使用的调用图上——`collectCallees` 只为
+  **直接** `fn_ref` callee（以及 `drop` 的类型 hook）加边，可以是跨模块的调用环。
+  经实参传递 / 高阶 / 未知目标不进图、取 `Top`（§9.1），所以 v1 的 SCC 不含
+  “函数值形成的运行期环”。
+- **从 Bottom 迭代本身不能发现发散**：`f → f` 必须额外 seed。**递归 SCC 一律
+  保守标 `may_diverge = true`**，只有另有独立终止证明才可取消。
+- **分析状态不属于格**：使用 `Pending` / `Ready(EffectSummary)`；SCC 内部可读
+  本轮近似，但优化器只能使用 Ready。尚未收敛时查询失败关闭——`Bottom` 与
+  `Pure` 同值，「未推导 ≠ 已证明纯」由 `Pending` 承担。未知目标、外部摘要缺失
+  或分析放弃时发布 `Ready(Top)`。
+- 推导风格与类型系统对递归 Copy/Unique 分类的 least-Copy fixpoint 一致
+  （Types & Ownership，type_shape.zig 的 `ownershipOf`）。
 
-- **调用图构成**：SCC 建在分析实际使用的调用图上，含经实参传递、已解析
-  fn-ref 可达的**跨模块运行期调用环**——import 图无环只排除模块间静态
-  互递归，不排除函数值形成的运行期环。未知目标按 §9.1 取 `Top`、不进
-  SCC；目标集精化（§9.2）改变调用图后须重建 SCC 并失效重算。
-- **从 Bottom 迭代本身不能发现发散**：`f → f` 必须额外 seed。**递归 SCC
-  一律保守标 `may_diverge = true`**，只有另有独立终止证明时才可取消
-  seed。递归性来自调用图结构而非摘要位，不能以当前近似推断没有递归。
-- **分析状态不属于格**：使用 `Pending` / `Ready(EffectSummary)`；SCC
-  内部可以读取本轮近似，但优化器只能使用 Ready。尚未收敛时查询失败关闭
-  （阻止变换）——`Bottom` 与 `Pure` 同值，「未推导 ≠ 已证明纯」由
-  `Pending` 承担。未知目标、外部摘要缺失或分析放弃时发布 `Ready(Top)`，
-  不再混用 Empty/Concrete/Top 表示计算进度。
-
-推导风格与类型系统对递归 Copy/Unique 分类的 least-Copy fixpoint 一致
-（Types & Ownership，type_shape.zig 的 `ownershipOf`）。
-
-**例：**
+例：
 
 ```stilla
-fn a() { b(); }                 effects(a) = effects(b) = { Write(Host.Output) }
+fn a() { b(); }              effects(a) = effects(b) = { Write(Host.Output) }
 
-fn f() { g(); }                 f、g 在同一 SCC：
-fn g() { f(); host.foo(); }     两者均 may_diverge = true；访问仍保守含 host.foo
+fn f() { g(); }              f、g 在同一 SCC：
+fn g() { f(); host.foo(); }  两者均 may_diverge = true；访问仍保守含 host.foo
 ```
 
 ### 8.3 失效与重算
 
-摘要在**初始构建**后随 HIR 变换失效并重算（任何变换之后都要对受影响
-区域重新验证 ownership 与 effects，不能假定原结论在重写后仍成立）。
-失效模型：
+摘要随 HIR 变换失效（任何变换之后都要对受影响区域重新验证 ownership 与
+effects）。
 
-- **存储与求解**：函数级 memo 缓存每函数摘要；被改写函数所属递归 SCC
-  需重算时**联合重算**——从 §8.2 的种子重新迭代，**不在旧摘要上继续
-  join**（重写会减少 effects，增量向上合并永远降不下来）。
-- **标脏**：标脏被改写函数，并用世代/版本号阻断一切缓存旧摘要的查询
-  （只标脏不够——所有依赖旧摘要的调用者都必须失效或版本检查失败关闭）。
-- **传播**：重算后 interned id 与旧值相等即短路，不向调用者传播；传播
-  范围由「摘要是否真的变了」决定，不由「哪个函数被改」决定。
-- **边界**：id 短路只作用于效果摘要；ownership / cleanup / call-target
-  等派生事实各有依赖与失效规则——§10 的查询组合它们，不等于它们随
-  effect id 自动免失效。
+> **现状：全量重算，无增量失效。** `solveSummaries` 每次开始时清空 memo /
+> summary，`analyze` / `validate` 从头重导；没有标脏、世代 / 版本号或调用者
+> 传播。原设计的增量失效模型（下方）**未实现**，因为当前消费者每轮都从头
+> 重导（hir_seg.zig）与 `revalidateHir`。
+
+设计意图（待需要时落地）：
+
+- **存储与求解**：函数级 memo 缓存每函数摘要；被改写函数所属递归 SCC 需重算时
+  **联合重算**——从种子重新迭代，**不在旧摘要上继续 join**（重写会减少
+  effects，增量向上合并永远降不下来）。
+- **标脏**：标脏被改写函数，并用世代 / 版本号阻断一切缓存旧摘要的查询。
+- **传播**：重算后 interned id 与旧值相等即短路；传播范围由「摘要是否真的变了」
+  决定，不由「哪个函数被改」决定。
+- **边界**：id 短路只作用于效果摘要；ownership / cleanup / call-target 等派生
+  事实各有依赖与失效规则——§10 的查询组合它们，不等于它们随 effect id 自动免
+  失效。
 
 ## 9. 一等函数与间接调用
 
@@ -700,31 +574,26 @@ callback.f(x)   // 目标静态未知
 ```
 
 v1 取 `Top`：`accesses = All`，`may_trap`（含 panic）、`may_diverge`、
-`nondeterministic` 全 true。不能只是「有副作用」一位，也不能遗漏发散或
-非确定性。
+`nondeterministic` 全 true。不能只是「有副作用」一位，也不能遗漏发散或非确定性。
 
-### 9.2 数据流收窄（可选精化）
+### 9.2 数据流收窄（可选精化，未实现）
 
 ```text
-FnValueInfo {
-    type:         FnTypeId,
-    effect_bound: EffectSummaryId,
-}
+FnValueInfo { type: FnTypeId, effect_bound: EffectSummaryId }
 ```
 
 若 callee 操作数静态可见地绑定到有限目标集 `f ∈ {foo, bar}`，则
-`effect_bound(f) = summary(foo) ⊔ summary(bar)`，逐步提高精度而不改
-中间表示。
+`effect_bound(f) = summary(foo) ⊔ summary(bar)`。
 
-**收窄档位**：v1 间接调用摘要 = `Top`（§9.1）。首个精化档为**局部
-fn-ref 传播**：callee 操作数经字面 `fn_ref` / `let` 绑定 / 分支内有限集
-可达，且**不跨函数边界、无逃逸路径**时收窄；任何逃逸（存入 host /
-opaque、作为实参传出当前函数）立即回到 `Top`。该档**需求驱动**：只对
-真实消费点——module-const 初始化/teardown 检查（§7）与优化 legality——
-现场、按预算解析，不为全模块跑全局数据流。超限/不可证明是**精度预算**：
-必须 over-approximate 回 `Top`，**绝不截取前 N 个目标**（截断是
-under-approx，soundness bug）。跨过程目标集分析等局部档落地并出现量化
-收益后再做（§14）。
+**收窄档位**（未立项）：
+
+- v1 间接调用摘要 = `Top`（§9.1）。
+- 首个精化档为**局部 fn-ref 传播**：callee 操作数经字面 `fn_ref` / `let` 绑定 /
+  分支内有限集可达，且**不跨函数边界、无逃逸路径**时收窄；任何逃逸立即回 `Top`。
+- 该档**需求驱动**：只对真实消费点（module-const 检查与优化 legality）现场、按
+  预算解析。
+- 超限 / 不可证明是**精度预算**：必须 over-approximate 回 `Top`，**绝不截取前
+  N 个目标**（截断是 under-approx，soundness bug）。
 
 ### 9.3 host 元数据缺失 → TOP
 
@@ -732,50 +601,59 @@ host 函数的摘要来自 embedding metadata（§13）；缺失一律 TOP。
 
 ### 9.4 间接读 module const 的保守
 
-初始化检查中，间接调用若 `effect_bound = Top`，其读集合视为「可能读任意
-较晚常量」——不能当作空读集合放行（§7.3）。
+初始化检查中，间接调用若 `effect_bound = Top`，其读集合视为「可能读任意较晚
+常量」——不能当作空读集合放行（§7.3）。
 
 ## 10. 派生查询与优化合法性
 
 ### 10.1 事实表：不存 bool
 
-**只保存事实（EffectSummary + 派生所需的类型/use/view），不保存
-`is_pure = true` 这类 bool。** 所有优化属性由查询函数从摘要推导：
+**只保存事实（EffectSummary + 派生所需的类型 / use / view），不保存
+`is_pure = true` 这类 bool。** 所有优化属性由查询函数推导：
 
 | 属性 | 判定（由 EffectSummary 及 ownership 门组合） |
 | --- | --- |
-| `total` | `!may_trap ∧ !may_diverge`（正常返回为默认假设，无 N 位） |
-| `observable_effect_free` | 无 `Write / Allocate / Release`、无未知资源（Top）；资源**读**默认不构成可观察交互（Q 不在此判定内，见下） |
-| `discardable` | `total` + `observable_effect_free` + 在给定清理上下文下 `discard_view(observed_effect(expr, ctx)) == Pure`（§11；discard_view 忽略 Q）+ ownership 门（值可安全弃，不含未完成的 Consume/借用约束）——**不要求 !Q** |
-| `duplicable` | `discardable` + 结果 Copy + `OperandUse` 全 `Read`（不 Consume）+ **无 Q**（求值可重复） |
-| `speculatable` | `total` + 无有序/可观察 effect（不越过 trap/borrow 边界提前执行不可撤销交互）+ **无 Q**（结果不稳定不可提前采样）；**上下文**：可移动性相对目标位置（§10.5），`isIntrinsicallySpeculatable` 只是必要非充分 |
-| `reorderable(a,b)` | **位置上下文**：由 `canSwapOperands` / `canMove`（父 EvalPolicy + operand 位 + 路径屏障，§10.5）判定；资源访问无冲突（§5.6）、无 trap/diverge 顺序可观察差异是输入（默认仍 LTR，见 §3） |
-| `never_returns(f)` | **must 事实、独立于摘要**：f 无正常返回路径——签名声明 `-> never`（Core），或结构推导（所有路径以 panic/trap/发散收尾，或全部分支 must-abort，或尾调用 `never_returns` 者）。调用点后同一直行区域的后缀不可达，可整段删除（含该区域 FE 清理，§11 上下文内）。推导保守（取不到即 false）；v1 只做签名与局部结构推导，递归 SCC 成员的推导需 greatest-fixpoint 语义、留待需要时 |
-| `seg_safe` | `Copy(type)` + `total` + `observable_effect_free` + 无 nondeterministic（Q = 0，island 需结果稳定）+ cleanup 安全证明 + 递归子树与 region 同判 + ownership/lifetime 门（§12.3） |
+| `total` | `!may_trap ∧ !may_diverge` |
+| `observable_effect_free` | 无 `Write / Allocate / Release`、无未知资源（Top）；资源**读**默认不构成可观察交互 |
+| `discardable` | `total` + `observable_effect_free` + 给定清理上下文下 `discard_view(observed_effect(expr, ctx)) == Pure`（§11；discard_view 忽略 Q）+ ownership 门——**不要求 !Q** |
+| `duplicable` | `discardable` + 结果 Copy + `OperandUse` 全 `Read` + **无 Q** |
+| `speculatable` | `total` + 无有序 / 可观察 effect + **无 Q**；**上下文**：可移动性相对目标位置（§10.5），`isIntrinsicallySpeculatable` 只是必要非充分 |
+| `reorderable(a,b)` | **位置上下文**：由 `canSwapOperands` / `canMove`（父 EvalPolicy + operand 位 + 路径屏障，§10.5）判定 |
+| `seg_safe` | `Copy(type)` + `total` + `observable_effect_free` + 无 Q + cleanup 安全证明 + 递归子树与 region 同判 + ownership / lifetime 门（§12.3） |
+| `can_float_as_tree` | selective ANF 准入：`total` + `observable_effect_free` + 清理上下文 |
+| `never_returns(f)` | **must 事实、独立于摘要**——**尚未实现**（见下） |
 
-**强约束**：`move.effects == {}` **不**使 move 变得 discardable /
-duplicable / speculatable——每个公开查询都要组合 effect、operand uses、
-结果 capability/view、ownership 可用性与 lifetime 栅栏，**缺一不可**。
+**强约束**：`move.effects == {}` **不**使 move 变得 discardable / duplicable /
+speculatable——每个公开查询都要组合 effect、operand uses、结果 capability/view、
+ownership 可用性与 lifetime 栅栏，**缺一不可**。
 
-**结果不稳定（Q）与可观察交互分离。** `nondeterministic`（Q）只描述「同式
-两次求值结果可不同」——它需要**结果**参与的判定（duplicable、CSE、
-speculate/move 前移：重复 / 合并 / 提前采样会把「两次值不同」变成可观察
-差异）才要求 `!Q`。它本身**不构成可观察交互**：删除一次 total、无
-`Write/Allocate/Release`、结果未被使用的求值，不改变程序可观察行为：
+**代码中的查询名**：`readySummary` / `observedEffect` / `isTotal` /
+`observableEffectFree` / `canFloatAsTree` / `isDiscardable` / `isDuplicable` /
+`isSegSafe` / `hasSegEncoding` / `isSegAdmissible` /
+`isIntrinsicallySpeculatable` / `canSwapOperands` / `orderCompatible` /
+`cleanupFree` / `ownershipGate`；纯摘要级 `effects.isTotal` /
+`isObservableEffectFree` / `discardView` / `isPure`。**没有** `is_droppable` /
+`drop_is_observable` 这类额外查询。没有「facts table」缓存——查询按需从
+`readySummary` 计算。
+
+- **`never_returns`（未实现）**：设计上 f 无正常返回路径（签名 `-> never`，或
+  结构推导），调用点后同一直行区域的后缀不可达，可整段删除（含该区域 FE 清理）。
+  推导保守（取不到即 false）；递归 SCC 成员的推导需 greatest-fixpoint 语义。
+  **当前代码中不存在该事实**，由它驱动的后缀删除也未实现；CFG 侧另有基于
+  schema 位的 dead-instr 移除（§15）。摘要代数不变，`;` 合并仍保守并入后缀位。
+- **结果不稳定（Q）与可观察交互分离。** `nondeterministic` 只描述「同式两次
+  求值结果可不同」——它需要**结果**参与的判定（duplicable、CSE、speculate /
+  move 前移）才要求 `!Q`；它本身**不构成可观察交互**：
 
 ```text
 discardable      : 不要求 !Q      // let x = clock.now() in 0 → 0 合法
-                 （结果未使用，Q 只影响被丢弃的结果）
 duplicable / CSE : 要求 !Q
 speculate / move : 要求 !Q
 ```
 
-资源**读是否可观察是 host 契约决定**（§13），编译器不替宿主假定：默认读
-非可观察（`stat` 的稳定读与 `clock.now()` 的不稳定读，在「未使用结果」的
-删除判定上同等对待）；宿主把读本身声明为可观察（清读寄存器、消费式读、
-atime 更新）时以 `Write` 或可观察读标注出现，discardable 自然拒绝。Q 仍留
-在格内（§5.4/§5.5 的代数与 `stable` 声明机制不变），discard 判定只经
-`discard_view` 投影忽略它。
+资源**读是否可观察是 host 契约决定**（§13）：默认读非可观察；宿主把读本身
+声明为可观察时以 `Write` 或可观察读标注出现，discardable 自然拒绝。Q 仍留在
+格内，discard 判定只经 `discard_view` 投影忽略它。
 
 ### 10.2 MayTrap 是 effect：dead-let 的通用化
 
@@ -784,182 +662,141 @@ let x = 10 / y;
 0
 ```
 
-若 `x` 未使用，`let x = 10/y in 0 → 0` 看起来像 dead-let elimination；
-但整数除零 trap（Runtime），变换不合法。于是 `effects(div.i32) =
-{ may_trap: true }`，dead-let 规则自动成为：
+若 `x` 未使用，`let x = 10/y in 0 → 0` 看起来像 dead-let；但整数除零 trap，
+变换不合法。于是 `effects(div.i32) = { may_trap: true }`，dead-let 规则自动成为：
 
 ```text
 let x = v in body  →  body
     若 x ∉ FV(body)  ∧  discardable(v)        // discardable(div(..)) == false
 ```
 
-不再需要 dead-let pass 特殊认识 `/`；derived 判定让规则随 descriptor
-注册自动正确。
+不再需要 dead-let pass 特殊认识 `/`；实现见 `tryDeadLet`（hir_simplify.zig）。
 
 ### 10.3 rewrite legality 统一接口
 
-**两层判定必须分开**（否则「不 `switch(opcode)`」会被误读为所有 rewrite
-都与 opcode 无关——那做不到、也没必要做到）：
+**两层判定必须分开**（否则「不 `switch(opcode)`」会被误读为所有 rewrite 都与
+opcode 无关）：
 
-- **Rewrite applicability**：typed opcode / 代数语义 / 值谓词。引擎在**规则
-  匹配层**认识 opcode 没问题：`x + 0 → x` 能否做首先取决于它是 `add.i32`
-  （wrapping）还是 `add.f32` / decimal / vector——这是代数可适用性；
-- **Operational legality**：discard / duplicate / reorder / effect /
-  ownership / lifetime。**通用 legality 引擎不认识 opcode**，合法性只来自
-  派生查询/要求。
+- **Rewrite applicability**：typed opcode / 代数语义 / 值谓词。引擎在**规则匹配
+  层**认识 opcode 没问题：`x + 0 → x` 能否做首先取决于它是 `add.i32` 还是
+  `add.f32` / decimal / vector——这是代数可适用性。
+- **Operational legality**：discard / duplicate / reorder / effect / ownership /
+  lifetime。**通用 legality 引擎不认识 opcode**，合法性只来自派生查询。
 
-「优化器永远不 `switch(opcode)` 决定合法性」的精确含义是后者：legality
-引擎没有 per-opcode 分支；applicability 是规则库内部事实，随 typed
-opcode 注册，不进入 legality 查询面。
+「优化器永远不 `switch(opcode)` 决定合法性」的精确含义是后者：legality 引擎
+没有 per-opcode 分支；applicability 是规则库内部事实，随 typed opcode 注册。
 
-```text
-RewriteRule {
-    match                  // 模式（typed opcode 形状）
-    build
-    applicability          // 代数/值前提（按 typed opcode + 具体数值语义）
-    legality: [Requirement]     // operational：不再散落特判
-}
-
-Requirement =
-    Discardable(expr)
-  | Duplicable(expr)
-  | SwapOperands(parent, lhs_slot, rhs_slot)   // 上下文形式，见 §10.5
-  | EvaluationCountPreserved(a, b)
-```
+> **现状：无统一接口类型。** 设计中描述的
+> `RewriteRule { match, build, applicability, legality: [Requirement] }` 与
+> `Requirement = Discardable | Duplicable | SwapOperands | EvaluationCountPreserved`
+> **在代码中不存在**。当前实现是规则函数内直接调用派生查询（如 hir_seg.zig 的
+> `ruleLet` / `tryBeta`、hir_simplify.zig 的 `tryAnf` / `tryDeadLet`）；两层
+> 判定已经分离，只是没有形式化的规则 / 要求数据结构。
 
 例：
 
 ```text
-Rule add_zero_i32
-    match: add.i32(x, 0)
-    applicability: true              // add.i32 wrapping 代数成立
-    legality: [ EvaluationCountPreserved(x) ]   // 不改变 x 求值次数
-
-x * 0 → 0      要求 Discardable(x)      // host.read() * 0 不能变 0
-x + x → 2 * x  要求 Duplicable(x) 或显式 EvaluationCountPreserved
+Rule add_zero_i32   match: add.i32(x, 0)   applicability: true   legality: EvaluationCountPreserved(x)
+x * 0 → 0           要求 Discardable(x)          // host.read() * 0 不能变 0
+x + x → 2 * x       要求 Duplicable(x) 或显式 EvaluationCountPreserved
 ```
 
 ### 10.4 rewrite 的 effect contract（正式概念，两类重写）
 
-**两类重写。** 普通 SEG 重写必须 full-expression-preserving；**boundary
-rewrite**（v1 唯一实例是 β）把 callee 体从 λ 内部语义边界搬进调用点，
-必须逐条声明契约后才准入。契约的 effect 面如下；HIR 侧的 scope / FE 映射
-与 cleanup 证明见 [hir.md](hir.md) §8.4：
+**两类重写**：普通 SEG 重写必须 full-expression-preserving；**boundary
+rewrite**（v1 唯一实例是 β）把 callee 体从 λ 内部边界搬进调用点，必须逐条声明
+契约后才准入。契约的 effect 面：
 
 ```text
 RewriteContract {
-    effect: {
-        PreservesEvaluationCount
-      | PreservesOrder
-      | MayDuplicate      // 未来规则用：v1 引擎自动要求 discardable
-      | MayDiscard        // let-unused：MayDiscard(init) → 引擎自动要求 discardable(init)
-      | MayReorder
-    }
-    maps_scope / maps_full_expr / preserves_cleanup   // hir.md §8.4
+    effect: { PreservesEvaluationCount | PreservesOrder
+            | MayDuplicate | MayDiscard | MayReorder }
+    maps_scope / maps_full_expr / preserves_cleanup   // [hir.md](hir.md) §8.4
 }
 
-β-to-let    : PreservesEvaluationCount + PreservesOrder
-              + scope/FE 映射 + cleanup 证明
-              （实参 Copy 且 discardable、λ 体 cleanup-free）
+β-to-let    : PreservesEvaluationCount + PreservesOrder + scope/FE 映射 + cleanup 证明
 let-unused  : MayDiscard(init) → 引擎自动要求 discardable(init)
 ```
 
-`(fn(x) { x + 1 })(host.read())` 整体仍不能进纯 term 的 equality
-saturation——但 β 本身不删除、不复制、不重排 `arg`，契约证明后**可**
-允许 effectful 实参；那是单独验证后再放开的方向（见
-[todo.md](todo.md)）。**v1 仍保守**：只对 Copy 且 discardable 的实参、cleanup-free
-的单表达式 λ 体提供 β 契约实例，λ 体 FE 到调用点 FE 的映射逐条显式声明（hir.md §8.4），
-不作为 v1 行为宣传。
+> **现状：契约是设计概念，不是类型。** `RewriteContract` / `RewriteRule` 在
+> 代码中不存在；β 的契约由 `tryBeta`（hir_seg.zig）内联强制：call 必须
+> 语义 seg-safe、每个实参 Copy 且 discardable、λ 体是 cleanup-free 的单表达式
+> （非 `seq` root）、λ 只经 `fn_ref` 可达，克隆时用 fresh binder 重映射 scope。
+> 详见 [hir.md](hir.md) §8.4。
+
+`(fn(x) { x + 1 })(host.read())` 整体仍不能进纯 term 的 equality saturation
+——但 β 本身不删除、不复制、不重排 `arg`，契约证明后**可**允许 effectful 实参
+（单独验证后再放开的方向，见 [todo.md](todo.md)）。v1 仍保守。
 
 ### 10.5 实现形态（Zig）
+
+设计 sketch：
 
 ```zig
 const OpSemantics = struct {
     eval: EvalPolicy,
     operand_uses: []const OperandUse,
     result_policy: ResultPolicy,
-
-    infer_effects: *const fn (
-        ctx: *EffectContext,
-        expr: ExprId,
-    ) EffectSummary,             // 递归汇总 + 函数摘要查找
-
+    infer_effects: *const fn (ctx: *EffectContext, expr: ExprId) EffectSummary,
     seg: ?SegDescriptor,
 };
 
 const EffectSummary = struct {
-    accesses: EffectRowId,       // interned 行：有序去重 EffectAccess
-
+    accesses: EffectRowId,   // interned 行：有序去重 EffectAccess
     // 不设默认值：构造点必须显式选择 pure / top 或完整摘要
-    // （bottom 与 pure 同值，见 §5.4）。
-    may_trap: bool,              // 包括 panic
+    may_trap: bool,          // 包括 panic
     may_diverge: bool,
     nondeterministic: bool,
 };
 ```
 
-构造器 `pure()` / `top()` 严格按 §5.4 的四元组赋值，`bottom()` 保留为
-迭代起点的别名；不可依赖 Zig `.{}` 或空访问行推断摘要。Pending/Ready
-包在摘要之外，不作为 EffectRow 的特殊值。
+构造器 `pure()` / `top()` / `bottom()` / `may_trap` 严格按 §5.4 的四元组赋值；
+不可依赖 Zig `.{}` 或空访问行推断摘要。Pending / Ready 包在摘要之外。
 
-公开查询（每个都组合 effects × uses × capability/view × ownership 门；
-Pending 或 cleanup 证明缺失均返回 false）。**speculate / reorder 是上下文
-属性**：同一个表达式能否前移取决于跨过哪些 condition、borrow lifetime、
-FE、effect 与 trap 屏障；同一对 sibling 能否交换取决于父节点的
-EvalPolicy、operand 位置与中间是否有第三个 operation。因此公开面把
-上下文显式参数化，只保留一个弱无上下文谓词：
+**实际落地的 descriptor 形状**（`OpDescriptor` 定义见 [hir.md](hir.md) §3.5）是上述
+sketch 的语义等价映射：
+
+| sketch | 落地字段 |
+| --- | --- |
+| `eval` | `policy`（`EvalPolicy`） |
+| `operand_uses` | `uses`（`UsePolicy`：`operand_capability` / `callee_params` / `static_list` / …）+ 可选显式 `operand_uses` 切片 |
+| `infer_effects` | `own_effect`（op 自身摘要）+ `transfer`（`TransferKind`，由 `hir_effects.compute` 按标签组合 operand / region / callee） |
+| `seg` | `seg: ?SegEncoding` |
+| `result_policy` | 由既有 capability / view 数据承担 |
+
+`uses` / `own_effect` / `transfer` 必填、无默认值（省略即编译错误）。
+
+公开查询（每个都组合 effects × uses × capability/view × ownership 门；Pending
+或 cleanup 证明缺失均返回 false）。**speculate / reorder 是上下文属性**，公开面
+把上下文显式参数化，只保留一个弱无上下文谓词：
 
 ```zig
-// 表达式自身事实的弱判定：无 intrinsically blocking 条件。
-// 必要非充分——code motion 必须再与路径上下文组合（canMove）。
+// 表达式自身事实的弱判定：无 intrinsically blocking 条件。必要非充分。
 fn isIntrinsicallySpeculatable(ctx: *HIR, expr: ExprId) bool;
 
 // 交换同一 parent 下两个 operand slot（v1 先限相邻的 eager operand）。
 fn canSwapOperands(ctx: *HIR, parent: ExprId, lhs_slot: u16, rhs_slot: u16) bool;
 
-// 把 expr 从 from 位置移到 to 位置；跨移动须逐条检查 intervening
-// operations、条件执行、binder 可用性、借用 lifetime 与 FE 边界。
-fn canMove(ctx: *HIR, expr: ExprId,
-           from: EvalPosition, to: EvalPosition,
+// 把 expr 从 from 位置移到 to 位置。
+fn canMove(ctx: *HIR, expr: ExprId, from: EvalPosition, to: EvalPosition,
            mctx: MovementContext) bool;
 
 fn isDiscardable(ctx: *HIR, expr: ExprId, cleanup: CleanupCtx) bool;
 fn isDuplicable(ctx: *HIR, expr: ExprId) bool;
 fn isSegSafe(ctx: *HIR, expr: ExprId) bool;
 
-const EvalPosition = struct {
-    parent: ExprId,     // 父 op（EvalPolicy 由 descriptor 取）
-    slot: u16,          // operand 位；region 内位置另按 regions 索引
-    fe: FullExprId,     // 所属 full expression
-};
-
-const MovementContext = struct {
-    // 移动路径上需检查的屏障与可用性：经过的 effect / trap / condition /
-    // borrow lifetime / FE 边界；目标位置 binder 可见性；是否改变求值次数
-    // 与销毁注册。具体字段随首个真实 consumer（hoisting、公共子表达式前移）
-    // 定稿；查询必须接收路径上下文，不得退回 (a, b) 二元签名。
-};
+const EvalPosition = struct { parent: ExprId, slot: u16, fe: FullExprId };
+const MovementContext = struct { /* 路径上的 effect / trap / condition / borrow
+    lifetime / FE 边界、目标 binder 可见性、求值次数与销毁注册变化 */ };
 ```
 
-旧的 unary `isSpeculatable(ctx, expr)` / binary `canReorder(ctx, a, b)`
-签名作废：EvalPolicy 是 **parent + operand 位置**的属性，不是 `a` / `b`
-的自身属性，二元签名无法消费「EvalPolicy 允许」。
-
-实际落地的 descriptor 形状与上面的 sketch 是语义等价映射
-（`OpDescriptor` 定义见 [hir.md](hir.md) §3.5）：`operand_uses` 拆为
-`uses`（`UsePolicy`，含 `operand_capability` / `callee_params` /
-`static_list`）加可选显式 `operand_uses` 切片；`infer_effects` 拆为
-`own_effect`（op 自身摘要）加 `transfer`（`TransferKind` 数据标签，由
-`hir_effects.compute` 单一函数按标签组合 operand / region / callee）；
-`seg` 是 registry 上的可选 SEG 编码 facet，`result_policy` 由既有
-capability/view 数据承担。`uses`/`own_effect`/`transfer` 必填、无默认值
-（省略即编译错误）。`EffectSummary` 同样无字段默认值，
-`pure`/`top`/`bottom`/`may_trap` 是唯一构造点。公开查询面：
-`isIntrinsicallySpeculatable` 除 total / 无可观察 / 无 `Q` 外还要求
-cleanup 证明与递归 ownership 门；`canSwapOperands` 组合父节点 operand
-位、full-expression 边界、两 operand 的 cleanup/ownership 与
-`orderCompatible`；`canMove` 尚未暴露（FE/lifetime 路径事实未建模，
-暴露恒 false 的入口无意义）。
+- **`canMove` 尚未暴露**（FE / lifetime 路径事实未建模，暴露恒 false 的入口无
+  意义）。
+- `canSwapOperands` 组合父节点 operand 位、full-expression 边界、两 operand 的
+  cleanup / ownership 门，再经 `orderCompatible`（资源冲突、trap/diverge 顺序、
+  `Q`）。
+- 旧的 unary `isSpeculatable` / binary `canReorder` 签名作废：EvalPolicy 是
+  **parent + operand 位置**的属性，二元签名无法消费「EvalPolicy 允许」。
 
 ## 11. 完整销毁的可观察性
 
@@ -969,136 +806,118 @@ cleanup 证明与递归 ownership 门；`canSwapOperands` 组合父节点 operan
 drop_effect(T) -> EffectSummary
 ```
 
-- `Copy(T)` → `{}`（drop 一个 Copy 值无效果，Types & Ownership）；
+- `Copy(T)` → `{}`；
 - `struct File { drop(file) { os.close(file.fd); } }` →
-  `effects(File.drop_hook) ; seq(drop_effect(unique fields…), 逆声明序)`，
-  保持结构销毁顺序（hook 先、字段逆声明序，Runtime）；
-- `tuple[A, B]` → `drop_effect(B) ; drop_effect(A)`（销毁逆创建序）；
-- `list[T] / box[T]` → 结构性递归（元素/内层 + 容器本身）；
-- host opaque / `hostdata` → `Release(Host …)`——但**未知 opaque 与
-  `any` 的装载内容销毁未知**，取保守摘要（不只是无害的 release 位：可能
-  含 Stilla drop hook 或 host 析构，见 Types & Ownership、
-  Runtime）；
-- union 的候选 variant 用 `⊔`，实际销毁步骤用 `;`；list 的未知长度须
-  覆盖零元素（`Pure`）及所有可能元素销毁序列，不能只汇总一个元素；
-- 递归类型（自指 struct/union）→ 在类型 SCC 上求 least fixpoint，**不设
-  展开深度/宽度上限**：分析期注册表冻结（§5.4/§5.6），transfer 单调，
-  有限格保证收敛；may-summary 下重复天然坍缩（未知长度/深度的元素销毁在
-  访问集与布尔位上等于单次），Kleene-star 不引入不收敛。**分析收敛 ≠
-  运行时销毁终止**：收敛不授权去掉 `may_diverge`；结构终止证明缺失仍
-  保守含发散，预算超限/放弃精化取 `Top`。
+  `effects(File.drop_hook) ; seq(drop_effect(unique fields…), 逆声明序)`；
+- `tuple[A, B]` → `drop_effect(B) ; drop_effect(A)`；
+- `list[T] / box[T]` → 结构性递归（元素 / 内层 + 容器本身）；
+- host opaque / `hostdata` → `Release(Host …)`；**未知 opaque 与 `any` 的装载
+  内容销毁未知**，取保守摘要；
+- union 候选 variant 用 `⊔`，实际销毁步骤用 `;`；list 的未知长度须覆盖零元素
+  （`Pure`）及所有可能元素销毁序列；
+- 递归类型 → 在类型 SCC 上求 least fixpoint（重入同类型返回格底，见下）；深度
+  超 `max_drop_type_depth` 即回 `Top`。**分析收敛 ≠ 运行时销毁终止**：收敛不
+  授权去掉 `may_diverge`。
 
-类型摘要与 drop hook 函数摘要**独立求解**：drop hook 是普通函数，其
-摘要在函数 SCC（§8.2）中推导；`drop_effect(T)` 只引用 hook 与字段的
-摘要。仅当依赖图出现跨层环——某函数摘要（经 FE 清理或 hook 路径）引用
-`drop_effect(T)`，而 `T` 的 hook 摘要又引用该函数——时，`T` 回退 `Top`
-（精度洞：此类环意味着 drop 一个值可能在 hook 中经模块函数间接 drop
-同类值，罕见；出现真实模式再升级为分层外循环）。
+**落地形态：**
 
-**长期演化（不入 MVP，评审 #11）**：函数摘要与 `drop_effect(T)` 各自在
-call-graph SCC / 类型 SCC 上求不动点，本质都是同一 EffectSummary 格上的
-单调函数。若跨层环成为常见模式，把依赖节点统一为
+| 实现 | 状态 | 行为 |
+| --- | --- | --- |
+| `effects.dropEffect(capability)` | M1b 遗留：**仅定义 + 单测，无生产消费者** | 极简：Copy → `{}`，其余 / null → `Top` |
+| `hir_effects.dropEffectOf(ty)` / `dropEffectInner` | **生产路径** | 精确全链，见下 |
 
-```text
-EffectDependencyNode =
-    Function(FuncId)
-  | DropType(TypeId)
-```
+`drop` descriptor 的 `own_effect` 是 `pure`、`transfer = .drop_effect`；
+`Analysis.compute` 的 `.drop_effect` 分支调用**精确的** `dropEffectOf(operand
+类型)`，再 `; effects(operand)`。module-const teardown 检查（§7.2）也用它。
+所以 `effects.dropEffect` 不参与生产。
 
-并在一张统一 dependency graph 上做 least fixpoint，可消掉「跨层环时
-`T` 回退 `Top`」的精度洞，分析器结构也更统一。留待真实模式出现后立项。
+`dropEffectInner` 的递归：
+
+- Copy 值短路 `{}`；`any` / `hostdata` / 未解析 → `Top`；
+- struct：自身 hook 摘要 `;` Unique 字段按逆声明序递归；
+- union：候选 payload 用 ⊔，实际销毁用 `;`；tuple 逆序；list / box 元素递归；
+  opaque → `Release(Host(host_id))`；
+- 命名类型递归按**类型身份截断**：下降中重入同一类型即返回格底 `Pure`。实现
+  论证这与「有限展开的 join」同值（may-摘要幂等），即 least fixpoint，无需显式
+  迭代；**不做 memoization**（被截断时的结果是 under-approximation，不可复用）；
+- 安全网 `max_drop_type_depth = 64`：非正规实例化链超过深度即回 `Top`。
+
+类型摘要与 drop hook 函数摘要**独立求解**：drop hook 是普通函数，其摘要在函数
+SCC（§8.2）中推导；`dropEffectOf` 经 `functionSummary` 读 hook 摘要。**跨层环
+没有专门检测**：hook 的 SCC 尚未求解时 `functionSummary` 返回 `Top`（保守）。
+
+**长期演化（未立项）**：函数摘要与 `drop_effect(T)` 各自在 call-graph SCC /
+类型 SCC 上求不动点，本质是同一格上的单调函数。若跨层环成为常见模式，把依赖
+节点统一为 `EffectDependencyNode = Function(FuncId) | DropType(TypeId)`，在一张
+统一 dependency graph 上做 least fixpoint，可消掉回退 `Top` 的精度洞。
 
 ### 11.2 full-expression 清理与 observed_effect
 
-Unique 临时量在所属 full expression 末尾**逆创建序**销毁（Runtime）。
-一个表达式的真实语义不只是 `effects(expr)`，还要含其自动清理——但清理
-是**上下文相关**的：
+Unique 临时量在所属 full expression 末尾**逆创建序**销毁。一个表达式的真实
+语义不只是 `effects(expr)`，还要含其自动清理——但清理是**上下文相关**的：
 
 ```text
 observed_effect(expr, cleanup_context) =
-    eval_effect(expr)
-  ; cleanup_effect(cleanup_footprint(expr), cleanup_context)
+    eval_effect(expr) ; cleanup_effect(cleanup_footprint(expr), cleanup_context)
 ```
 
-**清理栈条目的 occurrence 归属（CleanupFootprint）。** full-expression
-的清理栈不是「一堆临时量的袋子」——每条登记必须能回答它属于**哪个表达式
-occurrence**：
+**清理栈条目的 occurrence 归属（CleanupFootprint）。** 每条登记必须能回答它
+属于**哪个表达式 occurrence**：
 
 ```text
 cleanup_footprint(expr) =
     { token t | t.origin_expr ∈ subtree(expr)
-                ∧ t 登记在 expr 所属 FE 的清理栈上（未被 move / 转入
-                  调用消耗） }
+                ∧ t 登记在 expr 所属 FE 的清理栈上（未被 move / 转入调用消耗） }
 
-CleanupToken {
-    id,                    // 清理栈内身份（同一 FE 内唯一）
-    origin_expr: ExprId,   // 创建该临时量的 occurrence
-    value: TempId, type: TypeId,
-    registration_index,    // 入栈序号（逆创建序销毁的排序键）
-}
+CleanupToken { id, origin_expr: ExprId, value: TempId, type: TypeId, registration_index }
 ```
 
-由此 `observed_effect(expr, ctx)` 拿的是 **expr 子树对清理栈的贡献**
-（origin 落在子树内的登记），不是整条 FE 的清理：
+- `observed_effect(expr, ctx)` 拿的是 **expr 子树对清理栈的贡献**，不是整条 FE
+  的清理：`foo(make_file(), pure_expr())` 中 `discardable(pure_expr())` 不得把
+  sibling `make_file()` 的 destructor 算进来；`discardable(make_file())` 必须
+  计入其临时量在 FE 末尾的 drop。
+- MVP 只需 token 的 **origin + type + registration_index**；`Consumed /
+  Escaped` 这类**状态**是路径敏感的，属于 destruction planner / CFG 侧（§11.3）。
+- `make_file();` 的 full expression 实际含 `drop_effect(File)`——不能凭空
+  effects 删除；
+- 被 `move` / 转入调用（如 `consume(move make_file())`）的临时量**不在**清理栈
+  上，不得重复计清理；
+- 清理只在**正常路径**发生：panic / trap 跳过全部销毁；某个 destructor 异常
+  终止后不执行剩余清理；
+- 清理顺序（逆创建序）用 `;` 折叠，空清理为 `Pure`；cleanup 证明不可用时查询
+  失败关闭，需要保守摘要时用 `Top`。**不能把未知清理当 `Pure`**。
+- **变换后的 origin 重映射**：任何重写后，被改写区域内存活临时量的 token 须把
+  origin 重映射到新节点，registration_index 保持原 FE 内相对销毁序；「合成 let
+  不改销毁注册」即此不变量。
 
-- `foo(make_file(), pure_expr())` 中 `discardable(pure_expr())` 不得把
-  sibling `make_file()` 的 destructor 算进来（origin 不在其子树）；
-- `discardable(make_file())` 必须计入其临时量在 FE 末尾的 drop
-  （origin 在子树、且未消耗）。
+> **现状：CleanupFootprint 未实现。** `CleanupToken` / `cleanup_footprint` 在
+> 代码中不存在（仅注释引用）。`observedEffect` 已实现，但只走 cleanup-free
+> MVP：对子表达式递归证明全部类型 Copy、无非借用 Unique 绑定、无 `drop`，否则
+> cleanup 贡献 `Top`（未建模的 destructor / FE 清理失败关闭）；空注册表视为
+> 未建模、不作证明。因此清理敏感查询目前只放开已证明 cleanup-free 的子树。
+> 落地见 [todo.md](todo.md)。
 
-MVP 只需 token 的 **origin + type + registration_index** 即可回答上述
-两类问题；`Consumed / Escaped` 这类**状态**是路径敏感的（同一值在不同
-控制流边上的消耗状态不同），不是摘要层的单一全局状态——它属于
-destruction planner / CFG 侧（§11.3），效果层不维护。
-
-规则要点：
-
-- `make_file()` 即使构造本身无外部交互（`effects(make_file) = {}`），若
-  结果未使用，`make_file();` 的 full expression 实际含
-  `drop_effect(File)`——不能凭空 effects 删除；
-- 被 `move`/转入调用（如 `consume(move make_file())`）的临时量**不在**
-  清理栈上，不得重复计清理；
-- 清理只在**正常路径**发生：panic/trap 跳过全部销毁（Static Semantics *Panic and traps*）；
-- 清理顺序（逆创建序）在计划里保持，摘要按此顺序用 `;` 折叠，空清理为
-  `Pure`；某个 destructor 异常终止后，不执行剩余清理；
-- cleanup 证明不可用时，查询失败关闭；若需要可发布的保守清理摘要，使用
-  `Top`。**不能把未知清理当 `Pure`，也不能只凭结果 Copy 推断整个子树无
-  清理**；本规则从 MVP 起生效。
-- **变换后的 origin 重映射**：任何重写（含 SEG island 替换、合成 let）
-  后，被改写区域内存活临时量的 token 须把 origin 重映射到新节点，且
-  registration_index 保持原 FE 内的相对销毁序；「合成 let 不改销毁注册」
-  即此不变量——校验器核对 origin 与注册表一致（[hir.md](hir.md)
-  §10.1）。
-
-于是优化器只问一个谓词：
+优化器只问一个谓词：
 
 ```text
 discardable(ctx, expr)   // 内部组合 total、observable_effect_free 与
                          // discard_view(observed_effect(expr, ctx)) == Pure
-                         // discard_view 忽略 Q（§10.1）；宿主声明的可观察读
-                         // 以 Write / 可观察读出现，仍被拒绝
 ```
-
-不必理解 full-expression 销毁的细节。合成 let 属于同一 full expression，
-不改变临时量销毁注册——因此本约束与「合成 let 不改销毁注册」一致。
 
 ### 11.3 drop_effect ≠ 有序销毁计划
 
-`drop_effect(T)` 只汇总**可观察性**；真正的有序销毁计划（hook 调用、
-逐字段 drop、maybe-unique 的 join 边 drop、panic/trap 路径跳过清理）
-仍由 destruction planner / CFG 层生成。effect 系统保证 DCE 不会误删带
-重要 destructor 的临时值，**不替代计划本身**。
+`drop_effect(T)` 只汇总**可观察性**；真正的有序销毁计划（hook 调用、逐字段
+drop、maybe-unique 的 join 边 drop、panic/trap 路径跳过清理）仍由 destruction
+planner / CFG 层生成。effect 系统保证 DCE 不会误删带重要 destructor 的临时值，
+**不替代计划本身**。
 
 ## 12. 效果驱动的前端变换
 
-这套模型的三个首要消费者。它们共同点是：**合法性全部来自派生查询，任何
-一个都没有 `switch(op)` 特判**。dead-let 与 selective ANF 在
-`passes/hir_simplify.zig`（`--simplify`，默认关），SEG 准入在
-`passes/hir_seg.zig`（`--seg`，默认关）。
+三个首要消费者，共同点是**合法性全部来自派生查询，任何一个都没有 `switch(op)`
+特判**。dead-let 与 selective ANF 在 hir_simplify.zig（`--simplify`，默认关），
+SEG 准入在 hir_seg.zig（`--seg`，默认关）。
 
 ### 12.1 Selective A-Normal Form
-
-不再硬编码 `if expr is Call || Div || …`：
 
 ```text
 if !can_float_as_tree(ctx, expr):     // 派生查询
@@ -1112,40 +931,39 @@ f(os.read(), a + b * c)
 ```text
 os.read()        effects = Read(Host.FileSystem) + MayTrap   → 提为 let
 a + b * c        effects = {}                                 → 保留树
-```
 
-```text
 let T0 = os.read() in call(f, local T0, add(a, mul(b, c)))
 ```
 
-新增 intrinsic（如 `gpu.query`）：在 stdlib 加无体声明并写 lowering 展开
-（Intrinsics）；其效果来自展开出的现有 op 与 host 调用，前端
-canonicalizer 零改动。约束保留：callee 若本身
-是表达式先按 LTR 绑定 callee；不跨 full expression；不从惰性分支内
-提升；不改变临时量销毁注册。
+新增 intrinsic（如 `gpu.query`）：在 stdlib 加无体声明并写 lowering 展开；其
+效果来自展开出的现有 op 与 host 调用，前端 canonicalizer 零改动。约束保留：
+callee 若本身是表达式先按 LTR 绑定；不跨 full expression；不从惰性分支内提升；
+不改变临时量销毁注册。
 
 ### 12.2 dead-let
 
-见 §10.2——`discardable` 一个查询同时覆盖 trap、效果与清理，规则无需
-认识 `/` 或任何具体 op。
+见 §10.2——`discardable` 一个查询同时覆盖 trap、效果与清理，规则无需认识 `/`
+或任何具体 op。
 
 ### 12.3 SEG legality
 
-SEG 入口从 op 白名单改成两个条件（先看该 op 是否带 SEG 编码，再看派生
-查询）：
+SEG 入口从 op 白名单改成两个条件（先看该 op 是否带 SEG 编码，再看派生查询）：
 
 ```text
-isSegSafe(ctx, expr)  ==
-    op(expr).seg_encoding 已注册
-    && Copy(type(expr))
+admission(expr) ==
+    hasSegEncoding(op(expr))           // 注册表带 SEG 编码
+    && isSegSafe(expr)                 // 语义谓词；**不含**编码检查
+    && 所有 operand / region root 同为 island 成员
+
+isSegSafe(expr)  == ...
+    Copy(type(expr))
     && total(expr)
     && observable_effect_free(expr)
-    && 无 nondeterministic（Q = 0：island 内求值结果须稳定，饱和/抽取才能
-        合并与复用）
-    && cleanup 安全证明：已证明 cleanup-free，或 observed_effect == Pure
+    && 无 nondeterministic（Q = 0）
+    && cleanup 安全证明（已证明 cleanup-free，或 observed_effect == Pure）
     && 递归：所有 operand 子树同判
     && 对 lazy-branch op：每个可选 region body 同判
-    && ownership/lifetime 门：无 Borrowed-view 参与、无未决 Consume、
+    && ownership / lifetime 门：无 Borrowed-view 参与、无未决 Consume、
        不跨越 full-expression 边界
 ```
 
@@ -1155,49 +973,41 @@ isSegSafe(ctx, expr)  ==
 add.i32 / mul.i32 / add.f32    ✅
 div.i32                        ❌  may_trap
 any 恢复                        ❌  may_trap
-host binding 调用（syscall 目标）          ❌
-drop                           ❌
-move Unique                    ❌
+host binding 调用（syscall 目标） ❌
+drop / move Unique             ❌
 ```
 
-职责分离：Slotted E-Graph 处理 variables/binders、substitution、
-α-equivalence；Stilla 所需的 effect semantics 由 HIR→SEG bridge 的
-legality 查询负责——准入检查的是**递归属性**（region body 与 ownership
-依赖都纳入），而非只看根节点的效果与 operand 类型。
+职责分离：v1 的 SEG 由 HIR→SEG bridge 的 legality 查询负责准入——检查的是
+**递归属性**（region body 与 ownership 依赖都纳入），而非只看根节点。
 
-**本谓词只管普通 island**：isSegSafe 的「不跨越 full-expression 边界」
-约束对 ordinary rewrite 成立；boundary rewrite（β，hir.md §8.4）不进
-isSegSafe，由 §10.4 的契约门准入——两类重写共用本模型，但准入路径不同。
+**本谓词只管普通 island**：boundary rewrite（β，[hir.md](hir.md) §8.4）的 callee 是
+`fn_ref`（无 SEG 编码），call 节点不进 island，因此绕过 encoding / 成员资格；
+但 β 仍**调用** `isSegSafe`（对 call 节点与 λ 体），再叠加 §10.4 的契约条件。
 
 ## 13. Host 接口 metadata（embedding ABI）
 
-> **Status：声明入口与重入契约已落地；其余 embedding ABI 项尚未实现。**
+> **Status：声明入口与重入契约已落地；其余 embedding ABI 项未实现。**
 > **已实现**：`StillaExecution` 三态、符号键声明（`effects.HostDecl` /
-> `HostEffects.resolve` / `consolidate`）、`frontend.Options.host_decls`
-> 贯穿初始分析 / SEG / selective ANF / `revalidateHir`，以及分析内局部
-> host 语义注册表（`stable`/`disjoint`）。**未实现**：运行时侧的契约
-> 匹配校验（编译器无法验证 embedding 真的不重入）、host_bind typed
-> registry 的自动声明接线、符号→`ConstId` 的宿主侧序列化工具，以及
-> `EffectEnvironmentFingerprint` 缓存指纹。落地项见 [todo.md](todo.md)。
+> `HostEffects.resolve` / `consolidate`）、`frontend.Options.host_decls` 贯穿
+> 初始分析 / SEG / selective ANF / `revalidateHir`、分析内局部 host 语义注册表
+> （`stable` / `disjoint`）。**未实现**：运行时侧契约匹配校验（编译器无法验证
+> embedding 真的不重入）、host_bind typed registry 的自动声明接线、符号→`ConstId`
+> 的宿主侧序列化工具、`EffectEnvironmentFingerprint` 缓存指纹。
 
-host 是 Stilla 的核心目标（host binding 实现完全由 host 提供；stdlib
-intrinsic 由编译器展开，Intrinsics Spec）。编译器侧模块元数据
-可扩展：
+host 是 Stilla 的核心目标。编译器侧模块元数据：
 
 ```text
 HostFunctionDescriptor {
     signature
-    effects:          EffectSummary     // 资源 / 控制契约（单一事实；读也在这里）
-    stilla_execution: StillaExecution   // 是否可能执行 Stilla 代码
+    effects:          EffectSummary
+    stilla_execution: StillaExecution
 }
-```
 
-```text
 StillaExecution = Forbidden | MayExecute | Unknown   // 缺失 = Unknown
 ```
 
 ```text
-math.sqrt:      effects = {},              stilla_execution = Forbidden
+math.sqrt:      effects = {},  stilla_execution = Forbidden
 os.open:        effects = { ReadWrite(Host.OS) + Allocate(Host.FileSystem) + MayTrap },
                 stilla_execution = Forbidden
 builtin.print:  effects = { Write(Host.Output) }, stilla_execution = Forbidden
@@ -1205,97 +1015,68 @@ clock.now:      effects = { Read(Host.Clock), nondeterministic }
 unknown host:   Top                        // 无声明
 ```
 
-无 `stilla_execution` 的声明等价于 `Unknown`，其 `effects` 实际不生效
-（仍取 `Top`）——所以上表每一条精确声明都必须带 `Forbidden`。
-
 立场：
 
-- host 声明是**受信的语义契约**（host 与编译器约定），不是编译器自动
-  验证出的 purity；错误声明是 host 的 bug，编译器按契约优化。这作为
-  embedding ABI metadata，**不进 Stilla source syntax**；扩展点是 host_bind
-  的 typed registry。
-- **缺失声明默认取完整 `top`**（含 read 通配、`may_trap`、`may_diverge`、
-  `Q`）。缺失元数据不构成任何证据，尤其不构成「不会执行 Stilla 代码」的
-  证据（见「重入契约」）。
-- **读的可观察性是声明项**：默认域/op 的 `Read` 视为**非可观察**（结果未
-  使用时允许删除，Q 不阻断 discard，§10.1）；宿主把「读本身有可观察后
-  果」的访问（清读寄存器、消费式读、atime 更新）声明为 `Write` 或可观察
-  读，编译器不替宿主假定「读可观察」或「读不可观察」。
+- host 声明是**受信的语义契约**，不是编译器自动验证出的 purity；错误声明是
+  host 的 bug。它作为 embedding ABI metadata，**不进 Stilla source syntax**；
+  扩展点是 host_bind 的 typed registry。
+- **缺失声明默认取完整 `top`**（含 read 通配、`may_trap`、`may_diverge`、`Q`）。
+- **读的可观察性是声明项**：默认域 / op 的 `Read` 视为**非可观察**；宿主把
+  「读本身有可观察后果」的访问声明为 `Write` 或可观察读。
 
 ### 重入契约（host 与模块常量）
 
-**问题。** `host_top` 剔除 `Read(ModuleConst)`，所以它的 soundness 完全
-取决于一句话：这个 host binding 不会执行 Stilla 代码。编译器证明不了这
-件事——host binding 是 embedding 的任意代码（`HostCall.invoke` 拿到的
-就是活的 VM 上下文；连 `builtin.print` 的输出 sink 都是 embedding 提供
-的 `PrintHook`），而 interpreter-vm.md / host-bindings.md §2 把「异步 /
-重入 host 调用」列在**当前范围之外**只是范围，不是「永远不会发生」的
-保证。所以它是一个**受信声明**，不是编译器推出来的事实。
+**问题。** `host_top` 剔除 `Read(ModuleConst)`，其 soundness 完全取决于一句话：
+这个 host binding 不会执行 Stilla 代码。编译器证明不了这件事——host binding 是
+embedding 的任意代码，而 interpreter-vm.md / host-bindings.md 把「异步 / 重入
+host 调用」列在当前范围之外只是范围，不是「永远不会发生」的保证。所以它是**受信
+声明**，不是编译器推出的事实。
 
-```text
-StillaExecution = Forbidden | MayExecute | Unknown
-```
-
-- **`Unknown`（缺失声明的默认）与 `MayExecute` 都取完整 `top`。** 未知
-  回调要覆盖的是**全部**效果，不只是读集：资源、`may_trap`、
-  `may_diverge`、`Q`、以及 `Read(ModuleConst)` 通配。于是 §7 的
-  module-const 检查按「可能读任意较晚常量」拒绝。
-- **只有显式 `Forbidden` 才让声明逐字生效。** embedding 认证该 binding
-  「不执行任何 Stilla 代码」时，声明的 `EffectSummary` 才被直接使用——
-  也只有这时 `host_top`（每 mode 的 `host_any` + trap/diverge/`Q`、
-  **不含** `Read(ModuleConst)`）才可以作为声明值。`Forbidden` 的语义要
-  覆盖「执行相关 Stilla 代码的**所有**通道」，不只是调用当前实参。
-- **单一事实。** 读集就是 `EffectSummary` 里的 `Read(ModuleConst)`
-  （`ModuleConst` 是 §5.2 的原生资源），**不另设**与之语义重叠的独立读
-  集字段。ABI 层只需要一个**稳定符号键**——`<模块限定名>.<成员名>`——
-  作为序列化形式：`effects.HostDecl` 按符号声明，编译会话开始时经
-  `HostEffects.resolve` 解析成 `HostBindingId`（builder 分配的稠密 id，
-  只有白盒代码能直接用），符号指不到 binding 的声明被忽略（一份声明集
-  描述的是 embedding，不是某个程序）。
-- **编译与运行必须用同一份契约。** 这些声明是受信的，`host_top` 只对
-  真的不重入的 binding 成立；embedding 采用「禁止重入」的运行时配置，
-  就同时提供这些 `Forbidden` 声明。**编译器不校验运行时是否真的遵守**
-  （它看不到 host 代码）——所以这不是 runtime 侧的重入设计，只是一份
-  编译器消费的受信声明。
-- **重复/矛盾的声明。** 同一 binding 的多条声明**顺序无关**地合并：只有
-  全部为 `Forbidden` 才保留担保，摘要取 join；出现 `Forbidden` 与
-  `MayExecute` 矛盾则降为 `Unknown`（即 `Top`），不采用「后来者胜」。
+- **`Unknown`（缺失声明的默认）与 `MayExecute` 都取完整 `top`**：未知回调要
+  覆盖**全部**效果——资源、`may_trap`、`may_diverge`、`Q`、以及
+  `Read(ModuleConst)` 通配。§7 的 module-const 检查按「可能读任意较晚常量」拒绝。
+- **只有显式 `Forbidden` 才让声明逐字生效。** `Forbidden` 的语义要覆盖「执行
+  相关 Stilla 代码的**所有**通道」。
+- **单一事实。** 读集就是 `EffectSummary` 里的 `Read(ModuleConst)`，**不另设**
+  独立读集字段。ABI 层只需要一个**稳定符号键**——`<模块限定名>.<成员名>`——
+  作为序列化形式：`effects.HostDecl` 按符号声明，会话开始时经
+  `HostEffects.resolve` 解析成 `HostBindingId`；符号指不到 binding 的声明被忽略。
+- **编译与运行必须用同一份契约。** **编译器不校验运行时是否真的遵守**——这不是
+  runtime 侧的重入设计，只是一份编译器消费的受信声明。
+- **重复 / 矛盾的声明** 顺序无关地合并：只有全部 `Forbidden` 才保留担保，摘要
+  取 join；出现 `Forbidden` 与 `MayExecute` 矛盾则降为 `Unknown`（即 `Top`），
+  不采用「后来者胜」。
 
 **兼容成本。** 严格默认会拒绝原本合法的程序：模块常量的销毁链里带日志
-（`drop(t) { builtin.print(...) }`）属于这一类。迁移方式是让 embedding
-（含测试的默认 host）显式声明 `builtin.*` 为 `Forbidden`，而不是把默认
-放宽——默认放宽就回到了「未证明当已保证」。
+（`drop(t) { builtin.print(...) }`）属于这一类。迁移方式是让 embedding（含测试
+的默认 host）显式声明 `builtin.*` 为 `Forbidden`，而不是把默认放宽。
 
-**待决（见 [todo.md](todo.md)）。**
+**待决**（[todo.md](todo.md)）：
 
-- **回调参数化摘要**：调用点若能证明传入 callable 的有限目标集，
-  `MayExecute` 的摘要可精化为 `own ⊔ ⨆ effect_bound(target_i)`；
-  保存后触发的调用必须在**实际触发阶段**归因效果，不能只记在注册调用
-  上。v1 不做。
-- **metadata 不是执行许可。** 即使将来声明 `MayExecute`，允许 host 真正
-  重入还需要运行时的安全设计（栈/帧、借用值生命周期、重入期间的模块
-  状态），声明只描述后果，不开启能力。
+- **回调参数化摘要**：调用点若能证明传入 callable 的有限目标集，`MayExecute`
+  的摘要可精化为 `own ⊔ ⨆ effect_bound(target_i)`；保存后触发的调用必须在
+  **实际触发阶段**归因效果。v1 不做。
+- **metadata 不是执行许可。** 即使将来声明 `MayExecute`，允许 host 真正重入
+  还需要运行时的安全设计；声明只描述后果，不开启能力。
 
-**缓存指纹（EffectEnvironmentFingerprint）。** 若将来缓存**解析之后**的
-结果（语义 side table、摘要、或 lower/优化产物），effect metadata 必须
-进入该缓存键：host 语义 registry 的 generation/版本、effect-domain
-注册表、overlap/disjoint 与 `stable` 声明、以及**本次的 host 声明集合**，
-整体折叠为一个 `EffectEnvironmentFingerprint`。否则 `host.foo` 的声明从
-`Pure` 改成 `Write(OS)` 后，旧缓存里按 `Pure` 优化的代码会变得 unsound。
+**缓存指纹（EffectEnvironmentFingerprint）。** 若将来缓存**解析之后**的结果，
+effect metadata 必须进入该缓存键：host 语义 registry 的 generation / 版本、
+effect-domain 注册表、overlap/disjoint 与 `stable` 声明、以及**本次的 host
+声明集合**，整体折叠为一个指纹。否则声明从 `Pure` 改成 `Write(OS)` 后，旧缓存
+里按 `Pure` 优化的代码会变得 unsound。
 
-**今天不阻塞。** 现有 `frontend_cache.zig` 只缓存**解析产物**
-（`ast.Program` / `ast.Source`，按内容 hash + 逐字节比对校验），member
-表与 phase-2/3 的所有 side table **每次编译都重新推导**——所以声明改变
-不会命中陈旧的效果结论，指纹是为「缓存 phase-2/3 结果」预留的前置条件，
-不是现有缓存的漏洞。
+**今天不阻塞。** 现有 frontend_cache.zig 只缓存**解析产物**（`ast.Program` /
+`ast.Source`，按内容 hash + 逐字节比对校验），member 表与 phase-2/3 的所有 side
+table **每次编译都重新推导**——所以声明改变不会命中陈旧的效果结论，指纹是为
+「缓存 phase-2/3 结果」预留的前置条件，不是现有缓存的漏洞。
 
 ## 14. 模型范围与验收
 
-**最小范围（固定乘积格与保守查询，不做通用 lattice 引擎）**：
+**最小范围**（固定乘积格与保守查询，不做通用 lattice 引擎）：
 
 ```text
 MayTrap（含 panic）+ MayDiverge + nondeterministic
-+ 不再跟踪 may_return_normally（正常返回为默认假设，见 §5.4）
++ 不跟踪 may_return_normally（正常返回为默认假设，见 §5.4）
 + Host(resource, Read/Write)     // resource = 抽象域
 + ModuleConst(Read)
 + OperandUse 独立（move/borrow/consume 不进 EffectSummary）
@@ -1303,122 +1084,92 @@ MayTrap（含 panic）+ MayDiverge + nondeterministic
 
 用它驱动三个 pass：**dead-let、selective ANF、SEG-safe**。
 
-**当前实现**（模型 `effects.zig`，HIR 集成 `hir_effects.zig`）：
+**当前实现**（模型 effects.zig，HIR 集成 hir_effects.zig）：
 
-- 固定乘积格：每模式的规范化访问行 + `All` 通配；`join` / `sequence` /
-  内部 `latticeMeet` / `le`；`Pure == Bottom` 与 `Top`；行与摘要 interner；
-  `Pending | Ready(EffectSummaryId)` 查询门。
-- `effect_transfer` 按 descriptor 的 `own_effect` + `TransferKind` 组合
-  operand / region / callee；`OperandUse` 由 `UsePolicy` + callee 签名 /
-  operand capability 逐 occurrence 解析。
-- 函数摘要：调用图建在已解析 `fn_ref` 目标上（间接 / 未知 Stilla 目标不
-  进图 → `Top`；host 目标只在显式 `StillaExecution.forbidden` 声明下用
-  声明的摘要，否则 `Top`，§13），Kosaraju + callee-first Kleene 迭代
-  （递归 SCC 播种 `Diverge`，每轮清 memo 同步更新；同 SCC 读 `cur`、
-  已完成读 final）；`drop` 把类型的 hook 接入调用图。`validate` 重跑同一
-  fixpoint 后拒绝低报 callee 摘要的节点注解。宿主注入的声明同时贯穿
-  SEG / selective ANF 内部分析轮次与最终复验，共用同一效果环境。
-- `drop_effect(T)` 全链：Copy → `{}`；struct 自身 hook `;` Unique 字段按
-  逆声明序递归；union 候选 `⊔` + payload 逆序；tuple 逆序；`list`/`box`
-  元素递归；opaque → `Release(Host(host_id))`；递归类型以「重入给格底」
-  取 least fixpoint；`any`/`hostdata`/未解析仍保守 `Top`。
-- cleanup 走 cleanup-free MVP：对已求值子树递归证明全部类型 Copy、无非
-  借用 Unique 绑定、无 `drop`，否则 cleanup 贡献 `Top`（未建模的
-  destructor/FE 清理失败关闭）。`CleanupFootprint` token 登记**尚未由
-  builder 填充**，空注册表视为未建模、不作证明（见 [todo.md](todo.md)）。
-- 未知目标：间接调用 / 缺失函数摘要取完整 `Top`（含 read 通配，在 §7
-  检查里保守拒绝）；**缺失 host 声明同样取完整 `Top`**，只有显式
-  `StillaExecution.forbidden` 才让声明的摘要逐字生效（§13）。host 声明
-  经 `frontend.Options.host_decls`（符号键）→ `HostEffects.resolve` →
-  `consolidate` 解析；`EffectEnvironmentFingerprint` 缓存指纹未接线。
-- `stable` 域与 `disjoint` 对按 §5.5/§5.6 实现，未声明的不同资源对按冲突
-  处理。
-- `canMove` 尚未暴露（FE/lifetime 路径事实未建模，暴露恒 false 的入口无
-  意义）；`canSwapOperands` 组合父节点 operand 位、full-expression 边界、
-  两 operand 的 cleanup/ownership 门，再经 `orderCompatible`（资源冲突、
-  trap/diverge 顺序、`Q`）——摘要相等本身不放行任何程序级交换。
-- 隐藏操作审计（未建模但可能有非 pure 行为者一律 `Top`/`MayTrap`）：值
-  位置的模块链叶子（`ExprNode.access_hops` 非空）取 `Top`——lowering 会
-  重放 `module_ref` + `load_member`（hir.md §7.4），其效果面不建模；
-  `let`/`match` 的 pattern 在 HIR 无节点，transfer 显式序列化其效果：
-  只有 list pattern 非 total（元素访问 lowering 为边界检查的
-  `read_index`/`split_list`，均为 `cfg` `may_trap`），其余类别
-  （wildcard/bind/literal/tuple/struct/variant/type_test）为 total。
-- 查询组合（§10.1 强约束「缺一不可」）：`observableEffectFree` 对任一
-  模的通配/未知资源（含 `Read(Top)`）返回 false；
-  `isIntrinsicallySpeculatable` 除 total / 无可观察 / 无 `Q` 外还要求
-  cleanup 证明与递归 ownership 门；`orderCompatible` 拒绝两个可能失败的
-  位（失败顺序可观察，§5.6），`Q` 位除「同一 stable 域读对」外一律拒绝
-  （§5.5）；`ownershipGate` 递归 operand，嵌套 `move`/borrow 不得逃逸；
-  注解校验先清 per-node memo 再重算摘要，故校验是同逻辑的新推导（能拒绝
-  被篡改/过期的注解并定位到过期的调用者）。
-- module-const 检查在 `Analysis.checkModuleDependencies`：初始化方向读
-  函数摘要的 `Read(ModuleConst)`，teardown 方向读 `drop_effect(type(C))`
-  全链，同一模块内按声明序比较；checker 的 AST 级 `InitOrder` 已删除。
+- 固定乘积格：每模式的规范化访问行 + `All` 通配；`join` / `sequence` / 内部
+  `latticeMeet` / `le`；`Pure == Bottom` 与 `Top` / `host_top`；行与摘要
+  interner；`Pending | Ready(EffectSummaryId)` 查询门。
+- transfer 按 descriptor 的 `own_effect` + `TransferKind` 组合 operand / region
+  / callee；`OperandUse` 由 `UsePolicy` + callee 签名 / operand capability 逐
+  occurrence 解析。
+- 函数摘要：调用图建在已解析 `fn_ref` 目标上（间接 / 未知 Stilla 目标不进图 →
+  `Top`；host 目标只在显式 `StillaExecution.forbidden` 声明下用声明的摘要，
+  否则 `Top`），Kosaraju + callee-first Kleene 迭代（递归 SCC 播种 `Diverge`，
+  同 SCC 读 `cur`、已完成读 final）；`drop` 把类型的 hook 接入调用图。`validate`
+  重跑同一 fixpoint 后拒绝低报 callee 摘要的节点注解。
+- `drop_effect(T)` 全链：Copy → `{}`；struct 自身 hook `;` Unique 字段逆声明序
+  递归；union 候选 `⊔` + payload 逆序；tuple 逆序；`list` / `box` 元素递归；
+  opaque → `Release(Host(host_id))`；递归类型取 least fixpoint；`any` /
+  `hostdata` / 未解析仍保守 `Top`。
+- cleanup 走 cleanup-free MVP：对已求值子树递归证明全部类型 Copy、无非借用
+  Unique 绑定、无 `drop`，否则 cleanup 贡献 `Top`。`CleanupFootprint` token
+  登记**尚未填充**，空注册表视为未建模、不作证明。
+- 未知目标：间接调用 / 缺失函数摘要 / 缺失 host 声明取完整 `Top`；host 声明经
+  `frontend.Options.host_decls`（符号键）→ `HostEffects.resolve` →
+  `consolidate` 解析；`EffectEnvironmentFingerprint` 未接线。
+- `stable` 域与 `disjoint` 对按 §5.5/§5.6 实现，未声明的不同资源对按冲突处理。
+- `canMove` 尚未暴露；`canSwapOperands` 组合父节点 operand 位、full-expression
+  边界、两 operand 的 cleanup / ownership 门，再经 `orderCompatible`。
+- 隐藏操作审计（未建模但可能有非 pure 行为者一律 `Top` / `MayTrap`）：值位置的
+  模块链叶子（`access_hops` 非空）取 `Top`；`let` / `match` 的 pattern 在 HIR
+  无节点，transfer 显式序列化其效果：只有 list pattern 非 total（元素访问 lowering
+  为边界检查的 `read_index` / `split_list`），其余类别为 total。
+- 查询组合按 §10.1 强约束；注解校验先清 per-node memo 再重算摘要，故校验是同
+  逻辑的新推导。
+- module-const 检查在 `Analysis.checkModuleDependencies`；checker 的 AST 级
+  `InitOrder` 已删除。
 
 **MVP 前置条件（不能延期）**：
 
 - 实现 Bottom/Pure/Top、join 与顺序组合，以及 Pending/Ready 查询门；
-- 接入 cleanup-aware legality：只有已证明无清理，或已获得保守清理摘要
-  并通过相关查询，才允许删除、浮动、复制或 SEG 准入。未建模的
-  destructor/FE 清理失败关闭；MVP 可只优化**已证明 cleanup-free** 的
-  子树，不能仅检查根结果是否 Copy；
-- **缺失函数摘要、未知 callee 使用 `Top`；缺失 host 声明使用
-  `Top`**（§13）。尚未实现的精化只降低优化覆盖率，不降低保守性。
+- 接入 cleanup-aware legality：只有已证明无清理，或已获得保守清理摘要并通过
+  相关查询，才允许删除、浮动、复制或 SEG 准入；MVP 可只优化**已证明
+  cleanup-free** 的子树，不能仅检查根结果是否 Copy；
+- **缺失函数摘要、未知 callee、缺失 host 声明一律使用 `Top`**（§13）。尚未实现
+  的精化只降低优化覆盖率，不降低保守性。
 
 **验收标准**：
 
-- 这三个 pass 没有任何 `switch(op)` 特判——所有合法性来自派生查询；
-- **negative tests**：每个判定配「不该发生的例子」（如
-  `let x = 10/y in 0` 不许删 x；`host.read() * 0` 不许变 0；`div.i32`
-  不许进 SEG；带 drop hook 的临时值不许被 DCE）；
-- **Q 与 discard 的正/负例**：`let x = clock.now() in 0 → 0` 合法
-  （Q 不阻断 discard，§10.1）；`duplicable(clock.now()) == false`、两处
-  同形 `clock.now()` 不许合并（Q 仍阻断重复与 CSE）；宿主把某读声明为
-  可观察读后，同形的 `let x = that_read() in 0` 不许删；
-- 条件 panic 的函数调用不许被 DCE；有副作用的 callee 表达式必须先于
-  实参执行且不能丢失；未知 cleanup（包括返回 Copy 的子树内部临时量）
-  不许被删/浮动/复制或进入 SEG；Bottom/Pure/Top 与组合满足 §5.4 的
-  代数验收例。另含 `;`/`⊔` 同式与摘要层 `E ; F == F ; E` 的正断言、
-  「摘要相等不单独放行任何程序级交换/删除」的负例，以及 `stable` 域读对
-  在整体 `Q = 1` 表达式中的边界用例（§5.5）。
+- 三个 pass 的**合法性判定**没有 `switch(op)` 特判——合法性一律来自派生查询
+  （规则匹配层的 applicability 按 typed opcode 分派，§10.3）；
+- **negative tests**：`let x = 10/y in 0` 不许删 x；`host.read() * 0` 不许变 0；
+  `div.i32` 不许进 SEG；带 drop hook 的临时值不许被 DCE；
+- **Q 与 discard 的正 / 负例**：`let x = clock.now() in 0 → 0` 合法；
+  `duplicable(clock.now()) == false`、两处同形 `clock.now()` 不许合并；宿主把某
+  读声明为可观察读后，同形的 `let x = that_read() in 0` 不许删；
+- 条件 panic 的函数调用不许被 DCE；有副作用的 callee 表达式必须先于实参执行且
+  不能丢失；未知 cleanup 不许被删 / 浮动 / 复制或进入 SEG；Bottom/Pure/Top 与
+  组合满足 §5.4 的代数验收例；另含 `;`/`⊔` 同式与摘要层交换的正断言、「摘要
+  相等不单独放行任何程序级交换 / 删除」的负例，以及 `stable` 域读对在整体
+  `Q = 1` 表达式中的边界用例（§5.5）。
 
-**里程碑映射**：M1a / M1b / M2a / M2b 各档的内容与交付状态见
-[hir.md](hir.md) §11 的映射表。三个消费者判定（dead-let / selective ANF /
-SEG-safe）均由派生查询驱动、无 `switch(op)` 合法性特判；本节的验收标准
-至此全部满足。未落地项、依赖与验收条件见 [todo.md](todo.md)。
+**里程碑映射**：M1a / M1b / M2a / M2b 见 [hir.md](hir.md) §11。三个消费者判定
+均由派生查询驱动、无 `switch(op)` 合法性特判；上述验收例由 effects.zig /
+hir_effects.zig / hir_simplify_tests.zig / hir_seg_tests.zig 的正负例覆盖。
+未落地项、依赖与验收条件见 [todo.md](todo.md)。
 
 ## 15. 开放问题与现状核对
 
-**开放问题（待决项与验收条件见 [todo.md](todo.md) 的「待决」节）：**
+**开放问题**（待决项与验收条件见 [todo.md](todo.md) 的「待决」节）：
 
-- 域间 overlap/disjoint 声明的具体条目：条目形式见 §5.6，具体内容随
-  真实 host 域出现后按需补全。
-- teardown 检查的链与措辞（§7.2）：Core 现措辞只约束「hook 及其传递
-  调用」，字段/容器元素级 hook 的读（构造上同一危害类）与 Copy 常量的
-  teardown 期读取（从不销毁、无害）均未表达。两条待规范澄清后回填本节
-  与 checker 行为。
-- host 重入契约（§13）：**已定并落地**——`StillaExecution = Forbidden |
-  MayExecute | Unknown`，缺失 = `Unknown` 取完整 `Top`；只有显式
-  `Forbidden` 才让声明逐字生效。余下待定项：(a) 「回调参数化摘要」
-  （`own ⊔ ⨆ effect_bound(target_i)`，保存后调用归因于实际触发阶段）
-  是否立项；(b) `EffectEnvironmentFingerprint` 缓存指纹接线（§13
-  末节）。
+- 域间 overlap / disjoint 声明的具体条目：形式见 §5.6，内容随真实 host 域出现
+  后按需补全。
+- teardown 检查的链与措辞（§7.2）：Core 现措辞只约束「hook 及其传递调用」，字段
+  / 容器元素级 hook 的读与 Copy 常量的 teardown 期读取均未表达。待规范澄清后
+  回填本节与 checker 行为。
+- host 重入契约（§13）：**已定并落地**——缺失 = `Unknown` 取完整 `Top`；只有
+  显式 `Forbidden` 才让声明逐字生效。余下待定项：(a)「回调参数化摘要」是否
+  立项；(b) `EffectEnvironmentFingerprint` 缓存指纹接线。
 
 **现状核对（哪些特设实现已被本文派生查询取代）：**
 
-- module-const 依赖检查：checker_validate.zig 的 `InitOrder`（初始化
-  方向 + drop hook 方向）曾是 AST 级的特设 walker，现由
-  `hir_effects.Analysis.checkModuleDependencies` 取代——用函数摘要的
-  `Read(ModuleConst)` 集（初始化方向）与 `drop_effect(T)` 全链（teardown
-  方向）判定，`InitOrder` 已从 checker 删除；
-- CFG/AIR 层已有一份 per-op 的 `may_trap / effects` 两位 schema（cfg.zig
-  的 op schema，派生查询为 `pure()` 即 `!effects ∧ !may_trap`）——它是
-  op 级的保守位，缺少 typed 精度与资源域；本文的 typed-opcode 摘要是对
-  它的精化与统一，按“显式分层”处理：HIR 的 typed 行按具体 rep 写死
-  （整数 div/rem `MayTrap`、float div/rem `Pure`），**不要求**与 CFG 粗
-  粒度位逐位相等（CFG 故意过度近似 float 除法）；registry 启动校验只
-  断言 HIR 行自身的 typed 一致性，避免同一 trap 语义写两处而漂移。
-- 现有 pass（dead-instr 等）以「side-effect-free、non-consuming、
-  non-trapping」的 schema 位白名单做判定——正是本文想用派生查询替代的
-  形态。
+- **module-const 依赖检查**：checker_validate.zig 的 `InitOrder` 曾是 AST 级
+  特设 walker，现由 `hir_effects.Analysis.checkModuleDependencies` 取代——用函数
+  摘要的 `Read(ModuleConst)` 集与 `drop_effect(T)` 全链判定，`InitOrder` 已删除。
+- **CFG/AIR 的 per-op schema**：cfg.zig 的 op schema 仍有一份 `may_trap` /
+  `effects` 两位（派生查询为 `pure()`）；它是 op 级保守位，缺少 typed 精度与
+  资源域。本文的 typed-opcode 摘要是对它的精化与统一，按**显式分层**处理：
+  HIR 的 typed 行按具体 rep 写死，**不要求**与 CFG 粗粒度位逐位相等（CFG 故意
+  过度近似 float 除法）；registry 启动校验只断言 HIR 行自身的 typed 一致性。
+- **现有 pass（dead-instr 等）** 仍以 schema 位白名单做判定——正是本文想用派生
+  查询替代的形态。

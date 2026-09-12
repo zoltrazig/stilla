@@ -27,32 +27,31 @@ pub const invalid_pc: u32 = 0xffff_ffff;
 /// popped continuation instead of a caller pc.
 pub const vm_internal_pc: u32 = 0xffff_fffe;
 
-/// One decoded frame header. Field ranges are validated by `check`.
-pub const FrameHeader = struct {
-    saved_fp: u32,
-    saved_fn: u32,
-    saved_ra: u32,
+/// The three-cell frame header as it sits on the stack — the LLIR
+/// `llir.CallHeader` record (`saved_fp`, `saved_fn`, `saved_ra`,
+/// distinguished by position). Decoding is `readHeader`; range/sentinel
+/// validation is `checkHeader`.
+pub const FrameHeader = llir.CallHeader;
 
-    /// Range/sentinel validation, in place, before any use (§7):
-    /// `saved_fp` is the caller's frame base — strictly below the
-    /// current `fp` — or the root sentinel; `saved_ra` is an
-    /// executable pc, the root sentinel, or the
-    /// internal-continuation sentinel. When `saved_ra` is a real pc
-    /// (or `vm_internal_pc`), `saved_fn` must be a real registry index
-    /// whose code range contains that pc — O(1), position-consistent.
-    pub fn check(self: FrameHeader, funcs: []const FnEntry, fp: u32) bool {
-        if (self.saved_fp != invalid_pc and self.saved_fp >= fp) return false;
-        switch (self.saved_ra) {
-            invalid_pc => return self.saved_fp == invalid_pc and self.saved_fn == invalid_pc,
-            vm_internal_pc => return self.saved_fn < funcs.len,
-            else => {
-                if (self.saved_fn >= funcs.len) return false;
-                const f = funcs[self.saved_fn].desc;
-                return self.saved_ra >= f.code_start and self.saved_ra < f.code_end;
-            },
-        }
+/// Range/sentinel validation of a decoded header, in place, before any use
+/// (§7): `saved_fp` is the caller's frame base — strictly below the
+/// current `fp` — or the root sentinel; `saved_ra` is an executable pc,
+/// the root sentinel, or the internal-continuation sentinel. When
+/// `saved_ra` is a real pc (or `vm_internal_pc`), `saved_fn` must be a
+/// real registry index whose code range contains that pc — O(1),
+/// position-consistent.
+pub fn checkHeader(self: FrameHeader, funcs: []const FnEntry, fp: u32) bool {
+    if (self.saved_fp != invalid_pc and self.saved_fp >= fp) return false;
+    switch (self.saved_ra) {
+        invalid_pc => return self.saved_fp == invalid_pc and self.saved_fn == invalid_pc,
+        vm_internal_pc => return self.saved_fn < funcs.len,
+        else => {
+            if (self.saved_fn >= funcs.len) return false;
+            const f = funcs[self.saved_fn].desc;
+            return self.saved_ra >= f.code_start and self.saved_ra < f.code_end;
+        },
     }
-};
+}
 
 /// The VM's function registry entry: one loaded artifact's function,
 /// relocated onto the VM instruction image. `mod` is the owning

@@ -21,7 +21,7 @@
 
 const std = @import("std");
 const ast = @import("stilla").ast;
-const cfg = @import("stilla").cfg;
+const meta = @import("stilla").meta;
 const moduleinfo = @import("stilla").moduleinfo;
 const type_resolve = @import("type_resolve.zig");
 const type_shape = @import("type_shape.zig");
@@ -129,7 +129,7 @@ fn annotateItem(ck: *checker.Checker, frame: *Frame, item: *ast.ModuleItem) Chec
 fn checkDropHook(frame: *Frame, s: *const ast.StructDef, d: *const ast.DropDecl) CheckError!void {
     _ = try pushScope(frame, true);
     defer popScope(frame);
-    _ = try bindLocal(frame, d.param.text, cfg.Type{ .named = .{ .id = (moduleinfo.resolveTypeId(frame.resolve, frame.info, s.name.text) orelse return), .args = &.{} } }, true);
+    _ = try bindLocal(frame, d.param.text, meta.Type{ .named = .{ .id = (moduleinfo.resolveTypeId(frame.resolve, frame.info, s.name.text) orelse return), .args = &.{} } }, true);
     _ = try checkBlock(frame, d.body);
     if (d.body.result) |*r| {
         if (try isBorrowedExpr(frame, r)) {
@@ -147,7 +147,7 @@ fn checkDropHook(frame: *Frame, s: *const ast.StructDef, d: *const ast.DropDecl)
 /// in scope. Phase 1 degrades unknown names to `.param`, so this is how
 /// the checker turns a typo like `fn f(x: Piont)` into a diagnostic
 /// (Core §12.1).
-fn findStrayParam(t: cfg.Type, declared: []const ast.Ident) ?[]const u8 {
+fn findStrayParam(t: meta.Type, declared: []const meta.Ident) ?[]const u8 {
     return switch (t) {
         .param => |name| blk: {
             for (declared) |d| if (std.mem.eql(u8, d.text, name)) break :blk null;
@@ -209,7 +209,7 @@ fn checkFuncBody(frame: *Frame, f: *const ast.FuncDef, body: *const ast.Block) C
     }
 }
 
-fn checkBlock(frame: *Frame, b: *const ast.Block) CheckError!cfg.Type {
+fn checkBlock(frame: *Frame, b: *const ast.Block) CheckError!meta.Type {
     _ = try pushScope(frame, false);
     defer popScope(frame);
 
@@ -228,8 +228,8 @@ fn checkBlock(frame: *Frame, b: *const ast.Block) CheckError!cfg.Type {
         .empty => {},
     };
 
-    if (b.result) |*r| return (try inferExprAs(frame, r, frame.expect)) orelse cfg.Type{ .primitive = .void };
-    return cfg.Type{ .primitive = .void };
+    if (b.result) |*r| return (try inferExprAs(frame, r, frame.expect)) orelse meta.Type{ .primitive = .void };
+    return meta.Type{ .primitive = .void };
 }
 
 fn checkLet(frame: *Frame, l: *const ast.LetStmt) CheckError!void {
@@ -237,7 +237,7 @@ fn checkLet(frame: *Frame, l: *const ast.LetStmt) CheckError!void {
     // it against the initializer (checker.md, Checks enabled by annotation; Core §5); it is also the
     // initializer's goal type (Core §11), so an under-determined
     // construction fills its type arguments from it.
-    var declared: ?cfg.Type = null;
+    var declared: ?meta.Type = null;
     if (l.type_ != null) {
         declared = try frame.ck.resolveTypeOf(frame.ma, frame.info, &l.type_.?);
         // A declared type may not name an undeclared type variable.
@@ -245,7 +245,7 @@ fn checkLet(frame: *Frame, l: *const ast.LetStmt) CheckError!void {
             return frame.ck.fail(l.type_.?.span(), "cannot resolve type '{s}': not a declared type parameter of this function", .{name});
         }
     }
-    const t: ?cfg.Type = blk: {
+    const t: ?meta.Type = blk: {
         // The declared type types the binding when one is written (Core
         // §4): a declared `any` makes the binding `any` (the top-type
         // coercion is materialized at the let, Core §11.6), a declared
@@ -294,7 +294,7 @@ fn bindUsing(frame: *Frame, u: *const ast.UsingDecl) CheckError!void {
     const target = type_resolve.resolveAliasTarget(frame.resolve, frame.info, u) orelse return;
     switch (target) {
         .module => {
-            const local = try bindLocal(frame, alias.text, cfg.Type{ .module = {} }, false);
+            const local = try bindLocal(frame, alias.text, meta.Type{ .module = {} }, false);
             local.is_using = true;
         },
         .value => |mr| {
@@ -322,7 +322,7 @@ fn popScope(frame: *Frame) void {
     frame.scope = frame.scope.parent.?;
 }
 
-fn bindLocal(frame: *Frame, name: []const u8, t: cfg.Type, is_borrow: bool) CheckError!*Local {
+fn bindLocal(frame: *Frame, name: []const u8, t: meta.Type, is_borrow: bool) CheckError!*Local {
     const ma = frame.ma;
     const id = ma.next_binding_id;
     ma.next_binding_id += 1;
@@ -369,7 +369,7 @@ fn lookupLocalScope(frame: *Frame, name: []const u8) ?LocalBinding {
 /// reports unknown bindings). A borrowed, already-moved, definitely-
 /// released, or maybe-unique binding cannot be moved or dropped (Core
 /// §18 *Ownership*).
-fn markConsumed(frame: *Frame, name: []const u8, span: ast.Span, action: []const u8, actioned: []const u8) CheckError!?cfg.Type {
+fn markConsumed(frame: *Frame, name: []const u8, span: meta.Span, action: []const u8, actioned: []const u8) CheckError!?meta.Type {
     const local = lookupLocal(frame, name) orelse return null;
     if (!isUnique(frame, local.type_)) return local.type_;
     switch (local.state) {
@@ -383,7 +383,7 @@ fn markConsumed(frame: *Frame, name: []const u8, span: ast.Span, action: []const
     return local.type_;
 }
 
-fn isUnique(frame: *Frame, t: cfg.Type) bool {
+fn isUnique(frame: *Frame, t: meta.Type) bool {
     return checker.isUnique(frame, t);
 }
 
@@ -392,7 +392,7 @@ fn isUnique(frame: *Frame, t: cfg.Type) bool {
 // §13.5, §10.7, §18)
 // ---------------------------------------------------------------------------
 
-fn isUniqueType(frame: *Frame, t: ?cfg.Type) bool {
+fn isUniqueType(frame: *Frame, t: ?meta.Type) bool {
     return if (t) |tt| isUnique(frame, tt) else false;
 }
 
@@ -460,7 +460,7 @@ fn scrutineeIsMove(frame: *Frame, e: *const ast.Expr) bool {
 /// §13.5). True for an explicit `move`, for a Copy scrutinee, and for
 /// a fresh unique value (any non-path expression); false for an unique
 /// binding or module member, which is borrowed by the construct.
-fn consumesScrutinee(frame: *Frame, e: *const ast.Expr, t: cfg.Type) bool {
+fn consumesScrutinee(frame: *Frame, e: *const ast.Expr, t: meta.Type) bool {
     if (scrutineeIsMove(frame, e)) return true;
     if (!isUnique(frame, t)) return true;
     switch (e.*) {
@@ -472,7 +472,7 @@ fn consumesScrutinee(frame: *Frame, e: *const ast.Expr, t: cfg.Type) bool {
 /// Core §14.6 *Whole-owner*: consumingly destructuring a struct that
 /// defines its own `drop` hook is a compile-time error; borrowing
 /// destructuring is fine. Only reached for consuming scrutinees.
-fn checkDropHookMatch(frame: *Frame, m: *const ast.MatchExpr, scrut_t: cfg.Type) CheckError!void {
+fn checkDropHookMatch(frame: *Frame, m: *const ast.MatchExpr, scrut_t: meta.Type) CheckError!void {
     if (scrut_t != .named) return;
     const sd = moduleinfo.structDecl(frame.resolve, frame.info, frame.resolve.typeNameOf(scrut_t.named.id) orelse return) orelse return;
     if (sd.drop == null) return;
@@ -513,7 +513,7 @@ fn requireMoveIfOwned(frame: *Frame, a: *const ast.Expr, what: []const u8) Check
 /// rejects `move`; a `move` parameter requires an explicit `move` of an
 /// existing unique owner, rejects borrowed values, and accepts a fresh
 /// unique value as an implicit transfer.
-fn checkArgsOwnership(frame: *Frame, c: *const ast.Call, arg_types: []const cfg.Type, sig: cfg.Type) CheckError!void {
+fn checkArgsOwnership(frame: *Frame, c: *const ast.Call, arg_types: []const meta.Type, sig: meta.Type) CheckError!void {
     if (sig != .function) return;
     const params = sig.function.params;
     for (c.args, 0..) |*a, i| {
@@ -579,7 +579,7 @@ fn checkArgsOwnership(frame: *Frame, c: *const ast.Call, arg_types: []const cfg.
 /// Infer the type an expression produces, recording it in `expr_of`
 /// (checker.md, Expression inference). Returns null when the type is not inferable; the node
 /// is still visited so every child's type is recorded.
-fn inferExpr(frame: *Frame, e: *const ast.Expr) CheckError!?cfg.Type {
+fn inferExpr(frame: *Frame, e: *const ast.Expr) CheckError!?meta.Type {
     const t = try inferExprInner(frame, e);
     if (t) |tt| try frame.ma.expr_of.put(frame.ck.alloc(), e, tt);
     return t;
@@ -589,7 +589,7 @@ fn inferExpr(frame: *Frame, e: *const ast.Expr) CheckError!?cfg.Type {
 /// arguments can't be inferred from their payloads alone fill the unbound
 /// ones from `expected`. The goal applies only to this subtree and is
 /// restored afterwards.
-fn inferExprAs(frame: *Frame, e: *const ast.Expr, expected: ?cfg.Type) CheckError!?cfg.Type {
+fn inferExprAs(frame: *Frame, e: *const ast.Expr, expected: ?meta.Type) CheckError!?meta.Type {
     const old = frame.expect;
     frame.expect = expected;
     defer frame.expect = old;
@@ -603,7 +603,7 @@ fn inferExprAs(frame: *Frame, e: *const ast.Expr, expected: ?cfg.Type) CheckErro
 /// (Core Types: the other side of a numeric binary operator is an explicit
 /// type context). A literal on the left is widened symmetrically once the
 /// right side's type is known.
-fn inferBinaryOperands(frame: *Frame, b: *const ast.Binary) CheckError!?cfg.Type {
+fn inferBinaryOperands(frame: *Frame, b: *const ast.Binary) CheckError!?meta.Type {
     const lt = try inferExpr(frame, b.lhs);
     const rt = try inferExprAs(frame, b.rhs, lt);
     // A literal on the left is widened symmetrically once the right side's
@@ -611,7 +611,7 @@ fn inferBinaryOperands(frame: *Frame, b: *const ast.Binary) CheckError!?cfg.Type
     // `int`) is a literal in this sense too — `-4 < x` with `x: int64`
     // must type the literal at int64, not reject the comparison.
     if (lt != null and rt != null) {
-        if (rt.? == .primitive and !cfg.Type.eql(lt.?, rt.?)) {
+        if (rt.? == .primitive and !meta.Type.eql(lt.?, rt.?)) {
             switch (b.lhs.*) {
                 .int, .float => return inferExprAs(frame, b.lhs, rt),
                 .unary => |u| if (u.op == .neg and (u.operand.* == .int or u.operand.* == .float)) {
@@ -626,14 +626,14 @@ fn inferBinaryOperands(frame: *Frame, b: *const ast.Binary) CheckError!?cfg.Type
 
 /// The integer widths (Core Types §16.3): `byte` has no arithmetic and is
 /// written with an explicit `as byte`, so it is never a literal context.
-fn isIntWidth(k: ast.PrimitiveKind) bool {
+fn isIntWidth(k: meta.PrimitiveKind) bool {
     return switch (k) {
         .int32, .uint32, .int64, .uint64 => true,
         else => false,
     };
 }
 
-fn inferExprInner(frame: *Frame, e: *const ast.Expr) CheckError!?cfg.Type {
+fn inferExprInner(frame: *Frame, e: *const ast.Expr) CheckError!?meta.Type {
     const alloc = frame.ck.alloc();
     switch (e.*) {
         .int => |*lit| {
@@ -655,7 +655,7 @@ fn inferExprInner(frame: *Frame, e: *const ast.Expr) CheckError!?cfg.Type {
                     return t;
                 }
             }
-            return cfg.Type{ .primitive = .int32 };
+            return meta.Type{ .primitive = .int32 };
         },
         .float => |*lit| {
             // A float literal keeps `float32` unless its uniquely-expected
@@ -668,28 +668,28 @@ fn inferExprInner(frame: *Frame, e: *const ast.Expr) CheckError!?cfg.Type {
                     return t;
                 }
             }
-            return cfg.Type{ .primitive = .float32 };
+            return meta.Type{ .primitive = .float32 };
         },
-        .string => return cfg.Type{ .primitive = .str },
-        .bool => return cfg.Type{ .primitive = .bool },
-        .void => return cfg.Type{ .primitive = .void },
-        .import => return cfg.Type{ .module = {} },
+        .string => return meta.Type{ .primitive = .str },
+        .bool => return meta.Type{ .primitive = .bool },
+        .void => return meta.Type{ .primitive = .void },
+        .import => return meta.Type{ .module = {} },
         .path => |*p| return inferPath(frame, p),
         .paren => |*p| return inferExpr(frame, p.inner),
         .tuple => |*t| {
-            var elems = try alloc.alloc(cfg.Type, t.elems.len);
+            var elems = try alloc.alloc(meta.Type, t.elems.len);
             for (t.elems, 0..) |*el, i| {
                 const et = try inferExpr(frame, el);
                 if (try isBorrowedExpr(frame, el)) {
                     return frame.ck.fail(el.span(), "cannot store a borrowed value into an owning container (Core §10.7)", .{});
                 }
                 try requireMoveIfOwned(frame, el, "element");
-                elems[i] = et orelse cfg.Type{ .primitive = .any };
+                elems[i] = et orelse meta.Type{ .primitive = .any };
             }
-            return cfg.Type{ .tuple = elems };
+            return meta.Type{ .tuple = elems };
         },
         .list => |*l| {
-            var elem: cfg.Type = cfg.Type{ .primitive = .int32 };
+            var elem: meta.Type = meta.Type{ .primitive = .int32 };
             for (l.elems, 0..) |*el, i| {
                 const et = try inferExpr(frame, el);
                 if (try isBorrowedExpr(frame, el)) {
@@ -700,14 +700,14 @@ fn inferExprInner(frame: *Frame, e: *const ast.Expr) CheckError!?cfg.Type {
                     if (i == 0) elem = t;
                 }
             }
-            const ptr = try alloc.create(cfg.Type);
+            const ptr = try alloc.create(meta.Type);
             ptr.* = elem;
-            return cfg.Type{ .list = ptr };
+            return meta.Type{ .list = ptr };
         },
         .lambda => |*lam| {
             _ = try pushScope(frame, true);
             defer popScope(frame);
-            var params = try alloc.alloc(cfg.Param, lam.params.len);
+            var params = try alloc.alloc(meta.Param, lam.params.len);
             for (lam.params, 0..) |*p, i| {
                 const t = try frame.ck.resolveTypeOf(frame.ma, frame.info, &p.type_);
                 params[i] = .{ .span = p.span, .name = p.name, .mode = p.mode, .type_ = t };
@@ -727,9 +727,9 @@ fn inferExprInner(frame: *Frame, e: *const ast.Expr) CheckError!?cfg.Type {
             frame.expect = declared;
             defer frame.expect = old;
             _ = try checkBlock(frame, lam.body);
-            const ret_ptr = try alloc.create(cfg.Type);
+            const ret_ptr = try alloc.create(meta.Type);
             ret_ptr.* = declared;
-            return cfg.Type{ .function = .{ .params = params, .ret = ret_ptr } };
+            return meta.Type{ .function = .{ .params = params, .ret = ret_ptr } };
         },
         .if_ => |*i| {
             const tracked = try ownership.begin(frame);
@@ -739,7 +739,7 @@ fn inferExprInner(frame: *Frame, e: *const ast.Expr) CheckError!?cfg.Type {
             const then_path = try ownership.pathOf(frame, tracked, entry, ownership.blockCompletesNormally(frame, i.then));
             if (i.else_) |else_e| {
                 try ownership.restore(frame, tracked, entry);
-                const else_t = (try inferExprAs(frame, else_e, frame.expect)) orelse cfg.Type{ .primitive = .void };
+                const else_t = (try inferExprAs(frame, else_e, frame.expect)) orelse meta.Type{ .primitive = .void };
                 const else_path = try ownership.pathOf(frame, tracked, entry, ownership.exprCompletesNormally(frame, else_e));
                 try ownership.merge(frame, tracked, entry, &.{ then_path, else_path }, i.span);
                 return try joinBranches(frame, i.span, then_t, else_t);
@@ -748,11 +748,11 @@ fn inferExprInner(frame: *Frame, e: *const ast.Expr) CheckError!?cfg.Type {
             // releases nothing (Core §10.10).
             const noop = try ownership.noopPath(frame, tracked);
             try ownership.merge(frame, tracked, entry, &.{ then_path, noop }, i.span);
-            return cfg.Type{ .primitive = .void };
+            return meta.Type{ .primitive = .void };
         },
         .match => |*m| {
             const tracked = try ownership.begin(frame);
-            const scrut_t = (try inferExpr(frame, m.scrutinee)) orelse cfg.Type{ .primitive = .any };
+            const scrut_t = (try inferExpr(frame, m.scrutinee)) orelse meta.Type{ .primitive = .any };
             // `match (move value)` consumes the complete owner; matching an
             // unique value through an ordinary expression borrows it, and
             // the arm's unique payload bindings are borrows for the arm
@@ -762,7 +762,7 @@ fn inferExprInner(frame: *Frame, e: *const ast.Expr) CheckError!?cfg.Type {
             const consuming = consumesScrutinee(frame, m.scrutinee, scrut_t);
             if (consuming) try checkDropHookMatch(frame, m, scrut_t);
             const entry = try ownership.entryStates(frame, tracked);
-            var result: ?cfg.Type = null;
+            var result: ?meta.Type = null;
             const paths = try alloc.alloc(ownership.Path, m.arms.len);
             for (m.arms, 0..) |*arm, ai| {
                 // Each arm's pattern bindings live in their own scope
@@ -774,18 +774,18 @@ fn inferExprInner(frame: *Frame, e: *const ast.Expr) CheckError!?cfg.Type {
                 _ = try pushScope(frame, false);
                 defer popScope(frame);
                 _ = try inferPattern(frame, &arm.pattern, scrut_t, !consuming);
-                const at = (try inferExprAs(frame, arm.body, frame.expect)) orelse cfg.Type{ .primitive = .void };
+                const at = (try inferExprAs(frame, arm.body, frame.expect)) orelse meta.Type{ .primitive = .void };
                 result = if (result) |r| try joinBranches(frame, m.span, r, at) else at;
                 paths[ai] = try ownership.pathOf(frame, tracked, entry, ownership.exprCompletesNormally(frame, arm.body));
                 try ownership.restore(frame, tracked, entry);
             }
             try ownership.merge(frame, tracked, entry, paths, m.span);
-            return result orelse cfg.Type{ .primitive = .void };
+            return result orelse meta.Type{ .primitive = .void };
         },
         .block => |*b| return try checkBlock(frame, b.block),
         .unary => |*u| {
             const ot = try inferExpr(frame, u.operand);
-            if (u.op == .not) return cfg.Type{ .primitive = .bool };
+            if (u.op == .not) return meta.Type{ .primitive = .bool };
             return ot;
         },
         .binary => |*b| switch (b.op) {
@@ -800,11 +800,11 @@ fn inferExprInner(frame: *Frame, e: *const ast.Expr) CheckError!?cfg.Type {
                 _ = try inferExpr(frame, b.rhs);
                 const rhs_path = try ownership.pathOf(frame, tracked, entry, ownership.exprCompletesNormally(frame, b.rhs));
                 try ownership.merge(frame, tracked, entry, &.{ lhs_path, rhs_path }, b.span);
-                return cfg.Type{ .primitive = .bool };
+                return meta.Type{ .primitive = .bool };
             },
             .eq, .ne, .lt, .le, .gt, .ge => {
                 _ = try inferBinaryOperands(frame, b);
-                return cfg.Type{ .primitive = .bool };
+                return meta.Type{ .primitive = .bool };
             },
             .add, .sub, .mul, .div, .rem, .bitand, .bitor, .bitxor, .shl, .shr => {
                 return inferBinaryOperands(frame, b);
@@ -828,7 +828,7 @@ fn inferExprInner(frame: *Frame, e: *const ast.Expr) CheckError!?cfg.Type {
     }
 }
 
-fn inferPath(frame: *Frame, p: *const ast.PathExpr) CheckError!?cfg.Type {
+fn inferPath(frame: *Frame, p: *const ast.PathExpr) CheckError!?meta.Type {
     switch (p.tail) {
         .construct => |*sc| {
             // Struct construction: the path is a type name (Core §8.1).
@@ -845,7 +845,7 @@ fn inferPath(frame: *Frame, p: *const ast.PathExpr) CheckError!?cfg.Type {
                 break :blk moduleinfo.structDecl(frame.resolve, frame.info, cname);
             };
             for (sc.fields) |*f| {
-                var goal: ?cfg.Type = null;
+                var goal: ?meta.Type = null;
                 if (sd) |s| {
                     if (moduleinfo.fieldIndex(s, f.name.text)) |idx| {
                         goal = try frame.ck.resolveTypeOf(frame.ma, frame.info, &s.fields[@intCast(idx)].type_);
@@ -884,7 +884,7 @@ fn inferPath(frame: *Frame, p: *const ast.PathExpr) CheckError!?cfg.Type {
             } else null;
             if (v.args) |args| {
                 for (args, 0..) |*a, i| {
-                    var goal: ?cfg.Type = null;
+                    var goal: ?meta.Type = null;
                     if (payload_types) |types| {
                         if (i < types.len) goal = try frame.ck.resolveTypeOf(frame.ma, frame.info, &types[i]);
                     }
@@ -922,7 +922,7 @@ fn opaquePathName(frame: *Frame, p: *const ast.PathExpr) CheckError!?[]const u8 
 /// then against module members (Core §2.5, §2.7); a local that has been
 /// moved or definitely released is a use-after-move error (Core §18
 /// *Ownership*).
-fn resolvePath(frame: *Frame, path: []const ast.Ident) CheckError!?cfg.Type {
+fn resolvePath(frame: *Frame, path: []const meta.Ident) CheckError!?meta.Type {
     const head = path[0];
     if (lookupLocalScope(frame, head.text)) |found| {
         // A lambda or function body may not capture a local binding from an
@@ -991,7 +991,7 @@ fn isCapture(frame: *Frame, scope_of_local: *const Scope) bool {
 
 /// The type of a member selected on `cur` by name (`cur.name`), for struct
 /// fields and tuple elements (Core §15.1).
-fn memberTypeOf(frame: *Frame, cur: cfg.Type, seg: ast.Ident) CheckError!?cfg.Type {
+fn memberTypeOf(frame: *Frame, cur: meta.Type, seg: meta.Ident) CheckError!?meta.Type {
     switch (cur) {
         .named => |n| {
             const qname = frame.resolve.typeNameOf(n.id) orelse return null;
@@ -1022,17 +1022,17 @@ fn memberTypeOf(frame: *Frame, cur: cfg.Type, seg: ast.Ident) CheckError!?cfg.Ty
 /// from the field/payload argument types (`Option::Some(42)` →
 /// `Option[int32]`), or empty (a wildcard matching any instantiation of
 /// the declaration) when nothing constrains them (`Option::None`).
-fn namedPath(frame: *Frame, p: *const ast.PathExpr, sc: ?*const ast.StructConstruct, v: ?*const ast.VariantExpr) CheckError!?cfg.Type {
+fn namedPath(frame: *Frame, p: *const ast.PathExpr, sc: ?*const ast.StructConstruct, v: ?*const ast.VariantExpr) CheckError!?meta.Type {
     const name = type_resolve.joinPath(frame.ck.alloc(), p.path) orelse return null;
     const id = moduleinfo.resolveTypeId(frame.resolve, frame.info, name) orelse return null;
-    var args: []cfg.Type = &.{};
+    var args: []meta.Type = &.{};
     if (p.type_args) |wa| {
-        args = try frame.ck.alloc().alloc(cfg.Type, wa.len);
+        args = try frame.ck.alloc().alloc(meta.Type, wa.len);
         for (wa, 0..) |*w, i| args[i] = try frame.ck.resolveTypeOf(frame.ma, frame.info, w);
     } else {
         args = try inferConstructArgs(frame, id, sc, v);
     }
-    return cfg.Type{ .named = .{ .id = id, .args = args } };
+    return meta.Type{ .named = .{ .id = id, .args = args } };
 }
 
 /// Infer a construction's type arguments from its field/payload argument
@@ -1040,19 +1040,19 @@ fn namedPath(frame: *Frame, p: *const ast.PathExpr, sc: ?*const ast.StructConstr
 /// (which references the declaration's type parameters) against the
 /// corresponding argument expression type. Any parameter left unbound
 /// leaves the arguments empty (a wildcard).
-fn inferConstructArgs(frame: *Frame, id: moduleinfo.TypeId, sc: ?*const ast.StructConstruct, v: ?*const ast.VariantExpr) CheckError![]cfg.Type {
+fn inferConstructArgs(frame: *Frame, id: moduleinfo.TypeId, sc: ?*const ast.StructConstruct, v: ?*const ast.VariantExpr) CheckError![]meta.Type {
     const name = frame.resolve.typeNameOf(id) orelse return &.{};
     const alloc = frame.ck.alloc();
-    var params: []const ast.Ident = &.{};
+    var params: []const meta.Ident = &.{};
     var written: []const ast.Type = &.{};
-    var args: []const cfg.Type = &.{};
+    var args: []const meta.Type = &.{};
     if (sc) |s| {
         const sd = moduleinfo.structDecl(frame.resolve, frame.info, name) orelse return &.{};
         params = sd.type_params;
         if (params.len == 0) return &.{};
         const n = sd.fields.len;
         const wt = try alloc.alloc(ast.Type, n);
-        const at = try alloc.alloc(cfg.Type, n);
+        const at = try alloc.alloc(meta.Type, n);
         var used = false;
         for (sd.fields, 0..) |*f, i| {
             wt[i] = f.type_;
@@ -1086,7 +1086,7 @@ fn inferConstructArgs(frame: *Frame, id: moduleinfo.TypeId, sc: ?*const ast.Stru
         const vt = ud.variants[idx].types orelse return &.{};
         written = vt;
         const va = vv.args orelse return &.{};
-        const at = try alloc.alloc(cfg.Type, va.len);
+        const at = try alloc.alloc(meta.Type, va.len);
         for (va, 0..) |*a, i| {
             // Payload positions are an explicit type context (Core Types
             // §16.3): infer under the declared payload's resolved type.
@@ -1095,13 +1095,13 @@ fn inferConstructArgs(frame: *Frame, id: moduleinfo.TypeId, sc: ?*const ast.Stru
         }
         args = at;
     } else return &.{};
-    var env = std.StringHashMapUnmanaged(cfg.Type).empty;
+    var env = std.StringHashMapUnmanaged(meta.Type).empty;
     const count = @min(written.len, args.len);
     for (written[0..count], args[0..count]) |*w, a| {
         const wt = try frame.ck.resolveTypeOf(frame.ma, frame.info, w);
         _ = type_infer.unifyType(frame.resolve, frame.info, wt, a, &env);
     }
-    const out = try alloc.alloc(cfg.Type, params.len);
+    const out = try alloc.alloc(meta.Type, params.len);
     for (params, 0..) |*prm, i| {
         if (env.get(prm.text)) |t| {
             out[i] = t;
@@ -1126,9 +1126,9 @@ fn inferConstructArgs(frame: *Frame, id: moduleinfo.TypeId, sc: ?*const ast.Stru
 // Calls (checker.md, Expression inference; Generic expansion)
 // ---------------------------------------------------------------------------
 
-fn inferCall(frame: *Frame, c: *const ast.Call) CheckError!?cfg.Type {
+fn inferCall(frame: *Frame, c: *const ast.Call) CheckError!?meta.Type {
     var callee = c.callee;
-    var explicit: ?[]cfg.Type = null;
+    var explicit: ?[]meta.Type = null;
     if (callee.* == .specialize) {
         explicit = try resolveSpecializeArgs(frame, &callee.specialize);
         callee = callee.specialize.operand;
@@ -1150,9 +1150,9 @@ fn inferCall(frame: *Frame, c: *const ast.Call) CheckError!?cfg.Type {
             if (explicit == null and requiresExplicitTypeArgs(target)) {
                 return frame.ck.fail(c.span, "type arguments of '{s}.{s}' must be written explicitly (::[...])", .{ target.module.specifier, target.vm.name.text });
             }
-            var arg_types = try frame.ck.alloc().alloc(cfg.Type, c.args.len);
+            var arg_types = try frame.ck.alloc().alloc(meta.Type, c.args.len);
             for (c.args, 0..) |*a, i| {
-                arg_types[i] = (try inferExpr(frame, a)) orelse cfg.Type{ .primitive = .any };
+                arg_types[i] = (try inferExpr(frame, a)) orelse meta.Type{ .primitive = .any };
             }
             const inst = try specializeInstance(frame, target, explicit, arg_types);
             try frame.ma.call_of.put(frame.ck.alloc(), c, inst);
@@ -1175,12 +1175,12 @@ fn inferCall(frame: *Frame, c: *const ast.Call) CheckError!?cfg.Type {
     if (fn_t != .function) return null;
     const sig = fn_t.function;
 
-    var arg_types = try frame.ck.alloc().alloc(cfg.Type, c.args.len);
+    var arg_types = try frame.ck.alloc().alloc(meta.Type, c.args.len);
     for (c.args, 0..) |*a, i| {
         // Parameter positions are an explicit type context (Core Types
         // §16.3): a literal argument to an `i64` parameter types at i64.
         const pt = if (i < sig.params.len) sig.params[i].type_ else null;
-        arg_types[i] = (try inferExprAs(frame, a, pt)) orelse cfg.Type{ .primitive = .any };
+        arg_types[i] = (try inferExprAs(frame, a, pt)) orelse meta.Type{ .primitive = .any };
     }
 
     try checkArgsOwnership(frame, c, arg_types, fn_t);
@@ -1230,12 +1230,12 @@ fn requiresExplicitTypeArgs(target: moduleinfo.PathTarget) bool {
 /// `identity::[int32]` is a first-class monomorphic function value. On a
 /// non-function operand the type arguments are simply ignored (peeled),
 /// matching the old inference behavior.
-fn inferSpecialize(frame: *Frame, s: *const ast.Specialize) CheckError!?cfg.Type {
+fn inferSpecialize(frame: *Frame, s: *const ast.Specialize) CheckError!?meta.Type {
     if (try inferCalleeDecl(frame, s.operand)) |target| {
         const decl = target.vm.decl.func;
         if (decl.type_params.len > 0) {
             const args = try resolveSpecializeArgs(frame, s);
-            const inst = try specializeInstance(frame, target, args, &[_]cfg.Type{});
+            const inst = try specializeInstance(frame, target, args, &[_]meta.Type{});
             try frame.ma.spec_of.put(frame.ck.alloc(), s, inst);
             return inst.signature;
         }
@@ -1272,8 +1272,8 @@ fn inferCalleeDecl(frame: *Frame, callee: *const ast.Expr) CheckError!?moduleinf
 
 /// Resolve the type arguments of an explicit `::[...]` specialization
 /// (Core §12.3).
-fn resolveSpecializeArgs(frame: *Frame, s: *const ast.Specialize) CheckError![]cfg.Type {
-    const args = try frame.ck.alloc().alloc(cfg.Type, s.type_args.len);
+fn resolveSpecializeArgs(frame: *Frame, s: *const ast.Specialize) CheckError![]meta.Type {
+    const args = try frame.ck.alloc().alloc(meta.Type, s.type_args.len);
     for (s.type_args, 0..) |*t, i| {
         args[i] = try frame.ck.resolveTypeOf(frame.ma, frame.info, t);
     }
@@ -1288,8 +1288,8 @@ fn resolveSpecializeArgs(frame: *Frame, s: *const ast.Specialize) CheckError![]c
 fn specializeInstance(
     frame: *Frame,
     target: moduleinfo.PathTarget,
-    explicit: ?[]const cfg.Type,
-    arg_types: []const cfg.Type,
+    explicit: ?[]const meta.Type,
+    arg_types: []const meta.Type,
 ) CheckError!*checker.FuncInstance {
     const ck = frame.ck;
     const decl = target.vm.decl.func;
@@ -1302,7 +1302,7 @@ fn specializeInstance(
     };
 
     // Build the type-parameter substitution (Core §12.2, §12.3).
-    var env = std.StringHashMapUnmanaged(cfg.Type).empty;
+    var env = std.StringHashMapUnmanaged(meta.Type).empty;
     if (explicit) |args| {
         if (args.len != decl.type_params.len) {
             return ck.fail(target.vm.name.span, "expected {d} type argument(s), found {d}", .{ decl.type_params.len, args.len });
@@ -1321,7 +1321,7 @@ fn specializeInstance(
 
     // The instance's type arguments, ordered by the declaration's
     // parameter list.
-    const type_args = try ck.alloc().alloc(cfg.Type, decl.type_params.len);
+    const type_args = try ck.alloc().alloc(meta.Type, decl.type_params.len);
     for (decl.type_params, 0..) |tp, i| {
         type_args[i] = env.get(tp.text).?;
     }
@@ -1364,10 +1364,10 @@ fn specializeInstance(
     return inst;
 }
 
-fn typeArgsEqual(a: []const cfg.Type, b: []const cfg.Type) bool {
+fn typeArgsEqual(a: []const meta.Type, b: []const meta.Type) bool {
     if (a.len != b.len) return false;
     for (a, b) |x, y| {
-        if (!cfg.Type.eql(x, y)) return false;
+        if (!meta.Type.eql(x, y)) return false;
     }
     return true;
 }
@@ -1393,7 +1393,7 @@ fn checkInstanceBody(ck: *checker.Checker, info: *ModuleInfo, ma: *ModuleAnnotat
 
 /// True when a type mentions an unresolved named type — the signature of a
 /// generic binding (recursive: `list[T]`, `fn(move A) -> B`).
-fn hasTypeVars(frame: *Frame, t: cfg.Type) bool {
+fn hasTypeVars(frame: *Frame, t: meta.Type) bool {
     return switch (t) {
         .primitive, .module, .cleanup => false,
         // Every `.named` is a concrete interned decl; only `.param` marks
@@ -1413,7 +1413,7 @@ fn hasTypeVars(frame: *Frame, t: cfg.Type) bool {
     };
 }
 
-fn inferCallee(frame: *Frame, callee: *const ast.Expr) CheckError!?cfg.Type {
+fn inferCallee(frame: *Frame, callee: *const ast.Expr) CheckError!?meta.Type {
     switch (callee.*) {
         .path => |*p| {
             if (p.tail == .none) {
@@ -1442,7 +1442,7 @@ fn inferCallee(frame: *Frame, callee: *const ast.Expr) CheckError!?cfg.Type {
 
 /// Resolve `object.name`: a module member of a module value, a field of a
 /// struct value (Core §15.1), or an element of a tuple (named by index).
-fn resolveMember(frame: *Frame, object: *const ast.Expr, name: []const u8) CheckError!?cfg.Type {
+fn resolveMember(frame: *Frame, object: *const ast.Expr, name: []const u8) CheckError!?meta.Type {
     if (try moduleValueOf(frame, object)) |mi| {
         if (mi.valueMember(name)) |vm| {
             // Module generic names follow the same rule as module paths:
@@ -1508,7 +1508,7 @@ fn moduleValueOf(frame: *Frame, object: *const ast.Expr) CheckError!?*ModuleInfo
 /// When `borrow` is set (a non-consuming `match`/`for` over an unique
 /// owner, Core §13.4, §13.5), the unique bindings become borrows: they may
 /// be read and passed along, but not moved or dropped.
-fn inferPattern(frame: *Frame, p: *const ast.Pattern, value_t: cfg.Type, borrow: bool) CheckError!void {
+fn inferPattern(frame: *Frame, p: *const ast.Pattern, value_t: meta.Type, borrow: bool) CheckError!void {
     switch (p.*) {
         .wildcard => {},
         .literal => |*lit| {
@@ -1530,7 +1530,7 @@ fn inferPattern(frame: *Frame, p: *const ast.Pattern, value_t: cfg.Type, borrow:
         .tuple => |*tp| {
             if (value_t == .tuple) {
                 for (tp.elems, 0..) |*el, i| {
-                    const elem_t = if (i < value_t.tuple.len) value_t.tuple[i] else cfg.Type{ .primitive = .any };
+                    const elem_t = if (i < value_t.tuple.len) value_t.tuple[i] else meta.Type{ .primitive = .any };
                     try inferPattern(frame, el, elem_t, borrow);
                 }
             }
@@ -1569,7 +1569,7 @@ fn inferPattern(frame: *Frame, p: *const ast.Pattern, value_t: cfg.Type, borrow:
                                 const resolved = if (i < types.len)
                                     try frame.ck.resolveTypeOf(frame.ma, frame.info, &types[i])
                                 else
-                                    cfg.Type{ .primitive = .any };
+                                    meta.Type{ .primitive = .any };
                                 // The payload type of a generic
                                 // instantiation substitutes the type
                                 // parameters (`Option[int32]`'s `Some`
@@ -1583,7 +1583,7 @@ fn inferPattern(frame: *Frame, p: *const ast.Pattern, value_t: cfg.Type, borrow:
             },
         },
         .list => |*lp| {
-            const elem_t: cfg.Type = if (value_t == .list) value_t.list.* else cfg.Type{ .primitive = .any };
+            const elem_t: meta.Type = if (value_t == .list) value_t.list.* else meta.Type{ .primitive = .any };
             for (lp.items) |*it| try inferPattern(frame, it, elem_t, borrow);
             if (lp.rest) |r| _ = try bindLocal(frame, r.text, value_t, borrow and isUnique(frame, value_t));
         },
@@ -1597,16 +1597,16 @@ fn inferPattern(frame: *Frame, p: *const ast.Pattern, value_t: cfg.Type, borrow:
 /// widens to `any` — except that `hostdata` does not coerce to `any`
 /// (Core §11.6, §11.7), so a mixed join involving `hostdata` is a
 /// compile-time error.
-fn joinBranches(frame: *Frame, span: ast.Span, a: cfg.Type, b: cfg.Type) CheckError!cfg.Type {
+fn joinBranches(frame: *Frame, span: meta.Span, a: meta.Type, b: meta.Type) CheckError!meta.Type {
     if (a == .primitive and a.primitive == .never) return b;
     if (b == .primitive and b.primitive == .never) return a;
-    if (cfg.Type.eql(a, b)) return a;
+    if (meta.Type.eql(a, b)) return a;
     if (isHostdata(a) or isHostdata(b)) {
         return frame.ck.fail(span, "'hostdata' does not coerce to 'any' (Core §11.6, §11.7); a branch of type 'hostdata' cannot join a branch of another type", .{});
     }
-    return cfg.Type{ .primitive = .any };
+    return meta.Type{ .primitive = .any };
 }
 
-fn isHostdata(t: cfg.Type) bool {
+fn isHostdata(t: meta.Type) bool {
     return t == .primitive and t.primitive == .hostdata;
 }

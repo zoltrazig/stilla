@@ -11,6 +11,7 @@
 
 const std = @import("std");
 const cfg = @import("stilla").cfg;
+const meta = @import("stilla").meta;
 const llir = @import("stilla").llir;
 const lower = @import("cfg_lower_llir.zig");
 const lifecycle = @import("cfg_lower_lifecycle.zig");
@@ -25,7 +26,7 @@ pub const EdgeCopy = struct {
     src: u32,
     /// The source value's type — cycle staging matches the reserved
     /// staging row by it (v1 has no slot-type rows).
-    src_type: ?*const cfg.Type = null,
+    src_type: ?*const meta.Type = null,
     /// For `slot_*` records the imm16 window offset (the write position
     /// inside the outgoing call area); 0 otherwise.
     imm: u32 = 0,
@@ -268,7 +269,7 @@ pub fn edgeCopyList(bld: *const Builder, pred: *const cfg.BasicBlock, succ: *con
             // emission run the identical walk.
             var known_type = false;
             for (sink.items) |k| {
-                if (cfg.Type.eql(k.*, source_type.*)) known_type = true;
+                if (meta.Type.eql(k.*, source_type.*)) known_type = true;
             }
             if (!known_type) try sink.append(bld.arena, source_type);
             staging = std.math.maxInt(u32);
@@ -334,12 +335,12 @@ pub fn cycleStagingSlot(bld: *const Builder, blk: *const cfg.BasicBlock) u32 {
 /// value had since taken over, clobbering it. The reserved scratch rows
 /// cost nothing extra — they are already part of `f_count` — so the
 /// dead-cell reuse was deleted outright.)
-fn cycleStagingSlotForType(bld: *const Builder, blk: *const cfg.BasicBlock, type_: cfg.Type) u32 {
+fn cycleStagingSlotForType(bld: *const Builder, blk: *const cfg.BasicBlock, type_: meta.Type) u32 {
     const fi = bld.funcIndexOfBlock(blk);
     const fd = bld.func_descs.items[fi];
     const cycle_types = bld.scratch_cycle_types.items[fi].items;
     for (cycle_types, 0..) |known, rank| {
-        if (!cfg.Type.eql(known.*, type_)) continue;
+        if (!meta.Type.eql(known.*, type_)) continue;
         // Staging cells sit past the value cells: f_count counts
         // values + staging (+1 spill-stage when the function spills —
         // `x_count > 0` — a reserved cell that routes spilled values

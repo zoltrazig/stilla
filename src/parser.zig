@@ -19,6 +19,7 @@
 
 const std = @import("std");
 const ast = @import("ast.zig");
+const meta = @import("meta.zig");
 const lex = @import("lex.zig");
 const parse_type = @import("parse/type.zig");
 const parse_pattern = @import("parse/pattern.zig");
@@ -317,7 +318,7 @@ pub const Parser = struct {
         const start = self.mark();
         _ = self.advance(); // kw_using
         const path = try self.parseUsingPath();
-        var alias: ?ast.Ident = null;
+        var alias: ?meta.Ident = null;
         if (self.at(.kw_as)) {
             _ = self.advance();
             alias = try self.expectIdent();
@@ -330,14 +331,14 @@ pub const Parser = struct {
     /// identifier or a reserved word, so that paths such as `builtin.str`
     /// and `string.repeat` (Core §2.8) parse. `builtin` itself is an
     /// ordinary imported module, not a reserved word (Core §3).
-    pub fn parseUsingPath(self: *Parser) ParseError![]ast.Ident {
-        var path = std.ArrayList(ast.Ident).empty;
+    pub fn parseUsingPath(self: *Parser) ParseError![]meta.Ident {
+        var path = std.ArrayList(meta.Ident).empty;
         try path.append(self.arena.allocator(), try self.expectPathSegment());
         while (self.eat(.dot)) try path.append(self.arena.allocator(), try self.expectPathSegment());
-        return self.arena.allocator().dupe(ast.Ident, path.items);
+        return self.arena.allocator().dupe(meta.Ident, path.items);
     }
 
-    pub fn expectPathSegment(self: *Parser) ParseError!ast.Ident {
+    pub fn expectPathSegment(self: *Parser) ParseError!meta.Ident {
         const tok = self.cur();
         if (!self.atPathSegment()) {
             return self.fail(tok.span, "expected a path segment, found {s}", .{self.describe(tok)});
@@ -363,13 +364,13 @@ pub const Parser = struct {
 
     /// `[ name, ... ]` after a named declaration (Grammar `type-params`,
     /// Core §12); returns empty when absent.
-    pub fn parseOptionalTypeParams(self: *Parser) ![]ast.Ident {
+    pub fn parseOptionalTypeParams(self: *Parser) ![]meta.Ident {
         if (!self.eat(.lbracket)) return &.{};
-        var params = std.ArrayList(ast.Ident).empty;
+        var params = std.ArrayList(meta.Ident).empty;
         try params.append(self.arena.allocator(), try self.expectIdent());
         while (self.eat(.comma)) try params.append(self.arena.allocator(), try self.expectIdent());
         try self.expectAdvance(.rbracket, "']'");
-        return self.arena.allocator().dupe(ast.Ident, params.items);
+        return self.arena.allocator().dupe(meta.Ident, params.items);
     }
 
     /// `[ type, ... ]` with the `[` already consumed (Grammar `type-args`).
@@ -409,7 +410,7 @@ pub const Parser = struct {
         return .{ .span = self.spanFrom(start), .mode = mode, .name = name, .type_ = type_ };
     }
 
-    pub fn takeMode(self: *Parser) ast.ParamMode {
+    pub fn takeMode(self: *Parser) meta.ParamMode {
         return switch (self.cur().kind) {
             .kw_borrow => blk: {
                 _ = self.advance();
@@ -468,8 +469,8 @@ pub const Parser = struct {
         return self.pos;
     }
 
-    pub fn spanFrom(self: *Parser, start: usize) ast.Span {
-        return ast.Span.merge(self.tokens[start].span, self.tokens[self.pos - 1].span);
+    pub fn spanFrom(self: *Parser, start: usize) meta.Span {
+        return meta.Span.merge(self.tokens[start].span, self.tokens[self.pos - 1].span);
     }
 
     pub fn cur(self: *Parser) lex.Token {
@@ -507,14 +508,14 @@ pub const Parser = struct {
         }
     }
 
-    pub fn expectIdent(self: *Parser) ParseError!ast.Ident {
+    pub fn expectIdent(self: *Parser) ParseError!meta.Ident {
         const tok = self.cur();
         if (tok.kind != .ident) return self.fail(tok.span, "expected an identifier, found {s}", .{self.describe(tok)});
         self.pos += 1;
         return .{ .span = tok.span, .text = tok.text };
     }
 
-    pub fn fail(self: *Parser, span: ast.Span, comptime fmt: []const u8, args: anytype) error{Syntax} {
+    pub fn fail(self: *Parser, span: meta.Span, comptime fmt: []const u8, args: anytype) error{Syntax} {
         const message = std.fmt.allocPrint(self.arena.allocator(), fmt, args) catch "out of memory";
         const d = ast.Diagnostic{ .span = span, .message = message };
         if (self.diag == null) self.diag = d;
@@ -662,7 +663,7 @@ test "parses constants with and without type annotations" {
     try std.testing.expectEqual(@as(usize, 2), t.program.items.len);
     const first = t.program.items[0].const_def;
     try std.testing.expectEqualStrings("pi", first.name.text);
-    try std.testing.expectEqual(ast.PrimitiveKind.float32, first.type_.?.primitive.kind);
+    try std.testing.expectEqual(meta.PrimitiveKind.float32, first.type_.?.primitive.kind);
     try std.testing.expectEqual(@as(f64, 3.14), first.init.?.float.value);
     const second = t.program.items[1].const_def;
     try std.testing.expect(second.type_ == null);
@@ -675,7 +676,7 @@ test "parses the top type any" {
     defer t.tp.deinit();
 
     const c = t.program.items[0].const_def;
-    try std.testing.expectEqual(ast.PrimitiveKind.any, c.type_.?.primitive.kind);
+    try std.testing.expectEqual(meta.PrimitiveKind.any, c.type_.?.primitive.kind);
     try std.testing.expect(c.init.?.* == .call);
 }
 
@@ -687,14 +688,14 @@ test "parses hostdata as a primitive type" {
 
     try std.testing.expectEqual(@as(usize, 4), t.program.items.len);
     const c = t.program.items[0].const_def;
-    try std.testing.expectEqual(ast.PrimitiveKind.hostdata, c.type_.?.primitive.kind);
+    try std.testing.expectEqual(meta.PrimitiveKind.hostdata, c.type_.?.primitive.kind);
     const f = t.program.items[1].func_def;
-    try std.testing.expectEqual(ast.PrimitiveKind.hostdata, f.ret.primitive.kind);
+    try std.testing.expectEqual(meta.PrimitiveKind.hostdata, f.ret.primitive.kind);
     const g = t.program.items[2].func_def;
-    try std.testing.expectEqual(ast.PrimitiveKind.hostdata, g.params[0].type_.primitive.kind);
-    try std.testing.expectEqual(ast.PrimitiveKind.hostdata, g.ret.primitive.kind);
+    try std.testing.expectEqual(meta.PrimitiveKind.hostdata, g.params[0].type_.primitive.kind);
+    try std.testing.expectEqual(meta.PrimitiveKind.hostdata, g.ret.primitive.kind);
     const td = t.program.items[3].type_def;
-    try std.testing.expectEqual(ast.PrimitiveKind.hostdata, td.target.primitive.kind);
+    try std.testing.expectEqual(meta.PrimitiveKind.hostdata, td.target.primitive.kind);
 }
 
 test "rejects hostdata as a binding name" {
@@ -712,11 +713,11 @@ test "parses any in host-binding declarations" {
 
     try std.testing.expectEqual(@as(usize, 2), t.program.items.len);
     const c = t.program.items[0].const_def;
-    try std.testing.expectEqual(ast.PrimitiveKind.any, c.type_.?.primitive.kind);
+    try std.testing.expectEqual(meta.PrimitiveKind.any, c.type_.?.primitive.kind);
     try std.testing.expect(c.init == null);
     const f = t.program.items[1].func_def;
-    try std.testing.expectEqual(ast.PrimitiveKind.any, f.params[0].type_.primitive.kind);
-    try std.testing.expectEqual(ast.PrimitiveKind.any, f.ret.primitive.kind);
+    try std.testing.expectEqual(meta.PrimitiveKind.any, f.params[0].type_.primitive.kind);
+    try std.testing.expectEqual(meta.PrimitiveKind.any, f.ret.primitive.kind);
     try std.testing.expect(f.body == null);
 }
 
@@ -729,7 +730,7 @@ test "parses function definitions" {
     try std.testing.expectEqual(@as(usize, 1), f.type_params.len);
     try std.testing.expectEqualStrings("T", f.type_params[0].text);
     try std.testing.expectEqual(@as(usize, 1), f.params.len);
-    try std.testing.expectEqual(ast.ParamMode.plain, f.params[0].mode);
+    try std.testing.expectEqual(meta.ParamMode.plain, f.params[0].mode);
     try std.testing.expectEqualStrings("x", f.params[0].name.text);
     try std.testing.expectEqualStrings("T", f.ret.named.path[0].text);
     try std.testing.expectEqual(@as(usize, 0), f.body.?.stmts.len);
@@ -741,8 +742,8 @@ test "parses borrow and move parameters" {
     defer t.tp.deinit();
 
     const f = t.program.items[0].func_def;
-    try std.testing.expectEqual(ast.ParamMode.borrow, f.params[0].mode);
-    try std.testing.expectEqual(ast.ParamMode.move, f.params[1].mode);
+    try std.testing.expectEqual(meta.ParamMode.borrow, f.params[0].mode);
+    try std.testing.expectEqual(meta.ParamMode.move, f.params[1].mode);
     try std.testing.expectEqual(@as(usize, 0), f.body.?.stmts.len);
     try std.testing.expect(f.body.?.result == null);
 }
@@ -754,7 +755,7 @@ test "parses struct definitions with drop declarations" {
     const s = t.program.items[0].struct_def;
     try std.testing.expectEqual(@as(usize, 2), s.fields.len);
     try std.testing.expectEqualStrings("x", s.fields[0].name.text);
-    try std.testing.expectEqual(ast.PrimitiveKind.int32, s.fields[0].type_.primitive.kind);
+    try std.testing.expectEqual(meta.PrimitiveKind.int32, s.fields[0].type_.primitive.kind);
     const d = s.drop.?;
     try std.testing.expectEqualStrings("v", d.param.text);
     try std.testing.expectEqual(@as(usize, 1), d.body.stmts.len);
@@ -854,15 +855,15 @@ test "parses type aliases" {
 
     try std.testing.expectEqual(@as(usize, 4), t.program.items.len);
     const a = t.program.items[0].type_def;
-    try std.testing.expectEqual(ast.PrimitiveKind.int32, a.target.primitive.kind);
+    try std.testing.expectEqual(meta.PrimitiveKind.int32, a.target.primitive.kind);
     const b = t.program.items[1].type_def;
     try std.testing.expectEqual(@as(usize, 2), b.target.list.elem.box.inner.tuple.elems.len);
-    try std.testing.expectEqual(ast.PrimitiveKind.int32, b.target.list.elem.box.inner.tuple.elems[0].primitive.kind);
+    try std.testing.expectEqual(meta.PrimitiveKind.int32, b.target.list.elem.box.inner.tuple.elems[0].primitive.kind);
     const f = t.program.items[2].type_def;
     try std.testing.expectEqual(@as(usize, 2), f.target.function.params.len);
-    try std.testing.expectEqual(ast.ParamMode.borrow, f.target.function.params[0].mode);
-    try std.testing.expectEqual(ast.ParamMode.move, f.target.function.params[1].mode);
-    try std.testing.expectEqual(ast.PrimitiveKind.bool, f.target.function.ret.primitive.kind);
+    try std.testing.expectEqual(meta.ParamMode.borrow, f.target.function.params[0].mode);
+    try std.testing.expectEqual(meta.ParamMode.move, f.target.function.params[1].mode);
+    try std.testing.expectEqual(meta.PrimitiveKind.bool, f.target.function.ret.primitive.kind);
     const g = t.program.items[3].type_def;
     try std.testing.expectEqual(@as(usize, 2), g.target.named.path.len);
     try std.testing.expectEqualStrings("map", g.target.named.path[0].text);
@@ -894,8 +895,8 @@ test "parses unary, move, and cast expressions" {
     const c = t.program.items[1].const_def.init.?;
     try std.testing.expectEqualStrings("v", c.move.name.text);
     const d = t.program.items[2].const_def.init.?;
-    try std.testing.expectEqual(ast.PrimitiveKind.float32, d.cast.target.primitive.kind);
-    try std.testing.expectEqual(ast.PrimitiveKind.int32, d.cast.operand.cast.target.primitive.kind);
+    try std.testing.expectEqual(meta.PrimitiveKind.float32, d.cast.target.primitive.kind);
+    try std.testing.expectEqual(meta.PrimitiveKind.int32, d.cast.operand.cast.target.primitive.kind);
 }
 
 test "parses postfix chains" {
@@ -932,7 +933,7 @@ test "parses struct construction, variants, and specialization" {
     try std.testing.expectEqual(@as(usize, 1), d.specialize.type_args.len);
     try std.testing.expectEqual(@as(usize, 1), d.specialize.operand.path.type_args.?.len);
     const e = t.program.items[4].const_def.init.?;
-    try std.testing.expectEqual(ast.PrimitiveKind.int32, e.specialize.type_args[0].primitive.kind);
+    try std.testing.expectEqual(meta.PrimitiveKind.int32, e.specialize.type_args[0].primitive.kind);
     try std.testing.expect(e.specialize.operand.call.args.len == 0);
 }
 
@@ -970,13 +971,13 @@ test "parses keyword-led type-test patterns" {
     const arms = r.match.arms;
     try std.testing.expectEqual(@as(usize, 6), arms.len);
     const a0 = arms[0].pattern.type_test;
-    try std.testing.expectEqual(ast.PrimitiveKind.int32, a0.type_.primitive.kind);
+    try std.testing.expectEqual(meta.PrimitiveKind.int32, a0.type_.primitive.kind);
     try std.testing.expectEqualStrings("n", a0.binding.?.text);
     const a1 = arms[1].pattern.type_test;
-    try std.testing.expectEqual(ast.PrimitiveKind.str, a1.type_.primitive.kind);
+    try std.testing.expectEqual(meta.PrimitiveKind.str, a1.type_.primitive.kind);
     try std.testing.expect(a1.binding == null);
     const a2 = arms[2].pattern.type_test;
-    try std.testing.expectEqual(ast.PrimitiveKind.int32, a2.type_.list.elem.primitive.kind);
+    try std.testing.expectEqual(meta.PrimitiveKind.int32, a2.type_.list.elem.primitive.kind);
     try std.testing.expectEqualStrings("xs", a2.binding.?.text);
     const a3 = arms[3].pattern.type_test;
     try std.testing.expectEqual(@as(usize, 2), a3.type_.tuple.elems.len);
@@ -1026,7 +1027,7 @@ test "parses lambdas" {
 
     const f = t.program.items[0].const_def.init.?;
     try std.testing.expectEqual(@as(usize, 1), f.lambda.params.len);
-    try std.testing.expectEqual(ast.PrimitiveKind.int32, f.lambda.ret.primitive.kind);
+    try std.testing.expectEqual(meta.PrimitiveKind.int32, f.lambda.ret.primitive.kind);
     try std.testing.expectEqualStrings("x", f.lambda.body.result.?.path.path[0].text);
 }
 
@@ -1223,7 +1224,7 @@ test "parses never as a primitive type" {
     defer t.tp.deinit();
 
     const f = t.program.items[0].func_def;
-    try std.testing.expectEqual(ast.PrimitiveKind.never, f.ret.primitive.kind);
+    try std.testing.expectEqual(meta.PrimitiveKind.never, f.ret.primitive.kind);
 }
 
 test "parses empty structs and empty unions" {
@@ -1260,10 +1261,10 @@ test "parses function types in struct fields and parameters" {
     defer t.tp.deinit();
 
     const s = t.program.items[0].struct_def;
-    try std.testing.expectEqual(ast.PrimitiveKind.int32, s.fields[0].type_.function.ret.primitive.kind);
+    try std.testing.expectEqual(meta.PrimitiveKind.int32, s.fields[0].type_.function.ret.primitive.kind);
     try std.testing.expectEqual(@as(usize, 2), s.fields[0].type_.function.params.len);
     const f = t.program.items[1].func_def;
-    try std.testing.expectEqual(ast.ParamMode.move, f.params[0].type_.function.params[0].mode);
+    try std.testing.expectEqual(meta.ParamMode.move, f.params[0].type_.function.params[0].mode);
 }
 
 test "rejects a function without a return type" {
@@ -1279,9 +1280,9 @@ test "parses void-returning functions" {
     defer t.tp.deinit();
 
     try std.testing.expectEqual(@as(usize, 3), t.program.items.len);
-    try std.testing.expectEqual(ast.PrimitiveKind.void, t.program.items[0].func_def.ret.primitive.kind);
-    try std.testing.expectEqual(ast.PrimitiveKind.void, t.program.items[1].func_def.ret.primitive.kind);
-    try std.testing.expectEqual(ast.PrimitiveKind.int32, t.program.items[2].func_def.ret.primitive.kind);
+    try std.testing.expectEqual(meta.PrimitiveKind.void, t.program.items[0].func_def.ret.primitive.kind);
+    try std.testing.expectEqual(meta.PrimitiveKind.void, t.program.items[1].func_def.ret.primitive.kind);
+    try std.testing.expectEqual(meta.PrimitiveKind.int32, t.program.items[2].func_def.ret.primitive.kind);
 }
 
 test "rejects a second drop declaration" {

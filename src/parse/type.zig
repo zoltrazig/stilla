@@ -4,6 +4,7 @@
 
 const std = @import("std");
 const ast = @import("stilla").ast;
+const meta = @import("stilla").meta;
 const lex = @import("stilla").lex;
 const parser = @import("stilla").parser;
 const ParseError = parser.ParseError;
@@ -72,7 +73,7 @@ pub fn parseTypeInner(self: *parser.Parser, start: usize) ParseError!ast.Type {
     };
 }
 
-pub fn primitive(self: *parser.Parser, start: usize, kind: ast.PrimitiveKind) ParseError!ast.Type {
+pub fn primitive(self: *parser.Parser, start: usize, kind: meta.PrimitiveKind) ParseError!ast.Type {
     const tok = self.advance();
     _ = start;
     return .{ .primitive = .{ .span = tok.span, .kind = kind } };
@@ -101,9 +102,9 @@ pub fn parseFunctionType(self: *parser.Parser, start: usize) ParseError!ast.Type
 /// identifier or a reserved word, so that paths such as `builtin.str`
 /// and `builtin.Option` parse (Grammar note, Core §2.8). `builtin` is
 /// an ordinary imported module, not a reserved word (Core §3).
-pub fn parseTypePath(self: *parser.Parser) ![]ast.Ident {
-    var path = std.ArrayList(ast.Ident).empty;
+pub fn parseTypePath(self: *parser.Parser) ![]meta.Ident {
+    var path = std.ArrayList(meta.Ident).empty;
     try path.append(self.arena.allocator(), try self.expectPathSegment());
     while (self.eat(.dot)) try path.append(self.arena.allocator(), try self.expectPathSegment());
-    return self.arena.allocator().dupe(ast.Ident, path.items);
+    return self.arena.allocator().dupe(meta.Ident, path.items);
 }

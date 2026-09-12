@@ -8,38 +8,21 @@
 //! copy-friendly (Stilla targets machine-generated code, Core §1.1), and
 //! line/column numbers are derived on demand from a per-source line index
 //! when a message is rendered.
+//!
+//! Layering. The source/value primitives (`SourceId`, `Span`, `Ident`,
+//! `ParamMode`, `PrimitiveKind`) live in the self-contained `meta.zig`;
+//! `ast` depends on `meta` and re-exports them so `ast.Span` and friends
+//! keep their meaning across the compiler.
 
 const std = @import("std");
+const meta = @import("meta.zig");
 
-/// Identifies one source file in a compilation, e.g. an index into the
-/// compilation's source table.
-pub const SourceId = u32;
-
-/// A half-open byte range `[start, end)` into the text of the source
-/// identified by `source`. Offsets are `u32` so a `Span` stays one word
-/// per field; sources larger than 4 GiB are out of scope.
-pub const Span = struct {
-    source: SourceId,
-    start: u32,
-    end: u32,
-
-    pub fn init(source: SourceId, start: u32, end: u32) Span {
-        std.debug.assert(start <= end);
-        return .{ .source = source, .start = start, .end = end };
-    }
-
-    /// Length in bytes of the covered text.
-    pub fn len(self: Span) u32 {
-        return self.end - self.start;
-    }
-
-    /// The smallest span that covers both inputs. The spans must belong to
-    /// the same source.
-    pub fn merge(a: Span, b: Span) Span {
-        std.debug.assert(a.source == b.source);
-        return .{ .source = a.source, .start = @min(a.start, b.start), .end = @max(a.end, b.end) };
-    }
-};
+// Re-exported from the self-contained `meta.zig` metadata layer.
+pub const SourceId = meta.SourceId;
+pub const Span = meta.Span;
+pub const Ident = meta.Ident;
+pub const ParamMode = meta.ParamMode;
+pub const PrimitiveKind = meta.PrimitiveKind;
 
 /// A 1-based line/column position, computed only when a diagnostic is
 /// rendered. `column` counts bytes since the start of the line — matching
@@ -100,23 +83,14 @@ pub const Source = struct {
     }
 };
 
-/// One parse or lexical error: the offending source range and a
-/// human-readable message. The parser records the first error it finds;
-/// nothing after it is guaranteed to be meaningful.
-pub const Diagnostic = struct {
-    span: Span,
-    message: []const u8,
-};
+/// A source diagnostic (re-exported from the self-contained `meta.zig`).
+/// The parser records the first error it finds; nothing after it is
+/// guaranteed to be meaningful.
+pub const Diagnostic = meta.Diagnostic;
 
 // ---------------------------------------------------------------------------
 // Names and programs
 // ---------------------------------------------------------------------------
-
-/// An identifier as written: its name and the span of the spelling.
-pub const Ident = struct {
-    span: Span,
-    text: []const u8,
-};
 
 /// A whole source file's module: the `program` production (Grammar).
 pub const Program = struct {
@@ -235,14 +209,6 @@ pub const VariantDecl = struct {
     types: ?[]Type,
 };
 
-/// Ownership mode of a function or lambda parameter (Grammar `param`,
-/// `function-param-type`; Core §6, §10).
-pub const ParamMode = enum {
-    plain,
-    borrow,
-    move,
-};
-
 /// One function parameter: `[borrow|move] name: type`.
 pub const Param = struct {
     span: Span,
@@ -280,26 +246,6 @@ pub const Type = union(enum) {
 
 /// A built-in scalar type (Grammar `primitive-type`).
 ///
-/// `any` is the top type: every value type coerces to it (Core §11.6);
-/// `never` is the bottom type, which has no values and coerces to every
-/// type (Core §13.2); `hostdata` is an opaque, host-defined payload
-/// (Core §11.7), created only by the host and unique like `any`.
-pub const PrimitiveKind = enum {
-    any,
-    byte,
-    hostdata,
-    int32,
-    uint32,
-    int64,
-    uint64,
-    float32,
-    float64,
-    bool,
-    str,
-    void,
-    never,
-};
-
 pub const Primitive = struct {
     span: Span,
     kind: PrimitiveKind,

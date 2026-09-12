@@ -47,7 +47,7 @@ known member.
 
 ## Type resolution
 
-Every syntactic `ast.Type` is resolved to a `cfg.Type`
+Every syntactic `ast.Type` is resolved to a `meta.Type`
 (`resolveType`), including:
 
 - generic struct/union instantiations with their `args` filled
@@ -149,7 +149,7 @@ Ownership annotation drives the transfer checks:
 
 Once the annotation of a block is complete, the following are decidable
 and enforced. This is the *raison d'être* of the checker: each check consumes
-the annotation and emits an `ast.Diagnostic` on failure.
+the annotation and emits a `meta.Diagnostic` on failure.
 
 ### Type mismatch
 
@@ -254,7 +254,7 @@ the value is destroyed only on the paths where it is still alive
 
 The checker output is `checker.Annotation` (here drawn against the
 implementation in `src/passes/checker.zig`; there is no `typeinfo`
-module — resolved types are the AIR-native `cfg.Type`):
+module — resolved types are the AIR-native `meta.Type`):
 
 ```zig
 pub const Annotation = struct {
@@ -277,22 +277,22 @@ pub const Annotation = struct {
 
 pub const ModuleAnnotation = struct {
     module: *moduleinfo.ModuleInfo,
-    /// Written `ast.Type` → resolved `cfg.Type` (Type resolution).
-    type_of:    std.AutoHashMapUnmanaged(*const ast.Type, cfg.Type) = .empty,
-    /// `ast.Expr` → produced `cfg.Type` (Expression inference).
-    expr_of:    std.AutoHashMapUnmanaged(*const ast.Expr, cfg.Type) = .empty,
+    /// Written `ast.Type` → resolved `meta.Type` (Type resolution).
+    type_of:    std.AutoHashMapUnmanaged(*const ast.Type, meta.Type) = .empty,
+    /// `ast.Expr` → produced `meta.Type` (Expression inference).
+    expr_of:    std.AutoHashMapUnmanaged(*const ast.Expr, meta.Type) = .empty,
     /// Binding id → resolved type.
-    binding_of: std.AutoHashMapUnmanaged(u32, cfg.Type) = .empty,
+    binding_of: std.AutoHashMapUnmanaged(u32, meta.Type) = .empty,
     /// Binding id → static ownership state (Ownership analysis).
     bindings:   std.AutoHashMapUnmanaged(u32, BindingState) = .empty,
     /// Call → callee's concrete signature (non-generic calls).
-    call_sig:   std.AutoHashMapUnmanaged(*const ast.Call, cfg.Type) = .empty,
+    call_sig:   std.AutoHashMapUnmanaged(*const ast.Call, meta.Type) = .empty,
     /// Call → the generic specialization it triggers (Generic expansion).
     call_of:    std.AutoHashMapUnmanaged(*const ast.Call, *FuncInstance) = .empty,
     /// Value-position `::[...]` → its `FuncInstance` (Generic expansion).
     spec_of:    std.AutoHashMapUnmanaged(*const ast.Specialize, *FuncInstance) = .empty,
     /// Module-member name → its declared identifier (name annotation).
-    names:      std.StringHashMapUnmanaged(*const ast.Ident) = .empty,
+    names:      std.StringHashMapUnmanaged(*const meta.Ident) = .empty,
     next_binding_id: u32 = 0,
 };
 ```
@@ -321,7 +321,7 @@ AST + module graph ([cfg-lowering.md](cfg-lowering.md)).
 | `src/passes/checker_ownership.zig` | Conditional-release state merging through `if`/`match`/`and`/`or` (Types & Ownership) |
 | `src/passes/monomorphize.zig` | Deep-copy monomorphization of template bodies under concrete substitutions |
 | `src/passes/type_infer.zig` | `bindTypeArgs`, `substSignature`, `specializeSignatureExplicit` |
-| `src/passes/type_resolve.zig` | `resolveType` — syntactic `ast.Type` → `cfg.Type` |
+| `src/passes/type_resolve.zig` | `resolveType` — syntactic `ast.Type` → `meta.Type` |
 | `src/passes/type_shape.zig` | `ownershipOf` — structural ownership classification to the least *Copy* fixpoint (Types & Ownership) |
 | `src/checker_tests.zig` | Black-box diagnostics tests per check (message + span) |
 

@@ -12,8 +12,8 @@
 //! machinery entirely (see hir_lower.zig's `.intrinsic` arm).
 
 const std = @import("std");
-const ast = @import("stilla").ast;
 const cfg = @import("stilla").cfg;
+const meta = @import("stilla").meta;
 const hir = @import("stilla").hir;
 const moduleinfo = @import("stilla").moduleinfo;
 const lower = @import("stilla").lower;
@@ -93,7 +93,7 @@ fn valueCall(c: *Ctx, fs: *FuncState, id: hir.ExprId, fv: *cfg.Value) LowerError
     }
     const ft = fv.type_.function;
     var args = std.ArrayList(*cfg.Value).empty;
-    var arg_types = std.ArrayList(cfg.Type).empty;
+    var arg_types = std.ArrayList(meta.Type).empty;
     for (ft.params, 0..) |p, i| {
         const arg_id = ops[1 + i];
         const v = (try hir_lower_expr.expr(c, fs, arg_id)) orelse return null;
@@ -130,13 +130,13 @@ fn hostCall(c: *Ctx, fs: *FuncState, id: hir.ExprId, callee_node: hir.ExprNode, 
     const sig_fn = callee_node.ty.function;
     // Effective modes: move when the argument is a `move` node (the
     // checker's rule, recorded structurally by the builder).
-    var eff_params = std.ArrayList(cfg.Param).empty;
+    var eff_params = std.ArrayList(meta.Param).empty;
     var args = std.ArrayList(*cfg.Value).empty;
     for (sig_fn.params, 0..) |p, i| {
         const arg_id = ops[1 + i];
         const moving = std.mem.eql(u8, c.opName(arg_id), "move");
         const v = (try hir_lower_expr.expr(c, fs, arg_id)) orelse return null;
-        const mode: ast.ParamMode = effectiveMode(p.mode, moving, v.type_);
+        const mode: meta.ParamMode = effectiveMode(p.mode, moving, v.type_);
         try eff_params.append(self.arena, .{ .span = p.span, .name = p.name, .mode = mode, .type_ = p.type_ });
         const arg = try cfg_lower_call.lowerCallArg(self, fs, v, mode, p.type_);
         if (arg.type_ == .primitive and arg.type_.primitive == .void) continue; // void args emit no operand
@@ -147,7 +147,7 @@ fn hostCall(c: *Ctx, fs: *FuncState, id: hir.ExprId, callee_node: hir.ExprNode, 
     // an explicit `move`) — mirror the direct effectiveSig rule, so the
     // runtime and validator see the call-site transfer (the box/unbox
     // contract depends on it).
-    const eff_sig = cfg.FunctionType{ .params = eff_params.items, .ret = sig_fn.ret };
+    const eff_sig = meta.FunctionType{ .params = eff_params.items, .ret = sig_fn.ret };
     // Origin-based dispatch (mirror the direct call dispatch, Intrinsics
     // §2): a bodyless bundle-origin member is an intrinsic and must have
     // an explicit expansion entry — a member with no table entry (a
@@ -171,7 +171,7 @@ fn hostCall(c: *Ctx, fs: *FuncState, id: hir.ExprId, callee_node: hir.ExprNode, 
 /// The effective argument mode (the direct effectiveMode rule over HIR
 /// shapes): only a *move-mode* parameter can change — a unique one is
 /// always moved; a Copy one moves iff the argument was written `move`.
-fn effectiveMode(declared: ast.ParamMode, moving: bool, t: cfg.Type) ast.ParamMode {
+fn effectiveMode(declared: meta.ParamMode, moving: bool, t: meta.Type) meta.ParamMode {
     if (declared != .move) return declared;
     if (t.ownership() != .copy) return declared;
     return if (moving) .move else .plain;

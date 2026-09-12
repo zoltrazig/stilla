@@ -13,7 +13,7 @@
 
 const std = @import("std");
 const ast = @import("ast.zig");
-const cfg = @import("cfg.zig");
+const meta = @import("meta.zig");
 const moduleinfo = @import("moduleinfo.zig");
 const testing = std.testing;
 
@@ -419,26 +419,26 @@ test "moduleinfo ownershipOf classifies primitives and containers" {
     const app = t.graph.module("app").?;
 
     // Core §10.1: primitives are Copy except any / hostdata.
-    try testing.expectEqual(cfg.Ownership.copy, moduleinfo.ownershipOf(resolve, app, .{ .primitive = .int32 }).?);
-    try testing.expectEqual(cfg.Ownership.copy, moduleinfo.ownershipOf(resolve, app, .{ .primitive = .str }).?);
-    try testing.expectEqual(cfg.Ownership.copy, moduleinfo.ownershipOf(resolve, app, .{ .primitive = .void }).?);
-    try testing.expectEqual(cfg.Ownership.unique, moduleinfo.ownershipOf(resolve, app, .{ .primitive = .any }).?);
-    try testing.expectEqual(cfg.Ownership.unique, moduleinfo.ownershipOf(resolve, app, .{ .primitive = .hostdata }).?);
-    try testing.expectEqual(cfg.Ownership.copy, moduleinfo.ownershipOf(resolve, app, .module).?);
-    var void_ret = cfg.Type{ .primitive = .void };
-    try testing.expectEqual(cfg.Ownership.copy, moduleinfo.ownershipOf(resolve, app, .{ .function = .{ .params = &.{}, .ret = &void_ret } }).?);
+    try testing.expectEqual(meta.Ownership.copy, moduleinfo.ownershipOf(resolve, app, .{ .primitive = .int32 }).?);
+    try testing.expectEqual(meta.Ownership.copy, moduleinfo.ownershipOf(resolve, app, .{ .primitive = .str }).?);
+    try testing.expectEqual(meta.Ownership.copy, moduleinfo.ownershipOf(resolve, app, .{ .primitive = .void }).?);
+    try testing.expectEqual(meta.Ownership.unique, moduleinfo.ownershipOf(resolve, app, .{ .primitive = .any }).?);
+    try testing.expectEqual(meta.Ownership.unique, moduleinfo.ownershipOf(resolve, app, .{ .primitive = .hostdata }).?);
+    try testing.expectEqual(meta.Ownership.copy, moduleinfo.ownershipOf(resolve, app, .module).?);
+    var void_ret = meta.Type{ .primitive = .void };
+    try testing.expectEqual(meta.Ownership.copy, moduleinfo.ownershipOf(resolve, app, .{ .function = .{ .params = &.{}, .ret = &void_ret } }).?);
 
     // Core §10.3: containers join their components.
-    var int32 = cfg.Type{ .primitive = .int32 };
-    try testing.expectEqual(cfg.Ownership.copy, moduleinfo.ownershipOf(resolve, app, .{ .list = &int32 }).?);
-    try testing.expectEqual(cfg.Ownership.copy, moduleinfo.ownershipOf(resolve, app, .{ .box = &int32 }).?);
-    var any = cfg.Type{ .primitive = .any };
-    try testing.expectEqual(cfg.Ownership.unique, moduleinfo.ownershipOf(resolve, app, .{ .list = &any }).?);
-    try testing.expectEqual(cfg.Ownership.unique, moduleinfo.ownershipOf(resolve, app, .{ .box = &any }).?);
-    var tuple_unique = [_]cfg.Type{ int32, any };
-    try testing.expectEqual(cfg.Ownership.unique, moduleinfo.ownershipOf(resolve, app, .{ .tuple = &tuple_unique }).?);
-    var tuple_dup = [_]cfg.Type{ int32, int32 };
-    try testing.expectEqual(cfg.Ownership.copy, moduleinfo.ownershipOf(resolve, app, .{ .tuple = &tuple_dup }).?);
+    var int32 = meta.Type{ .primitive = .int32 };
+    try testing.expectEqual(meta.Ownership.copy, moduleinfo.ownershipOf(resolve, app, .{ .list = &int32 }).?);
+    try testing.expectEqual(meta.Ownership.copy, moduleinfo.ownershipOf(resolve, app, .{ .box = &int32 }).?);
+    var any = meta.Type{ .primitive = .any };
+    try testing.expectEqual(meta.Ownership.unique, moduleinfo.ownershipOf(resolve, app, .{ .list = &any }).?);
+    try testing.expectEqual(meta.Ownership.unique, moduleinfo.ownershipOf(resolve, app, .{ .box = &any }).?);
+    var tuple_unique = [_]meta.Type{ int32, any };
+    try testing.expectEqual(meta.Ownership.unique, moduleinfo.ownershipOf(resolve, app, .{ .tuple = &tuple_unique }).?);
+    var tuple_dup = [_]meta.Type{ int32, int32 };
+    try testing.expectEqual(meta.Ownership.copy, moduleinfo.ownershipOf(resolve, app, .{ .tuple = &tuple_dup }).?);
 }
 
 test "moduleinfo ownershipOf resolves named structs and unions" {
@@ -457,12 +457,12 @@ test "moduleinfo ownershipOf resolves named structs and unions" {
     const resolve = moduleinfo.resolveOf(t.graph);
     const app = t.graph.module("app").?;
     // Core §10.2: a struct with a drop hook is unique.
-    try testing.expectEqual(cfg.Ownership.copy, moduleinfo.ownershipOf(resolve, app, .{ .named = .{ .id = resolve.intern("app.Dup").?, .args = &.{} } }).?);
-    try testing.expectEqual(cfg.Ownership.unique, moduleinfo.ownershipOf(resolve, app, .{ .named = .{ .id = resolve.intern("app.File").?, .args = &.{} } }).?);
+    try testing.expectEqual(meta.Ownership.copy, moduleinfo.ownershipOf(resolve, app, .{ .named = .{ .id = resolve.intern("app.Dup").?, .args = &.{} } }).?);
+    try testing.expectEqual(meta.Ownership.unique, moduleinfo.ownershipOf(resolve, app, .{ .named = .{ .id = resolve.intern("app.File").?, .args = &.{} } }).?);
     // Core §10.3: a struct with an unique field is unique; a union with
     // an unique payload variant is unique.
-    try testing.expectEqual(cfg.Ownership.unique, moduleinfo.ownershipOf(resolve, app, .{ .named = .{ .id = resolve.intern("app.Holds").?, .args = &.{} } }).?);
-    try testing.expectEqual(cfg.Ownership.unique, moduleinfo.ownershipOf(resolve, app, .{ .named = .{ .id = resolve.intern("app.Maybe").?, .args = &.{} } }).?);
+    try testing.expectEqual(meta.Ownership.unique, moduleinfo.ownershipOf(resolve, app, .{ .named = .{ .id = resolve.intern("app.Holds").?, .args = &.{} } }).?);
+    try testing.expectEqual(meta.Ownership.unique, moduleinfo.ownershipOf(resolve, app, .{ .named = .{ .id = resolve.intern("app.Maybe").?, .args = &.{} } }).?);
 }
 
 test "moduleinfo ownershipOf handles recursive types through indirection" {
@@ -481,11 +481,11 @@ test "moduleinfo ownershipOf handles recursive types through indirection" {
 
     const resolve = moduleinfo.resolveOf(t.graph);
     const app = t.graph.module("app").?;
-    try testing.expectEqual(cfg.Ownership.unique, moduleinfo.ownershipOf(resolve, app, .{ .named = .{ .id = resolve.intern("app.Tree").?, .args = &.{} } }).?);
+    try testing.expectEqual(meta.Ownership.unique, moduleinfo.ownershipOf(resolve, app, .{ .named = .{ .id = resolve.intern("app.Tree").?, .args = &.{} } }).?);
     // box[Tree] / list[Tree] are unique containers of the recursive type.
-    var tree = cfg.Type{ .named = .{ .id = resolve.intern("app.Tree").?, .args = &.{} } };
-    try testing.expectEqual(cfg.Ownership.unique, moduleinfo.ownershipOf(resolve, app, .{ .box = &tree }).?);
-    try testing.expectEqual(cfg.Ownership.unique, moduleinfo.ownershipOf(resolve, app, .{ .list = &tree }).?);
+    var tree = meta.Type{ .named = .{ .id = resolve.intern("app.Tree").?, .args = &.{} } };
+    try testing.expectEqual(meta.Ownership.unique, moduleinfo.ownershipOf(resolve, app, .{ .box = &tree }).?);
+    try testing.expectEqual(meta.Ownership.unique, moduleinfo.ownershipOf(resolve, app, .{ .list = &tree }).?);
     // A type cycle that passes only through function types is Copy
     // (Core §10.3: a function type is not an owned component).
     var t2 = try buildGraph("app", &.{
@@ -499,7 +499,7 @@ test "moduleinfo ownershipOf handles recursive types through indirection" {
 
     const resolve2 = moduleinfo.resolveOf(t2.graph);
     const app2 = t2.graph.module("app").?;
-    try testing.expectEqual(cfg.Ownership.copy, moduleinfo.ownershipOf(resolve2, app2, .{ .named = .{ .id = resolve2.intern("app.F").?, .args = &.{} } }).?);
+    try testing.expectEqual(meta.Ownership.copy, moduleinfo.ownershipOf(resolve2, app2, .{ .named = .{ .id = resolve2.intern("app.F").?, .args = &.{} } }).?);
 }
 
 test "moduleinfo ownershipOf: containers of a named Copy type are Copy" {
@@ -522,21 +522,21 @@ test "moduleinfo ownershipOf: containers of a named Copy type are Copy" {
 
     const resolve = moduleinfo.resolveOf(t.graph);
     const app = t.graph.module("app").?;
-    var opt_i32_args = [_]cfg.Type{cfg.Type{ .primitive = .int32 }};
-    var opt_i32 = cfg.Type{ .named = .{ .id = resolve.intern("app.Option").?, .args = &opt_i32_args } };
-    var opt_str_args = [_]cfg.Type{cfg.Type{ .primitive = .str }};
-    const opt_str = cfg.Type{ .named = .{ .id = resolve.intern("app.Option").?, .args = &opt_str_args } };
+    var opt_i32_args = [_]meta.Type{meta.Type{ .primitive = .int32 }};
+    var opt_i32 = meta.Type{ .named = .{ .id = resolve.intern("app.Option").?, .args = &opt_i32_args } };
+    var opt_str_args = [_]meta.Type{meta.Type{ .primitive = .str }};
+    const opt_str = meta.Type{ .named = .{ .id = resolve.intern("app.Option").?, .args = &opt_str_args } };
     // The named instantiation itself is Copy (its payload is Copy).
-    try testing.expectEqual(cfg.Ownership.copy, moduleinfo.ownershipOf(resolve, app, opt_i32).?);
+    try testing.expectEqual(meta.Ownership.copy, moduleinfo.ownershipOf(resolve, app, opt_i32).?);
     // The container of a named Copy type is Copy (was: unique).
-    try testing.expectEqual(cfg.Ownership.copy, moduleinfo.ownershipOf(resolve, app, .{ .box = &opt_i32 }).?);
+    try testing.expectEqual(meta.Ownership.copy, moduleinfo.ownershipOf(resolve, app, .{ .box = &opt_i32 }).?);
     // A struct holding it is Copy (was: unique).
-    try testing.expectEqual(cfg.Ownership.copy, moduleinfo.ownershipOf(resolve, app, .{ .named = .{ .id = resolve.intern("app.Holder").?, .args = &.{} } }).?);
+    try testing.expectEqual(meta.Ownership.copy, moduleinfo.ownershipOf(resolve, app, .{ .named = .{ .id = resolve.intern("app.Holder").?, .args = &.{} } }).?);
     // Sibling instantiations of one declaration are distinct, not a cycle.
-    try testing.expectEqual(cfg.Ownership.copy, moduleinfo.ownershipOf(resolve, app, .{ .named = .{ .id = resolve.intern("app.Both").?, .args = &.{} } }).?);
+    try testing.expectEqual(meta.Ownership.copy, moduleinfo.ownershipOf(resolve, app, .{ .named = .{ .id = resolve.intern("app.Both").?, .args = &.{} } }).?);
     _ = opt_str;
     // A recursive type through list indirection stays unique (least fixpoint).
-    try testing.expectEqual(cfg.Ownership.unique, moduleinfo.ownershipOf(resolve, app, .{ .named = .{ .id = resolve.intern("app.Tree").?, .args = &.{} } }).?);
+    try testing.expectEqual(meta.Ownership.unique, moduleinfo.ownershipOf(resolve, app, .{ .named = .{ .id = resolve.intern("app.Tree").?, .args = &.{} } }).?);
 }
 
 test "moduleinfo resolveType expands aliases and resolves containers" {
@@ -558,24 +558,24 @@ test "moduleinfo resolveType expands aliases and resolves containers" {
     const size_ast = sizetm.decl.alias;
     const t1 = moduleinfo.resolveType(resolve, app, &size_ast.target).?;
     try testing.expect(t1 == .primitive);
-    try testing.expectEqual(ast.PrimitiveKind.int32, t1.primitive);
+    try testing.expectEqual(meta.PrimitiveKind.int32, t1.primitive);
 
     const ltm = app.typeMember("ListOf").?;
     const t2 = moduleinfo.resolveType(resolve, app, &ltm.decl.alias.target).?;
     try testing.expect(t2 == .list);
-    try testing.expectEqual(ast.PrimitiveKind.int32, t2.list.*.primitive);
+    try testing.expectEqual(meta.PrimitiveKind.int32, t2.list.*.primitive);
 
     const ptm = app.typeMember("Pair").?;
     const t3 = moduleinfo.resolveType(resolve, app, &ptm.decl.alias.target).?;
     try testing.expectEqual(@as(usize, 2), t3.tuple.len);
-    try testing.expectEqual(ast.PrimitiveKind.str, t3.tuple[1].primitive);
+    try testing.expectEqual(meta.PrimitiveKind.str, t3.tuple[1].primitive);
 
     const ftm = app.typeMember("Func").?;
     const t4 = moduleinfo.resolveType(resolve, app, &ftm.decl.alias.target).?;
     try testing.expect(t4 == .function);
     try testing.expectEqual(@as(usize, 1), t4.function.params.len);
-    try testing.expectEqual(ast.ParamMode.move, t4.function.params[0].mode);
-    try testing.expectEqual(ast.PrimitiveKind.bool, t4.function.ret.*.primitive);
+    try testing.expectEqual(meta.ParamMode.move, t4.function.params[0].mode);
+    try testing.expectEqual(meta.PrimitiveKind.bool, t4.function.ret.*.primitive);
 }
 
 test "moduleinfo inferExprType infers module constant types" {
@@ -602,17 +602,17 @@ test "moduleinfo inferExprType infers module constant types" {
     const app = t.graph.module("app").?;
     const expectInt32 = struct {
         fn check(rsv: moduleinfo.Resolve, from: *moduleinfo.ModuleInfo, c: *const ast.ConstDef) !void {
-            try testing.expectEqual(ast.PrimitiveKind.int32, (moduleinfo.inferExprType(rsv, from, c.init.?).?).primitive);
+            try testing.expectEqual(meta.PrimitiveKind.int32, (moduleinfo.inferExprType(rsv, from, c.init.?).?).primitive);
         }
     }.check;
     try expectInt32(resolve, app, app.valueMember("a").?.decl.const_);
-    try testing.expectEqual(ast.PrimitiveKind.float32, (moduleinfo.inferExprType(resolve, app, app.valueMember("b").?.decl.const_.init.?).?).primitive);
-    try testing.expectEqual(ast.PrimitiveKind.str, (moduleinfo.inferExprType(resolve, app, app.valueMember("c").?.decl.const_.init.?).?).primitive);
-    try testing.expectEqual(ast.PrimitiveKind.bool, (moduleinfo.inferExprType(resolve, app, app.valueMember("d").?.decl.const_.init.?).?).primitive);
+    try testing.expectEqual(meta.PrimitiveKind.float32, (moduleinfo.inferExprType(resolve, app, app.valueMember("b").?.decl.const_.init.?).?).primitive);
+    try testing.expectEqual(meta.PrimitiveKind.str, (moduleinfo.inferExprType(resolve, app, app.valueMember("c").?.decl.const_.init.?).?).primitive);
+    try testing.expectEqual(meta.PrimitiveKind.bool, (moduleinfo.inferExprType(resolve, app, app.valueMember("d").?.decl.const_.init.?).?).primitive);
     try testing.expectEqual(@as(usize, 2), (moduleinfo.inferExprType(resolve, app, app.valueMember("e").?.decl.const_.init.?).?).tuple.len);
-    try testing.expectEqual(ast.PrimitiveKind.int32, (moduleinfo.inferExprType(resolve, app, app.valueMember("f").?.decl.const_.init.?).?).list.*.primitive);
-    try testing.expectEqual(ast.PrimitiveKind.int32, (moduleinfo.inferExprType(resolve, app, app.valueMember("g").?.decl.const_.init.?).?).primitive);
-    try testing.expectEqual(ast.PrimitiveKind.bool, (moduleinfo.inferExprType(resolve, app, app.valueMember("h").?.decl.const_.init.?).?).primitive);
+    try testing.expectEqual(meta.PrimitiveKind.int32, (moduleinfo.inferExprType(resolve, app, app.valueMember("f").?.decl.const_.init.?).?).list.*.primitive);
+    try testing.expectEqual(meta.PrimitiveKind.int32, (moduleinfo.inferExprType(resolve, app, app.valueMember("g").?.decl.const_.init.?).?).primitive);
+    try testing.expectEqual(meta.PrimitiveKind.bool, (moduleinfo.inferExprType(resolve, app, app.valueMember("h").?.decl.const_.init.?).?).primitive);
     // A call's return type resolves through the callee signature.
     try testing.expectEqualStrings("app.P", resolve.typeNameOf((moduleinfo.inferExprType(resolve, app, app.valueMember("p").?.decl.const_.init.?).?).named.id).?);
 }
@@ -637,7 +637,7 @@ test "moduleinfo resolvePathMember and resolvePathTarget" {
     try testing.expectEqualStrings("main", main.name.text);
 
     // Module-qualified member.
-    var path = [_]ast.Ident{ .{ .span = ast.Span.init(0, 0, 0), .text = "calc" }, .{ .span = ast.Span.init(0, 0, 0), .text = "add" } };
+    var path = [_]meta.Ident{ .{ .span = meta.Span.init(0, 0, 0), .text = "calc" }, .{ .span = meta.Span.init(0, 0, 0), .text = "add" } };
     const add_vm = moduleinfo.resolvePathMember(resolve, app, &path).?;
     try testing.expectEqualStrings("add", add_vm.name.text);
 
@@ -647,12 +647,12 @@ test "moduleinfo resolvePathMember and resolvePathTarget" {
     try testing.expectEqualStrings("add", target.vm.name.text);
 
     // A single-segment path resolves against the module itself.
-    const single = [_]ast.Ident{.{ .span = ast.Span.init(0, 0, 0), .text = "two" }};
+    const single = [_]meta.Ident{.{ .span = meta.Span.init(0, 0, 0), .text = "two" }};
     const two_vm = moduleinfo.resolvePathMember(resolve, calc, &single).?;
     try testing.expectEqualStrings("two", two_vm.name.text);
 
     // Unknown paths resolve to null.
-    const bad = [_]ast.Ident{.{ .span = ast.Span.init(0, 0, 0), .text = "nope" }};
+    const bad = [_]meta.Ident{.{ .span = meta.Span.init(0, 0, 0), .text = "nope" }};
     try testing.expect(moduleinfo.resolvePathMember(resolve, app, &bad) == null);
 }
 
@@ -675,27 +675,27 @@ test "moduleinfo specializeSignature instantiates generic host bindings" {
 
     // `len[T](borrow xs: list[T]) -> int32` with a list[str] argument
     // binds T = str.
-    var str_t = cfg.Type{ .primitive = .str };
-    const list_str = cfg.Type{ .list = &str_t };
-    const arg_types = [_]cfg.Type{list_str};
+    var str_t = meta.Type{ .primitive = .str };
+    const list_str = meta.Type{ .list = &str_t };
+    const arg_types = [_]meta.Type{list_str};
     const specialized = moduleinfo.specializeSignature(resolve, t.graph.module("list").?, sig, &arg_types);
     try testing.expect(specialized == .function);
     const ft = specialized.function;
     try testing.expectEqual(@as(usize, 1), ft.params.len);
-    try testing.expectEqual(ast.ParamMode.borrow, ft.params[0].mode);
+    try testing.expectEqual(meta.ParamMode.borrow, ft.params[0].mode);
     try testing.expect(ft.params[0].type_ == .list);
-    try testing.expectEqual(ast.PrimitiveKind.str, ft.params[0].type_.list.*.primitive);
-    try testing.expectEqual(ast.PrimitiveKind.int32, ft.ret.*.primitive);
+    try testing.expectEqual(meta.PrimitiveKind.str, ft.params[0].type_.list.*.primitive);
+    try testing.expectEqual(meta.PrimitiveKind.int32, ft.ret.*.primitive);
 
     // `range(start: int32, end: int32) -> list[int32]` is a non-generic
     // host binding of the `list` module and passes through unchanged.
     const range_vm = t.graph.module("list").?.valueMember("range").?;
     const range_sig = range_vm.type_.function;
-    const range_args = [_]cfg.Type{ .{ .primitive = .int32 }, .{ .primitive = .int32 } };
+    const range_args = [_]meta.Type{ .{ .primitive = .int32 }, .{ .primitive = .int32 } };
     const r_specialized = moduleinfo.specializeSignature(resolve, t.graph.module("list").?, range_sig, &range_args);
     try testing.expect(r_specialized == .function);
     try testing.expect(r_specialized.function.ret.* == .list);
-    try testing.expectEqual(ast.PrimitiveKind.int32, r_specialized.function.ret.*.list.*.primitive);
+    try testing.expectEqual(meta.PrimitiveKind.int32, r_specialized.function.ret.*.list.*.primitive);
 }
 
 test "moduleinfo specializes generic signatures with mode preservation" {
@@ -718,28 +718,28 @@ test "moduleinfo specializes generic signatures with mode preservation" {
     const map_vm = m.valueMember("map").?;
     const sig = map_vm.type_.function;
 
-    var int_t = cfg.Type{ .primitive = .int32 };
-    const list_int = cfg.Type{ .list = &int_t };
-    var str_t2 = cfg.Type{ .primitive = .str };
-    const int_param_t = cfg.Type{ .primitive = .int32 };
-    var fn_params = [_]cfg.Param{.{ .span = ast.Span.init(0, 0, 0), .name = .{ .span = ast.Span.init(0, 0, 0), .text = "" }, .mode = .move, .type_ = int_param_t }};
-    const fn_type = cfg.Type{ .function = .{
+    var int_t = meta.Type{ .primitive = .int32 };
+    const list_int = meta.Type{ .list = &int_t };
+    var str_t2 = meta.Type{ .primitive = .str };
+    const int_param_t = meta.Type{ .primitive = .int32 };
+    var fn_params = [_]meta.Param{.{ .span = meta.Span.init(0, 0, 0), .name = .{ .span = meta.Span.init(0, 0, 0), .text = "" }, .mode = .move, .type_ = int_param_t }};
+    const fn_type = meta.Type{ .function = .{
         .params = &fn_params,
         .ret = &str_t2,
     } };
-    const arg_types = [_]cfg.Type{ list_int, fn_type };
+    const arg_types = [_]meta.Type{ list_int, fn_type };
     const specialized = moduleinfo.specializeSignature(resolve, m, sig, &arg_types);
     const ft = specialized.function;
     // param 0: `move xs: list[int32]` — the list is specialized.
-    try testing.expectEqual(ast.ParamMode.move, ft.params[0].mode);
-    try testing.expectEqual(ast.PrimitiveKind.int32, ft.params[0].type_.list.*.primitive);
+    try testing.expectEqual(meta.ParamMode.move, ft.params[0].mode);
+    try testing.expectEqual(meta.PrimitiveKind.int32, ft.params[0].type_.list.*.primitive);
     // param 1: `f: fn(move int32) -> str` — A substituted inside fn type,
     // mode preserved.
-    try testing.expectEqual(ast.ParamMode.move, ft.params[1].type_.function.params[0].mode);
-    try testing.expectEqual(ast.PrimitiveKind.int32, ft.params[1].type_.function.params[0].type_.primitive);
-    try testing.expectEqual(ast.PrimitiveKind.str, ft.params[1].type_.function.ret.*.primitive);
+    try testing.expectEqual(meta.ParamMode.move, ft.params[1].type_.function.params[0].mode);
+    try testing.expectEqual(meta.PrimitiveKind.int32, ft.params[1].type_.function.params[0].type_.primitive);
+    try testing.expectEqual(meta.PrimitiveKind.str, ft.params[1].type_.function.ret.*.primitive);
     // ret: list[B] → list[str].
-    try testing.expectEqual(ast.PrimitiveKind.str, ft.ret.*.list.*.primitive);
+    try testing.expectEqual(meta.PrimitiveKind.str, ft.ret.*.list.*.primitive);
 }
 
 test "moduleinfo resolveTypeName follows using aliases for local type members" {

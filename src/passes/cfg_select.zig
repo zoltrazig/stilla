@@ -49,6 +49,7 @@
 
 const std = @import("std");
 const cfg = @import("stilla").cfg;
+const meta = @import("stilla").meta;
 
 /// One converted join phi: the phi, its result, and the then/else
 /// incoming values (from B1/B2 respectively).
@@ -98,7 +99,7 @@ fn hoistableArm(b: *cfg.BasicBlock) bool {
 }
 
 /// Scalar *Copy* type — the `cmov` domain (32-bit pattern moves).
-fn scalarCopy(t: cfg.Type) bool {
+fn scalarCopy(t: meta.Type) bool {
     return switch (t) {
         .primitive => |p| switch (p) {
             .int32, .uint32, .float32, .byte, .bool => true,

@@ -53,6 +53,7 @@
 
 const std = @import("std");
 const cfg = @import("stilla").cfg;
+const meta = @import("stilla").meta;
 
 /// Eliminate partially redundant computations across join points.
 pub fn pre(program: *cfg.IrProgram, allocator: std.mem.Allocator) !void {
@@ -272,7 +273,7 @@ fn sameComputation(pi: *const cfg.Instr, cand: *const cfg.Instr) bool {
     if (!cfg.identical(pi.op, cand.op)) return false;
     if (cand.op == .num_cast or pi.op == .num_cast) {
         if (pi.results.len == 0 or cand.results.len == 0) return false;
-        if (!cfg.Type.eql(pi.results[0].type_, cand.results[0].type_)) return false;
+        if (!meta.Type.eql(pi.results[0].type_, cand.results[0].type_)) return false;
     }
     return true;
 }

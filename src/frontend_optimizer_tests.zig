@@ -13,6 +13,7 @@
 
 const std = @import("std");
 const cfg = @import("cfg.zig");
+const meta = @import("meta.zig");
 const frontend = @import("frontend.zig");
 const lower = @import("lower.zig");
 const cfg_parse = @import("passes/cfg_parse.zig");
@@ -1617,10 +1618,10 @@ test "Pass 8.3 never merges num_casts with different result types" {
     // The int32 casts are untouched, and `els` received exactly one
     // inserted instruction: a fresh float32 cast.
     try testing.expectEqual(@as(usize, 2), blocks[1].instrs.len);
-    try testing.expectEqual(cfg.Type{ .primitive = .int32 }, blocks[1].instrs[0].results[0].type_);
+    try testing.expectEqual(meta.Type{ .primitive = .int32 }, blocks[1].instrs[0].results[0].type_);
     try testing.expectEqual(@as(usize, 2), blocks[2].instrs.len);
-    try testing.expectEqual(cfg.Type{ .primitive = .int32 }, blocks[2].instrs[0].results[0].type_);
-    try testing.expectEqual(cfg.Type{ .primitive = .float32 }, blocks[2].instrs[1].results[0].type_);
+    try testing.expectEqual(meta.Type{ .primitive = .int32 }, blocks[2].instrs[0].results[0].type_);
+    try testing.expectEqual(meta.Type{ .primitive = .float32 }, blocks[2].instrs[1].results[0].type_);
     // The phi takes the float32 casts only: pos's original one and the
     // fresh insertion — never an int32 value.
     const phi = switch (blocks[3].instrs[0].op) {
@@ -1631,7 +1632,7 @@ test "Pass 8.3 never merges num_casts with different result types" {
     try testing.expect(phi.incoming[0].value == blocks[1].instrs[1].results[0]);
     try testing.expect(phi.incoming[1].value == blocks[2].instrs[1].results[0]);
     for (phi.incoming) |inc| {
-        try testing.expectEqual(cfg.Type{ .primitive = .float32 }, inc.value.type_);
+        try testing.expectEqual(meta.Type{ .primitive = .float32 }, inc.value.type_);
     }
 }
 

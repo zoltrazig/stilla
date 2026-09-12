@@ -1,6 +1,6 @@
 //! Pass: type shape queries — checker.md, Type resolution.
 //! In: `Resolve` view + `from` module + written type name or AIR-native
-//! `cfg.Type`. Out: the struct/union declaration behind a name, the index
+//! `meta.Type`. Out: the struct/union declaration behind a name, the index
 //! of a field or variant, and the structural ownership of a type.
 //!
 //! Written-name lookups and alias-following come from `type_resolve.zig`;
@@ -10,7 +10,7 @@
 
 const std = @import("std");
 const ast = @import("stilla").ast;
-const cfg = @import("stilla").cfg;
+const meta = @import("stilla").meta;
 const moduleinfo = @import("stilla").moduleinfo;
 const type_resolve = @import("type_resolve.zig");
 
@@ -81,32 +81,32 @@ pub fn variantIndex(ud: *const ast.UnionDef, name: []const u8) ?u32 {
 /// through function types is Copy (a function type is not an owned
 /// component, so the cycle is never entered). The caller treats a final
 /// `null` as not-unique.
-pub fn ownershipOf(resolve: Resolve, from: *ModuleInfo, t: cfg.Type) ?cfg.Ownership {
+pub fn ownershipOf(resolve: Resolve, from: *ModuleInfo, t: meta.Type) ?meta.Ownership {
     // The ancestor stack holds the named types currently being
     // classified. It is a path set, not a grow-only seen set: sibling
     // instantiations of the same declaration (`Option[int32]` and
     // `Option[str]`) are distinct types and must not look like a cycle.
     // Arena-owned; no deinit needed.
-    var visited = std.ArrayList(cfg.Type).empty;
+    var visited = std.ArrayList(meta.Type).empty;
     return ownershipVisited(resolve, from, t, &visited);
 }
 
 fn ownershipVisited(
     resolve: Resolve,
     from: *ModuleInfo,
-    t: cfg.Type,
-    visited: *std.ArrayList(cfg.Type),
-) ?cfg.Ownership {
+    t: meta.Type,
+    visited: *std.ArrayList(meta.Type),
+) ?meta.Ownership {
     return switch (t) {
-        .primitive => |k| if (k == .any or k == .hostdata) cfg.Ownership.unique else cfg.Ownership.copy,
-        .module, .function, .cleanup => cfg.Ownership.copy,
+        .primitive => |k| if (k == .any or k == .hostdata) meta.Ownership.unique else meta.Ownership.copy,
+        .module, .function, .cleanup => meta.Ownership.copy,
         .param => null, // deferred until monomorphic substitution
         .list, .box => |inner| ownershipVisited(resolve, from, inner.*, visited),
         .tuple => |elems| blk: {
-            var acc: ?cfg.Ownership = cfg.Ownership.copy;
+            var acc: ?meta.Ownership = meta.Ownership.copy;
             for (elems) |e| {
-                const ow = ownershipVisited(resolve, from, e, visited) orelse break :blk cfg.Ownership.unique;
-                if (ow == .unique) acc = cfg.Ownership.unique;
+                const ow = ownershipVisited(resolve, from, e, visited) orelse break :blk meta.Ownership.unique;
+                if (ow == .unique) acc = meta.Ownership.unique;
             }
             break :blk acc;
         },
@@ -117,17 +117,17 @@ fn ownershipVisited(
             // Least fixpoint (Core §10.3): a back-edge to a named type
             // currently being classified — a recursive occurrence reached
             // through an owned component — is unique.
-            for (visited.items) |anc| if (cfg.Type.eql(t, anc)) break :blk cfg.Ownership.unique;
+            for (visited.items) |anc| if (meta.Type.eql(t, anc)) break :blk meta.Ownership.unique;
             visited.append(resolve.arena, t) catch break :blk null;
             defer _ = visited.pop();
             break :blk switch (final.decl) {
                 // A host-backed opaque nominal type is unique by declaration
                 // (Core §11.8): `Array[int32]` is unique even though `int32`
                 // is Copy. Ownership never recurses into the type arguments.
-                .opaque_ => cfg.Ownership.unique,
+                .opaque_ => meta.Ownership.unique,
                 .struct_ => |s| blk2: {
-                    if (s.drop != null) break :blk2 cfg.Ownership.unique;
-                    var acc: ?cfg.Ownership = cfg.Ownership.copy;
+                    if (s.drop != null) break :blk2 meta.Ownership.unique;
+                    var acc: ?meta.Ownership = meta.Ownership.copy;
                     for (s.fields) |f| {
                         const ft = type_resolve.resolveType(resolve, from, &f.type_) orelse continue;
                         // A generic instantiation's ownership resolves
@@ -135,24 +135,24 @@ fn ownershipVisited(
                         // is Copy; `Option[File]` is unique).
                         const ft_sub = type_resolve.substParams(resolve.arena, s.type_params, n.args, ft);
                         const ow = ownershipVisited(resolve, from, ft_sub, visited) orelse {
-                            acc = cfg.Ownership.unique;
+                            acc = meta.Ownership.unique;
                             break;
                         };
-                        if (ow == .unique) acc = cfg.Ownership.unique;
+                        if (ow == .unique) acc = meta.Ownership.unique;
                     }
                     break :blk2 acc;
                 },
                 .union_ => |u| blk2: {
-                    var acc: ?cfg.Ownership = cfg.Ownership.copy;
+                    var acc: ?meta.Ownership = meta.Ownership.copy;
                     for (u.variants) |v| {
                         if (v.types) |types| for (types) |vt| {
                             const t2 = type_resolve.resolveType(resolve, from, &vt) orelse continue;
                             const t2_sub = type_resolve.substParams(resolve.arena, u.type_params, n.args, t2);
                             const ow = ownershipVisited(resolve, from, t2_sub, visited) orelse {
-                                acc = cfg.Ownership.unique;
+                                acc = meta.Ownership.unique;
                                 break;
                             };
-                            if (ow == .unique) acc = cfg.Ownership.unique;
+                            if (ow == .unique) acc = meta.Ownership.unique;
                         };
                     }
                     break :blk2 acc;

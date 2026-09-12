@@ -7,6 +7,7 @@
 
 const std = @import("std");
 const ast = @import("stilla").ast;
+const meta = @import("stilla").meta;
 const lex = @import("stilla").lex;
 const parser = @import("stilla").parser;
 const parse_type = @import("type.zig");
@@ -93,7 +94,7 @@ fn parseExpressionBp(self: *parser.Parser, min_bp: u8) ParseError!*ast.Expr {
             if (10 < min_bp) return left;
             _ = self.advance();
             const target = try parse_type.parseType(self);
-            left = try self.newExpr(.{ .cast = .{ .span = ast.Span.merge(left.span(), target.span()), .operand = left, .target = target } });
+            left = try self.newExpr(.{ .cast = .{ .span = meta.Span.merge(left.span(), target.span()), .operand = left, .target = target } });
             continue;
         }
         const info = infixInfo(self.cur().kind) orelse return left;
@@ -131,14 +132,14 @@ fn parseNud(self: *parser.Parser) ParseError!*ast.Expr {
             const tok = self.advance();
             const operand = try parseExpressionBp(self, 10);
             const op: ast.UnaryOp = if (tok.kind == .minus) .neg else .not;
-            return self.newExpr(.{ .unary = .{ .span = ast.Span.merge(tok.span, operand.span()), .op = op, .operand = operand } });
+            return self.newExpr(.{ .unary = .{ .span = meta.Span.merge(tok.span, operand.span()), .op = op, .operand = operand } });
         },
         .kw_move => {
             // `move` takes a complete binding name, not an expression —
             // there is no partial move (Core §13.4).
             const tok = self.advance();
             const name = try self.expectIdent();
-            return self.newExpr(.{ .move = .{ .span = ast.Span.merge(tok.span, name.span), .name = name } });
+            return self.newExpr(.{ .move = .{ .span = meta.Span.merge(tok.span, name.span), .name = name } });
         },
         else => return parsePostfix(self),
     }
@@ -157,14 +158,14 @@ pub fn parsePostfix(self: *parser.Parser) ParseError!*ast.Expr {
                 // such as `f().str` and `(m).box` parse after any primary,
                 // exactly as path segments already do (`builtin.str`).
                 const name = try self.expectPathSegment();
-                expr = try self.newExpr(.{ .member = .{ .span = ast.Span.merge(expr.span(), name.span), .object = expr, .name = name } });
+                expr = try self.newExpr(.{ .member = .{ .span = meta.Span.merge(expr.span(), name.span), .object = expr, .name = name } });
             },
             .lparen => {
                 _ = self.advance();
                 const args = try parseArgListRest(
                     self,
                 );
-                expr = try self.newExpr(.{ .call = .{ .span = ast.Span.merge(expr.span(), self.prev().span), .callee = expr, .args = args } });
+                expr = try self.newExpr(.{ .call = .{ .span = meta.Span.merge(expr.span(), self.prev().span), .callee = expr, .args = args } });
             },
             // `:: [types]` after a non-path primary is the postfix
             // specialization suffix (Binding Power Table document); a `::`
@@ -173,7 +174,7 @@ pub fn parsePostfix(self: *parser.Parser) ParseError!*ast.Expr {
             .dcolon => {
                 _ = self.advance();
                 const type_args = try self.parseTypeArgs();
-                expr = try self.newExpr(.{ .specialize = .{ .span = ast.Span.merge(expr.span(), self.prev().span), .operand = expr, .type_args = type_args } });
+                expr = try self.newExpr(.{ .specialize = .{ .span = meta.Span.merge(expr.span(), self.prev().span), .operand = expr, .type_args = type_args } });
             },
             else => return expr,
         }
@@ -436,5 +437,5 @@ pub fn parseArgListRest(self: *parser.Parser) ![]ast.Expr {
 }
 
 pub fn binary(self: *parser.Parser, op: ast.BinaryOp, lhs: *ast.Expr, rhs: *ast.Expr) ParseError!*ast.Expr {
-    return self.newExpr(.{ .binary = .{ .span = ast.Span.merge(lhs.span(), rhs.span()), .op = op, .lhs = lhs, .rhs = rhs } });
+    return self.newExpr(.{ .binary = .{ .span = meta.Span.merge(lhs.span(), rhs.span()), .op = op, .lhs = lhs, .rhs = rhs } });
 }

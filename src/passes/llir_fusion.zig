@@ -13,6 +13,7 @@
 //! lists afterward).
 const std = @import("std");
 const cfg = @import("stilla").cfg;
+const meta = @import("stilla").meta;
 const llir = @import("stilla").llir;
 const lower = @import("cfg_lower_llir.zig");
 const patterns = @import("llir_patterns.zig");
@@ -75,7 +76,7 @@ fn isCommutative(tag: llir.TypedKind) bool {
 /// The integer types that may commute.
 /// The constant payload of a value whose defining instruction is a
 /// `const_`, or null for every other value.
-fn constOf(v: *const cfg.Value) ?cfg.ConstValue {
+fn constOf(v: *const cfg.Value) ?meta.ConstValue {
     const d = v.def orelse return null;
     return switch (d.op) {
         .const_ => |cv| cv,
@@ -103,7 +104,7 @@ fn constOf(v: *const cfg.Value) ?cfg.ConstValue {
 /// through `const`. Only numeric constants fuse
 /// (`typedOpcodeImm` gates the operand type to the numeric
 /// families first).
-fn immOf(cv: cfg.ConstValue, kind: llir.TypedKind, t: cfg.Type) ?u8 {
+fn immOf(cv: meta.ConstValue, kind: llir.TypedKind, t: meta.Type) ?u8 {
     return typed.immOf(cv, kind, t);
 }
 

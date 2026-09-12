@@ -5,7 +5,7 @@
 
 const std = @import("std");
 const ast = @import("stilla").ast;
-const cfg = @import("stilla").cfg;
+const meta = @import("stilla").meta;
 const hir = @import("stilla").hir;
 const moduleinfo = @import("stilla").moduleinfo;
 const hir_build = @import("hir_build.zig");
@@ -31,7 +31,7 @@ pub fn buildBlock(b: *hir_build.Builder, info: *moduleinfo.ModuleInfo, blk: *con
 
 fn buildStmts(b: *hir_build.Builder, info: *moduleinfo.ModuleInfo, stmts: []const ast.Stmt, i: usize, result: ?*const ast.Expr) hir_build.BuildError!hir.ExprId {
     if (i >= stmts.len) {
-        return if (result) |r| hir_build_expr.buildExpr(b, info, r) else hir_build_expr.voidLiteral(b, ast.Span.init(0, 0, 0));
+        return if (result) |r| hir_build_expr.buildExpr(b, info, r) else hir_build_expr.voidLiteral(b, meta.Span.init(0, 0, 0));
     }
     const stmt = &stmts[i];
     switch (stmt.*) {
@@ -51,7 +51,7 @@ fn buildStmts(b: *hir_build.Builder, info: *moduleinfo.ModuleInfo, stmts: []cons
 
 /// `seq(e, rest)`: evaluate `e` (discarding its value), then `rest`;
 /// the sequence's value is `rest`'s.
-fn seq2(b: *hir_build.Builder, span: ast.Span, e: hir.ExprId, rest: hir.ExprId) hir_build.BuildError!hir.ExprId {
+fn seq2(b: *hir_build.Builder, span: meta.Span, e: hir.ExprId, rest: hir.ExprId) hir_build.BuildError!hir.ExprId {
     const rest_ty = b.built.program.node(rest).ty;
     const ops = try b.built.program.addOperands(&.{ e, rest });
     return b.built.program.addExpr(.{ .op = try b.op(span, "seq"), .ty = rest_ty, .operands = ops });
@@ -152,7 +152,7 @@ fn resolveAlias(b: *hir_build.Builder, info: *moduleinfo.ModuleInfo, u: *const a
 fn letChain(
     b: *hir_build.Builder,
     info: *moduleinfo.ModuleInfo,
-    span: ast.Span,
+    span: meta.Span,
     names: []const LetName,
     init: hir.ExprId,
     stmts: []const ast.Stmt,
@@ -176,13 +176,13 @@ fn letChain(
 
 const LetName = struct {
     name: []const u8,
-    ty: ?cfg.Type = null,
+    ty: ?meta.Type = null,
     moving: bool = false,
 };
 
 /// One `let` node: init operand outside the region, region params bound
 /// for the body (the source-canonical `let x = e in body`).
-pub fn letNode(b: *hir_build.Builder, span: ast.Span, init: hir.ExprId, binder_ids: []const hir.BinderId, body: hir.ExprId) hir_build.BuildError!hir.ExprId {
+pub fn letNode(b: *hir_build.Builder, span: meta.Span, init: hir.ExprId, binder_ids: []const hir.BinderId, body: hir.ExprId) hir_build.BuildError!hir.ExprId {
     const ops = try b.built.program.addOperands(&.{init});
     const rid = try b.built.program.addRegion(binder_ids, body, null);
     const regs = try b.built.program.addRegions(&.{rid});
@@ -282,12 +282,12 @@ fn buildDropStmt(
 /// A `local` read of a binder.
 pub fn localNode(b: *hir_build.Builder, info: *moduleinfo.ModuleInfo, bind: hir.BinderId) hir_build.BuildError!hir.ExprId {
     const ty = b.built.program.binders.items[bind].ty;
-    return b.built.program.addExpr(.{ .op = try b.op(ast.Span.init(0, 0, 0), "local"), .ty = ty, .payload = .{ .binder = bind }, .sema = try viewOf(b, info, ty, bind, .read) });
+    return b.built.program.addExpr(.{ .op = try b.op(meta.Span.init(0, 0, 0), "local"), .ty = ty, .payload = .{ .binder = bind }, .sema = try viewOf(b, info, ty, bind, .read) });
 }
 
 /// A binder's created-state view: params arrive owned (except borrow
 /// params); reads off a `.borrow`-mode binder are borrowed.
-fn viewOf(b: *hir_build.Builder, info: *moduleinfo.ModuleInfo, ty: cfg.Type, bind: hir.BinderId, context: enum { read, value }) hir_build.BuildError!hir.SemanticInfoId {
+fn viewOf(b: *hir_build.Builder, info: *moduleinfo.ModuleInfo, ty: meta.Type, bind: hir.BinderId, context: enum { read, value }) hir_build.BuildError!hir.SemanticInfoId {
     const mode = b.built.program.binders.items[bind].mode;
     const borrowed = mode == .borrow or (context == .value and typeIsUnique(b, info, ty) and mode == .value and false);
     if (borrowed) {
@@ -296,7 +296,7 @@ fn viewOf(b: *hir_build.Builder, info: *moduleinfo.ModuleInfo, ty: cfg.Type, bin
     return 0;
 }
 
-pub fn typeIsUnique(b: *hir_build.Builder, info: *moduleinfo.ModuleInfo, t: cfg.Type) bool {
+pub fn typeIsUnique(b: *hir_build.Builder, info: *moduleinfo.ModuleInfo, t: meta.Type) bool {
     if (t.ownership()) |ow| return ow == .unique;
     return switch (t) {
         .named => (moduleinfo.ownershipOf(b.resolve, info, t) orelse .unique) == .unique,

@@ -4,7 +4,7 @@
 
 const std = @import("std");
 const ast = @import("stilla").ast;
-const cfg = @import("stilla").cfg;
+const meta = @import("stilla").meta;
 const hir = @import("stilla").hir;
 const moduleinfo = @import("stilla").moduleinfo;
 const cfg_lower_pattern = @import("cfg_lower_pattern.zig");
@@ -14,14 +14,14 @@ const hir_build_expr = @import("hir_build_expr.zig");
 const hir_build_pattern = @import("hir_build_pattern.zig");
 
 /// `ifNode(cond, then, else)`: two regions rooted at the branch values.
-fn ifNode(b: *hir_build.Builder, span: ast.Span, cond: hir.ExprId, then: hir.ExprId, else_: hir.ExprId) hir_build.BuildError!hir.ExprId {
+fn ifNode(b: *hir_build.Builder, span: meta.Span, cond: hir.ExprId, then: hir.ExprId, else_: hir.ExprId) hir_build.BuildError!hir.ExprId {
     return controlNode(b, span, "if", cond, then, else_);
 }
 
 /// One control node with two regions (`if`, or the `and`/`or` short-circuit
 /// rows — the §5.5/§7.1 amendment: and/or keep their own rows so the
 /// HIR→CFG lowering can reproduce the reference short-circuit diamond).
-pub fn controlNode(b: *hir_build.Builder, span: ast.Span, op_name: []const u8, cond: hir.ExprId, then: hir.ExprId, else_: hir.ExprId) hir_build.BuildError!hir.ExprId {
+pub fn controlNode(b: *hir_build.Builder, span: meta.Span, op_name: []const u8, cond: hir.ExprId, then: hir.ExprId, else_: hir.ExprId) hir_build.BuildError!hir.ExprId {
     const ops = try b.built.program.addOperands(&.{cond});
     const rt = try b.built.program.addRegion(&.{}, then, null);
     const re = try b.built.program.addRegion(&.{}, else_, null);
@@ -33,11 +33,11 @@ pub fn controlNode(b: *hir_build.Builder, span: ast.Span, op_name: []const u8, c
 
 /// The join type of two branch values: never contributes nothing; equal
 /// types join to themselves; a mixed pair joins as `any`.
-fn unifyJoin(a: cfg.Type, b_: cfg.Type) cfg.Type {
+fn unifyJoin(a: meta.Type, b_: meta.Type) meta.Type {
     if (a == .primitive and a.primitive == .never) return b_;
     if (b_ == .primitive and b_.primitive == .never) return a;
-    if (cfg.Type.eql(a, b_)) return a;
-    return cfg.Type{ .primitive = .any };
+    if (meta.Type.eql(a, b_)) return a;
+    return meta.Type{ .primitive = .any };
 }
 
 pub fn buildIf(b: *hir_build.Builder, info: *moduleinfo.ModuleInfo, i: *const ast.IfExpr) hir_build.BuildError!hir.ExprId {
@@ -84,7 +84,7 @@ pub fn buildMatch(b: *hir_build.Builder, info: *moduleinfo.ModuleInfo, e: *const
         }
     }
     var reg_ids = std.ArrayList(hir.RegionId).empty;
-    var arm_tys = std.ArrayList(cfg.Type).empty;
+    var arm_tys = std.ArrayList(meta.Type).empty;
     for (m.arms) |*arm| {
         var binder_ids = std.ArrayList(hir.BinderId).empty;
         const pat_id = try hir_build_pattern.buildPattern(b, info, &arm.pattern, scrut_ty, moving, &binder_ids);
@@ -97,7 +97,7 @@ pub fn buildMatch(b: *hir_build.Builder, info: *moduleinfo.ModuleInfo, e: *const
         try reg_ids.append(b.arena, rid);
     }
     const regs = try b.built.program.addRegions(reg_ids.items);
-    var jt: cfg.Type = .{ .primitive = .void };
+    var jt: meta.Type = .{ .primitive = .void };
     for (arm_tys.items) |t2| jt = unifyJoin(jt, t2);
     return b.built.program.addExpr(.{ .op = try b.op(m.span, "match"), .ty = b.annotatedType(info, e) orelse jt, .operands = ops, .regions = regs });
 }

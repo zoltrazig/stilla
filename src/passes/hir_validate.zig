@@ -51,7 +51,7 @@
 const std = @import("std");
 const hir = @import("stilla").hir;
 // Test fixtures build cfg nominal decls (module graph stand-in).
-const cfg = @import("stilla").cfg;
+const meta = @import("stilla").meta;
 
 const lambda_op = hir.opId("lambda").?;
 const let_op = hir.opId("let").?;
@@ -491,8 +491,8 @@ const Validator = struct {
 // ---------------------------------------------------------------------------
 
 const t = std.testing;
-const ty_int = cfg.Type{ .primitive = .int32 };
-const ty_bool = cfg.Type{ .primitive = .bool };
+const ty_int = meta.Type{ .primitive = .int32 };
+const ty_bool = meta.Type{ .primitive = .bool };
 
 const op_const = hir.opId("const").?;
 const op_local = hir.opId("local").?;
@@ -636,7 +636,7 @@ test "a BinderId is a param of at most one region" {
     // Duplicate binder in a single region's params.
     const reg = try p.addRegion(&.{ b, b }, try p.addExpr(.{ .op = op_const, .ty = ty_int, .payload = .{ .const_value = .{ .int = 0 } } }), null);
     const regions = try p.addRegions(&.{reg});
-    const fn_ty = cfg.Type{ .primitive = .int32 };
+    const fn_ty = meta.Type{ .primitive = .int32 };
     const lam = try p.addExpr(.{ .op = op_lambda, .ty = fn_ty, .regions = regions });
     const m = try validate(&p, lam, arena.allocator());
     const msg = m orelse return error.TestUnexpectedResult;
@@ -842,13 +842,13 @@ fn optionFixture(allocator: std.mem.Allocator) !Fixture {
     errdefer arena.deinit();
     const a = arena.allocator();
     const t_param = "T";
-    const param_ty = cfg.Type{ .param = t_param };
-    const some_payload = try a.dupe(cfg.Type, &.{param_ty});
-    var variants = try a.alloc(cfg.VariantDecl, 2);
+    const param_ty = meta.Type{ .param = t_param };
+    const some_payload = try a.dupe(meta.Type, &.{param_ty});
+    var variants = try a.alloc(meta.VariantDecl, 2);
     variants[0] = .{ .name = "Some", .payloads = some_payload };
     variants[1] = .{ .name = "None", .payloads = &.{} };
     const type_params = try a.dupe([]const u8, &.{t_param});
-    const decls = try a.alloc(cfg.TypeDecl, 1);
+    const decls = try a.alloc(meta.TypeDecl, 1);
     decls[0] = .{ .union_ = .{
         .name = "Option",
         .module = "test",

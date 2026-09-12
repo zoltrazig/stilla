@@ -15,7 +15,7 @@
 
 const std = @import("std");
 const ast = @import("ast.zig");
-const cfg = @import("cfg.zig");
+const meta = @import("meta.zig");
 const checker = @import("passes/checker.zig");
 const moduleinfo = @import("moduleinfo.zig");
 const testing = std.testing;
@@ -730,7 +730,7 @@ test "checker specializes a generic host binding without a body" {
     switch (inst.signature) {
         .function => |f| {
             try testing.expectEqual(@as(usize, 1), f.params.len);
-            try testing.expectEqual(cfg.Type{ .primitive = .int32 }, f.ret.*);
+            try testing.expectEqual(meta.Type{ .primitive = .int32 }, f.ret.*);
         },
         else => try testing.expect(false),
     }

@@ -11,6 +11,7 @@
 const std = @import("std");
 const ast = @import("stilla").ast;
 const cfg = @import("stilla").cfg;
+const meta = @import("stilla").meta;
 const hir = @import("stilla").hir;
 const lower = @import("stilla").lower;
 const cfg_lower_emit = @import("cfg_lower_emit.zig");
@@ -78,7 +79,7 @@ pub fn bindPattern(c: *Ctx, fs: *FuncState, pid: hir.PatternId, base: *cfg.Value
                 // base and defines every field value at once. The
                 // builder wrote the pattern fields in declaration
                 // order, so the projections line up with the unpack.
-                const field_types = try self.arena.alloc(cfg.Type, sp.fields.len);
+                const field_types = try self.arena.alloc(meta.Type, sp.fields.len);
                 for (sp.fields, 0..) |fp, i| {
                     field_types[i] = fieldType(c, base, fp.field);
                 }
@@ -108,9 +109,9 @@ pub fn bindPattern(c: *Ctx, fs: *FuncState, pid: hir.PatternId, base: *cfg.Value
 /// serialized layout's declared type, substituted with the base's type
 /// arguments (the direct lowering's `substParams` rule — `p.first` of
 /// a `Pair[int32, str]` is `int32`, Core §12.1).
-fn fieldType(c: *Ctx, base: *cfg.Value, idx: u32) cfg.Type {
+fn fieldType(c: *Ctx, base: *cfg.Value, idx: u32) meta.Type {
     const sd = c.built.types[base.type_.named.id].struct_;
-    return cfg.substParams(c.self.arena, sd.type_params, base.type_.named.args, sd.fields[idx].type_);
+    return meta.substParams(c.self.arena, sd.type_params, base.type_.named.args, sd.fields[idx].type_);
 }
 
 fn destructureList(c: *Ctx, fs: *FuncState, lp: hir.Pattern.ListPattern, base: *cfg.Value, base_owned: bool) LowerError!void {
@@ -131,10 +132,10 @@ fn destructureList(c: *Ctx, fs: *FuncState, lp: hir.Pattern.ListPattern, base: *
             }
             return;
         }
-        var types = std.ArrayList(cfg.Type).empty;
+        var types = std.ArrayList(meta.Type).empty;
         try types.appendNTimes(self.arena, elem_type, lp.elems.len);
-        const tail_type = try self.arena.create(cfg.Type);
-        const tail_inner = try self.arena.create(cfg.Type);
+        const tail_type = try self.arena.create(meta.Type);
+        const tail_inner = try self.arena.create(meta.Type);
         tail_inner.* = elem_type;
         tail_type.* = .{ .list = tail_inner };
         try types.append(self.arena, tail_type.*);
@@ -161,7 +162,7 @@ fn destructureList(c: *Ctx, fs: *FuncState, lp: hir.Pattern.ListPattern, base: *
         }
         if (lp.rest) |rest| {
             // `..rest` binds a borrowed sublist view (Core §14.5).
-            const inner = try self.arena.create(cfg.Type);
+            const inner = try self.arena.create(meta.Type);
             inner.* = elem_type;
             const tail = (try cfg_lower_emit.emit(self, fs, no_span, .{ .tail = base }, .{ .list = inner })) orelse return;
             try hir_lower.bindBinder(c, fs, restBinder(c, rest), tail, tail.state == .owned and tail.ownership == .unique);
@@ -198,9 +199,9 @@ pub fn bindUnionArm(c: *Ctx, fs: *FuncState, rid: hir.RegionId, scrut: *cfg.Valu
             const payload_pid = vp.payload orelse return; // no payload to bind
             // The payload types substitute the union's type parameters
             // with the scrutinee's arguments (Core §12.1).
-            const payload_types = try self.arena.alloc(cfg.Type, variant.payloads.len);
+            const payload_types = try self.arena.alloc(meta.Type, variant.payloads.len);
             for (variant.payloads, 0..) |pt, i| {
-                payload_types[i] = cfg.substParams(self.arena, ud.type_params, scrut.type_.named.args, pt);
+                payload_types[i] = meta.substParams(self.arena, ud.type_params, scrut.type_.named.args, pt);
             }
             if (payload_types.len == 1) {
                 if (moving) {
@@ -308,11 +309,11 @@ pub fn armTest(c: *Ctx, fs: *FuncState, scrut: *cfg.Value, rid: hir.RegionId, k:
                     .list => |inner| inner.*,
                     else => return self.fail(no_span, "list pattern requires a list value", .{}),
                 };
-                const elem_ptr = try self.arena.create(cfg.Type);
+                const elem_ptr = try self.arena.create(meta.Type);
                 elem_ptr.* = elem_type;
-                const len_params = try self.arena.alloc(cfg.Param, 1);
-                len_params[0] = cfg.syntheticParam(no_span, .borrow, .{ .list = elem_ptr });
-                const len_ret = try self.arena.create(cfg.Type);
+                const len_params = try self.arena.alloc(meta.Param, 1);
+                len_params[0] = meta.syntheticParam(no_span, .borrow, .{ .list = elem_ptr });
+                const len_ret = try self.arena.create(meta.Type);
                 len_ret.* = .{ .primitive = .int32 };
                 const len = (try cfg_lower_emit.emit(self, fs, no_span, .{ .syscall = .{
                     .span = no_span,
@@ -354,14 +355,14 @@ pub fn armTest(c: *Ctx, fs: *FuncState, scrut: *cfg.Value, rid: hir.RegionId, k:
 }
 
 /// A literal pattern's constant value.
-fn literalConst(c: *Ctx, fs: *FuncState, lit: cfg.ConstValue) LowerError!*cfg.Value {
+fn literalConst(c: *Ctx, fs: *FuncState, lit: meta.ConstValue) LowerError!*cfg.Value {
     return (try cfg_lower_expr.emitConst(c.self, fs, no_span, lit, litType(lit))).?;
 }
 
 /// The type of a literal pattern's constant (the direct
 /// `lowerLiteralConst` mapping; negative literals arrive pre-negated
-/// in `cfg.ConstValue.int`).
-fn litType(lit: cfg.ConstValue) cfg.Type {
+/// in `meta.ConstValue.int`).
+fn litType(lit: meta.ConstValue) meta.Type {
     return switch (lit) {
         .int => .{ .primitive = .int32 },
         .float => .{ .primitive = .float32 },

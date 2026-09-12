@@ -16,6 +16,7 @@
 
 const std = @import("std");
 const cfg = @import("cfg.zig");
+const meta = @import("meta.zig");
 const opcodes = @import("llir_opcodes.zig");
 
 /// The symbolic assembly projection of a frozen `LlirProgram` image.
@@ -439,7 +440,7 @@ pub const OwnMode = enum {
 
 /// The lifecycle mode of `t`. Borrowed is never inferred here — it is a
 /// property of the *value* (its defining op), not of the type.
-pub fn modeOf(t: cfg.Type) OwnMode {
+pub fn modeOf(t: meta.Type) OwnMode {
     return switch (t) {
         .primitive => |k| switch (k) {
             .str => .counted,
@@ -853,7 +854,7 @@ pub const TypeKind = enum(u32) {
     cleanup,
 };
 
-/// One serialized `cfg.Type` (spec §2, Instruction Set §13):
+/// One serialized `meta.Type` (spec §2, Instruction Set §13):
 /// - `.primitive`: `a` = `PrimitiveId`;
 /// - `.named`: `a` = declaration `TypeId`, `{ b, c }` = type-argument
 ///   range into `types`;
@@ -868,13 +869,13 @@ pub const TypeDesc = struct {
     c: u32,
 };
 
-/// The kind of one `TypeDeclDesc` row — a serialized `cfg.TypeDecl`
+/// The kind of one `TypeDeclDesc` row — a serialized `meta.TypeDecl`
 /// (air.md §9.1): the concrete layout, ownership, and destruction info a
 /// backend needs for `construct` / `unpack_*` / `drop`, without the
 /// source module graph.
 pub const TypeDeclKind = enum(u32) { struct_, union_, opaque_ };
 
-/// One serialized `cfg.TypeDecl`:
+/// One serialized `meta.TypeDecl`:
 /// - `.struct_`: `a` = ownership (`OwnershipId`), `b` = drop-hook local
 ///   `FunctionId` or `no_index`, `{ c, d }` = field-type range into
 ///   `type_decl_fields`, `e` = `ImportDesc` index of an imported drop
@@ -914,7 +915,10 @@ pub const UnionVariant = struct {
 /// modes — `plain | borrow | move` — preserved so indirect signature
 /// equality is exact; the runtime derives transfer behavior for `plain`
 /// from the parameter type's ownership.
-pub const ParamMode = enum(u32) { plain, borrow, move };
+/// A declared parameter's ownership mode (Instruction Set §13): the same
+/// concept and wire values as `meta.ParamMode`, aliased so the serialized
+/// signature tables carry the shared type.
+pub const ParamMode = meta.ParamMode;
 pub const SignatureDesc = struct {
     params_start: u32,
     params_len: u32,
@@ -1265,7 +1269,7 @@ pub fn lowerTerminator(tag: std.meta.Tag(cfg.Terminator)) Opcode {
 
 /// The `Rep` of a primitive type, or null for a type with no rep
 /// (byte/bool/str/any/hostdata and the non-primitives).
-fn typeRep(t: cfg.Type) ?Rep {
+fn typeRep(t: meta.Type) ?Rep {
     return switch (t) {
         .primitive => |k| switch (k) {
             .int32 => .i32,
@@ -1302,7 +1306,7 @@ fn famOp(comptime base: []const u8, rep: ?Rep) ?Opcode {
 
 /// The widthless bitwise op: rep-agnostic on canonical cells (§4), one
 /// opcode serves every integer type. Null for non-integer types.
-fn bitwiseOp(comptime name: []const u8, t: cfg.Type) ?Opcode {
+fn bitwiseOp(comptime name: []const u8, t: meta.Type) ?Opcode {
     return switch (t) {
         .primitive => |k| switch (k) {
             .int32, .uint32, .int64, .uint64 => @field(Opcode, name),
@@ -1316,7 +1320,7 @@ fn bitwiseOp(comptime name: []const u8, t: cfg.Type) ?Opcode {
 /// is taken at the operand's width, so the unsigned integer types alias
 /// the signed member of the same width (`clz.u32` → `clz.i32`). Null for
 /// floats and non-primitives.
-fn bitCountOp(comptime base: []const u8, t: cfg.Type) ?Opcode {
+fn bitCountOp(comptime base: []const u8, t: meta.Type) ?Opcode {
     return switch (t) {
         .primitive => |k| switch (k) {
             .int32, .uint32 => @field(Opcode, base ++ "_i32"),
@@ -1344,7 +1348,7 @@ fn bitCountOp(comptime base: []const u8, t: cfg.Type) ?Opcode {
 /// synthesized as `not(slt)` by the lowering — so `typedOpcode(.gt, _)`
 /// is null, and `typedOpcode(.le, _)`/`typedOpcode(.ge, _)` are null on
 /// the integer reps.
-pub fn typedOpcode(kind: TypedKind, src: cfg.Type, dst: cfg.Type) ?Opcode {
+pub fn typedOpcode(kind: TypedKind, src: meta.Type, dst: meta.Type) ?Opcode {
     return switch (kind) {
         .add => famOp("add", typeRep(src)),
         .sub => famOp("sub", typeRep(src)),
@@ -1383,7 +1387,7 @@ pub fn typedOpcode(kind: TypedKind, src: cfg.Type, dst: cfg.Type) ?Opcode {
 
 /// Integer comparisons carry signedness but no width; float width remains
 /// explicit. Scalar bool/string equality keeps its dedicated opcode.
-fn cmpFam(comptime base: []const u8, src: cfg.Type) ?Opcode {
+fn cmpFam(comptime base: []const u8, src: meta.Type) ?Opcode {
     const ordering = comptime std.mem.eql(u8, base, "slt");
     return switch (src) {
         .primitive => |k| switch (k) {
@@ -1402,7 +1406,7 @@ fn cmpFam(comptime base: []const u8, src: cfg.Type) ?Opcode {
 /// `cvt.<src>.<dst>` spellings over the seven cast types
 /// `b, i32, u32, i64, u64, f32, f64` — the identity entries have no
 /// opcode (null).
-fn castOp(src: cfg.Type, dst: cfg.Type) ?Opcode {
+fn castOp(src: meta.Type, dst: meta.Type) ?Opcode {
     return switch (src) {
         .primitive => |ks| switch (dst) {
             .primitive => |kd| switch (ks) {
@@ -1481,7 +1485,7 @@ fn castOp(src: cfg.Type, dst: cfg.Type) ?Opcode {
 /// when the type has no such form. The integer immediate families are
 /// integer-4 only (no float forms); comparison immediates are C-Type and
 /// write `cond`; unary families have no immediate forms.
-fn cmpImmOp(comptime base: []const u8, src: cfg.Type) ?Opcode {
+fn cmpImmOp(comptime base: []const u8, src: meta.Type) ?Opcode {
     return switch (src) {
         .primitive => |k| switch (k) {
             .int32, .int64 => @field(Opcode, base),
@@ -1492,7 +1496,7 @@ fn cmpImmOp(comptime base: []const u8, src: cfg.Type) ?Opcode {
     };
 }
 
-fn hasIntComparison(src: cfg.Type) bool {
+fn hasIntComparison(src: meta.Type) bool {
     return switch (src) {
         .primitive => |k| k == .int32 or k == .uint32 or k == .int64 or k == .uint64 or k == .byte,
         else => false,
@@ -1501,7 +1505,7 @@ fn hasIntComparison(src: cfg.Type) bool {
 
 /// The integer-only immediate form with a uniform zero-extended
 /// immediate (shift counts and bitwise masks — a single opcode).
-fn intImm(comptime name: []const u8, t: cfg.Type) ?Opcode {
+fn intImm(comptime name: []const u8, t: meta.Type) ?Opcode {
     return switch (t) {
         .primitive => |k| switch (k) {
             .int32, .uint32, .int64, .uint64 => @field(Opcode, name),
@@ -1511,7 +1515,7 @@ fn intImm(comptime name: []const u8, t: cfg.Type) ?Opcode {
     };
 }
 
-pub fn typedOpcodeImm(kind: TypedKind, src: cfg.Type) ?Opcode {
+pub fn typedOpcodeImm(kind: TypedKind, src: meta.Type) ?Opcode {
     return switch (kind) {
         .add => famOp("addi", typeRep(src)),
         .sub => famOp("subi", typeRep(src)),
@@ -1535,7 +1539,7 @@ pub fn typedOpcodeImm(kind: TypedKind, src: cfg.Type) ?Opcode {
 /// The fused multiply-accumulate opcode for a type (`dst = dst + b *
 /// c`): the typed integer rep member (`madd.i32` on `int32`, …), the
 /// float rep member for floats; null for non-numeric types.
-pub fn maddOpcode(src: cfg.Type) ?Opcode {
+pub fn maddOpcode(src: meta.Type) ?Opcode {
     return famOp("madd", typeRep(src));
 }
 
@@ -1544,7 +1548,7 @@ pub fn maddOpcode(src: cfg.Type) ?Opcode {
 /// follows the rep (`maddi.i32`/`maddi.i64` sign-extend,
 /// `maddi.u32`/`maddi.u64` zero-extend). No float form — the float
 /// immediate variants do not exist.
-pub fn maddiOpcode(src: cfg.Type) ?Opcode {
+pub fn maddiOpcode(src: meta.Type) ?Opcode {
     return switch (src) {
         .primitive => |k| switch (k) {
             .int32, .uint32, .int64, .uint64 => famOp("maddi", typeRep(src)),
@@ -1989,7 +1993,7 @@ test "typed opcodes resolve at every supported rep (typed integer schema)" {
     // The full 7 × 7 matrix minus the identity entries: 42 distinct
     // opcodes, one per non-identity pair.
     {
-        const types = [_]cfg.Type{
+        const types = [_]meta.Type{
             .{ .primitive = .byte },
             .{ .primitive = .int32 },
             .{ .primitive = .uint32 },

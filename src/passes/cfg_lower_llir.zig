@@ -7,6 +7,7 @@
 
 const std = @import("std");
 const cfg = @import("stilla").cfg;
+const meta = @import("stilla").meta;
 const llir = @import("stilla").llir;
 const llir_alloc = @import("llir_alloc.zig");
 const llir_coalesce = @import("llir_result_coalesce.zig");
@@ -177,7 +178,7 @@ pub const Builder = struct {
     /// (`V + rank`). The edge pass's cycle-staging slot lookup
     /// reads it back when
     /// emission resolves a cycle's staging slot.
-    scratch_cycle_types: std.ArrayList(std.ArrayList(*const cfg.Type)) = .empty,
+    scratch_cycle_types: std.ArrayList(std.ArrayList(*const meta.Type)) = .empty,
     /// Cycle-type detection mode: while set (inside `allocateSlots`, before the
     /// scratch rows exist), the edge pass's cycle-staging lookup
     /// records the
@@ -185,7 +186,7 @@ pub const Builder = struct {
     /// placeholder cannot perturb the copy-graph walk — staging ids
     /// appear only as record dsts, never as copy-graph nodes — so
     /// detection and emission run the identical walk.
-    detect_cycle_types: ?*std.ArrayList(*const cfg.Type) = null,
+    detect_cycle_types: ?*std.ArrayList(*const meta.Type) = null,
 
     // --- interning (strings, constants, types, signatures, symbols, imports) ---------
     /// The lowering scope: `null` lowers every function of the program
@@ -546,7 +547,7 @@ pub const Builder = struct {
     /// Whether `t` is an integer primitive — the `le`/`ge` synthesis
     /// and the immediate/register fused-branch forms read it. Shared
     /// with the budgeting pass's record counts.
-    pub fn isInteger(t: cfg.Type) bool {
+    pub fn isInteger(t: meta.Type) bool {
         return switch (t.primitive) {
             .int32, .uint32, .byte, .int64, .uint64 => true,
             else => false,
@@ -672,7 +673,7 @@ pub const Builder = struct {
     /// value's type. Compatibility shim: the logic lives with the
     /// body-emission pass (`cfg_lower_llir_emit.calleeParamList`),
     /// shared with the lifecycle pass's argument-mode classification.
-    pub fn calleeParamList(self: *Builder, callee: cfg.Callee) []const cfg.Param {
+    pub fn calleeParamList(self: *Builder, callee: cfg.Callee) []const meta.Param {
         return llir_emit.calleeParamList(self, callee);
     }
 

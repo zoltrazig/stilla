@@ -55,7 +55,7 @@
 
 const std = @import("std");
 const ast = @import("ast.zig");
-const cfg = @import("cfg.zig");
+const meta = @import("meta.zig");
 const frontend_cache = @import("frontend_cache.zig");
 const module_check = @import("passes/module_check.zig");
 const module_load = @import("passes/module_load.zig");
@@ -68,12 +68,9 @@ const type_infer = @import("passes/type_infer.zig");
 /// How a written specifier resolved (Runtime §2.6).
 pub const ModuleKind = enum { source, standard_library, host };
 
-/// One diagnostic: the offending source range and a message. The builder
-/// records the first error; nothing after it is guaranteed meaningful.
-pub const Diag = struct {
-    span: ast.Span,
-    message: []const u8,
-};
+/// A phase-1 source diagnostic (`meta.Diagnostic` under the builder's
+/// spelling). The builder records the first error.
+pub const Diag = meta.Diagnostic;
 
 // ---------------------------------------------------------------------------
 // Members
@@ -106,7 +103,7 @@ pub const MemberClass = enum {
 /// value members). Monomorphic functions are first-class (Core §12.4), so
 /// functions occupy member slots like consts.
 pub const ValueMember = struct {
-    name: ast.Ident,
+    name: meta.Ident,
     /// Member index: position in the module's value-member declaration
     /// order (Core §2.1 — consts and functions share one member space),
     /// source-level and stable. Intrinsics occupy no member row (air.md
@@ -117,7 +114,7 @@ pub const ValueMember = struct {
     slot: u32,
     /// Resolved type: the const's type, or the function's monomorphic
     /// signature.
-    type_: cfg.Type,
+    type_: meta.Type,
     decl: ValueDecl,
     /// The resolved specifier when this member is a *module value* (Core
     /// §2.3): an `import("spec")` initializer or an alias of one.
@@ -144,7 +141,7 @@ pub const ValueDecl = union(enum) {
 /// A compile-time type member: a struct, a union, or a transparent alias
 /// (Core §2.5, §12.1).
 pub const TypeMember = struct {
-    name: ast.Ident,
+    name: meta.Ident,
     decl: TypeDecl,
     /// True when the declaration takes type parameters (a template, Core
     /// §12.1). Templates are recorded so phase 2 can specialize them;
@@ -179,7 +176,7 @@ pub const MemberRef = struct {
 
 pub const UsingAlias = struct {
     name: []const u8,
-    span: ast.Span,
+    span: meta.Span,
     target: AliasTarget,
 };
 
@@ -191,15 +188,15 @@ pub const UsingAlias = struct {
 /// §2). Phase 3 lowers calls to these as system calls, never as in-AIR
 /// calls.
 pub const HostBinding = struct {
-    span: ast.Span,
-    name: ast.Ident,
+    span: meta.Span,
+    name: meta.Ident,
     /// Index of the binding in its module's member table (a `MemberId`,
     /// air.md §7). Dispatch at the LLIR/runtime boundary is by
     /// (module, member name) — the index only orders the AIR row
     /// (Intrinsics Specification §4).
     member_index: u32,
-    /// The declaration's resolved signature (`cfg.Type.function`).
-    signature: cfg.Type,
+    /// The declaration's resolved signature (`meta.Type.function`).
+    signature: meta.Type,
 };
 
 // ---------------------------------------------------------------------------
@@ -311,9 +308,11 @@ pub const ModuleInfo = struct {
     }
 };
 
-/// The result of phase 1 (module-graph.md, Data structures): every module of the program, in
-/// dependency order, with module-level info computed.
-pub const TypeId = u32;
+/// A nominal-type declaration id — the index into the compilation's
+/// `TypeInterner` (`ModuleGraph.type_interner`), shared with `meta.TypeId`
+/// (the id `meta.Type.named` carries) so phase 1 and lowering agree on
+/// identity.
+pub const TypeId = meta.TypeId;
 
 /// The canonical nominal-type interner for one compilation (air.md §11).
 /// Every concrete struct/union *and* every generic template decl named in
@@ -343,6 +342,8 @@ pub const TypeInterner = struct {
     }
 };
 
+/// The result of phase 1 (module-graph.md, Data structures): every module
+/// of the program, in dependency order, with module-level info computed.
 pub const ModuleGraph = struct {
     arena: std.mem.Allocator,
     /// Topological order: dependencies before dependents (module-graph.md, Import-cycle detection).
@@ -406,7 +407,7 @@ pub const RawConst = struct {
     /// `import("spec")` initializer.
     import_spec: ?[]const u8 = null,
     /// Span of the `import(...)` expression, for import diagnostics.
-    import_span: ast.Span = ast.Span.init(0, 0, 0),
+    import_span: meta.Span = meta.Span.init(0, 0, 0),
     /// A single-segment path initializer naming another const
     /// (`const b = a;`), resolved transitively.
     alias_of: ?[]const u8 = null,
@@ -418,7 +419,7 @@ pub const RawConst = struct {
 /// start.
 pub const ImportEdge = struct {
     spec: []const u8,
-    span: ast.Span,
+    span: meta.Span,
 };
 
 /// Working state for one module while the graph is under construction.
@@ -487,7 +488,7 @@ pub const Builder = struct {
     /// Run phase 1 from an entry specifier. On failure `diag` holds the
     /// first error.
     pub fn build(self: *Builder, entry: []const u8) !*ModuleGraph {
-        const entry_span = ast.Span.init(0, 0, 0);
+        const entry_span = meta.Span.init(0, 0, 0);
         const entry_raw = (try module_load.load(self, entry, entry_span)) orelse return error.Diagnostic;
 
         // Worklist expansion (module-graph.md, Recursive expansion): load every imported module,
@@ -604,7 +605,7 @@ pub const Builder = struct {
     /// cycle in import order with both ends the same module — rendered as
     /// "a imports b imports c imports a". The span points at the import
     /// that closed the cycle (the last element's importing expression).
-    fn cycleDiag(self: *Builder, path: []usize, span: ast.Span) error{ Diagnostic, OutOfMemory } {
+    fn cycleDiag(self: *Builder, path: []usize, span: meta.Span) error{ Diagnostic, OutOfMemory } {
         var msg = std.ArrayList(u8).empty;
         try msg.appendSlice(self.arena, "import cycle detected: ");
         for (path, 0..) |node, k| {
@@ -621,14 +622,14 @@ pub const Builder = struct {
 
     /// pass-internal: append one diagnostic (keeping `diag` as the
     /// first) and fail. Shared with the passes.
-    pub fn failSpan(self: *Builder, span: ast.Span, comptime fmt: []const u8, args: anytype) error{ Diagnostic, OutOfMemory } {
+    pub fn failSpan(self: *Builder, span: meta.Span, comptime fmt: []const u8, args: anytype) error{ Diagnostic, OutOfMemory } {
         const msg = std.fmt.allocPrint(self.arena, fmt, args) catch return error.OutOfMemory;
         self.recordDiag(span, msg);
         return error.Diagnostic;
     }
 
     /// pass-internal: append one diagnostic with a pre-formatted message.
-    pub fn recordDiag(self: *Builder, span: ast.Span, message: []const u8) void {
+    pub fn recordDiag(self: *Builder, span: meta.Span, message: []const u8) void {
         self.diags.append(self.arena, .{ .span = span, .message = message }) catch {};
         if (self.diag == null) self.diag = self.diags.items[self.diags.items.len - 1];
     }

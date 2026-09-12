@@ -14,6 +14,10 @@
 //! - `parser`  — recursive-descent parser: token stream → AST (compile-time)
 //! - `cfg`     — the AIR (air.md): data structures plus the text-form
 //!               parser and canonical printer (compile-time)
+//! - `meta`    — the shared compiler metadata (air.md §4.2, §9.1): the
+//!               resolved `Type`, the nominal-declaration environment,
+//!               `ConstValue`, and `substParams` every pass agrees on
+//!               (compile-time)
 //! - `hir`     — the structural HIR (hir.md §3, M1a): arena + dense-handle
 //!               data structures for the seam between the checker and CFG
 //!               lowering. S1: data only, no stage wired.
@@ -117,6 +121,7 @@ pub const artifact_bundle = @import("artifact_bundle.zig");
 pub const ast = @import("ast.zig");
 pub const llir = @import("llir.zig");
 pub const vm_instr = @import("vm_instr.zig");
+pub const meta = @import("meta.zig");
 pub const cfg = @import("cfg.zig");
 pub const effects = @import("effects.zig");
 pub const checker = @import("passes/checker.zig");

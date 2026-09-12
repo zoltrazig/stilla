@@ -27,8 +27,8 @@
 //! registry binding, independent of the AIR member table).
 
 const std = @import("std");
-const ast = @import("stilla").ast;
 const cfg = @import("stilla").cfg;
+const meta = @import("stilla").meta;
 const moduleinfo = @import("stilla").moduleinfo;
 const lower = @import("stilla").lower;
 const cfg_lower_call = @import("cfg_lower_call.zig");
@@ -164,7 +164,7 @@ pub fn isConstrainedMember(module_spec: []const u8, member: []const u8) bool {
 /// The required set is exactly the nine listed primitives; every other
 /// type — including the remaining primitives (`any`, `hostdata`, `void`,
 /// `never`) and every container — is a compile-time error.
-fn isSupportedStrHashType(t: cfg.Type) bool {
+fn isSupportedStrHashType(t: meta.Type) bool {
     return switch (t) {
         .primitive => |k| switch (k) {
             .byte, .int32, .uint32, .int64, .uint64, .float32, .float64, .bool, .str => true,
@@ -181,7 +181,7 @@ fn isSupportedStrHashType(t: cfg.Type) bool {
 /// both expansion entry points (direct call and first-class wrapper
 /// synthesis), so an unsupported specialization fails before canonical
 /// AIR (Intrinsics §3 — the host cannot serve the expansion).
-pub fn checkStrHashSignature(self: *Lowerer, span: ast.Span, member: []const u8, ft: cfg.FunctionType) LowerError!void {
+pub fn checkStrHashSignature(self: *Lowerer, span: meta.Span, member: []const u8, ft: meta.FunctionType) LowerError!void {
     if (ft.params.len != 1) {
         return self.fail(span, "intrinsic 'builtin.{s}' takes exactly one argument", .{member});
     }
@@ -191,16 +191,16 @@ pub fn checkStrHashSignature(self: *Lowerer, span: ast.Span, member: []const u8,
     }
 }
 
-/// A diagnostic name for a `cfg.Type`: the same names as the AIR text
+/// A diagnostic name for a `meta.Type`: the same names as the AIR text
 /// form (`cfg_print.printType`), rendered without the program's type
 /// table — named types resolve through the module graph's interner.
-fn typeName(self: *Lowerer, t: cfg.Type) LowerError![]const u8 {
+fn typeName(self: *Lowerer, t: meta.Type) LowerError![]const u8 {
     var buf = std.ArrayList(u8).empty;
     try appendTypeName(self, &buf, t);
     return buf.toOwnedSlice(self.arena);
 }
 
-fn appendTypeName(self: *Lowerer, buf: *std.ArrayList(u8), t: cfg.Type) LowerError!void {
+fn appendTypeName(self: *Lowerer, buf: *std.ArrayList(u8), t: meta.Type) LowerError!void {
     switch (t) {
         .primitive => |k| try buf.appendSlice(self.arena, @tagName(k)),
         .named => |n| {
@@ -249,7 +249,7 @@ fn appendTypeName(self: *Lowerer, buf: *std.ArrayList(u8), t: cfg.Type) LowerErr
 /// once by `syscallTarget`. Direct emitters that bypass the call path
 /// (the list-pattern length query) route through this so every
 /// intrinsic syscall comes from the table.
-pub fn intrinsicSyscallTarget(self: *Lowerer, span: ast.Span, module_spec: []const u8, member: []const u8) LowerError!cfg.SysCallTarget {
+pub fn intrinsicSyscallTarget(self: *Lowerer, span: meta.Span, module_spec: []const u8, member: []const u8) LowerError!cfg.SysCallTarget {
     if (!isHostExpansion(module_spec, member)) {
         return self.fail(span, "intrinsic '{s}.{s}' has no expansion", .{ module_spec, member });
     }
@@ -261,7 +261,7 @@ pub fn intrinsicSyscallTarget(self: *Lowerer, span: ast.Span, module_spec: []con
 /// enum (`BuiltinId` — the builtin module's host interface name); every
 /// other module names its host-registry binding directly. Shared by the
 /// host-binding path, the intrinsic table, and the pattern-length query.
-pub fn syscallTarget(self: *Lowerer, span: ast.Span, module_spec: []const u8, member: []const u8) LowerError!cfg.SysCallTarget {
+pub fn syscallTarget(self: *Lowerer, span: meta.Span, module_spec: []const u8, member: []const u8) LowerError!cfg.SysCallTarget {
     if (std.mem.eql(u8, module_spec, "builtin")) {
         return .{ .builtin = std.meta.stringToEnum(cfg.BuiltinId, member) orelse
             return self.fail(span, "unknown builtin member '{s}'", .{member}) };
@@ -287,7 +287,7 @@ pub fn syscallTarget(self: *Lowerer, span: ast.Span, module_spec: []const u8, me
 pub fn intrinsicFnRef(
     self: *Lowerer,
     fs: *FuncState,
-    span: ast.Span,
+    span: meta.Span,
     owner: *moduleinfo.ModuleInfo,
     vm: *const moduleinfo.ValueMember,
     spec: ?*checker.FuncInstance,
@@ -328,10 +328,10 @@ pub fn intrinsicFnRef(
 fn synthIntrinsicFunc(
     self: *Lowerer,
     into: *moduleinfo.ModuleInfo,
-    span: ast.Span,
+    span: meta.Span,
     owner_spec: []const u8,
     member: []const u8,
-    sig: cfg.Type,
+    sig: meta.Type,
 ) LowerError!*cfg.IrFunc {
     const ft = switch (sig) {
         .function => |f| f,
@@ -339,7 +339,7 @@ fn synthIntrinsicFunc(
     };
     const name = try std.fmt.allocPrint(self.arena, "{s}.{s}.intrinsic.{d}", .{ into.specifier, member, self.next_intrinsic_id });
     self.next_intrinsic_id += 1;
-    var params = std.ArrayList(cfg.Param).empty;
+    var params = std.ArrayList(meta.Param).empty;
     for (ft.params, 0..) |*p, i| {
         try params.append(self.arena, .{
             .span = span,

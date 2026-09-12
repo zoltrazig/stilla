@@ -8,8 +8,9 @@
 
 const std = @import("std");
 const ast = @import("stilla").ast;
-const cfg = @import("stilla").cfg;
+const meta = @import("stilla").meta;
 const hir = @import("stilla").hir;
+const lower = @import("stilla").lower;
 const moduleinfo = @import("stilla").moduleinfo;
 const checker = @import("stilla").checker;
 const hir_build_block = @import("hir_build_block.zig");
@@ -17,14 +18,12 @@ const hir_build_expr = @import("hir_build_expr.zig");
 pub const BuildError = error{ OutOfMemory, Diagnostic };
 
 /// Program-wide first-class intrinsic wrapper cache key: the declaring
-/// module index, the member's source slot, and the concrete
-/// specialization (the instance id, or maxInt(u32) for non-generic
-/// members) — mirror `lower.IntrinsicKey`.
-pub const WrapperKey = struct {
-    owner: u32, // module index
-    slot: u32,
-    spec: u32, // maxInt(u32) = non-generic
-};
+/// Key of the program-wide first-class intrinsic wrapper cache: the
+/// declaring module's identity, the member's slot in its member table,
+/// and the concrete specialization (the instance id, or `maxInt(u32)` for
+/// non-generic members). The shared `lower.IntrinsicKey`, so the HIR
+/// builder's and the CFG lowerer's wrapper caches key identically.
+pub const WrapperKey = lower.IntrinsicKey;
 
 /// The AST→HIR builder: one per whole-program build.
 pub const Builder = struct {
@@ -103,7 +102,7 @@ pub const Builder = struct {
         };
     }
 
-    pub fn fail(self: *Builder, span: ast.Span, comptime fmt: []const u8, args: anytype) BuildError {
+    pub fn fail(self: *Builder, span: meta.Span, comptime fmt: []const u8, args: anytype) BuildError {
         const msg = std.fmt.allocPrint(self.arena, fmt, args) catch return error.OutOfMemory;
         self.diag = .{ .span = span, .message = msg };
         return error.Diagnostic;
@@ -113,13 +112,13 @@ pub const Builder = struct {
         for (self.built.modules.items, 0..) |m, i| {
             if (std.mem.eql(u8, m.specifier, specifier)) return @intCast(i);
         }
-        return self.fail(ast.Span.init(0, 0, 0), "module '{s}' is not built", .{specifier});
+        return self.fail(meta.Span.init(0, 0, 0), "module '{s}' is not built", .{specifier});
     }
 
     /// Registry lookup with a source span for the diagnostic. New rows
     /// are data edits in hir.zig's `typed_descriptors`; a missing row is
     /// a loud builder error, never a silent fallback.
-    pub fn op(self: *Builder, span: ast.Span, name: []const u8) BuildError!hir.OpId {
+    pub fn op(self: *Builder, span: meta.Span, name: []const u8) BuildError!hir.OpId {
         return hir.opId(name) orelse
             self.fail(span, "HIR op '{s}' is not registered (add a typed_descriptors row)", .{name});
     }
@@ -177,33 +176,33 @@ pub const Builder = struct {
         return std.fmt.allocPrint(self.arena, "{s}.{s}", .{ specifier, name });
     }
 
-    pub fn funcType(self: *Builder, params: []cfg.Param, ret: cfg.Type) BuildError!cfg.Type {
-        const rp = try self.arena.create(cfg.Type);
+    pub fn funcType(self: *Builder, params: []meta.Param, ret: meta.Type) BuildError!meta.Type {
+        const rp = try self.arena.create(meta.Type);
         rp.* = ret;
         return .{ .function = .{ .params = params, .ret = rp } };
     }
 
     /// The checker's annotated type of an expression in module `info`.
-    pub fn annotatedType(self: *Builder, info: *moduleinfo.ModuleInfo, e: *const ast.Expr) ?cfg.Type {
+    pub fn annotatedType(self: *Builder, info: *moduleinfo.ModuleInfo, e: *const ast.Expr) ?meta.Type {
         const ma = self.ann.per_module.get(info.specifier) orelse return null;
         return ma.expr_of.get(e);
     }
 
-    pub fn resolveType(self: *Builder, info: *moduleinfo.ModuleInfo, t: *const ast.Type) BuildError!cfg.Type {
+    pub fn resolveType(self: *Builder, info: *moduleinfo.ModuleInfo, t: *const ast.Type) BuildError!meta.Type {
         return moduleinfo.resolveType(self.resolve, info, t) orelse
             self.fail(t.span(), "cannot resolve type", .{});
     }
 };
 
-pub fn isVoid(t: cfg.Type) bool {
+pub fn isVoid(t: meta.Type) bool {
     return t == .primitive and t.primitive == .void;
 }
 
-pub fn isNever(t: cfg.Type) bool {
+pub fn isNever(t: meta.Type) bool {
     return t == .primitive and t.primitive == .never;
 }
 
-pub fn typeNameOf(b: *Builder, id: cfg.TypeId) ?[]const u8 {
+pub fn typeNameOf(b: *Builder, id: meta.TypeId) ?[]const u8 {
     return b.resolve.typeNameOf(id);
 }
 
@@ -319,7 +318,7 @@ fn buildModuleFuncs(b: *Builder, info: *moduleinfo.ModuleInfo) BuildError!void {
     // init — every source / standard-library module except `builtin`
     // and host modules (the direct lowerModule rule).
     if (info.kind != .host and !std.mem.eql(u8, info.specifier, "builtin")) {
-        const fid = try predeclare(b, hir.FuncKind.init, info, "init", &.{}, .{ .primitive = .void }, ast.Span.init(0, 0, 0), null);
+        const fid = try predeclare(b, hir.FuncKind.init, info, "init", &.{}, .{ .primitive = .void }, meta.Span.init(0, 0, 0), null);
         m.init_func = fid;
     }
     // Non-generic function members with bodies, declaration order.
@@ -351,7 +350,7 @@ fn buildModuleFuncs(b: *Builder, info: *moduleinfo.ModuleInfo) BuildError!void {
                 const type_id = moduleinfo.resolveTypeId(b.resolve, info, s.name.text) orelse
                     return b.fail(d.span, "drop hook type unresolved", .{});
                 const qname = try std.fmt.allocPrint(b.arena, "{s}.{s}.drop", .{ info.specifier, s.name.text });
-                const params = try b.arena.alloc(cfg.Param, 1);
+                const params = try b.arena.alloc(meta.Param, 1);
                 params[0] = .{ .span = d.param.span, .name = d.param, .mode = .borrow, .type_ = .{ .named = .{ .id = type_id, .args = &.{} } } };
                 _ = try predeclare(b, hir.FuncKind.drop_hook, info, qname, params, .{ .primitive = .void }, s.name.span, d.body);
             },
@@ -397,10 +396,10 @@ fn buildModuleFuncs(b: *Builder, info: *moduleinfo.ModuleInfo) BuildError!void {
 
 /// Append one function record skeleton (root filled by the body build);
 /// returns its FuncId (its index in the funcs table).
-pub fn predeclare(b: *Builder, kind: hir.FuncKind, info: *moduleinfo.ModuleInfo, name: []const u8, params: []cfg.Param, ret: cfg.Type, span: ast.Span, body: ?*const ast.Block) BuildError!hir.FuncId {
+pub fn predeclare(b: *Builder, kind: hir.FuncKind, info: *moduleinfo.ModuleInfo, name: []const u8, params: []meta.Param, ret: meta.Type, span: meta.Span, body: ?*const ast.Block) BuildError!hir.FuncId {
     const mi = try b.modIdx(info.specifier);
     const id: hir.FuncId = @intCast(b.built.funcs.items.len);
-    const owned_params = try b.arena.dupe(cfg.Param, params);
+    const owned_params = try b.arena.dupe(meta.Param, params);
     try b.built.funcs.append(b.built.arena, .{
         .name = name,
         .kind = kind,
@@ -453,11 +452,11 @@ pub fn buildFuncBody(b: *Builder, fid: hir.FuncId) BuildError!void {
         try hir_build_block.buildBlock(b, b.graph.modules[f.module], blk)
     else
         try buildInitBody(b);
-    const params_sig = try b.arena.dupe(cfg.Param, f.params);
+    const params_sig = try b.arena.dupe(meta.Param, f.params);
     const ty = try b.funcType(params_sig, f.ret);
     const rid = try b.built.program.addRegion(binder_ids.items, body, null);
     const regs = try b.built.program.addRegions(&.{rid});
-    const node = try b.built.program.addExpr(.{ .op = try b.op(ast.Span.init(0, 0, 0), "lambda"), .ty = ty, .regions = regs });
+    const node = try b.built.program.addExpr(.{ .op = try b.op(meta.Span.init(0, 0, 0), "lambda"), .ty = ty, .regions = regs });
     b.built.funcs.items[fid].root = node;
 }
 
@@ -466,7 +465,7 @@ pub fn buildFuncBody(b: *Builder, fid: hir.FuncId) BuildError!void {
 /// The init record's body is a void literal; the const initializer trees
 /// live on the const records.
 fn buildInitBody(b: *Builder) BuildError!hir.ExprId {
-    return hir_build_expr.voidLiteral(b, ast.Span.init(0, 0, 0));
+    return hir_build_expr.voidLiteral(b, meta.Span.init(0, 0, 0));
 }
 
 /// One module-constant initializer tree, stashed on the record.
@@ -493,12 +492,12 @@ fn buildConstInit(b: *Builder, cid: hir.ConstId) BuildError!void {
 }
 
 // ---------------------------------------------------------------------------
-// Type environment (one cfg.TypeDecl per TypeId — SerCtx shape)
+// Type environment (one meta.TypeDecl per TypeId — SerCtx shape)
 // ---------------------------------------------------------------------------
 
-fn collectTypeEnv(b: *Builder) BuildError![]cfg.TypeDecl {
+fn collectTypeEnv(b: *Builder) BuildError![]meta.TypeDecl {
     const count = b.graph.type_interner.to_name.items.len;
-    const decls = try b.arena.alloc(cfg.TypeDecl, count);
+    const decls = try b.arena.alloc(meta.TypeDecl, count);
     for (decls) |*d| d.* = .{ .unknown = "" };
     for (b.graph.modules) |info| {
         for (info.types) |*tm| {
@@ -511,7 +510,7 @@ fn collectTypeEnv(b: *Builder) BuildError![]cfg.TypeDecl {
     return decls;
 }
 
-fn lowerTypeDecl(b: *Builder, info: *moduleinfo.ModuleInfo, tm: *moduleinfo.TypeMember, qname: []const u8) BuildError!cfg.TypeDecl {
+fn lowerTypeDecl(b: *Builder, info: *moduleinfo.ModuleInfo, tm: *moduleinfo.TypeMember, qname: []const u8) BuildError!meta.TypeDecl {
     return switch (tm.decl) {
         .struct_ => |s| .{ .struct_ = .{
             .name = tm.name.text,
@@ -538,14 +537,14 @@ fn lowerTypeDecl(b: *Builder, info: *moduleinfo.ModuleInfo, tm: *moduleinfo.Type
     };
 }
 
-fn paramNames(b: *Builder, params: []const ast.Ident) BuildError![]const []const u8 {
+fn paramNames(b: *Builder, params: []const meta.Ident) BuildError![]const []const u8 {
     const out = try b.arena.alloc([]const u8, params.len);
     for (params, 0..) |p, i| out[i] = p.text;
     return out;
 }
 
-fn lowerFields(b: *Builder, info: *moduleinfo.ModuleInfo, fields: []const ast.FieldDecl) BuildError![]cfg.FieldDecl {
-    const out = try b.arena.alloc(cfg.FieldDecl, fields.len);
+fn lowerFields(b: *Builder, info: *moduleinfo.ModuleInfo, fields: []const ast.FieldDecl) BuildError![]meta.FieldDecl {
+    const out = try b.arena.alloc(meta.FieldDecl, fields.len);
     for (fields, 0..) |*f, i| {
         const ft = moduleinfo.resolveType(b.resolve, info, &f.type_) orelse
             return b.fail(f.span, "cannot resolve field type", .{});
@@ -554,10 +553,10 @@ fn lowerFields(b: *Builder, info: *moduleinfo.ModuleInfo, fields: []const ast.Fi
     return out;
 }
 
-fn lowerVariants(b: *Builder, info: *moduleinfo.ModuleInfo, variants: []const ast.VariantDecl) BuildError![]cfg.VariantDecl {
-    const out = try b.arena.alloc(cfg.VariantDecl, variants.len);
+fn lowerVariants(b: *Builder, info: *moduleinfo.ModuleInfo, variants: []const ast.VariantDecl) BuildError![]meta.VariantDecl {
+    const out = try b.arena.alloc(meta.VariantDecl, variants.len);
     for (variants, 0..) |*v, i| {
-        var payloads = std.ArrayList(cfg.Type).empty;
+        var payloads = std.ArrayList(meta.Type).empty;
         if (v.types) |types| for (types) |*t| {
             const pt = moduleinfo.resolveType(b.resolve, info, t) orelse
                 return b.fail(t.span(), "cannot resolve variant payload type", .{});

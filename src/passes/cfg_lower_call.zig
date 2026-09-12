@@ -2,8 +2,8 @@
 //! FuncState + ast.Call + resolved callee. Out: a `call` or `syscall`
 //! instruction (with parameter modes applied at the call site).
 const std = @import("std");
-const ast = @import("stilla").ast;
 const cfg = @import("stilla").cfg;
+const meta = @import("stilla").meta;
 const moduleinfo = @import("stilla").moduleinfo;
 const lower = @import("stilla").lower;
 const cfg_lower_program = @import("cfg_lower_program.zig");
@@ -22,13 +22,13 @@ const LowerError = lower.LowerError;
 /// registry binding, air.md §8.2/§9.3) plus the syscall emission. Shared
 /// with the intrinsic expansion path, which validates the specialized
 /// signature before emitting.
-pub fn emitHostCall(self: *Lowerer, fs: *FuncState, span: ast.Span, module_spec: []const u8, member: []const u8, args: []*cfg.Value, sig: cfg.FunctionType) LowerError!?*cfg.Value {
+pub fn emitHostCall(self: *Lowerer, fs: *FuncState, span: meta.Span, module_spec: []const u8, member: []const u8, args: []*cfg.Value, sig: meta.FunctionType) LowerError!?*cfg.Value {
     const call_target = try cfg_lower_intrinsic.syscallTarget(self, span, module_spec, member);
     return try emitSyscall(self, fs, span, call_target, args, sig);
 }
 
 /// Emit a `call` instruction, trapping when the callee is `never`.
-pub fn emitCall(self: *Lowerer, fs: *FuncState, span: ast.Span, callee: cfg.Callee, args: []*cfg.Value, ret: cfg.Type) LowerError!?*cfg.Value {
+pub fn emitCall(self: *Lowerer, fs: *FuncState, span: meta.Span, callee: cfg.Callee, args: []*cfg.Value, ret: meta.Type) LowerError!?*cfg.Value {
     if (cfg_lower_emit.isNever(ret)) {
         _ = try cfg_lower_emit.emit(self, fs, span, .{ .call = .{ .callee = callee, .args = args } }, null);
         try cfg_lower_emit.setTerminator(self, fs, .trap);
@@ -43,7 +43,7 @@ pub fn emitCall(self: *Lowerer, fs: *FuncState, span: ast.Span, callee: cfg.Call
 
 /// Emit a `syscall` instruction, trapping when the host binding is
 /// `never` (no destruction runs after it — Runtime §7.1, air.md §8.3).
-pub fn emitSyscall(self: *Lowerer, fs: *FuncState, span: ast.Span, target: cfg.SysCallTarget, args: []*cfg.Value, sig: cfg.FunctionType) LowerError!?*cfg.Value {
+pub fn emitSyscall(self: *Lowerer, fs: *FuncState, span: meta.Span, target: cfg.SysCallTarget, args: []*cfg.Value, sig: meta.FunctionType) LowerError!?*cfg.Value {
     const ret = sig.ret.*;
     if (cfg_lower_emit.isNever(ret)) {
         // `builtin.panic` and friends: the call is followed by a trap,
@@ -70,8 +70,8 @@ pub fn emitSyscall(self: *Lowerer, fs: *FuncState, span: ast.Span, target: cfg.S
 /// borrow params); move transfers ownership — an existing unique owner
 /// arrives as `move %a`, a fresh unique value directly, and a Copy
 /// value as a `copy`.
-pub fn lowerCallArg(self: *Lowerer, fs: *FuncState, v: *cfg.Value, mode: ast.ParamMode, expected: cfg.Type) LowerError!*cfg.Value {
-    if (isAny(expected) and !cfg.Type.eql(v.type_, expected)) {
+pub fn lowerCallArg(self: *Lowerer, fs: *FuncState, v: *cfg.Value, mode: meta.ParamMode, expected: meta.Type) LowerError!*cfg.Value {
+    if (isAny(expected) and !meta.Type.eql(v.type_, expected)) {
         const span = v.span;
         if (v.ownership == .unique) {
             if (v.state == .borrowed) {
@@ -122,6 +122,6 @@ pub fn lowerCallArg(self: *Lowerer, fs: *FuncState, v: *cfg.Value, mode: ast.Par
     };
 }
 
-fn isAny(t: cfg.Type) bool {
+fn isAny(t: meta.Type) bool {
     return t == .primitive and t.primitive == .any;
 }

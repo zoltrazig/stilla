@@ -21,7 +21,7 @@
 
 const std = @import("std");
 const ast = @import("stilla").ast;
-const cfg = @import("stilla").cfg;
+const meta = @import("stilla").meta;
 const checker = @import("checker.zig");
 
 const CheckError = checker.CheckError;
@@ -105,7 +105,7 @@ pub fn noopPath(frame: *Frame, tracked: []*Local) CheckError!Path {
 /// some but not all normal paths becomes *maybe-unique* (unusable
 /// afterward, conditionally destroyed at runtime); otherwise it is
 /// restored to its entry state.
-pub fn merge(frame: *Frame, tracked: []*Local, entry: []BindingState, paths: []const Path, span: ast.Span) CheckError!void {
+pub fn merge(frame: *Frame, tracked: []*Local, entry: []BindingState, paths: []const Path, span: meta.Span) CheckError!void {
     _ = span;
     for (tracked, 0..) |l, i| {
         if (isDead(entry[i])) continue;
@@ -147,6 +147,6 @@ fn exprIsNever(frame: *Frame, e: *const ast.Expr) bool {
 
 /// Whether a value of type `t` is owned (not Copy); unique types are
 /// subject to move/drop/conditional-release tracking (Core §18).
-fn isUnique(frame: *Frame, t: cfg.Type) bool {
+fn isUnique(frame: *Frame, t: meta.Type) bool {
     return checker.isUnique(frame, t);
 }

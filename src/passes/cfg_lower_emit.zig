@@ -17,8 +17,8 @@
 //! over the finished program.
 
 const std = @import("std");
-const ast = @import("stilla").ast;
 const cfg = @import("stilla").cfg;
+const meta = @import("stilla").meta;
 const moduleinfo = @import("stilla").moduleinfo;
 const lower = @import("stilla").lower;
 
@@ -26,29 +26,29 @@ const FuncState = lower.FuncState;
 
 /// The resolved ownership of a type (named types resolve through the
 /// module graph); `null` (unspecialized) is treated as Copy.
-pub fn ownership(self: *lower.Lowerer, fs: *lower.FuncState, type_: cfg.Type) ?cfg.Ownership {
+pub fn ownership(self: *lower.Lowerer, fs: *lower.FuncState, type_: meta.Type) ?meta.Ownership {
     return moduleinfo.ownershipOf(self.resolve, fs.module, type_);
 }
 
-pub fn isUnique(self: *lower.Lowerer, fs: *lower.FuncState, type_: cfg.Type) bool {
-    return (ownership(self, fs, type_) orelse cfg.Ownership.copy) == .unique;
+pub fn isUnique(self: *lower.Lowerer, fs: *lower.FuncState, type_: meta.Type) bool {
+    return (ownership(self, fs, type_) orelse meta.Ownership.copy) == .unique;
 }
 
 /// True when the value must not silently leak: resolved-unique, or a
 /// deferred (generic) ownership that monomorphization may resolve to
 /// unique. Used by the exact-pattern `split_list` remainder drop.
-pub fn mayBeUnique(self: *lower.Lowerer, fs: *lower.FuncState, type_: cfg.Type) bool {
-    return (ownership(self, fs, type_) orelse cfg.Ownership.unique) == .unique;
+pub fn mayBeUnique(self: *lower.Lowerer, fs: *lower.FuncState, type_: meta.Type) bool {
+    return (ownership(self, fs, type_) orelse meta.Ownership.unique) == .unique;
 }
 
-pub fn isVoid(t: cfg.Type) bool {
+pub fn isVoid(t: meta.Type) bool {
     return switch (t) {
         .primitive => |k| k == .void,
         else => false,
     };
 }
 
-pub fn isNever(t: cfg.Type) bool {
+pub fn isNever(t: meta.Type) bool {
     return switch (t) {
         .primitive => |k| k == .never,
         else => false,
@@ -63,9 +63,9 @@ pub fn isNever(t: cfg.Type) bool {
 pub fn emit(
     self: *lower.Lowerer,
     fs: *lower.FuncState,
-    span: ast.Span,
+    span: meta.Span,
     op: cfg.Op,
-    result_type: ?cfg.Type,
+    result_type: ?meta.Type,
 ) lower.LowerError!?*cfg.Value {
     const b = fs.cur orelse return null;
     var op2 = op;
@@ -135,7 +135,7 @@ pub fn emit(
 /// base-operand consumption is validated by `cfg.validate`; the
 /// lowering additionally calls `markConsumed` / `cleanupDisable` on the
 /// base so the checker-side binding state stays in sync.
-pub fn emitUnpack(self: *lower.Lowerer, fs: *lower.FuncState, span: ast.Span, op: cfg.Op, result_types: []const cfg.Type) lower.LowerError![]*cfg.Value {
+pub fn emitUnpack(self: *lower.Lowerer, fs: *lower.FuncState, span: meta.Span, op: cfg.Op, result_types: []const meta.Type) lower.LowerError![]*cfg.Value {
     const b = fs.cur orelse return &.{};
     const results = try self.arena.alloc(*cfg.Value, result_types.len);
     for (result_types, 0..) |rt, i| {
@@ -157,7 +157,7 @@ pub fn emitUnpack(self: *lower.Lowerer, fs: *lower.FuncState, span: ast.Span, op
 /// (rooted at the base) when unique — the same rule as `read_field` of a
 /// unique base. The op must carry its tag so the parser/backend need not
 /// recover which variant's payloads these are from the switch context.
-pub fn emitBorrowVariant(self: *lower.Lowerer, fs: *lower.FuncState, span: ast.Span, base: *cfg.Value, tag: u32, result_types: []const cfg.Type) lower.LowerError![]*cfg.Value {
+pub fn emitBorrowVariant(self: *lower.Lowerer, fs: *lower.FuncState, span: meta.Span, base: *cfg.Value, tag: u32, result_types: []const meta.Type) lower.LowerError![]*cfg.Value {
     const b = fs.cur orelse return &.{};
     const op: cfg.Op = .{ .borrow_variant = .{ .base = base, .tag = tag } };
     const results = try self.arena.alloc(*cfg.Value, result_types.len);
@@ -179,7 +179,7 @@ pub fn emitBorrowVariant(self: *lower.Lowerer, fs: *lower.FuncState, span: ast.S
 /// The SSA-state of an op result (air.md §6.1–§6.5). Parameters are SSA
 /// roots (air.md §5.1): their state is set when they are seeded, never by
 /// an op.
-pub fn createdState(op: cfg.Op, result_type: cfg.Type) cfg.ValueState {
+pub fn createdState(op: cfg.Op, result_type: meta.Type) cfg.ValueState {
     return switch (cfg.opInfo(std.meta.activeTag(op)).created) {
         .owned => .owned,
         .borrowed => .borrowed,
@@ -192,7 +192,7 @@ pub fn createdState(op: cfg.Op, result_type: cfg.Type) cfg.ValueState {
     };
 }
 
-pub fn readState(t: cfg.Type) cfg.ValueState {
+pub fn readState(t: meta.Type) cfg.ValueState {
     const ow = t.ownership();
     return if (ow == null or ow.? == .unique) .borrowed else .owned;
 }
@@ -217,7 +217,7 @@ pub fn isConsumed(fs: *lower.FuncState, v: *cfg.Value) bool {
 /// (immediately before its terminator), which is the correct evaluation
 /// point. No on-the-fly folding/CSE applies (these ops are not foldable
 /// or shareable).
-pub fn emitInto(self: *lower.Lowerer, fs: *lower.FuncState, b: *cfg.BasicBlock, span: ast.Span, op: cfg.Op, result_type: ?cfg.Type) lower.LowerError!?*cfg.Value {
+pub fn emitInto(self: *lower.Lowerer, fs: *lower.FuncState, b: *cfg.BasicBlock, span: meta.Span, op: cfg.Op, result_type: ?meta.Type) lower.LowerError!?*cfg.Value {
     var result: ?*cfg.Value = null;
     if (result_type) |rt| {
         const v = try newValue(self, fs, span, rt, createdState(op, rt));
@@ -244,7 +244,7 @@ pub fn emitInto(self: *lower.Lowerer, fs: *lower.FuncState, b: *cfg.BasicBlock, 
 /// (`joinMaybeFlags`), which destroys every partially-consumed candidate
 /// on its non-consuming branch edges; per-path disarm bookkeeping no
 /// longer exists. Kept as a no-op so every transfer site keeps compiling.
-pub fn cleanupDisable(self: *lower.Lowerer, fs: *lower.FuncState, span: ast.Span, v: *cfg.Value) lower.LowerError!void {
+pub fn cleanupDisable(self: *lower.Lowerer, fs: *lower.FuncState, span: meta.Span, v: *cfg.Value) lower.LowerError!void {
     _ = self;
     _ = fs;
     _ = span;
@@ -253,7 +253,7 @@ pub fn cleanupDisable(self: *lower.Lowerer, fs: *lower.FuncState, span: ast.Span
 
 /// `cleanupDisable` into a specific block (a branch edge or the join).
 /// A no-op for the same reason.
-pub fn cleanupDisableInto(self: *lower.Lowerer, fs: *lower.FuncState, b: *cfg.BasicBlock, span: ast.Span, v: *cfg.Value) lower.LowerError!void {
+pub fn cleanupDisableInto(self: *lower.Lowerer, fs: *lower.FuncState, b: *cfg.BasicBlock, span: meta.Span, v: *cfg.Value) lower.LowerError!void {
     _ = self;
     _ = fs;
     _ = b;
@@ -267,7 +267,7 @@ pub fn cleanupDisableInto(self: *lower.Lowerer, fs: *lower.FuncState, b: *cfg.Ba
 /// join-time edge drops of `joinMaybeFlags`, so by the time any later
 /// scope-end drop runs, the candidate is either definitely owned (this
 /// drop fires) or already consumed (skipped).
-pub fn emitDrop(self: *lower.Lowerer, fs: *lower.FuncState, span: ast.Span, v: *cfg.Value) lower.LowerError!void {
+pub fn emitDrop(self: *lower.Lowerer, fs: *lower.FuncState, span: meta.Span, v: *cfg.Value) lower.LowerError!void {
     if (!isUnique(self, fs, v.type_)) return;
     // Borrowed values are views (borrow params, `borrow` ops,
     // projections of an unique base) and are never drop candidates
@@ -375,7 +375,7 @@ pub const CondBranch = struct {
 /// condition/scrutinee has been lowered — a binding consumed there is
 /// already dead and excluded. Returns an empty track when no binding can
 /// be released on one branch but not another.
-pub fn beginCond(self: *lower.Lowerer, fs: *lower.FuncState, span: ast.Span) lower.LowerError!CondTrack {
+pub fn beginCond(self: *lower.Lowerer, fs: *lower.FuncState, span: meta.Span) lower.LowerError!CondTrack {
     _ = span;
     var cands = std.ArrayList(*cfg.Value).empty;
     for (fs.values.items) |v| {
@@ -423,7 +423,7 @@ pub fn joinMaybeFlags(
     self: *lower.Lowerer,
     fs: *lower.FuncState,
     track: CondTrack,
-    span: ast.Span,
+    span: meta.Span,
     branches: []const CondBranch,
 ) lower.LowerError!void {
     if (track.candidates.len == 0) return;
@@ -489,7 +489,7 @@ pub fn newBlock(self: *lower.Lowerer, fs: *lower.FuncState, name: []const u8) lo
     const b = try self.arena.create(cfg.BasicBlock);
     b.* = .{
         .id = @intCast(fs.blocks.items.len),
-        .span = ast.Span.init(0, 0, 0),
+        .span = meta.Span.init(0, 0, 0),
         .name = final_name,
         .instrs = &.{},
         .terminator = undefined,
@@ -506,7 +506,7 @@ pub fn setTerminator(_: *lower.Lowerer, fs: *lower.FuncState, term: cfg.Terminat
     fs.cur = null;
 }
 
-pub fn newValue(self: *lower.Lowerer, fs: *lower.FuncState, span: ast.Span, type_: cfg.Type, state: cfg.ValueState) lower.LowerError!*cfg.Value {
+pub fn newValue(self: *lower.Lowerer, fs: *lower.FuncState, span: meta.Span, type_: meta.Type, state: cfg.ValueState) lower.LowerError!*cfg.Value {
     const v = try self.arena.create(cfg.Value);
     v.* = .{
         .id = @intCast(fs.values.items.len),
@@ -538,7 +538,7 @@ pub fn fmtBlockName(self: *lower.Lowerer, prefix: []const u8, i: usize) lower.Lo
     return std.fmt.allocPrint(self.arena, "{s}_{d}", .{ prefix, i });
 }
 
-pub fn newPhi(self: *lower.Lowerer, fs: *lower.FuncState, span: ast.Span, type_: cfg.Type) lower.LowerError!?*cfg.Value {
+pub fn newPhi(self: *lower.Lowerer, fs: *lower.FuncState, span: meta.Span, type_: meta.Type) lower.LowerError!?*cfg.Value {
     const v = try emit(self, fs, span, .{ .phi = .{ .incoming = &.{} } }, type_);
     const instr = v.?.def.?;
     const list = try self.arena.create(std.ArrayList(cfg.PhiIn));
@@ -572,7 +572,7 @@ const Cmp = enum { eq, ne, lt, le, gt, ge };
 /// always fold when constant. `result_type` is the op's result type
 /// (`.neg` and `.cast` need it). Exposed for the construction-time
 /// optimization tests (frontend_optimizer_tests.zig).
-pub fn tryFoldOp(op: cfg.Op, result_type: cfg.Type) ?cfg.ConstValue {
+pub fn tryFoldOp(op: cfg.Op, result_type: meta.Type) ?meta.ConstValue {
     return switch (op) {
         .neg => |x| foldNeg(x, result_type),
         .abs => |x| foldAbs(x),
@@ -603,7 +603,7 @@ pub fn tryFoldOp(op: cfg.Op, result_type: cfg.Type) ?cfg.ConstValue {
 }
 
 /// The `ConstValue` carried by a `const`-defined value, if any.
-fn constOf(x: *cfg.Value) ?cfg.ConstValue {
+fn constOf(x: *cfg.Value) ?meta.ConstValue {
     const def = x.def orelse return null;
     return switch (def.op) {
         .const_ => |c| c,
@@ -611,7 +611,7 @@ fn constOf(x: *cfg.Value) ?cfg.ConstValue {
     };
 }
 
-fn intConst(c: cfg.ConstValue, comptime T: type) ?T {
+fn intConst(c: meta.ConstValue, comptime T: type) ?T {
     const U = std.meta.Int(.unsigned, @typeInfo(T).int.bits);
     return switch (c) {
         .int => |i| @bitCast(@as(U, @truncate(@as(u64, @bitCast(i))))),
@@ -619,21 +619,21 @@ fn intConst(c: cfg.ConstValue, comptime T: type) ?T {
     };
 }
 
-fn floatConst(c: cfg.ConstValue) ?f64 {
+fn floatConst(c: meta.ConstValue) ?f64 {
     return switch (c) {
         .float => |f| f,
         else => null,
     };
 }
 
-fn boolConst(c: cfg.ConstValue) ?bool {
+fn boolConst(c: meta.ConstValue) ?bool {
     return switch (c) {
         .bool => |b| b,
         else => null,
     };
 }
 
-fn strConst(c: cfg.ConstValue) ?[]const u8 {
+fn strConst(c: meta.ConstValue) ?[]const u8 {
     return switch (c) {
         .string => |s| s,
         else => null,
@@ -641,7 +641,7 @@ fn strConst(c: cfg.ConstValue) ?[]const u8 {
 }
 
 /// The primitive kind of a type, null for non-primitives.
-fn primKind(t: cfg.Type) ?ast.PrimitiveKind {
+fn primKind(t: meta.Type) ?meta.PrimitiveKind {
     return switch (t) {
         .primitive => |k| k,
         else => null,
@@ -655,7 +655,7 @@ fn primKind(t: cfg.Type) ?ast.PrimitiveKind {
 /// WebAssembly semantics, Runtime §7.2). Integer arithmetic wraps modulo
 /// 2³² (WebAssembly semantics, never traps), so overflow folds to the
 /// wrapped value; float arithmetic is IEEE and always folds.
-fn foldArith(bin: cfg.Bin, op: Arith) ?cfg.ConstValue {
+fn foldArith(bin: cfg.Bin, op: Arith) ?meta.ConstValue {
     const a = constOf(bin.a) orelse return null;
     const b = constOf(bin.b) orelse return null;
     const kind = primKind(bin.a.type_) orelse return null;
@@ -667,7 +667,7 @@ fn foldArith(bin: cfg.Bin, op: Arith) ?cfg.ConstValue {
     };
 }
 
-fn intArith(comptime T: type, a: cfg.ConstValue, b: cfg.ConstValue, op: Arith) ?cfg.ConstValue {
+fn intArith(comptime T: type, a: meta.ConstValue, b: meta.ConstValue, op: Arith) ?meta.ConstValue {
     const x = intConst(a, T) orelse return null;
     const y = intConst(b, T) orelse return null;
     switch (op) {
@@ -709,7 +709,7 @@ fn intArith(comptime T: type, a: cfg.ConstValue, b: cfg.ConstValue, op: Arith) ?
 /// matching the runtime. Non-finite results DO fold — the AIR text form
 /// represents them as inf/-inf/nan (cfg_parse accepts them), so the
 /// round-trip stays faithful.
-fn floatArith(a: cfg.ConstValue, b: cfg.ConstValue, op: Arith) ?cfg.ConstValue {
+fn floatArith(a: meta.ConstValue, b: meta.ConstValue, op: Arith) ?meta.ConstValue {
     const x = floatConst(a) orelse return null;
     const y = floatConst(b) orelse return null;
     return switch (op) {
@@ -730,7 +730,7 @@ fn floatArith(a: cfg.ConstValue, b: cfg.ConstValue, op: Arith) ?cfg.ConstValue {
 /// is 31, so `x << -1` is `x << 31`). `int32` right shift is arithmetic
 /// (sign-filling), `uint32` logical (zero-filling) — Zig's `>>` is
 /// already type-correct for both. Shifts never trap.
-fn foldShift(bin: cfg.Bin, op: Shift) ?cfg.ConstValue {
+fn foldShift(bin: cfg.Bin, op: Shift) ?meta.ConstValue {
     const a = constOf(bin.a) orelse return null;
     const b = constOf(bin.b) orelse return null;
     const kind = primKind(bin.a.type_) orelse return null;
@@ -741,7 +741,7 @@ fn foldShift(bin: cfg.Bin, op: Shift) ?cfg.ConstValue {
     };
 }
 
-fn intShift(comptime T: type, a: cfg.ConstValue, b: cfg.ConstValue, op: Shift) ?cfg.ConstValue {
+fn intShift(comptime T: type, a: meta.ConstValue, b: meta.ConstValue, op: Shift) ?meta.ConstValue {
     const x = intConst(a, T) orelse return null;
     const y = intConst(b, T) orelse return null;
     const s: u5 = @intCast(y & 31);
@@ -754,7 +754,7 @@ fn intShift(comptime T: type, a: cfg.ConstValue, b: cfg.ConstValue, op: Shift) ?
 /// Fold a bitwise op over constants. Operates on the raw 32-bit
 /// patterns — `int32`/`uint32` alike, the ops are bit-identical with
 /// no signedness distinction. Bitwise ops never trap (Runtime §7.2).
-fn foldBit(bin: cfg.Bin, op: Bit) ?cfg.ConstValue {
+fn foldBit(bin: cfg.Bin, op: Bit) ?meta.ConstValue {
     const a = constOf(bin.a) orelse return null;
     const b = constOf(bin.b) orelse return null;
     const kind = primKind(bin.a.type_) orelse return null;
@@ -765,7 +765,7 @@ fn foldBit(bin: cfg.Bin, op: Bit) ?cfg.ConstValue {
     };
 }
 
-fn intBit(comptime T: type, a: cfg.ConstValue, b: cfg.ConstValue, op: Bit) ?cfg.ConstValue {
+fn intBit(comptime T: type, a: meta.ConstValue, b: meta.ConstValue, op: Bit) ?meta.ConstValue {
     const x = intConst(a, T) orelse return null;
     const y = intConst(b, T) orelse return null;
     return switch (op) {
@@ -777,7 +777,7 @@ fn intBit(comptime T: type, a: cfg.ConstValue, b: cfg.ConstValue, op: Bit) ?cfg.
 
 /// Fold a binary comparison. `==`/`!=` cover byte, int, float, bool, and
 /// str; the ordering ops cover ints and floats only (Core §16.3).
-fn foldCmp(bin: cfg.Bin, op: Cmp) ?cfg.ConstValue {
+fn foldCmp(bin: cfg.Bin, op: Cmp) ?meta.ConstValue {
     const a = constOf(bin.a) orelse return null;
     const b = constOf(bin.b) orelse return null;
     const kind = primKind(bin.a.type_) orelse return null;
@@ -793,7 +793,7 @@ fn foldCmp(bin: cfg.Bin, op: Cmp) ?cfg.ConstValue {
     return .{ .bool = r };
 }
 
-fn cmpInt(comptime T: type, a: cfg.ConstValue, b: cfg.ConstValue, op: Cmp) ?bool {
+fn cmpInt(comptime T: type, a: meta.ConstValue, b: meta.ConstValue, op: Cmp) ?bool {
     const x = intConst(a, T) orelse return null;
     const y = intConst(b, T) orelse return null;
     return switch (op) {
@@ -806,7 +806,7 @@ fn cmpInt(comptime T: type, a: cfg.ConstValue, b: cfg.ConstValue, op: Cmp) ?bool
     };
 }
 
-fn cmpByte(a: cfg.ConstValue, b: cfg.ConstValue, op: Cmp) ?bool {
+fn cmpByte(a: meta.ConstValue, b: meta.ConstValue, op: Cmp) ?bool {
     if (op != .eq and op != .ne) return null;
     const x = intConst(a, u8) orelse return null;
     const y = intConst(b, u8) orelse return null;
@@ -815,7 +815,7 @@ fn cmpByte(a: cfg.ConstValue, b: cfg.ConstValue, op: Cmp) ?bool {
 
 /// Zig float comparison matches the runtime's IEEE semantics: NaN is not
 /// equal to anything (including itself) and `+0.0 == -0.0`.
-fn cmpFloat(a: cfg.ConstValue, b: cfg.ConstValue, op: Cmp) ?bool {
+fn cmpFloat(a: meta.ConstValue, b: meta.ConstValue, op: Cmp) ?bool {
     const x = floatConst(a) orelse return null;
     const y = floatConst(b) orelse return null;
     return switch (op) {
@@ -828,14 +828,14 @@ fn cmpFloat(a: cfg.ConstValue, b: cfg.ConstValue, op: Cmp) ?bool {
     };
 }
 
-fn cmpBool(a: cfg.ConstValue, b: cfg.ConstValue, op: Cmp) ?bool {
+fn cmpBool(a: meta.ConstValue, b: meta.ConstValue, op: Cmp) ?bool {
     if (op != .eq and op != .ne) return null;
     const x = boolConst(a) orelse return null;
     const y = boolConst(b) orelse return null;
     return if (op == .eq) x == y else x != y;
 }
 
-fn cmpStr(a: cfg.ConstValue, b: cfg.ConstValue, op: Cmp) ?bool {
+fn cmpStr(a: meta.ConstValue, b: meta.ConstValue, op: Cmp) ?bool {
     if (op != .eq and op != .ne) return null;
     const x = strConst(a) orelse return null;
     const y = strConst(b) orelse return null;
@@ -846,7 +846,7 @@ fn cmpStr(a: cfg.ConstValue, b: cfg.ConstValue, op: Cmp) ?bool {
 /// semantics): `-int32_min` is `int32_min` itself and never traps.
 /// `uint32` negation is the two's-complement `0 - x` (never traps); float
 /// negation is IEEE.
-fn foldNeg(x: *cfg.Value, result_type: cfg.Type) ?cfg.ConstValue {
+fn foldNeg(x: *cfg.Value, result_type: meta.Type) ?meta.ConstValue {
     const c = constOf(x) orelse return null;
     const kind = primKind(result_type) orelse return null;
     switch (c) {
@@ -875,7 +875,7 @@ fn foldNeg(x: *cfg.Value, result_type: cfg.Type) ?cfg.ConstValue {
     }
 }
 
-fn foldNot(x: *cfg.Value) ?cfg.ConstValue {
+fn foldNot(x: *cfg.Value) ?meta.ConstValue {
     const c = constOf(x) orelse return null;
     const b = boolConst(c) orelse return null;
     return .{ .bool = !b };
@@ -886,7 +886,7 @@ fn foldNot(x: *cfg.Value) ?cfg.ConstValue {
 /// minimum wraps, never traps. `float32` is IEEE `fabs` (clears the sign
 /// bit — `abs(-0.0) = +0.0`). `uint32` has no abs (the identity — no
 /// opcode exists), so it stays unfolded.
-fn foldAbs(x: *cfg.Value) ?cfg.ConstValue {
+fn foldAbs(x: *cfg.Value) ?meta.ConstValue {
     const c = constOf(x) orelse return null;
     const kind = primKind(x.type_) orelse return null;
     switch (c) {
@@ -908,7 +908,7 @@ fn foldAbs(x: *cfg.Value) ?cfg.ConstValue {
 /// 754 `fmin`/`fmax` — NaN propagates (either operand NaN ⇒ NaN) and
 /// `fmin(-0, +0) = -0` / `fmax(-0, +0) = +0`. All total — never traps,
 /// always fold when constant.
-fn foldMinMax(bin: cfg.Bin, op: enum { min, max }) ?cfg.ConstValue {
+fn foldMinMax(bin: cfg.Bin, op: enum { min, max }) ?meta.ConstValue {
     const a = constOf(bin.a) orelse return null;
     const b = constOf(bin.b) orelse return null;
     const kind = primKind(bin.a.type_) orelse return null;
@@ -958,7 +958,7 @@ fn fmaxIeee(comptime T: type, a: T, b: T) T {
 /// leading zero bits (WebAssembly semantics). Total — always folds when
 /// constant. The result is the operand type (a count 0..32 fits both
 /// int32 and uint32).
-fn foldClz(x: *cfg.Value) ?cfg.ConstValue {
+fn foldClz(x: *cfg.Value) ?meta.ConstValue {
     const c = constOf(x) orelse return null;
     const kind = primKind(x.type_) orelse return null;
     switch (c) {
@@ -977,7 +977,7 @@ fn foldClz(x: *cfg.Value) ?cfg.ConstValue {
 /// Fold population count: set bits in the 32-bit pattern (WebAssembly
 /// semantics). Total — always folds when constant; the result is the
 /// operand type.
-fn foldPopcount(x: *cfg.Value) ?cfg.ConstValue {
+fn foldPopcount(x: *cfg.Value) ?meta.ConstValue {
     const c = constOf(x) orelse return null;
     const kind = primKind(x.type_) orelse return null;
     switch (c) {
@@ -996,7 +996,7 @@ fn foldPopcount(x: *cfg.Value) ?cfg.ConstValue {
 /// Fold the Core §16.3 numeric conversions: `int32 as float32` and
 /// `float32 as int32` (truncating toward zero; a NaN or out-of-range
 /// source saturates, NaN becomes zero — casts never trap, Runtime §7.2).
-fn foldNumCast(x: *cfg.Value, target: cfg.Type) ?cfg.ConstValue {
+fn foldNumCast(x: *cfg.Value, target: meta.Type) ?meta.ConstValue {
     const c = constOf(x) orelse return null;
     const src = primKind(x.type_) orelse return null;
     const dst = primKind(target) orelse return null;
@@ -1024,13 +1024,13 @@ fn floatToInt32(f: f32) i64 {
 
 /// The result of arithmetic simplification: reuse an operand, fold to a
 /// constant, or nothing.
-const Simplify = union(enum) { none, reuse: *cfg.Value, const_: cfg.ConstValue };
+const Simplify = union(enum) { none, reuse: *cfg.Value, const_: meta.ConstValue };
 
 /// Integer identity simplifications (braun13cc.pdf §3.1's arithmetic
 /// simplification, e.g. `x − x → 0`). Integer-only — float identities
 /// are unsound (`x−x ≠ 0` for NaN, `0·x ≠ 0` for ±inf/NaN, `0+x ≠ x` for
 /// −0.0). Every rule is exact and trap-free for int32/uint32.
-fn simplifyOp(op: cfg.Op, rt: cfg.Type) ?Simplify {
+fn simplifyOp(op: cfg.Op, rt: meta.Type) ?Simplify {
     const kind = switch (rt) {
         .primitive => |k| k,
         else => return null,
@@ -1122,7 +1122,7 @@ fn isOneInt(v: *cfg.Value) bool {
 /// current block, or null. The caller has already checked the result is
 /// Copy; same op + operands ⇒ same result type, so one ownership
 /// check suffices. Consts are never shared (matching the old CSE pass).
-fn findCse(fs: *FuncState, b: *cfg.BasicBlock, op: cfg.Op, rt: cfg.Type) ?*cfg.Value {
+fn findCse(fs: *FuncState, b: *cfg.BasicBlock, op: cfg.Op, rt: meta.Type) ?*cfg.Value {
     for (fs.block_instrs.items[b.id].items) |prior| {
         if (prior.results.len == 0) continue;
         if (!isCandidate(prior)) continue;
@@ -1132,7 +1132,7 @@ fn findCse(fs: *FuncState, b: *cfg.BasicBlock, op: cfg.Op, rt: cfg.Type) ?*cfg.V
             // of one source share a key — with the uniform conversion
             // family that is a value-changing collision (a byte
             // truncation vs a float widen), never a reuse.
-            if (cfg.Type.eql(prior.results[0].type_, rt)) return prior.results[0];
+            if (meta.Type.eql(prior.results[0].type_, rt)) return prior.results[0];
         }
     }
     return null;

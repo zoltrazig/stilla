@@ -3,7 +3,7 @@
 //! finalized `cfg.IrFunc` with instruction slices, predecessor lists in
 //! edge order, materialized phi incoming lists, and the value table.
 const std = @import("std");
-const ast = @import("stilla").ast;
+const meta = @import("stilla").meta;
 const cfg = @import("stilla").cfg;
 const lower = @import("stilla").lower;
 
@@ -15,7 +15,7 @@ const LowerError = lower.LowerError;
 /// lists, phi incoming lists, and the value table.
 pub fn finishFunc(self: *Lowerer, fs: *FuncState) LowerError!*cfg.IrFunc {
     if (fs.blocks.items.len == 0) {
-        return self.fail(ast.Span.init(0, 0, 0), "function '{s}' has no blocks", .{fs.name.text});
+        return self.fail(meta.Span.init(0, 0, 0), "function '{s}' has no blocks", .{fs.name.text});
     }
     const blocks = try self.arena.dupe(*cfg.BasicBlock, fs.blocks.items);
     const instr_lists = try self.arena.alloc([]const *cfg.Instr, fs.block_instrs.items.len);

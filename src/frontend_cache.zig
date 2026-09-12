@@ -28,13 +28,14 @@
 
 const std = @import("std");
 const ast = @import("ast.zig");
+const meta = @import("meta.zig");
 
 pub const FrontendCache = struct {
     arena: std.heap.ArenaAllocator,
     /// Monotonic source-id counter. Every module stored by this cache
     /// drew a unique id from here, so a fresh module's id can never
     /// collide with a cached module's id in the same compile.
-    next_source_id: ast.SourceId = 0,
+    next_source_id: meta.SourceId = 0,
     /// Resolved specifier → cached parse. The key slice is duped into
     /// the cache arena at store time (callers' specifiers are compile-
     /// arena-owned and would dangle once the compile ends).
@@ -70,7 +71,7 @@ pub const FrontendCache = struct {
     /// The source id for a module parsed fresh through this cache:
     /// monotonic, so it can never collide with any id a cached module
     /// already holds.
-    pub fn allocSourceId(self: *FrontendCache) ast.SourceId {
+    pub fn allocSourceId(self: *FrontendCache) meta.SourceId {
         defer self.next_source_id += 1;
         return self.next_source_id;
     }

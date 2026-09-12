@@ -20,6 +20,7 @@ const HeapErr = vm_types.HeapErr;
 const Termination = interp_types.Termination;
 const RunError = interp_types.RunError;
 const readHeader = interp_types.readHeader;
+const checkHeader = interp_types.checkHeader;
 const invalid_pc = interp_types.invalid_pc;
 const vm_internal_pc = interp_types.vm_internal_pc;
 const functionAtPc = interp_types.functionAtPc;
@@ -1329,7 +1330,7 @@ pub fn returnFrom(self: *VmCtx, v: VmInstr) !?Termination {
     const a: u32 = fe.a();
     const result: Value = read(self, v.a);
     const hdr = readHeader(self.runtime.stack.items, self.runtime.fp);
-    if (!hdr.check(self.loaded.funcs.items, self.runtime.fp)) {
+    if (!checkHeader(hdr, self.loaded.funcs.items, self.runtime.fp)) {
         return trapMsg(self, "corrupt frame header", .{});
     }
     if (hdr.saved_ra == invalid_pc) {

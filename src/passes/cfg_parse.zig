@@ -12,16 +12,16 @@
 //! working for tests, golden files, and round-trip checks.
 
 const std = @import("std");
-const ast = @import("stilla").ast;
 const cfg = @import("stilla").cfg;
+const meta = @import("stilla").meta;
 
 // AIR structures (cfg.zig), brought into scope under the bare names the
 // parser uses.
-const Type = cfg.Type;
-const TypeId = cfg.TypeId;
-const Param = cfg.Param;
+const Type = meta.Type;
+const TypeId = meta.TypeId;
+const Param = meta.Param;
 const ValueState = cfg.ValueState;
-const ConstValue = cfg.ConstValue;
+const ConstValue = meta.ConstValue;
 const Value = cfg.Value;
 const Instr = cfg.Instr;
 const Op = cfg.Op;
@@ -142,7 +142,7 @@ const op_names = blk: {
     break :blk std.StaticStringMap(OpName).initComptime(entries[0..n]);
 };
 
-const primitive_names = std.StaticStringMap(ast.PrimitiveKind).initComptime(.{
+const primitive_names = std.StaticStringMap(meta.PrimitiveKind).initComptime(.{
     .{ "any", .any },
     .{ "byte", .byte },
     .{ "hostdata", .hostdata },
@@ -188,7 +188,7 @@ pub const Parser = struct {
     // carries no type declarations) so printing round-trips it (air.md
     // §10).
     type_ids: std.StringHashMap(u32) = undefined,
-    types: std.ArrayList(cfg.TypeDecl) = .empty,
+    types: std.ArrayList(meta.TypeDecl) = .empty,
     type_ids_ready: bool = false,
 
     pub fn init(allocator: std.mem.Allocator) Parser {
@@ -266,7 +266,7 @@ pub const Parser = struct {
         return self.failAt(tok.span, fmt, args);
     }
 
-    fn failAt(self: *Parser, span: ast.Span, comptime fmt: []const u8, args: anytype) ParseError {
+    fn failAt(self: *Parser, span: meta.Span, comptime fmt: []const u8, args: anytype) ParseError {
         const pos = cfg_lex.lineCol(self.text, span.start);
         const msg = std.fmt.allocPrint(self.arena.allocator(), fmt, args) catch "out of memory";
         self.diag = .{ .line = pos.line, .column = pos.column, .message = msg };
@@ -335,7 +335,7 @@ pub const Parser = struct {
             // The text form carries no type declarations; typed names are
             // interned into `.unknown` `TypeDecl`s as they are parsed
             // (air.md §10).
-            .types = try self.arena.allocator().dupe(cfg.TypeDecl, self.types.items),
+            .types = try self.arena.allocator().dupe(meta.TypeDecl, self.types.items),
             .entry = null,
         };
         try program.resolveDirectCalls(self.arena.allocator());
@@ -378,7 +378,7 @@ pub const Parser = struct {
         var params = std.ArrayList(Param).empty;
         while (!self.at(.rparen)) {
             const pspan = self.cur().span;
-            var mode: ast.ParamMode = .plain;
+            var mode: meta.ParamMode = .plain;
             if (self.at(.ident)) {
                 const it = self.cur();
                 if (std.mem.eql(u8, it.text, "borrow")) {
@@ -574,7 +574,7 @@ pub const Parser = struct {
         const f = try self.arena.allocator().create(IrFunc);
         f.* = .{
             .id = self.next_func_id,
-            .span = ast.Span.merge(start_tok.span, self.f_brace.span),
+            .span = meta.Span.merge(start_tok.span, self.f_brace.span),
             .name = .{ .span = name_tok.span, .text = name_tok.text },
             .params = self.f_params,
             .ret = ret,
@@ -953,7 +953,7 @@ pub const Parser = struct {
             target = .{ .host_module = .{ .module = mod_tok.text, .member = member_tok.text } };
         }
         return .{
-            .span = ast.Span.merge(mod_tok.span, member_tok.span),
+            .span = meta.Span.merge(mod_tok.span, member_tok.span),
             .target = target,
             .args = try self.parseCommaOperandList(),
             .sig = null,
@@ -1110,7 +1110,7 @@ pub const Parser = struct {
     // Value and instruction construction
     // -----------------------------------------------------------------
 
-    fn newValue(self: *Parser, span: ast.Span, type_: Type, state: ValueState) ParseError!*Value {
+    fn newValue(self: *Parser, span: meta.Span, type_: Type, state: ValueState) ParseError!*Value {
         const v = try self.arena.allocator().create(Value);
         v.* = .{
             .id = @intCast(self.f_values.items.len),
@@ -1125,7 +1125,7 @@ pub const Parser = struct {
         return v;
     }
 
-    fn emit(self: *Parser, span: ast.Span, op: Op, results: []*Value) ParseError!*Instr {
+    fn emit(self: *Parser, span: meta.Span, op: Op, results: []*Value) ParseError!*Instr {
         const blk = self.f_cur orelse unreachable;
         const instr = try self.arena.allocator().create(Instr);
         instr.* = .{ .span = span, .results = results, .op = op };
@@ -1289,7 +1289,7 @@ pub const Parser = struct {
             var params = std.ArrayList(Param).empty;
             while (!self.at(.rparen)) {
                 const pspan = self.cur().span;
-                var mode: ast.ParamMode = .plain;
+                var mode: meta.ParamMode = .plain;
                 if (self.at(.ident)) {
                     const it = self.cur();
                     if (std.mem.eql(u8, it.text, "borrow")) {
@@ -1518,7 +1518,7 @@ test "cfg resolves direct calls and host-module syscalls" {
     const main = t.program.funcs[1];
 
     // Borrow-mode parameter arrives borrowed; its type is a named File.
-    try std.testing.expectEqual(ast.ParamMode.borrow, inspect.params[0].mode);
+    try std.testing.expectEqual(meta.ParamMode.borrow, inspect.params[0].mode);
     try std.testing.expectEqual(ValueState.borrowed, inspect.values[0].state);
     try std.testing.expect(inspect.values[0].ownership == null); // deferred
 
@@ -1635,14 +1635,14 @@ test "cfg parses type_is tests and hostdata primitives" {
 
     const f = t.program.funcs[0];
     try std.testing.expectEqual(@as(usize, 2), f.params.len);
-    try std.testing.expectEqual(ast.PrimitiveKind.any, f.params[0].type_.primitive);
-    try std.testing.expectEqual(ast.PrimitiveKind.hostdata, f.params[1].type_.primitive);
+    try std.testing.expectEqual(meta.PrimitiveKind.any, f.params[0].type_.primitive);
+    try std.testing.expectEqual(meta.PrimitiveKind.hostdata, f.params[1].type_.primitive);
     const ti = switch (f.blocks[0].instrs[0].op) {
         .type_is => |ti| ti,
         else => unreachable,
     };
     try std.testing.expect(ti.value == f.values[0]);
-    try std.testing.expectEqual(ast.PrimitiveKind.int32, ti.type_.list.primitive);
+    try std.testing.expectEqual(meta.PrimitiveKind.int32, ti.type_.list.primitive);
     const c = switch (f.blocks[1].instrs[0].op) {
         .any_unpack_copy => |c| c,
         else => unreachable,

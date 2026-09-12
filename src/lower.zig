@@ -33,6 +33,7 @@
 const std = @import("std");
 const ast = @import("ast.zig");
 const cfg = @import("cfg.zig");
+const meta = @import("meta.zig");
 const checker = @import("passes/checker.zig");
 const moduleinfo = @import("moduleinfo.zig");
 const cfg_lower_drop = @import("passes/cfg_lower_drop.zig");
@@ -75,9 +76,9 @@ pub const Scope = struct {
 /// table, the symbol table, scope stack, and ownership bookkeeping.
 pub const FuncState = struct {
     module: *moduleinfo.ModuleInfo,
-    name: ast.Ident,
-    params: []cfg.Param,
-    ret: cfg.Type,
+    name: meta.Ident,
+    params: []meta.Param,
+    ret: meta.Type,
     /// The function's own module reference (`module_ref "<spec>"`),
     /// created lazily for member loads.
     self_module: ?*cfg.Value = null,
@@ -110,9 +111,10 @@ pub const FuncState = struct {
 };
 
 /// Cache key of a first-class intrinsic wrapper (intrinsic plan,
-/// phase 3): the declaring module, the member's index in its member
-/// table, and the concrete specialization — the instance id for generic
-/// intrinsics, `maxInt(u32)` for non-generic members.
+/// phase 3): the declaring module's identity (`@intFromPtr`), the
+/// member's source slot, and the concrete specialization — the instance
+/// id for generic intrinsics, `maxInt(u32)` for non-generic members.
+/// Shared with the HIR builder's wrapper cache (`hir_build.WrapperKey`).
 pub const IntrinsicKey = struct {
     owner: usize,
     slot: u32,
@@ -175,20 +177,20 @@ pub const Lowerer = struct {
     /// instantiated type of a construction, the resolved type of a use
     /// site. Null when the annotation is unavailable (or the expression
     /// was not annotated — e.g. inside an unspecialized generic template).
-    pub fn annotatedType(self: *Lowerer, fs: *FuncState, e: *const ast.Expr) ?cfg.Type {
+    pub fn annotatedType(self: *Lowerer, fs: *FuncState, e: *const ast.Expr) ?meta.Type {
         const a = self.ann orelse return null;
         const ma = a.per_module.get(fs.module.specifier) orelse return null;
         return ma.expr_of.get(e);
     }
 
     /// pass-internal: type resolution helper shared with the passes.
-    pub fn resolveType(self: *Lowerer, fs: *FuncState, t: *const ast.Type) LowerError!cfg.Type {
+    pub fn resolveType(self: *Lowerer, fs: *FuncState, t: *const ast.Type) LowerError!meta.Type {
         return moduleinfo.resolveType(self.resolve, fs.module, t) orelse
             self.fail(t.span(), "cannot resolve type", .{});
     }
 
     /// pass-internal: diagnostic helper shared with the passes.
-    pub fn fail(self: *Lowerer, span: ast.Span, comptime fmt: []const u8, args: anytype) LowerError {
+    pub fn fail(self: *Lowerer, span: meta.Span, comptime fmt: []const u8, args: anytype) LowerError {
         const msg = std.fmt.allocPrint(self.arena, fmt, args) catch return error.OutOfMemory;
         self.diag = .{ .span = span, .message = msg };
         return error.Diagnostic;

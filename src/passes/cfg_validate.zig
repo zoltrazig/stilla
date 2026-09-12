@@ -35,7 +35,7 @@
 
 const std = @import("std");
 const cfg = @import("stilla").cfg;
-const ast = @import("stilla").ast;
+const meta = @import("stilla").meta;
 
 /// The per-value availability state along a path (air.md §12 Ownership):
 /// alive (owned), consumed (dead on this path), or consumed on some
@@ -252,7 +252,7 @@ fn validateFunc(program: *const cfg.IrProgram, f: *const cfg.IrFunc, allocator: 
             if (instr.op != .phi) break;
             const phi = instr.op.phi;
             for (phi.incoming) |inc| {
-                if (!cfg.Type.eql(instr.results[0].type_, inc.value.type_)) {
+                if (!meta.Type.eql(instr.results[0].type_, inc.value.type_)) {
                     return msg(allocator, "function @{s}: phi in '{s}' joins value %{d} of type {any} into {any}", .{ f.name.text, b.name, inc.value.id, inc.value.type_, instr.results[0].type_ });
                 }
                 const ep = blkIndex(&index_of, inc.pred) orelse unreachable;
@@ -539,12 +539,12 @@ fn checkInstr(
         // and byte no arithmetic — the lowering only covers int32/f32.
         .abs => |v| {
             if (v.type_.primitive != .int32 and v.type_.primitive != .int64 and v.type_.primitive != .float32) return typeErr(allocator, f, b, info.text, v.type_);
-            if (!cfg.Type.eql(v.type_, instr.results[0].type_)) return typeErr(allocator, f, b, info.text, v.type_);
+            if (!meta.Type.eql(v.type_, instr.results[0].type_)) return typeErr(allocator, f, b, info.text, v.type_);
         },
         // clz/popcount: the 32-bit integer patterns, result the operand
         // type (a count 0..32 fits both int32 and uint32).
         .clz, .popcount => |v| {
-            if (!isInt(v.type_) or !cfg.Type.eql(v.type_, instr.results[0].type_)) return typeErr(allocator, f, b, info.text, v.type_);
+            if (!isInt(v.type_) or !meta.Type.eql(v.type_, instr.results[0].type_)) return typeErr(allocator, f, b, info.text, v.type_);
         },
         .not_ => |v| {
             if (!isBool(v.type_)) return typeErr(allocator, f, b, "not", v.type_);
@@ -555,7 +555,7 @@ fn checkInstr(
             // conversion types); distinct from the arithmetic
             // `isNumeric` set, which gates add/sub/mul/div/rem.
             if (!isNumCastType(v.type_) or !isNumCastType(instr.results[0].type_) or
-                cfg.Type.eql(v.type_, instr.results[0].type_))
+                meta.Type.eql(v.type_, instr.results[0].type_))
             {
                 return typeErr(allocator, f, b, "num_cast", v.type_);
             }
@@ -570,7 +570,7 @@ fn checkInstr(
             if (!isAny(v.type_)) return typeErr(allocator, f, b, info.text, v.type_);
         },
         .add, .sub, .mul, .div, .rem => |x| {
-            if (!isNumeric(x.a.type_) or !cfg.Type.eql(x.a.type_, x.b.type_) or !cfg.Type.eql(x.a.type_, instr.results[0].type_)) {
+            if (!isNumeric(x.a.type_) or !meta.Type.eql(x.a.type_, x.b.type_) or !meta.Type.eql(x.a.type_, instr.results[0].type_)) {
                 return typeErr(allocator, f, b, info.text, x.a.type_);
             }
         },
@@ -578,14 +578,14 @@ fn checkInstr(
         // patterns (signedness fixed by the opcode), f32 follows IEEE
         // 754 fmin/fmax; never traps. byte has no arithmetic.
         .min, .max => |x| {
-            if (!isNumeric(x.a.type_) or !cfg.Type.eql(x.a.type_, x.b.type_) or !cfg.Type.eql(x.a.type_, instr.results[0].type_)) {
+            if (!isNumeric(x.a.type_) or !meta.Type.eql(x.a.type_, x.b.type_) or !meta.Type.eql(x.a.type_, instr.results[0].type_)) {
                 return typeErr(allocator, f, b, info.text, x.a.type_);
             }
         },
         // Shifts/bitwise: same-type int32/uint32 operands, result the
         // operand type — `byte` has no arithmetic, `f32` no bit pattern.
         .shl, .shr, .bitand, .bitor, .bitxor => |x| {
-            if (!isInt(x.a.type_) or !cfg.Type.eql(x.a.type_, x.b.type_) or !cfg.Type.eql(x.a.type_, instr.results[0].type_)) {
+            if (!isInt(x.a.type_) or !meta.Type.eql(x.a.type_, x.b.type_) or !meta.Type.eql(x.a.type_, instr.results[0].type_)) {
                 return typeErr(allocator, f, b, info.text, x.a.type_);
             }
         },
@@ -593,12 +593,12 @@ fn checkInstr(
             if (!isStr(x.a.type_) or !isStr(x.b.type_)) return typeErr(allocator, f, b, "concat", x.a.type_);
         },
         .eq, .ne, .lt, .le, .gt, .ge => |x| {
-            if (!cfg.Type.eql(x.a.type_, x.b.type_) or !isBool(instr.results[0].type_)) return typeErr(allocator, f, b, info.text, x.a.type_);
+            if (!meta.Type.eql(x.a.type_, x.b.type_) or !isBool(instr.results[0].type_)) return typeErr(allocator, f, b, info.text, x.a.type_);
         },
         // Branchless select: the condition is a bool, the then/else
         // values share one type, and the result is that type.
         .select => |x| {
-            if (!isBool(x.cond.type_) or !cfg.Type.eql(x.a.type_, x.b.type_) or !cfg.Type.eql(x.a.type_, instr.results[0].type_)) {
+            if (!isBool(x.cond.type_) or !meta.Type.eql(x.a.type_, x.b.type_) or !meta.Type.eql(x.a.type_, instr.results[0].type_)) {
                 return typeErr(allocator, f, b, "select", x.cond.type_);
             }
         },
@@ -606,7 +606,7 @@ fn checkInstr(
             if (v.ownership == .unique) return typeErr(allocator, f, b, "copy", v.type_);
         },
         .borrow => |v| {
-            if (!cfg.Type.eql(v.type_, instr.results[0].type_)) return typeErr(allocator, f, b, "borrow", v.type_);
+            if (!meta.Type.eql(v.type_, instr.results[0].type_)) return typeErr(allocator, f, b, "borrow", v.type_);
         },
         .move_ => |v| {
             if (v.state == .borrowed) {
@@ -655,14 +655,14 @@ fn checkInstr(
                         if (s >= m.slots.len) {
                             return msg(allocator, "function @{s}: load_member #{d} of member '{s}' references slot #{d} out of range for module '{s}' ({d} slots)", .{ f.name.text, x.member, member.name, s, m.name, m.slots.len });
                         }
-                        if (!cfg.Type.eql(m.slots[s].type_, member.type_)) {
+                        if (!meta.Type.eql(m.slots[s].type_, member.type_)) {
                             return msg(allocator, "function @{s}: member '{s}' of module '{s}' has type {any} but its slot holds {any}", .{ f.name.text, member.name, m.name, member.type_, m.slots[s].type_ });
                         }
                     }
                 },
                 .function, .host_binding, .module_ref => {},
             }
-            if (!cfg.Type.eql(member.type_, instr.results[0].type_)) {
+            if (!meta.Type.eql(member.type_, instr.results[0].type_)) {
                 return msg(allocator, "function @{s}: load_member #{d} of member '{s}' ({any}) produces {any} in block '{s}'", .{ f.name.text, x.member, member.name, member.type_, instr.results[0].type_, b.name });
             }
         },
@@ -682,7 +682,7 @@ fn checkInstr(
                         if (x.slot >= m.slots.len) {
                             return msg(allocator, "function @{s}: store_member #{d} is out of range for module '{s}' ({d} slots)", .{ f.name.text, x.slot, m.name, m.slots.len });
                         }
-                        if (!cfg.Type.eql(x.value.type_, m.slots[x.slot].type_)) {
+                        if (!meta.Type.eql(x.value.type_, m.slots[x.slot].type_)) {
                             // The `T -> any` coercion is implicit at the
                             // constant boundary (air.md §4.4 lists call and
                             // join boundaries only; module constants store
@@ -735,8 +735,8 @@ fn checkInstr(
                     if (x.index >= s.fields.len) {
                         return msg(allocator, "function @{s}: read_field #{d} names no field of '{s}' ({d} fields) in block '{s}'", .{ f.name.text, x.index, s.name, s.fields.len, b.name });
                     }
-                    const ft = cfg.substParams(allocator, s.type_params, r.n.args, s.fields[x.index].type_);
-                    if (!cfg.Type.eql(instr.results[0].type_, ft)) {
+                    const ft = meta.substParams(allocator, s.type_params, r.n.args, s.fields[x.index].type_);
+                    if (!meta.Type.eql(instr.results[0].type_, ft)) {
                         return msg(allocator, "function @{s}: read_field #{d} of '{s}' produces {any}, expected its declared field type {any} in block '{s}'", .{ f.name.text, x.index, s.name, instr.results[0].type_, ft, b.name });
                     }
                 },
@@ -752,7 +752,7 @@ fn checkInstr(
                     if (x.index >= elems.len) {
                         return msg(allocator, "function @{s}: read_tuple #{d} out of range for a {d}-element tuple in block '{s}'", .{ f.name.text, x.index, elems.len, b.name });
                     }
-                    if (!cfg.Type.eql(instr.results[0].type_, elems[x.index])) {
+                    if (!meta.Type.eql(instr.results[0].type_, elems[x.index])) {
                         return msg(allocator, "function @{s}: read_tuple #{d} produces {any}, expected {any} in block '{s}'", .{ f.name.text, x.index, instr.results[0].type_, elems[x.index], b.name });
                     }
                 },
@@ -871,7 +871,7 @@ fn checkInstr(
             var pi: usize = 0;
             for (c.args) |a| {
                 while (pi < params.len and (params[pi].type_ == .primitive and params[pi].type_.primitive == .void)) pi += 1;
-                const mode: ast.ParamMode = if (pi < params.len) params[pi].mode else .plain;
+                const mode: meta.ParamMode = if (pi < params.len) params[pi].mode else .plain;
                 if (mode == .move) {
                     if (try checkAvailable(f, b, instr, a, st.*, "move-mode argument", allocator)) |m| return m;
                     if (a.ownership != .copy) try st.put(a, .consumed);
@@ -902,7 +902,7 @@ fn checkInstr(
                         return msg(allocator, "function @{s}: syscall passes more arguments than its signature has parameters in block '{s}'", .{ f.name.text, b.name });
                     }
                     const p = sig.params[pi];
-                    if (!cfg.Type.eql(a.type_, p.type_)) {
+                    if (!meta.Type.eql(a.type_, p.type_)) {
                         return msg(allocator, "function @{s}: syscall argument %{d} of type {any} does not match parameter type {any} in block '{s}'", .{ f.name.text, a.id, a.type_, p.type_, b.name });
                     }
                     if (p.mode == .move) {
@@ -934,7 +934,7 @@ fn checkInstr(
                 }
                 // The result type matches the signature's return (a
                 // void/never return produces no result).
-                if (instr.results.len == 1 and !cfg.Type.eql(instr.results[0].type_, sig.ret.*)) {
+                if (instr.results.len == 1 and !meta.Type.eql(instr.results[0].type_, sig.ret.*)) {
                     return msg(allocator, "function @{s}: syscall result %{d} of type {any} does not match return type {any}", .{ f.name.text, instr.results[0].id, instr.results[0].type_, sig.ret.* });
                 }
             }
@@ -963,7 +963,7 @@ fn checkTerminator(program: *const cfg.IrProgram, f: *const cfg.IrFunc, b: *cons
             if (val.state == .borrowed) {
                 return msg(allocator, "function @{s}: ret of borrowed value %{d} in block '{s}' (Core §10.7)", .{ f.name.text, val.id, b.name });
             }
-            if (!cfg.Type.eql(val.type_, f.ret)) {
+            if (!meta.Type.eql(val.type_, f.ret)) {
                 const is_never = val.type_ == .primitive and val.type_.primitive == .never;
                 if (!is_never) {
                     return msg(allocator, "function @{s}: ret value %{d} of type {any} does not match return type {any}", .{ f.name.text, val.id, val.type_, f.ret });
@@ -996,7 +996,7 @@ fn checkTerminator(program: *const cfg.IrProgram, f: *const cfg.IrFunc, b: *cons
             }
             for (tc.args, f.params) |a, p| {
                 if (try checkUse(f, b, null, a, dom, allocator)) |m| return m;
-                if (!cfg.Type.eql(a.type_, p.type_)) {
+                if (!meta.Type.eql(a.type_, p.type_)) {
                     return msg(allocator, "function @{s}: tailcall argument %{d} of type {any} does not match parameter type {any}", .{ f.name.text, a.id, a.type_, p.type_ });
                 }
                 if (p.mode == .move) {
@@ -1121,7 +1121,7 @@ fn collectOperands(instr: *const cfg.Instr, allocator: std.mem.Allocator) ![]*co
 
 /// The callee's parameters, for argument-mode checks (empty when the
 /// callee is unresolvable).
-fn calleeParams(c: cfg.Call) []const cfg.Param {
+fn calleeParams(c: cfg.Call) []const meta.Param {
     return switch (c.callee) {
         .direct => |d| if (d.func) |fn_| fn_.params else &.{},
         .value => |v| switch (v.type_) {
@@ -1238,14 +1238,14 @@ fn defBlock(f: *const cfg.IrFunc, instr: *const cfg.Instr) ?*const cfg.BasicBloc
     return null;
 }
 
-fn isNumeric(t: cfg.Type) bool {
+fn isNumeric(t: meta.Type) bool {
     return t == .primitive and (t.primitive == .int32 or t.primitive == .uint32 or t.primitive == .int64 or t.primitive == .uint64 or t.primitive == .float32 or t.primitive == .float64);
 }
 
 /// The shift/bitwise domain (`shl`/`shr`/`bitand`/`bitor`/`bitxor`):
 /// the two integer types — `byte` has no arithmetic and `f32` no bit
 /// pattern to shift.
-fn isInt(t: cfg.Type) bool {
+fn isInt(t: meta.Type) bool {
     return t == .primitive and (t.primitive == .int32 or t.primitive == .uint32 or t.primitive == .int64 or t.primitive == .uint64);
 }
 
@@ -1253,27 +1253,27 @@ fn isInt(t: cfg.Type) bool {
 /// non-identity pair of the seven conversion types. Arithmetic
 /// (`isNumeric`) stays as-is; enabling a cast does not enable
 /// `byte + byte` or `uint32` negation.
-fn isNumCastType(t: cfg.Type) bool {
+fn isNumCastType(t: meta.Type) bool {
     return t == .primitive and (t.primitive == .int32 or t.primitive == .uint32 or t.primitive == .int64 or t.primitive == .uint64 or t.primitive == .byte or t.primitive == .float32 or t.primitive == .float64);
 }
 
-fn isBool(t: cfg.Type) bool {
+fn isBool(t: meta.Type) bool {
     return t == .primitive and t.primitive == .bool;
 }
 
-fn isStr(t: cfg.Type) bool {
+fn isStr(t: meta.Type) bool {
     return t == .primitive and t.primitive == .str;
 }
 
-fn isAny(t: cfg.Type) bool {
+fn isAny(t: meta.Type) bool {
     return t == .primitive and t.primitive == .any;
 }
 
-fn isVoid(t: cfg.Type) bool {
+fn isVoid(t: meta.Type) bool {
     return t == .primitive and t.primitive == .void;
 }
 
-fn typeErr(allocator: std.mem.Allocator, f: *const cfg.IrFunc, b: *const cfg.BasicBlock, what: []const u8, t: cfg.Type) !?[]const u8 {
+fn typeErr(allocator: std.mem.Allocator, f: *const cfg.IrFunc, b: *const cfg.BasicBlock, what: []const u8, t: meta.Type) !?[]const u8 {
     _ = t;
     return msg(allocator, "function @{s}: '{s}' operand/result type mismatch in block '{s}'", .{ f.name.text, what, b.name });
 }
@@ -1287,11 +1287,11 @@ fn typeErr(allocator: std.mem.Allocator, f: *const cfg.IrFunc, b: *const cfg.Bas
 /// text form carries no type declarations, air.md §10) makes every layout
 /// query null, so the §12 checks skip it rather than reject.
 const NamedDecl = struct {
-    n: cfg.Type.Named,
-    decl: cfg.TypeDecl,
+    n: meta.Type.Named,
+    decl: meta.TypeDecl,
 };
 
-fn namedDecl(program: *const cfg.IrProgram, t: cfg.Type) ?NamedDecl {
+fn namedDecl(program: *const cfg.IrProgram, t: meta.Type) ?NamedDecl {
     return switch (t) {
         .named => |n| blk: {
             const decl = program.typeDecl(n.id) orelse return null;
@@ -1303,7 +1303,7 @@ fn namedDecl(program: *const cfg.IrProgram, t: cfg.Type) ?NamedDecl {
 
 const UnionResolved = struct {
     nd: NamedDecl,
-    u: cfg.UnionDecl,
+    u: meta.UnionDecl,
 };
 
 /// The union a union-base op's base resolves to (air.md §12 "read_tag /
@@ -1551,7 +1551,7 @@ test "validator rejects an any_unpack of a non-any operand" {
 /// §10 — the §12 layout checks skip unknown rows, so a test must supply
 /// the layout to exercise them). Declarations are indexed by interning
 /// order: the i-th named type in the text gets decls[i].
-fn parseValidateWithDecls(text: []const u8, decls: []const cfg.TypeDecl) !?[]const u8 {
+fn parseValidateWithDecls(text: []const u8, decls: []const meta.TypeDecl) !?[]const u8 {
     var t = try cfg_parse.parseText(text);
     defer t.arena.deinit();
     for (decls, 0..) |d, i| {
@@ -1566,28 +1566,28 @@ fn parseValidateWithDecls(text: []const u8, decls: []const cfg.TypeDecl) !?[]con
 }
 
 /// `Result`: two variants, `Ok(str)` (one payload) and `Err` (none).
-const result_union = cfg.TypeDecl{ .union_ = .{
+const result_union = meta.TypeDecl{ .union_ = .{
     .name = "Result",
     .module = "use",
     .type_params = &.{},
     .ownership = .unique,
-    .variants = @constCast(&[_]cfg.VariantDecl{
-        .{ .name = "Ok", .payloads = @constCast(&[_]cfg.Type{.{ .primitive = .str }}) },
+    .variants = @constCast(&[_]meta.VariantDecl{
+        .{ .name = "Ok", .payloads = @constCast(&[_]meta.Type{.{ .primitive = .str }}) },
         .{
             .name = "Err",
-            .payloads = @constCast(&[_]cfg.Type{}),
+            .payloads = @constCast(&[_]meta.Type{}),
         },
     }),
 } };
 
 /// `Pair`: one field `a: int32`.
-const pair_struct = cfg.TypeDecl{ .struct_ = .{
+const pair_struct = meta.TypeDecl{ .struct_ = .{
     .name = "Pair",
     .module = "use",
     .type_params = &.{},
     .ownership = .copy,
     .drop = null,
-    .fields = @constCast(&[_]cfg.FieldDecl{
+    .fields = @constCast(&[_]meta.FieldDecl{
         .{ .name = "a", .type_ = .{ .primitive = .int32 } },
     }),
 } };
@@ -1733,7 +1733,7 @@ test "validator rejects a non-exhaustive switch (air.md §12)" {
 }
 
 test "validator rejects projections over an opaque type (air.md §12)" {
-    const handle = cfg.TypeDecl{ .opaque_ = .{
+    const handle = meta.TypeDecl{ .opaque_ = .{
         .name = "Handle",
         .module = "use",
         .ownership = .unique,
@@ -1763,13 +1763,13 @@ test "validator accepts a read_field over a generic struct instantiation (air.md
     // §10), so the test installs a generic `Pair[T, U]` declaration and
     // patches the parameter's named type to the `Pair[int32, str]`
     // instantiation; field #0 then substitutes to `int32`.
-    const pair_gen = cfg.TypeDecl{ .struct_ = .{
+    const pair_gen = meta.TypeDecl{ .struct_ = .{
         .name = "Pair",
         .module = "use",
         .type_params = @constCast(&[_][]const u8{ "T", "U" }),
         .ownership = .copy,
         .drop = null,
-        .fields = @constCast(&[_]cfg.FieldDecl{
+        .fields = @constCast(&[_]meta.FieldDecl{
             .{ .name = "a", .type_ = .{ .param = "T" } },
             .{ .name = "b", .type_ = .{ .param = "U" } },
         }),
@@ -1785,7 +1785,7 @@ test "validator accepts a read_field over a generic struct instantiation (air.md
     );
     defer t.arena.deinit();
     t.program.types[0] = pair_gen;
-    t.program.funcs[0].values[0].type_ = .{ .named = .{ .id = 0, .args = @constCast(&[_]cfg.Type{ .{ .primitive = .int32 }, .{ .primitive = .str } }) } };
+    t.program.funcs[0].values[0].type_ = .{ .named = .{ .id = 0, .args = @constCast(&[_]meta.Type{ .{ .primitive = .int32 }, .{ .primitive = .str } }) } };
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const m = try validate(&t.program, arena.allocator());

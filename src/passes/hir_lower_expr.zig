@@ -11,6 +11,7 @@
 const std = @import("std");
 const ast = @import("stilla").ast;
 const cfg = @import("stilla").cfg;
+const meta = @import("stilla").meta;
 const hir = @import("stilla").hir;
 const moduleinfo = @import("stilla").moduleinfo;
 const lower = @import("stilla").lower;
@@ -367,7 +368,7 @@ fn letNode(c: *Ctx, fs: *FuncState, id: hir.ExprId) LowerError!?*cfg.Value {
     var bound = init_val;
     if (binder_ids.len == 1 and region.pattern == null) {
         const declared = c.built.program.binder(binder_ids[0]).ty;
-        if (declared == .primitive and declared.primitive == .any and !cfg.Type.eql(init_val.type_, declared)) {
+        if (declared == .primitive and declared.primitive == .any and !meta.Type.eql(init_val.type_, declared)) {
             if (init_val.ownership == .unique) {
                 cfg_lower_emit.markConsumed(self, fs, init_val);
                 try cfg_lower_emit.cleanupDisable(self, fs, no_span, init_val);
