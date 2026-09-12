@@ -8,9 +8,9 @@
 //!
 //! Scope (hir.md §11 M2a):
 //!
-//! - **Island set** — `const / local / let / lambda / call / if /
-//!   struct_make / field_get` plus every typed (numeric) opcode, exactly
-//!   the registry rows carrying `OpDescriptor.seg` (hir.md §3.5). The
+//! - **Island set** — `const / local / let / lambda / call / if / match /
+//!   struct_make / variant_make / field_get` plus every typed (numeric) opcode,
+//!   exactly the registry rows carrying `OpDescriptor.seg` (hir.md §3.5). The
 //!   real boundary is the *recursive* encodability predicate: a node is
 //!   an island member only if its own encoding is registered, it is
 //!   semantically `isSegSafe`, and every operand subtree / region body is
@@ -18,14 +18,19 @@
 //!   original shape.
 //! - **Rules** — β-reduction (→ let, the v1 boundary rewrite with the
 //!   §8.4 contract), let simplification (dead let, used-once forwarding,
-//!   trivial-atom forwarding), constant folding over the typed reps, and
-//!   integer algebra identities. Not in scope: associativity /
-//!   commutativity search, CSE, match, `move` / `drop` / borrow, host
-//!   calls (§8.3).
+//!   trivial-atom forwarding), constant folding over the typed reps,
+//!   integer algebra identities, and the known-variant `match` reduction
+//!   to `let` (§8.6). Not in scope: associativity / commutativity search,
+//!   CSE, η-reduction, `move` / `drop` / borrow, host calls (§8.3).
 //! - **Extraction cost** — v1 uses minimal node count plus a
-//!   deterministic rule order as the tie-break (hir.md §8.2); every
-//!   ordinary rule below strictly reduces `costOf`, and β (a boundary
-//!   rewrite, not an e-class extraction) is admitted by its contract.
+//!   deterministic rule order as the tie-break (hir.md §8.2). The let /
+//!   folding / algebra rules strictly reduce `costOf`; β (a boundary
+//!   rewrite, not an e-class extraction) is admitted by its contract and
+//!   the known-variant `match` reduction by its coverage / arity proof.
+//!   The `match` rule splices one `let` per bound payload, so a wide
+//!   constructor can add nodes: termination comes from the bounded
+//!   `max_iterations` rounds (each `match` node is consumed once), not
+//!   from a globally decreasing cost.
 //! - **Re-verification** — each iteration re-derives the effect analysis
 //!   from scratch before rewriting; the caller re-validates structurally
 //!   and by effects after the pass. No transform is allowed to rely on
@@ -58,6 +63,7 @@ pub const Stats = struct {
     algebra: usize = 0,
     lets: usize = 0,
     conds: usize = 0,
+    matches: usize = 0,
 };
 
 pub const Config = struct {
@@ -101,6 +107,7 @@ pub fn optimize(arena: std.mem.Allocator, built: *hir.BuiltProgram, config: Conf
         stats.algebra += rw.algebra;
         stats.lets += rw.lets;
         stats.conds += rw.conds;
+        stats.matches += rw.matches;
         if (!changed) break;
     }
     return stats;
@@ -129,6 +136,7 @@ const Rewriter = struct {
     algebra: usize = 0,
     lets: usize = 0,
     conds: usize = 0,
+    matches: usize = 0,
 
     /// The full-expression id β maps every cloned λ-body node onto
     /// (hir.md §8.4 `maps_full_expr`): the call site's FE. The M1a
@@ -235,7 +243,7 @@ const Rewriter = struct {
             }
         }
         try self.rewriteChildren(id);
-        _ = try self.applyRules(id, self.encOf(id));
+        if (try self.applyRules(id, self.encOf(id))) self.changed = true;
     }
 
     /// Copy the operand/region/param id lists into arena-owned slices
@@ -464,6 +472,12 @@ const Rewriter = struct {
                 return true;
             }
         }
+        if (std.mem.eql(u8, name, "match")) {
+            if (try self.ruleMatch(id)) {
+                self.matches += 1;
+                return true;
+            }
+        }
         if (hir.registry.get(pr.node(id).op).typed) {
             if (try self.ruleNumeric(id)) return true;
         }
@@ -488,6 +502,158 @@ const Rewriter = struct {
         const branch = pr.region(regs[taken]).root;
         pr.exprs.items[id] = pr.node(branch);
         return true;
+    }
+
+    /// Known-variant `match` → `let` (hir.md §8.6). When the scrutinee is a
+    /// `variant_make` with a statically known tag, dispatch is decided at
+    /// compile time: the covering arm (the first variant arm for the tag,
+    /// or the first catch-all before it — `hir_lower_control.unionMatch`
+    /// coverage) replaces the match, with its pattern leaves bound to the
+    /// constructor's payload operands as nested `let`s. Copy-only: the
+    /// match reached this rule only as an island member, so `isSegSafe`
+    /// already proved the Copy scrutinee, cleanup-free arms and
+    /// observable-effect-free region bodies (a consuming/borrowed
+    /// scrutinee or an effectful arm never becomes an island member). The
+    /// arm's own region params become the new binders, so the body needs
+    /// no substitution and no variant pattern is put on a synthesized
+    /// `let` (hir.md §5.4).
+    fn ruleMatch(self: *Rewriter, id: hir.ExprId) Error!bool {
+        const pr = self.p();
+        const ops = try self.dupOperands(id);
+        if (ops.len != 1) return false;
+        const scrut = ops[0];
+        const sn = pr.node(scrut);
+        if (!std.mem.eql(u8, hir.registry.get(sn.op).name, "variant_make")) return false;
+        // The scrutinee's union declaration fixes the tag range and the
+        // constructor arity (the HIR validator checks neither).
+        const named = switch (sn.ty) {
+            .named => |n| n,
+            else => return false,
+        };
+        if (named.id >= self.built.types.len) return false;
+        const ud = switch (self.built.types[named.id]) {
+            .union_ => |u| u,
+            else => return false,
+        };
+        const tag = sn.payload.tag;
+        if (tag >= ud.variants.len) return false;
+        const arity = ud.variants[tag].payloads.len;
+        const payload_ops = try self.dupOperands(scrut);
+        if (payload_ops.len != arity) return false;
+
+        const regs = try self.dupRegions(id);
+        for (regs) |rid| {
+            const pat = pr.region(rid).pattern orelse return false;
+            switch (pr.pattern(pat)) {
+                .wildcard => return self.spliceCatchAll(id, rid, null),
+                .bind => |b| return self.spliceCatchAll(id, rid, b),
+                .variant => |vp| {
+                    if (vp.tag >= ud.variants.len) return false;
+                    if (vp.tag != tag) continue;
+                    return self.spliceVariant(id, rid, vp, payload_ops);
+                },
+                // A union match admits only variant / catch-all patterns;
+                // anything else is malformed and left alone.
+                else => return false,
+            }
+        }
+        return false;
+    }
+
+    /// A catch-all arm binds the whole scrutinee (`bind`) or discards it
+    /// (`wildcard`).
+    fn spliceCatchAll(self: *Rewriter, id: hir.ExprId, rid: hir.RegionId, binder: ?hir.BinderId) Error!bool {
+        const pr = self.p();
+        const params = try self.dupParams(rid);
+        if (binder) |b| {
+            if (params.len != 1 or params[0] != b) return false;
+            const scrut = (try self.dupOperands(id))[0];
+            try self.spliceArm(id, &.{b}, &.{scrut}, pr.region(rid).root);
+        } else {
+            if (params.len != 0) return false;
+            pr.exprs.items[id] = pr.node(pr.region(rid).root);
+        }
+        return true;
+    }
+
+    /// A variant arm binds its payload leaves to the constructor's
+    /// operands in order. Only `bind` / `wildcard` leaves are admitted —
+    /// a nested or refutable pattern cannot be discharged by the outer
+    /// tag alone — and an unbound operand is dropped, which island
+    /// admission proved unobservable.
+    fn spliceVariant(self: *Rewriter, id: hir.ExprId, rid: hir.RegionId, vp: hir.Pattern.VariantPattern, ops: []const hir.ExprId) Error!bool {
+        const pr = self.p();
+        const params = try self.dupParams(rid);
+        const arity = ops.len;
+        var binders = std.ArrayListUnmanaged(?hir.BinderId).empty;
+        defer binders.deinit(self.arena);
+        if (vp.payload) |pp| {
+            if (arity == 1) {
+                switch (pr.pattern(pp)) {
+                    .bind => |b| try binders.append(self.arena, b),
+                    .wildcard => try binders.append(self.arena, null),
+                    else => return false,
+                }
+            } else {
+                const elems = switch (pr.pattern(pp)) {
+                    .tuple => |es| es,
+                    else => return false,
+                };
+                if (elems.len != arity) return false;
+                for (elems) |el| {
+                    switch (pr.pattern(el)) {
+                        .bind => |b| try binders.append(self.arena, b),
+                        .wildcard => try binders.append(self.arena, null),
+                        else => return false,
+                    }
+                }
+            }
+        } else if (arity != 0) {
+            return false;
+        }
+        // The region's params are exactly the materialized binding leaves,
+        // in order (the §10.1 leaf/param bijection).
+        var k: usize = 0;
+        for (binders.items) |b| {
+            if (b) |bid| {
+                if (k >= params.len or params[k] != bid) return false;
+                k += 1;
+            }
+        }
+        if (k != params.len) return false;
+        try self.spliceArm(id, binders.items, ops, pr.region(rid).root);
+        return true;
+    }
+
+    /// Replace the `match` node `id` with
+    /// `let b0 = v0 in let b1 = v1 in … body`, skipping `null` binders
+    /// (their values are island-safe — total and observable-effect-free —
+    /// so dropping the evaluation is unobservable). Nesting is in payload
+    /// order (outermost = first), preserving the scrutinee's left-to-right
+    /// evaluation (hir.md §5.5).
+    fn spliceArm(self: *Rewriter, id: hir.ExprId, binders: []const ?hir.BinderId, values: []const hir.ExprId, body: hir.ExprId) Error!void {
+        const pr = self.p();
+        std.debug.assert(binders.len == values.len);
+        const ty = pr.node(id).ty;
+        const fe = pr.node(id).full_expr;
+        var result = body;
+        var i = binders.len;
+        while (i > 0) {
+            i -= 1;
+            const b = binders[i] orelse continue;
+            const rid = try pr.addRegion(&.{b}, result, null);
+            const regs = try pr.addRegions(&.{rid});
+            const opr = try pr.addOperands(&.{values[i]});
+            result = try pr.addExpr(.{
+                .op = hir.opId("let").?,
+                .ty = ty,
+                .operands = opr,
+                .regions = regs,
+                .full_expr = fe,
+                .sema = try pr.internSema(.owned, .pending),
+            });
+        }
+        pr.exprs.items[id] = pr.node(result);
     }
 
     /// Plain `let` simplification (hir.md §8.3): dead let, used-once
@@ -635,9 +801,11 @@ const Rewriter = struct {
     }
 
     /// Minimal-node-count cost (hir.md §8.2's extraction cost): number of
-    /// expression nodes in the subtree. Every ordinary rule strictly
-    /// reduces it — the deterministic tie-break is the rule order in
-    /// `applyRules` (the v1 rule set has a single candidate per node).
+    /// expression nodes in the subtree. The let / folding / algebra rules
+    /// strictly reduce it, and the deterministic tie-break is the rule
+    /// order in `applyRules` (the v1 rule set has a single candidate per
+    /// node); β and the multi-payload `match` reduction are admitted by
+    /// their contracts instead (pass header).
     pub fn costOf(self: *Rewriter, root: hir.ExprId) usize {
         return nodeCost(self.p(), root, self.arena);
     }

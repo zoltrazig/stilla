@@ -445,7 +445,7 @@ pub const SegEncoding = enum {
     binder,
     /// Application (call).
     app,
-    /// Conditional term (if / and / or).
+    /// Conditional term (if / and / or / match).
     branch,
     /// Aggregate construction (struct_make).
     construct,
@@ -508,10 +508,10 @@ const core_descriptors = [_]OpDescriptor{
     .{ .name = "if", .class = .control, .operands = .one, .regions = .two, .policy = .branch, .uses = .all_read, .own_effect = effects.pure, .transfer = .branch, .seg = .branch },
     .{ .name = "and", .class = .control, .operands = .one, .regions = .two, .policy = .short_circuit, .uses = .all_read, .own_effect = effects.pure, .transfer = .branch, .seg = .branch },
     .{ .name = "or", .class = .control, .operands = .one, .regions = .two, .policy = .short_circuit, .uses = .all_read, .own_effect = effects.pure, .transfer = .branch, .seg = .branch },
-    .{ .name = "match", .class = .control, .operands = .one, .regions = .arms, .policy = .match, .uses = .operand_capability, .own_effect = effects.pure, .transfer = .match },
+    .{ .name = "match", .class = .control, .operands = .one, .regions = .arms, .policy = .match, .uses = .operand_capability, .own_effect = effects.pure, .transfer = .match, .seg = .branch },
     .{ .name = "struct_make", .class = .aggregate, .operands = .list, .regions = .none, .policy = .strict_ltr, .uses = .operand_capability, .own_effect = effects.pure, .transfer = .strict_ltr, .seg = .construct },
     .{ .name = "field_get", .class = .aggregate, .operands = .one, .regions = .none, .policy = .strict_ltr, .uses = .all_read, .own_effect = effects.pure, .transfer = .field_get, .seg = .project },
-    .{ .name = "variant_make", .class = .aggregate, .operands = .list, .regions = .none, .policy = .strict_ltr, .uses = .operand_capability, .own_effect = effects.pure, .transfer = .strict_ltr },
+    .{ .name = "variant_make", .class = .aggregate, .operands = .list, .regions = .none, .policy = .strict_ltr, .uses = .operand_capability, .own_effect = effects.pure, .transfer = .strict_ltr, .seg = .construct },
     .{ .name = "tuple_make", .class = .aggregate, .operands = .list, .regions = .none, .policy = .strict_ltr, .uses = .operand_capability, .own_effect = effects.pure, .transfer = .strict_ltr },
     .{ .name = "list_make", .class = .aggregate, .operands = .list, .regions = .none, .policy = .strict_ltr, .uses = .operand_capability, .own_effect = effects.pure, .transfer = .strict_ltr },
     .{ .name = "move", .class = .ownership, .operands = .one, .regions = .none, .policy = .strict_ltr, .uses = .static_list, .own_effect = effects.pure, .transfer = .strict_ltr, .operand_uses = &[_]OperandUse{.consume} },
@@ -1438,8 +1438,9 @@ test "registry: typed instances carry their scalar rep" {
 }
 
 test "registry: the M2a SEG island set carries `seg`, nothing else does" {
-    // hir.md §11 M2a: `const / local / let / lambda / call / if /
-    // struct_make / field_get` + numeric ops.
+    // hir.md §11 M2a: `const / local / let / lambda / call / if / match /
+    // struct_make / variant_make / field_get` + numeric ops. `match` and
+    // `variant_make` join the set for the known-variant reduction (§8.6).
     const encoded = [_]struct { []const u8, SegEncoding }{
         .{ "const", .atom },
         .{ "local", .slot },
@@ -1447,7 +1448,9 @@ test "registry: the M2a SEG island set carries `seg`, nothing else does" {
         .{ "lambda", .binder },
         .{ "call", .app },
         .{ "if", .branch },
+        .{ "match", .branch },
         .{ "struct_make", .construct },
+        .{ "variant_make", .construct },
         .{ "field_get", .project },
         .{ "add.i32", .numeric },
         .{ "div.i64", .numeric },
@@ -1459,7 +1462,7 @@ test "registry: the M2a SEG island set carries `seg`, nothing else does" {
         try t.expectEqual(pair[1], op.seg.?);
     }
     // Hard island boundaries (hir.md §8.2 `encode` → None).
-    for ([_][]const u8{ "fn_ref", "module_const", "seq", "match", "tuple_make", "list_make", "variant_make", "move", "borrow", "drop", "any_pack", "num_cast", "panic" }) |name| {
+    for ([_][]const u8{ "fn_ref", "module_const", "seq", "tuple_make", "list_make", "move", "borrow", "drop", "any_pack", "num_cast", "panic" }) |name| {
         const op = registry.get(registry.id(name) orelse return error.TestUnexpectedResult);
         try t.expect(op.seg == null);
     }

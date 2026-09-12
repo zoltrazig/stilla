@@ -7,7 +7,7 @@
 
 ## 近期（建议顺序）
 
-- [ ] **1. `match` 进 SEG**（[hir.md](hir.md) island/规则集与
+- [x] **1. `match` 进 SEG**（[hir.md](hir.md) island/规则集与
       `passes/hir_seg.zig`）
   - 范围：为 `match` op 增加 SEG 编码与 **copy-only、known-variant**
     归约 → `let` 规则；consuming match 与 effectful arm 排除；准入仍走
@@ -16,6 +16,15 @@
   - 验收：白盒规则用例 + 负例（consuming / effectful arm 拒绝、非法
     variant 拒绝）；examples/probes 全语料 `--seg` 编译 + AIR
     round-trip + SEG-on/off 解释器输出逐字相等。
+  - 已完成：`match` / `variant_make` 注册 `SegEncoding`（hir.zig）；
+    `hir_seg.zig` 的 `ruleMatch` 把已知 tag 的 `variant_make` scrutinee
+    归约为覆盖 arm 的嵌套 `let`，payload 叶只接受 bind / wildcard 并按构造
+    次序绑定；测试覆盖正例、consuming / borrowed / effectful / nested 负例、
+    单轮 `let` 链（次序实证）与 malformed HIR（越界 tag、arity 不匹配），
+    以及 examples/probes 全语料的 `--seg` 编译 + AIR round-trip +
+    SEG-on/off bundle-loader 解释器差分（含 panic 前输出与终止）。
+    注：多 payload 时节点数可能不降，终止由 `max_iterations` 轮界保证
+    （不保证收敛到不动点）。
 
 - [ ] **2. host ABI 余项：缓存指纹 + 回调参数化**（[effects.md](effects.md) §13）
   - 已落地：`StillaExecution = Forbidden | MayExecute | Unknown`（缺失 =

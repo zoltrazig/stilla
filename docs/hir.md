@@ -11,7 +11,7 @@
 > - **opt-in 消费者（默认关）**：dead-let + selective A-Normal Form
 >   （hir_simplify.zig，`--simplify`）；SEG v1（hir_seg.zig，`--seg`）。
 > - **设计已定但未实现**（§11、[todo.md](todo.md)）：full-expression 边界标注、
->   `CleanupFootprint` 清理 token 登记、η-reduction、`match` 进 SEG、
+>   `CleanupFootprint` 清理 token 登记、η-reduction、
 >   真正的 slotted e-graph、HIRTypeId canonical 表、source span side table。
 > - **阅读约定**：数据结构以 hir.zig 的落地形态为准；标 **Target** 的段落是
 >   设计意图，不是现状。
@@ -905,7 +905,11 @@ extract(eclass)      -> ExprId
 - extraction 回 HIR 时：分配 fresh BinderId；island 外原 binder 不得混淆；共享
   子项必须 materialize 成显式 `let`（§3.7）。
 - **cost model**：v1 用最小节点数 + 确定性 tie-break（规则的确定顺序），不用
-  per-opcode 权重。cost 是优化器事实，不进 op descriptor。
+  per-opcode 权重。cost 是优化器事实，不进 op descriptor。let / 折叠 / 代数规则
+  严格减小节点数；β 按 §8.4 契约准入，known-variant `match` 按覆盖 / arity 证明
+  准入——多 payload 时每个绑定叶合成一个 `let`，节点数可能不降，终止改由
+  `max_iterations` 轮界保证（不保证收敛到不动点；每个 `match` 节点只被消费
+  一次）。
 
 ### 8.3 v1 重写规则集
 
@@ -919,7 +923,7 @@ extract(eclass)      -> ExprId
 | integer algebra identities | ✅ | `x + 0 → x`、`x * 1 → x` 等，仅 integer rep |
 | constant `if` / `and` / `or` | ✅ | 常量条件选中已求值分支（另一分支是 island 成员） |
 | η-reduction | ❌ | 设计见 §8.5，**未实现** |
-| known variant `match` | ❌ | `match` 无 SEG 编码（[todo.md](todo.md)） |
+| known variant `match` | ✅ | 已知 tag 的 `variant_make` scrutinee → 覆盖 arm 的 `let` 链；payload 仅 bind / wildcard 叶 |
 | struct / tuple projection | ❌ | 无规则 |
 | α-equivalence | ✅* | 由 β 克隆时的**捕获规避** fresh-binder 重映射承担，不是 e-graph 的 α-合并 |
 | CSE-style sharing | ❌ | 无 CSE；未来须 materialize 成 `let` |
@@ -994,7 +998,10 @@ v1 只允许 `callee = fn_ref`：不捕获 ≠ 参数必然缺席，更一般的
 
 `if / match / block` 在 SEG 前不要过早 lower 成 CFG——它们本身是表达式。
 
-- **match Copy 值**：设计上应进 SEG（known variant 化简 → let），**当前未实现**；
+- **match Copy 值**：✅（known variant 化简 → `let`）——scrutinee 是已知 tag 的
+  `variant_make`、结果 Copy、各 arm cleanup-free 且无可观察效果时，覆盖 arm 的
+  payload 叶按构造函数次序绑定为嵌套 `let`；nested / refutable payload 叶、
+  consuming / borrowed scrutinee 拒绝；
 - **borrowed Unique 的 match**：❌（借用在分支间分流）；
 - **consuming match**：❌——ownership transfer，条件路径上的 move / drop 构成
   maybe-unique 状态，编译器必须在未消费分支 join 前插入 destruction；需线性
@@ -1130,10 +1137,10 @@ lowering。可选变换每轮原位重写后重新跑结构 + 效果校验（§2
 | --- | --- | --- |
 | M1a | 结构 HIR：AST→HIR 构建、结构校验、HIR→CFG lowering；直降路径删除后成为唯一前端路径 | hir_build.zig / hir_validate.zig / hir_lower.zig |
 | M1b | 效果基础设施：`SemanticInfo.effect`、固定乘积格、transfer、cleanup 门、派生查询、host 语义注册表 | effects.zig / hir_effects.zig |
-| M2a | SEG v1 规则子集（β / let / 常折叠 / 整数代数），opt-in | hir_seg.zig |
+| M2a | SEG v1 规则子集（β / let / 常折叠 / 整数代数 / known-variant match），opt-in | hir_seg.zig |
 | M2b | 摘要化消费者：函数摘要 SCC least fixpoint、精确 `drop_effect(T)`、module-const 检查、dead-let / selective ANF | hir_effects.zig / hir_simplify.zig |
 
-**尚未实现**（完整清单见 [todo.md](todo.md)）：`match` 进 SEG；η-reduction；full-expression
+**尚未实现**（完整清单见 [todo.md](todo.md)）：η-reduction；full-expression
 边界标注与 `CleanupFootprint` 登记；Unique ANF 物化；间接调用目标收窄；effectful
 β 实参放开；真正的 slotted e-graph / extraction；HIRTypeId canonical 表。
 

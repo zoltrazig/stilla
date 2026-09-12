@@ -20,7 +20,7 @@ specifications (the spec suite index is [spec/README.md](../spec/README.md)).
 | [frontend.md](frontend.md) | the pipeline contract end to end: module graph, checker, the HIR seam, CFG lowering, the optimizer, drop lowering, the LLIR backend stages |
 | [module-graph.md](module-graph.md) | module identity, resolution, loading, cycle detection, topo sort |
 | [checker.md](checker.md) | inference, generic expansion, ownership analysis, checks |
-| [hir.md](hir.md) | the canonical monomorphic HIR seam between the checker and CFG lowering: data structures, text form, structural invariants, HIR→CFG contract, effect annotations and opt-in consumers (`match`-into-SEG remains a proposal) |
+| [hir.md](hir.md) | the canonical monomorphic HIR seam between the checker and CFG lowering: data structures, text form, structural invariants, HIR→CFG contract, effect annotations and opt-in consumers |
 | [effects.md](effects.md) | the effect-semantics model: resource/control summary lattice, `effect_transfer`, function-summary SCC fixpoint, cleanup-aware legality queries, the module-const check (host ABI metadata wiring remains a proposal) |
 | [cfg-lowering.md](cfg-lowering.md) | the CFG AIR model and the HIR→CFG emission rules: destruction placement, module init functions, syscalls |
 | [optimizer.md](optimizer.md) | tail-call elimination, inlining, CSE, copy propagation, and the mid-level rewrites |
