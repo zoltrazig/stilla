@@ -10,7 +10,7 @@ Zig implementation of the Stilla v1.3 runtime and Stilla-to-CFG-AIR compiler. Us
 - `zig fmt src/` formats sources. Run it before `zig fmt --check src/`; the tree is currently format-clean.
 - `zig build -fincremental run -- examples/fib.st` compiles one Stilla source to CFG AIR on stdout; with no input it defaults to `examples/fib.st`.
 - `zig build -fincremental examples` always regenerates AIR, LLIR assembly, and LLIR binary artifacts under `zig-out/examples/` and prints their sizes.
-- CLI options must precede the input file. Important forms are `--output <file>`, `--emit-asm`, `--emit-bin <file>`, `--module <spec>`, `--entry-fn <name>`, `--no-entry-fn`, `-I <dir>`, `--seg` (enable the M2a SEG pass, off by default), and `--run`. `--emit-bin` cannot be combined with `--emit-asm` or `--output`.
+- CLI options must precede the input file. Important forms are `--output <file>`, `--emit-hir`, `--emit-asm`, `--emit-bin <file>`, `--module <spec>`, `--entry-fn <name>`, `--no-entry-fn`, `-I <dir>`, `--seg` (enable the M2a SEG pass, off by default), `--simplify` (enable the M2b consumers, off by default), and `--run`. The emission modes (`--emit-hir`, `--emit-asm`, `--emit-bin`) are mutually exclusive; `--emit-bin` and `--run` cannot be combined with `--output`, and `--run` cannot be combined with `--no-entry-fn`.
 
 ## Conventions
 
@@ -22,6 +22,8 @@ Zig implementation of the Stilla v1.3 runtime and Stilla-to-CFG-AIR compiler. Us
 - Add every new `*_tests.zig` to the `test {}` block in `root.zig` (alongside `std.testing.refAllDecls(@This())`) so it runs under `zig build test`.
 - Put white-box tests in the owning module's `test {}` blocks. Put black-box or cross-module tests in the matching `*_tests.zig` file and import it from `root.zig`.
 - Frontend coverage is intentionally split by pipeline area. Reuse `frontend_test_support.zig`; place LLIR tests in the existing core, ops, immediate, wide, branch, validation, normalization, assembly, or binary suite rather than growing `frontend_tests.zig`.
+- `probes/*.st` is the dynamic smoke corpus (`probe_corpus.zig` enumerates it at test time); every probe must compile, run, and agree under the consumers/SEG differentials. `frontend_pass_smoke_tests.zig` pushes each probe through every transform/optimization pass. Put whole-program black-box fixtures that are not runnable corpus members (host bindings, traps, intentional diagnostics) under `probes/cases/` and read them with `frontend_test_support.probeSource` or `probe_corpus.read` instead of constructing Stilla source inline.
+- A new pass, consumer, or rewrite needs a `probes/*.st` that actually triggers it, not merely one it runs over — compare the AIR with the pass on and off. Add a bullet for the probe in `probes/README.md`. A probe whose `main` intentionally traps must also be listed in `probe_corpus.panics`, and one that prints must do so deterministically, because the consumers/SEG on/off differentials compare output verbatim.
 
 ## Workflow
 

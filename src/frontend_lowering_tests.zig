@@ -31,9 +31,9 @@ const funcBody = helpers.funcBody;
 // ---------------------------------------------------------------------------
 
 test "frontend compiles a single module to AIR" {
-    var c = try compileText("app", &.{
-        .{ "app", "const builtin = import(\"builtin\");\nconst greeting: str = \"hello\";\nfn add(a: int32, b: int32) -> int32 { a + b }\nfn main() -> void { builtin.print(greeting); }" },
-    });
+    const src = try helpers.probeSource("probes/cases", "lowering_single_module_to_air");
+    defer testing.allocator.free(src);
+    var c = try compileText("app", &.{.{ "app", src }});
     defer c.deinit();
 
     const program = c.program.?;
@@ -61,10 +61,11 @@ test "frontend compiles a single module to AIR" {
 }
 
 test "frontend resolves imports, dependencies first" {
-    var c = try compileText("use", &.{
-        .{ "calc", "fn add(a: int32, b: int32) -> int32 { a + b }" },
-        .{ "use", "const calc = import(\"calc\");\nfn main() -> int32 { calc.add(1, 2) }" },
-    });
+    const calc_src = try helpers.probeSource("probes/cases", "lowering_resolves_imports_calc");
+    defer testing.allocator.free(calc_src);
+    const use_src = try helpers.probeSource("probes/cases", "lowering_resolves_imports_use");
+    defer testing.allocator.free(use_src);
+    var c = try compileText("use", &.{ .{ "calc", calc_src }, .{ "use", use_src } });
     defer c.deinit();
 
     const graph = c.graph.?;
@@ -82,10 +83,11 @@ test "frontend resolves imports, dependencies first" {
 }
 
 test "frontend rejects an import cycle" {
-    var c = try compileText("a", &.{
-        .{ "a", "const b = import(\"b\");\n" },
-        .{ "b", "const a = import(\"a\");\n" },
-    });
+    const a_src = try helpers.probeSource("probes/cases", "lowering_import_cycle_a");
+    defer testing.allocator.free(a_src);
+    const b_src = try helpers.probeSource("probes/cases", "lowering_import_cycle_b");
+    defer testing.allocator.free(b_src);
+    var c = try compileText("a", &.{ .{ "a", a_src }, .{ "b", b_src } });
     defer c.deinit();
 
     try testing.expect(c.graph == null);
@@ -99,9 +101,9 @@ test "frontend rejects an import cycle" {
 }
 
 test "frontend rejects an unresolved import" {
-    var c = try compileText("a", &.{
-        .{ "a", "const missing = import(\"nope\");\n" },
-    });
+    const src = try helpers.probeSource("probes/cases", "lowering_unresolved_import");
+    defer testing.allocator.free(src);
+    var c = try compileText("a", &.{.{ "a", src }});
     defer c.deinit();
 
     try testing.expect(c.graph == null);
@@ -118,14 +120,9 @@ test "frontend collects every independent error in one compile, in order" {
     // continue per module item. Here a parse-error file and a
     // semantic-error file each report every diagnostic.
     {
-        var c = try compileText("a", &.{
-            .{
-                "a",
-                \\const first = ;
-                \\fn f() -> void { let a = ; let b = 1 +; }
-                \\const last = ;
-            },
-        });
+        const src = try helpers.probeSource("probes/cases", "lowering_collect_errors_parse");
+        defer testing.allocator.free(src);
+        var c = try compileText("a", &.{.{ "a", src }});
         defer c.deinit();
         try testing.expect(c.program == null);
         try testing.expectEqual(@as(usize, 4), c.diags.len);
@@ -142,15 +139,9 @@ test "frontend collects every independent error in one compile, in order" {
         // Checker collection: independent semantic errors across module
         // items all surface (the validate phase runs after a clean
         // annotation pass).
-        var c = try compileText("a", &.{
-            .{
-                "a",
-                \\const a: int32 = "str";
-                \\const b: int32 = true;
-                \\fn f() -> int32 { "no" }
-                \\const c: int32 = 1.5;
-            },
-        });
+        const src = try helpers.probeSource("probes/cases", "lowering_collect_errors_check");
+        defer testing.allocator.free(src);
+        var c = try compileText("a", &.{.{ "a", src }});
         defer c.deinit();
         try testing.expect(c.program == null);
         try testing.expectEqual(@as(usize, 4), c.diags.len);
@@ -168,9 +159,9 @@ test "frontend single-error diagnostics match the pre-collection rendering" {
     // Regression guard: a one-error program renders byte-identically to
     // the first-error-wins behavior — the first diagnostic, with its
     // span, is unchanged by collection.
-    var c = try compileText("a", &.{
-        .{ "a", "const x = 1 +;" },
-    });
+    const src = try helpers.probeSource("probes/cases", "lowering_single_error_diag");
+    defer testing.allocator.free(src);
+    var c = try compileText("a", &.{.{ "a", src }});
     defer c.deinit();
     try testing.expect(c.program == null);
     try testing.expectEqual(@as(usize, 1), c.diags.len);
@@ -187,7 +178,9 @@ test "frontend rejects an explicit --entry-fn that does not exist" {
     var sources = moduleinfo.Sources{};
     var source_map = std.StringHashMapUnmanaged([]const u8).empty;
     defer source_map.deinit(testing.allocator);
-    try source_map.put(testing.allocator, "app", "fn helper() -> void {}\n");
+    const src = try helpers.probeSource("probes/cases", "lowering_missing_entry_fn");
+    defer testing.allocator.free(src);
+    try source_map.put(testing.allocator, "app", src);
     sources.source = source_map;
 
     var c = try frontend.compile(testing.allocator, .{
@@ -204,20 +197,9 @@ test "frontend rejects an explicit --entry-fn that does not exist" {
 }
 
 test "frontend lowers if/else joins and short-circuit and" {
-    var c = try compileText("app", &.{
-        .{
-            "app",
-            \\fn sign(value: int32) -> int32 {
-            \\    if (value >= 0) {
-            \\        1
-            \\    } else {
-            \\        -1
-            \\    }
-            \\}
-            \\fn ok(a: bool, b: bool) -> bool { a and b }
-            \\fn main() -> void {}
-        },
-    });
+    const src = try helpers.probeSource("probes/cases", "lowering_if_else_joins");
+    defer testing.allocator.free(src);
+    var c = try compileText("app", &.{.{ "app", src }});
     defer c.deinit();
 
     const out = try irText(&c.program.?);
@@ -236,21 +218,9 @@ test "frontend lowers if/else joins and short-circuit and" {
 }
 
 test "frontend lowers a union match to a switch" {
-    var c = try compileText("app", &.{
-        .{
-            "app",
-            \\const builtin = import("builtin");
-            \\const lists = import("list");
-            \\union Result { Ok(int32), Err(str) }
-            \\fn describe(r: Result) -> str {
-            \\    match (r) {
-            \\        Result::Ok(v) => builtin.str(v),
-            \\        Result::Err(e) => e
-            \\    }
-            \\}
-            \\fn main() -> void {}
-        },
-    });
+    const src = try helpers.probeSource("probes/cases", "lowering_union_match_switch");
+    defer testing.allocator.free(src);
+    var c = try compileText("app", &.{.{ "app", src }});
     defer c.deinit();
 
     const out = try irText(&c.program.?);
@@ -262,21 +232,9 @@ test "frontend lowers a union match to a switch" {
 }
 
 test "frontend lowers ownership: move, borrow, drop" {
-    var c = try compileText("app", &.{
-        .{
-            "app",
-            \\struct File { fd: int32; path: str; drop(file) {} }
-            \\fn open_file(path: str) -> File { File{ fd: 3, path: path } }
-            \\fn inspect(borrow file: File) -> void {}
-            \\fn consume(move file: File) -> void {}
-            \\fn main() -> void {
-            \\    let a = open_file("a.txt");
-            \\    inspect(a);
-            \\    inspect(a);
-            \\    consume(move a);
-            \\}
-        },
-    });
+    const src = try helpers.probeSource("probes/cases", "lowering_ownership_move_borrow_drop");
+    defer testing.allocator.free(src);
+    var c = try compileText("app", &.{.{ "app", src }});
     defer c.deinit();
 
     const program = c.program orelse {
@@ -304,18 +262,9 @@ test "frontend drops a plain-let fresh unique value at scope end" {
     // Core §10.5: `let a = open_file(...)` binds fresh ownership even
     // without `move`, so the local is dropped at scope end when it is
     // never consumed.
-    var c = try compileText("app", &.{
-        .{
-            "app",
-            \\struct File { fd: int32; path: str; drop(file) {} }
-            \\fn open_file(path: str) -> File { File{ fd: 3, path: path } }
-            \\fn inspect(borrow file: File) -> void {}
-            \\fn main() -> void {
-            \\    let a = open_file("a.txt");
-            \\    inspect(a);
-            \\}
-        },
-    });
+    const src = try helpers.probeSource("probes/cases", "lowering_plain_let_drop");
+    defer testing.allocator.free(src);
+    var c = try compileText("app", &.{.{ "app", src }});
     defer c.deinit();
 
     const program = c.program orelse {
@@ -332,22 +281,9 @@ test "frontend lowers struct drop hooks as destruction-view functions" {
     // per-type function whose parameter is the borrowed destruction view;
     // `drop %v` of the struct stays one unexpanded instruction (air.md
     // §6.4), so the body's code is typechecked and lowered here.
-    var c = try compileText("app", &.{
-        .{
-            "app",
-            \\const builtin = import("builtin");
-            \\struct File {
-            \\    fd: int32;
-            \\    path: str;
-            \\    drop(file) {
-            \\        builtin.print(file.path);
-            \\    }
-            \\}
-            \\fn main() -> void {
-            \\    let f = File{ fd: 3, path: "x" };
-            \\}
-        },
-    });
+    const src = try helpers.probeSource("probes/cases", "lowering_struct_drop_hook");
+    defer testing.allocator.free(src);
+    var c = try compileText("app", &.{.{ "app", src }});
     defer c.deinit();
 
     const program = c.program orelse {
@@ -368,13 +304,9 @@ test "frontend lowers struct drop hooks as destruction-view functions" {
 
 test "frontend rejects moving the destruction view inside a drop hook" {
     // Core §9.2: the destruction view may not be moved.
-    var c = try compileText("app", &.{
-        .{
-            "app",
-            \\struct File { fd: int32; drop(file) { let y = move file; } }
-            \\fn main() -> void {}
-        },
-    });
+    const src = try helpers.probeSource("probes/cases", "lowering_reject_move_destruction_view");
+    defer testing.allocator.free(src);
+    var c = try compileText("app", &.{.{ "app", src }});
     defer c.deinit();
     try testing.expect(c.program == null);
     try testing.expect(c.diag != null);
@@ -383,13 +315,9 @@ test "frontend rejects moving the destruction view inside a drop hook" {
 
 test "frontend rejects explicitly dropping the destruction view inside a drop hook" {
     // Core §9.2: the destruction view may not be explicitly dropped.
-    var c = try compileText("app", &.{
-        .{
-            "app",
-            \\struct File { fd: int32; drop(file) { drop file; } }
-            \\fn main() -> void {}
-        },
-    });
+    const src = try helpers.probeSource("probes/cases", "lowering_reject_drop_destruction_view");
+    defer testing.allocator.free(src);
+    var c = try compileText("app", &.{.{ "app", src }});
     defer c.deinit();
     try testing.expect(c.program == null);
     try testing.expect(c.diag != null);
@@ -400,17 +328,9 @@ test "frontend does not auto-drop a binding released by every branch" {
     // Core §10.10: a definitely-released binding was already destroyed by
     // the release on every normal path, so it is not destroyed again at
     // scope end (no maybe-unique flag is needed).
-    var c = try compileText("app", &.{
-        .{
-            "app",
-            \\struct File { fd: int32; drop(file) {} }
-            \\fn consume(move f: File) -> void {}
-            \\fn main() -> void {
-            \\    let f = File{ fd: 1 };
-            \\    if (true) { consume(move f); } else { consume(move f); }
-            \\}
-        },
-    });
+    const src = try helpers.probeSource("probes/cases", "lowering_no_autodrop_all_branches");
+    defer testing.allocator.free(src);
+    var c = try compileText("app", &.{.{ "app", src }});
     defer c.deinit();
 
     const program = c.program orelse {
@@ -435,17 +355,9 @@ test "frontend lowers a partially released binding to a cleanup token" {
     // alongside the `move`), and the scope-end destruction is a
     // `cleanup_drop` of the token — conditional on the per-path armed bit.
     // The maybe-unique value itself is never referenced after the join.
-    var c = try compileText("app", &.{
-        .{
-            "app",
-            \\struct File { fd: int32; drop(file) {} }
-            \\fn consume(move f: File) -> void {}
-            \\fn main() -> void {
-            \\    let f = File{ fd: 1 };
-            \\    if (true) { consume(move f); } else { }
-            \\}
-        },
-    });
+    const src = try helpers.probeSource("probes/cases", "lowering_partial_release_cleanup");
+    defer testing.allocator.free(src);
+    var c = try compileText("app", &.{.{ "app", src }});
     defer c.deinit();
 
     const program = c.program orelse {
@@ -467,15 +379,9 @@ test "frontend lowers a partially released binding to a cleanup token" {
 test "frontend emits no drop for a Copy value" {
     // Core §10.1: dropping a Copy value does nothing, so the frontend
     // emits no `drop` at all.
-    var c = try compileText("app", &.{
-        .{
-            "app",
-            \\fn main() -> void {
-            \\    let x = 1;
-            \\    drop x;
-            \\}
-        },
-    });
+    const src = try helpers.probeSource("probes/cases", "lowering_no_drop_copy");
+    defer testing.allocator.free(src);
+    var c = try compileText("app", &.{.{ "app", src }});
     defer c.deinit();
 
     const program = c.program orelse {
@@ -489,15 +395,9 @@ test "frontend emits no drop for a Copy value" {
 }
 
 test "frontend lowers panicking calls to traps" {
-    var c = try compileText("app", &.{
-        .{
-            "app",
-            \\const builtin = import("builtin");
-            \\fn main() -> void {
-            \\    builtin.panic("boom");
-            \\}
-        },
-    });
+    const src = try helpers.probeSource("probes/cases", "lowering_panic_trap");
+    defer testing.allocator.free(src);
+    var c = try compileText("app", &.{.{ "app", src }});
     defer c.deinit();
 
     const out = try irText(&c.program.?);
@@ -510,21 +410,9 @@ test "frontend lowers a type-test match over any to type_is + any_unpack" {
     // Core §11.6.2, §14.7: a `match` over an `any` value tests each arm's
     // type with `type_is` and recovers the payload with `any_unpack_copy`
     // in the selected arm; a wildcard arm is required.
-    var c = try compileText("app", &.{
-        .{
-            "app",
-            \\const builtin = import("builtin");
-            \\const lists = import("list");
-            \\fn describe(a: any) -> int32 {
-            \\    match (a) {
-            \\        int32 n => n,
-            \\        str s => lists.len(["x"]),
-            \\        _ => -1
-            \\    }
-            \\}
-            \\fn main() -> void {}
-        },
-    });
+    const src = try helpers.probeSource("probes/cases", "lowering_any_type_test_match");
+    defer testing.allocator.free(src);
+    var c = try compileText("app", &.{.{ "app", src }});
     defer c.deinit();
 
     const out = try irText(&c.program.?);
@@ -541,15 +429,9 @@ test "frontend lowers a type-test match over any to type_is + any_unpack" {
 test "frontend rejects a type-test match without a wildcard arm" {
     // Core §11.6.2: the tag space is open, so a match over an `any` with
     // type-test patterns must include a wildcard arm.
-    var c = try compileText("app", &.{
-        .{
-            "app",
-            \\fn describe(a: any) -> int32 {
-            \\    match (a) { int32 n => n }
-            \\}
-            \\fn main() -> void {}
-        },
-    });
+    const src = try helpers.probeSource("probes/cases", "lowering_reject_any_match_no_wildcard");
+    defer testing.allocator.free(src);
+    var c = try compileText("app", &.{.{ "app", src }});
     defer c.deinit();
 
     try testing.expect(c.program == null);
@@ -560,15 +442,9 @@ test "frontend rejects a type-test match without a wildcard arm" {
 test "frontend rejects a type-test pattern on a non-any scrutinee" {
     // Core §14.7: type-test patterns are accepted only for a scrutinee of
     // type `any`.
-    var c = try compileText("app", &.{
-        .{
-            "app",
-            \\fn describe(x: int32) -> int32 {
-            \\    match (x) { int32 n => n, _ => -1 }
-            \\}
-            \\fn main() -> void {}
-        },
-    });
+    const src = try helpers.probeSource("probes/cases", "lowering_reject_type_test_non_any");
+    defer testing.allocator.free(src);
+    var c = try compileText("app", &.{.{ "app", src }});
     defer c.deinit();
 
     try testing.expect(c.program == null);
@@ -579,16 +455,9 @@ test "frontend rejects a type-test pattern on a non-any scrutinee" {
 test "frontend allows unique type-test recovery from a consuming match" {
     // Core §11.6.2: `match (move a)` transfers the complete `any`, so an
     // unique arm binding owns the extracted payload.
-    var c = try compileText("app", &.{
-        .{
-            "app",
-            \\struct File { fd: int32; drop(file) {} }
-            \\fn describe(a: any) -> int32 {
-            \\    match (move a) { File f => f.fd, _ => 0 }
-            \\}
-            \\fn main() -> void {}
-        },
-    });
+    const src = try helpers.probeSource("probes/cases", "lowering_any_match_move_recovery");
+    defer testing.allocator.free(src);
+    var c = try compileText("app", &.{.{ "app", src }});
     defer c.deinit();
 
     const program = c.program orelse {
@@ -604,14 +473,9 @@ test "frontend allows unique type-test recovery from a consuming match" {
 test "frontend rejects an unique any cast without a move" {
     // Core §11.6.1: `a as T` for unique `T` requires `(move a) as T`; a
     // plain cast would copy an unique payload out of the `any`.
-    var c = try compileText("app", &.{
-        .{
-            "app",
-            \\struct File { fd: int32; drop(file) {} }
-            \\fn use(a: any) -> File { a as File }
-            \\fn main() -> void {}
-        },
-    });
+    const src = try helpers.probeSource("probes/cases", "lowering_reject_any_cast_no_move");
+    defer testing.allocator.free(src);
+    var c = try compileText("app", &.{.{ "app", src }});
     defer c.deinit();
 
     try testing.expect(c.program == null);
@@ -622,14 +486,9 @@ test "frontend rejects an unique any cast without a move" {
 test "frontend allows a moved unique any cast" {
     // `(move a) as T` transfers ownership of the complete `any` (Core
     // §11.6.1).
-    var c = try compileText("app", &.{
-        .{
-            "app",
-            \\struct File { fd: int32; drop(file) {} }
-            \\fn use(a: any) -> File { (move a) as File }
-            \\fn main() -> void {}
-        },
-    });
+    const src = try helpers.probeSource("probes/cases", "lowering_any_cast_move");
+    defer testing.allocator.free(src);
+    var c = try compileText("app", &.{.{ "app", src }});
     defer c.deinit();
 
     const program = c.program orelse {
@@ -646,16 +505,9 @@ test "frontend rejects an unique type-test recovery from a borrowed any" {
     // Core §11.6.2: a unique payload can be recovered only from a moved
     // `any` (`match (move a)`); a non-consuming match over `any` binds
     // only Copy payload types.
-    var c = try compileText("app", &.{
-        .{
-            "app",
-            \\struct File { fd: int32; drop(file) {} }
-            \\fn describe(a: any) -> int32 {
-            \\    match (a) { File f => 1, _ => 0 }
-            \\}
-            \\fn main() -> void {}
-        },
-    });
+    const src = try helpers.probeSource("probes/cases", "lowering_reject_any_match_borrowed");
+    defer testing.allocator.free(src);
+    var c = try compileText("app", &.{.{ "app", src }});
     defer c.deinit();
 
     try testing.expect(c.program == null);
@@ -667,15 +519,9 @@ test "frontend rejects a type-test pattern nested in another pattern" {
     // Core §14.7: a type-test pattern is the concrete type name with an
     // optional binding; nested inside a tuple/struct/list pattern it would
     // recover a payload without a `type_is` test.
-    var c = try compileText("app", &.{
-        .{
-            "app",
-            \\fn describe(a: any) -> int32 {
-            \\    match (a) { (int32 n, str s) => 1, _ => 0 }
-            \\}
-            \\fn main() -> void {}
-        },
-    });
+    const src = try helpers.probeSource("probes/cases", "lowering_reject_nested_type_test");
+    defer testing.allocator.free(src);
+    var c = try compileText("app", &.{.{ "app", src }});
     defer c.deinit();
 
     try testing.expect(c.program == null);
@@ -686,16 +532,9 @@ test "frontend rejects a type-test pattern nested in another pattern" {
 test "frontend rejects type-test patterns in let" {
     // Core §14: type-test patterns are refutable and may appear only in
     // `match`; `let` accepts only irrefutable patterns.
-    var c = try compileText("app", &.{
-        .{
-            "app",
-            \\fn f(a: any) -> int32 {
-            \\    let int32 n = a;
-            \\    n
-            \\}
-            \\fn main() -> void {}
-        },
-    });
+    const src = try helpers.probeSource("probes/cases", "lowering_reject_type_test_let");
+    defer testing.allocator.free(src);
+    var c = try compileText("app", &.{.{ "app", src }});
     defer c.deinit();
     try testing.expect(c.program == null);
     try testing.expect(c.diag != null);
@@ -706,16 +545,11 @@ test "frontend lowers hostdata host bindings and unique ownership" {
     // Core §11.7: `hostdata` is a primitive type created only by host
     // bindings; its values are unique, so a plain let is destroyed at
     // scope end.
-    var c = try compileText("app", &.{
-        .{ "os", "fn get_handle() -> hostdata;" },
-        .{
-            "app",
-            \\const os = import("os");
-            \\fn main() -> void {
-            \\    let h = os.get_handle();
-            \\}
-        },
-    });
+    const os_src = try helpers.probeSource("probes/cases", "lowering_hostdata_os");
+    defer testing.allocator.free(os_src);
+    const app_src = try helpers.probeSource("probes/cases", "lowering_hostdata_app");
+    defer testing.allocator.free(app_src);
+    var c = try compileText("app", &.{ .{ "os", os_src }, .{ "app", app_src } });
     defer c.deinit();
 
     const program = c.program orelse {
@@ -736,24 +570,9 @@ test "frontend lowers a non-consuming multi-payload match to borrow_variant" {
     // lowering emits the multi-result `borrow_variant %u, #tag` (symmetric
     // with `unpack_variant`, but the base is never consumed). Each payload
     // is copied out when Copy and a borrowed view when unique.
-    var c = try compileText("app", &.{
-        .{
-            "app",
-            \\const builtin = import("builtin");
-            \\union Tree[T] {
-            \\    Empty,
-            \\    Node(box[Tree[T]], T, box[Tree[T]])
-            \\}
-            \\struct Nothing {}
-            \\fn sum(t: Tree[int32]) -> int32 {
-            \\    match (t) {
-            \\        Tree::Empty => 0,
-            \\        Tree::Node(l, x, r) => x,
-            \\    }
-            \\}
-            \\fn main() -> void { let n = Nothing{}; let _ = n; }
-        },
-    });
+    const src = try helpers.probeSource("probes/cases", "lowering_multi_payload_borrow_variant");
+    defer testing.allocator.free(src);
+    var c = try compileText("app", &.{.{ "app", src }});
     defer c.deinit();
 
     const text = try irText(&c.program.?);
@@ -786,21 +605,9 @@ test "Pass 7 emits tailcall for a move/unique self-recursive fold" {
     var sources = moduleinfo.Sources{};
     var source_map = std.StringHashMapUnmanaged([]const u8).empty;
     defer source_map.deinit(testing.allocator);
-    try source_map.put(testing.allocator, "app",
-        \\const builtin = import("builtin");
-        \\struct File { fd: int32; drop(file) {} }
-        \\fn step(borrow f: File, x: int32) -> int32 { f.fd + x }
-        \\fn fold_files(xs: list[int32], move acc: File) -> File {
-        \\    match (xs) {
-        \\        [] => acc,
-        \\        [h, ..t] => {
-        \\            let next: File = File{ fd: step(acc, h) };
-        \\            fold_files(t, move next)
-        \\        }
-        \\    }
-        \\}
-        \\fn main() -> void { builtin.print("x"); }
-    );
+    const src = try helpers.probeSource("probes/cases", "lowering_pass7_tailcall_fold");
+    defer testing.allocator.free(src);
+    try source_map.put(testing.allocator, "app", src);
     sources.source = source_map;
     var c = try frontend.compile(testing.allocator, .{ .entry = "app", .sources = sources, .entry_fn = "main", .optimize = true });
     defer c.deinit();
@@ -826,17 +633,9 @@ test "iter.fold with a unique accumulator compiles and fold_with tailcalls" {
     var sources = moduleinfo.Sources{};
     var source_map = std.StringHashMapUnmanaged([]const u8).empty;
     defer source_map.deinit(testing.allocator);
-    try source_map.put(testing.allocator, "app",
-        \\const builtin = import("builtin");
-        \\const iter = import("iter");
-        \\struct File { fd: int32; drop(file) {} }
-        \\fn ff(borrow acc: File, x: int32) -> File { File{ fd: acc.fd + x } }
-        \\fn run_fold(xs: list[int32]) -> File {
-        \\    let s: File = File{ fd: 0 };
-        \\    iter.fold(xs, move s, fn(move a: File, borrow x: int32) -> File { ff(a, x) })
-        \\}
-        \\fn main() -> void { builtin.print("x"); }
-    );
+    const src = try helpers.probeSource("probes/cases", "lowering_iter_fold_unique_acc");
+    defer testing.allocator.free(src);
+    try source_map.put(testing.allocator, "app", src);
     sources.source = source_map;
     var c = try frontend.compile(testing.allocator, .{ .entry = "app", .sources = sources, .entry_fn = "main", .optimize = true });
     defer c.deinit();
@@ -858,22 +657,9 @@ test "iter.try_fold is Stilla source and short-circuits on Break" {
     var sources = moduleinfo.Sources{};
     var source_map = std.StringHashMapUnmanaged([]const u8).empty;
     defer source_map.deinit(testing.allocator);
-    try source_map.put(testing.allocator, "app",
-        \\const builtin = import("builtin");
-        \\const iter = import("iter");
-        \\using iter.Result;
-        \\fn over(move a: int32, borrow x: int32) -> iter.Result[int32, str] {
-        \\    if (a + x > 10) { Result::Break("stop") } else { Result::Complete(a + x) }
-        \\}
-        \\fn run(xs: list[int32]) -> void {
-        \\    let r = iter.try_fold(xs, 0, over);
-        \\    match (r) {
-        \\        Result::Complete(v) => builtin.print(builtin.str(v)),
-        \\        Result::Break(m) => builtin.print(m)
-        \\    }
-        \\}
-        \\fn main() -> void { builtin.print("x"); }
-    );
+    const src = try helpers.probeSource("probes/cases", "lowering_iter_try_fold");
+    defer testing.allocator.free(src);
+    try source_map.put(testing.allocator, "app", src);
     sources.source = source_map;
     var c = try frontend.compile(testing.allocator, .{ .entry = "app", .sources = sources, .entry_fn = "main", .optimize = true });
     defer c.deinit();
@@ -896,23 +682,9 @@ test "iter.try_fold_with with an inline step lambda and a void context compiles"
     // and a `()` void argument carries no observable value, so the call
     // emits no operand for it (the phantom id `%4294967295` never reaches
     // the text form and the optimized AIR round-trips).
-    var c = try compileOpt("app", &.{
-        .{
-            "app",
-            \\const builtin = import("builtin");
-            \\const iter = import("iter");
-            \\using iter.Result;
-            \\fn run(xs: list[int32]) -> void {
-            \\    let r = iter.try_fold_with::[int32, int32, int32, void](
-            \\        xs, 0, (),
-            \\        fn(move acc: int32, borrow ctx: void, borrow x: int32) -> Result[int32, int32] {
-            \\            if (acc + x > 10) { Result::Break(acc) } else { Result::Complete(acc + x) }
-            \\        }
-            \\    );
-            \\}
-            \\fn main() -> void { builtin.print("x"); }
-        },
-    });
+    const src = try helpers.probeSource("probes/cases", "lowering_iter_try_fold_with_void");
+    defer testing.allocator.free(src);
+    var c = try compileOpt("app", &.{.{ "app", src }});
     defer c.deinit();
 
     const program = c.program.?;
@@ -927,19 +699,9 @@ test "calling a function with a void parameter emits no operand" {
     // A `()` argument to a void-typed parameter produces no instruction
     // operand (cfg-lowering.md, Lowering rules): the call's operand list carries one
     // entry per non-void parameter, so the optimized AIR round-trips.
-    var c = try compileOpt("app", &.{
-        .{
-            "app",
-            \\const builtin = import("builtin");
-            \\fn g(ctx: void) -> int32 { 7 }
-            \\fn mid(x: int32, ctx: void, y: int32) -> int32 { x + y }
-            \\fn main() -> void {
-            \\    let a = g(());
-            \\    let b = mid(1, (), 2);
-            \\    builtin.assert(a + b == 10, "void args");
-            \\}
-        },
-    });
+    const src = try helpers.probeSource("probes/cases", "lowering_void_param_no_operand");
+    defer testing.allocator.free(src);
+    var c = try compileOpt("app", &.{.{ "app", src }});
     defer c.deinit();
 
     const program = c.program.?;
@@ -954,18 +716,9 @@ test "frontend compiles the standard-library bundle as host bindings" {
     // The whole embedded std/ bundle must load through the pipeline:
     // every member is a host binding, and builtin's generic signatures
     // resolve for syscalls.
-    var c = try compileText("app", &.{
-        .{
-            "app",
-            \\const builtin = import("builtin");
-            \\const lists = import("list");
-            \\const m = import("math");
-            \\const s = import("string");
-            \\fn main() -> int32 {
-            \\    lists.len(lists.range(0, 10)) + m.sqrt(2.0) as int32 + s.len("hi")
-            \\}
-        },
-    });
+    const src = try helpers.probeSource("probes/cases", "lowering_stdlib_bundle_host_bindings");
+    defer testing.allocator.free(src);
+    var c = try compileText("app", &.{.{ "app", src }});
     defer c.deinit();
 
     try testing.expect(c.graph != null);
@@ -983,31 +736,9 @@ test "frontend compiles the StdLib array/hashmap container examples" {
     // `::[...]` specialization where the type argument is not carried by
     // an argument expression (Core §12.2, §12.3), and in-place consuming
     // updates (move in, updated value out).
-    var c = try compileText("app", &.{
-        .{
-            "app",
-            \\const array = import("array");
-            \\const hashmap = import("hashmap");
-            \\const builtin = import("builtin");
-            \\using builtin.Option;
-            \\fn main() -> void {
-            \\    let a = array.make(4, 0);
-            \\    let x = array.get::[int32](a, 2);
-            \\    let n = array.len::[int32](a);
-            \\    let a = array.set(move a, 2, 42);
-            \\    let b = array.clone::[int32](a);
-            \\    let m = hashmap.empty::[str, int32]();
-            \\    let m = hashmap.insert(move m, "a", 1);
-            \\    let m = hashmap.insert(move m, "b", 2);
-            \\    match (hashmap.get::[str, int32](m, "a")) {
-            \\        Option::Some(value) => builtin.print(builtin.str(value)),
-            \\        Option::None => builtin.print("missing")
-            \\    };
-            \\    let (m, removed) = hashmap.remove::[str, int32](move m, "a");
-            \\    let c = hashmap.clone::[str, int32](m);
-            \\}
-        },
-    });
+    const src = try helpers.probeSource("probes/cases", "lowering_stdlib_array_hashmap");
+    defer testing.allocator.free(src);
+    var c = try compileText("app", &.{.{ "app", src }});
     defer c.deinit();
 
     try testing.expect(c.graph != null);
@@ -1034,30 +765,30 @@ test "frontend rejects every hostdata/any coercion and cast" {
     // Core §11.6, §11.6.1, §11.7: `hostdata` does not coerce to `any`
     // and no cast is defined from or to it. Each of these must be a
     // compile-time error, not a silent pack or an `any_unpack`.
-    var c1 = try compileText("app", &.{
-        .{ "app", "fn f(a: any) -> hostdata { (move a) as hostdata }\nfn main() -> void {}" },
-    });
+    const src1 = try helpers.probeSource("probes/cases", "lowering_reject_hostdata_cast");
+    defer testing.allocator.free(src1);
+    var c1 = try compileText("app", &.{.{ "app", src1 }});
     defer c1.deinit();
     try testing.expect(c1.program == null);
     try testing.expect(std.mem.indexOf(u8, c1.diag.?.message, "has no cast") != null);
 
-    var c2 = try compileText("app", &.{
-        .{ "app", "fn make_hd() -> hostdata;\nfn g() -> any { make_hd() }\nfn main() -> void {}" },
-    });
+    const src2 = try helpers.probeSource("probes/cases", "lowering_reject_hostdata_return");
+    defer testing.allocator.free(src2);
+    var c2 = try compileText("app", &.{.{ "app", src2 }});
     defer c2.deinit();
     try testing.expect(c2.program == null);
     try testing.expect(std.mem.indexOf(u8, c2.diag.?.message, "return type mismatch") != null);
 
-    var c3 = try compileText("app", &.{
-        .{ "app", "fn make_hd() -> hostdata;\nfn main() -> void { let a: any = make_hd(); }" },
-    });
+    const src3 = try helpers.probeSource("probes/cases", "lowering_reject_hostdata_let");
+    defer testing.allocator.free(src3);
+    var c3 = try compileText("app", &.{.{ "app", src3 }});
     defer c3.deinit();
     try testing.expect(c3.program == null);
     try testing.expect(std.mem.indexOf(u8, c3.diag.?.message, "let type mismatch") != null);
 
-    var c4 = try compileText("app", &.{
-        .{ "app", "fn make_hd() -> hostdata;\nfn pick(c: bool, h: hostdata) -> any { if (c) { h } else { \"hi\" } }\nfn main() -> void {}" },
-    });
+    const src4 = try helpers.probeSource("probes/cases", "lowering_reject_hostdata_coerce");
+    defer testing.allocator.free(src4);
+    var c4 = try compileText("app", &.{.{ "app", src4 }});
     defer c4.deinit();
     try testing.expect(c4.program == null);
     try testing.expect(std.mem.indexOf(u8, c4.diag.?.message, "does not coerce to 'any'") != null);
@@ -1066,9 +797,9 @@ test "frontend rejects every hostdata/any coercion and cast" {
 test "frontend rejects the empty tuple type" {
     // Core §11.4: `tuple[]` is not a type — the empty tuple `()` is the
     // unique `void` value; a tuple type has at least one element.
-    var c = try compileText("app", &.{
-        .{ "app", "fn main() -> void { let t: tuple[] = (); }" },
-    });
+    const src = try helpers.probeSource("probes/cases", "lowering_reject_empty_tuple");
+    defer testing.allocator.free(src);
+    var c = try compileText("app", &.{.{ "app", src }});
     defer c.deinit();
     try testing.expect(c.program == null);
     try testing.expect(std.mem.indexOf(u8, c.diag.?.message, "expected a type") != null);
@@ -1077,16 +808,9 @@ test "frontend rejects the empty tuple type" {
 test "frontend accepts the integer-family as conversions" {
     // Core §16.3: int32 ↔ float32, int32 ↔ byte, int32 ↔ uint32,
     // byte ↔ int32, uint32 ↔ int32. They lower to `num_cast`.
-    var c = try compileText("app", &.{
-        .{
-            "app",
-            \\fn main() -> int32 {
-            \\    let b = 104 as byte;
-            \\    let u = 7 as uint32;
-            \\    (b as int32) + (u as int32)
-            \\}
-        },
-    });
+    const src = try helpers.probeSource("probes/cases", "lowering_integer_family_casts");
+    defer testing.allocator.free(src);
+    var c = try compileText("app", &.{.{ "app", src }});
     defer c.deinit();
 
     const out = try irText(&c.program.?);
@@ -1099,22 +823,22 @@ test "frontend rejects casts outside the uniform conversion family" {
     // `a as T` on an `any` scrutinee still routes to `any_unpack` and
     // is unaffected. The 64-bit integer casts (`i64 as int32`, …) are
     // part of the family and compile.
-    var c1 = try compileText("app", &.{
-        .{ "app", "fn main() -> void { let a = 42 as int32; }" },
-    });
+    const src1 = try helpers.probeSource("probes/cases", "lowering_reject_identity_cast");
+    defer testing.allocator.free(src1);
+    var c1 = try compileText("app", &.{.{ "app", src1 }});
     defer c1.deinit();
     try testing.expect(c1.program == null);
     try testing.expect(std.mem.indexOf(u8, c1.diag.?.message, "invalid cast") != null);
 
-    var c2 = try compileText("app", &.{
-        .{ "app", "fn main() -> void { let x: int64 = 1; let a = x as int32; }" },
-    });
+    const src2 = try helpers.probeSource("probes/cases", "lowering_accept_i64_to_i32_cast");
+    defer testing.allocator.free(src2);
+    var c2 = try compileText("app", &.{.{ "app", src2 }});
     defer c2.deinit();
     try testing.expect(c2.program != null);
 
-    var c3 = try compileText("app", &.{
-        .{ "app", "fn main() -> void { let x: bool = true; let a = x as int32; }" },
-    });
+    const src3 = try helpers.probeSource("probes/cases", "lowering_reject_bool_cast");
+    defer testing.allocator.free(src3);
+    var c3 = try compileText("app", &.{.{ "app", src3 }});
     defer c3.deinit();
     try testing.expect(c3.program == null);
     try testing.expect(std.mem.indexOf(u8, c3.diag.?.message, "invalid cast") != null);
@@ -1123,20 +847,9 @@ test "frontend rejects casts outside the uniform conversion family" {
 test "frontend compiles the StdLib §5 string example with explicit conversions" {
     // StdLib §5: byte sequences are written with explicit `as byte`
     // conversions (Core §16.3); the example must compile as written.
-    var c = try compileText("app", &.{
-        .{
-            "app",
-            \\const string = import("string");
-            \\fn main() -> void {
-            \\    let s = string.from_utf8([104 as byte, 101 as byte, 108 as byte, 108 as byte, 111 as byte]);
-            \\    let parts = string.split(s, "l");
-            \\    let joined = string.join(parts, "-");
-            \\    let bytes = string.to_utf8(s);
-            \\    let cps = string.to_codepoints(s);
-            \\    let upper = string.upper(s);
-            \\}
-        },
-    });
+    const src = try helpers.probeSource("probes/cases", "lowering_stdlib_string_example");
+    defer testing.allocator.free(src);
+    var c = try compileText("app", &.{.{ "app", src }});
     defer c.deinit();
 
     try testing.expect(c.graph != null);
@@ -1151,24 +864,17 @@ test "frontend accepts uint32 arithmetic and two's-complement negation" {
     // Core §16.3 / Runtime §7.2: uint32 arithmetic wraps modulo 2^32 and
     // never traps; unary minus is two's-complement. byte arithmetic does
     // not exist and stays rejected.
-    var c = try compileText("app", &.{
-        .{
-            "app",
-            \\fn main() -> uint32 {
-            \\    let u = 7 as uint32;
-            \\    let w = u + u * (3 as uint32);
-            \\    -w
-            \\}
-        },
-    });
+    const src = try helpers.probeSource("probes/cases", "lowering_uint32_arithmetic");
+    defer testing.allocator.free(src);
+    var c = try compileText("app", &.{.{ "app", src }});
     defer c.deinit();
     const out = try irText(&c.program.?);
     defer testing.allocator.free(out);
     try testing.expect(std.mem.count(u8, out, "uint32 = ") >= 1);
 
-    var c2 = try compileText("app", &.{
-        .{ "app", "fn main() -> void { let b = 1 as byte; let c = b + b; }" },
-    });
+    const src2 = try helpers.probeSource("probes/cases", "lowering_reject_byte_arithmetic");
+    defer testing.allocator.free(src2);
+    var c2 = try compileText("app", &.{.{ "app", src2 }});
     defer c2.deinit();
     try testing.expect(c2.program == null);
     try testing.expect(std.mem.indexOf(u8, c2.diag.?.message, "type mismatch") != null);
@@ -1178,23 +884,23 @@ test "frontend requires move for existing unique owners in consuming positions" 
     // Core §10.11: an existing unique local owner must be moved with
     // explicit `move` before being stored into a struct field, a list or
     // tuple element, or a let binding; fresh values transfer implicitly.
-    var c1 = try compileText("app", &.{
-        .{ "app", "const builtin = import(\"builtin\");\nstruct File { fd: int32; drop(f) { builtin.print(\"x\"); } }\nstruct Pair { a: File; b: File; }\nfn main() -> void { let x = File{ fd: 1 }; let p = Pair{ a: x, b: File{ fd: 2 } }; }" },
-    });
+    const src1 = try helpers.probeSource("probes/cases", "lowering_reject_move_field");
+    defer testing.allocator.free(src1);
+    var c1 = try compileText("app", &.{.{ "app", src1 }});
     defer c1.deinit();
     try testing.expect(c1.program == null);
     try testing.expect(std.mem.indexOf(u8, c1.diag.?.message, "owning field") != null);
 
-    var c2 = try compileText("app", &.{
-        .{ "app", "const builtin = import(\"builtin\");\nstruct File { fd: int32; drop(f) { builtin.print(\"x\"); } }\nfn main() -> void { let x = File{ fd: 1 }; let xs = [x]; }" },
-    });
+    const src2 = try helpers.probeSource("probes/cases", "lowering_reject_move_element");
+    defer testing.allocator.free(src2);
+    var c2 = try compileText("app", &.{.{ "app", src2 }});
     defer c2.deinit();
     try testing.expect(c2.program == null);
     try testing.expect(std.mem.indexOf(u8, c2.diag.?.message, "owning element") != null);
 
-    var c3 = try compileText("app", &.{
-        .{ "app", "const builtin = import(\"builtin\");\nstruct File { fd: int32; drop(f) { builtin.print(\"x\"); } }\nfn main() -> void { let x = File{ fd: 1 }; let y = x; }" },
-    });
+    const src3 = try helpers.probeSource("probes/cases", "lowering_reject_move_binding");
+    defer testing.allocator.free(src3);
+    var c3 = try compileText("app", &.{.{ "app", src3 }});
     defer c3.deinit();
     try testing.expect(c3.program == null);
     try testing.expect(std.mem.indexOf(u8, c3.diag.?.message, "owning binding") != null);
@@ -1205,31 +911,15 @@ test "frontend applies the any-parameter exception with move discipline" {
     // exception to Copy-only plain parameters — a fresh unique value
     // transfers implicitly, an existing owner must be moved, and
     // hostdata never coerces to any (Core §11.6).
-    var c1 = try compileText("app", &.{
-        .{
-            "app",
-            \\const builtin = import("builtin");
-            \\struct File { fd: int32; drop(f) { builtin.print("x"); } }
-            \\fn f(a: any) -> void {}
-            \\fn main() -> void {
-            \\    f(File{ fd: 2 });
-            \\    let g = File{ fd: 3 };
-            \\    f(move g);
-            \\}
-        },
-    });
+    const src1 = try helpers.probeSource("probes/cases", "lowering_any_param_move_ok");
+    defer testing.allocator.free(src1);
+    var c1 = try compileText("app", &.{.{ "app", src1 }});
     defer c1.deinit();
     try testing.expect(c1.program != null);
 
-    var c2 = try compileText("app", &.{
-        .{
-            "app",
-            \\const builtin = import("builtin");
-            \\struct File { fd: int32; drop(f) { builtin.print("x"); } }
-            \\fn f(a: any) -> void {}
-            \\fn main() -> void { let h = File{ fd: 4 }; f(h); }
-        },
-    });
+    const src2 = try helpers.probeSource("probes/cases", "lowering_any_param_move_required");
+    defer testing.allocator.free(src2);
+    var c2 = try compileText("app", &.{.{ "app", src2 }});
     defer c2.deinit();
     try testing.expect(c2.program == null);
     try testing.expect(std.mem.indexOf(u8, c2.diag.?.message, "'any' parameter") != null);

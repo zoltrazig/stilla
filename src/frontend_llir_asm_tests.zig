@@ -43,22 +43,9 @@ fn patchImage(image: llir.LlirProgram, instructions: []const llir.Instr, st: *Pa
     return out;
 }
 test "5.1 LLIR assembly: symbolic projection — qualified funcs, block labels, consts, members, syscalls; deterministic and image-read-only" {
-    var c = try compileOpt("app", &.{
-        .{
-            "app",
-            \\const builtin = import("builtin");
-            \\const magic: int32 = 12345;
-            \\const greeting: str = "hi";
-            \\fn add(a: int32, b: int32) -> int32 { a + b }
-            \\fn pick(x: int32, y: int32) -> int32 {
-            \\    if (x < y) { 1 } else { 2 }
-            \\}
-            \\fn main() -> void {
-            \\    let s = add(1, magic);
-            \\    builtin.print(greeting);
-            \\}
-        },
-    });
+    const src = try helpers.probeSource("probes/cases", "llir_asm_symbolic_projection");
+    defer testing.allocator.free(src);
+    var c = try compileOpt("app", &.{.{ "app", src }});
     defer c.deinit();
     const program = &c.program.?;
 
@@ -125,13 +112,9 @@ test "5.1 LLIR assembly: module symbols resolve from the image, not the source p
     // program untouched — must change every module symbol: the syscall
     // operand, the function-header qualifier, the symbol table's
     // modules section, and the `module_ref` operand.
-    var c = try compileText("app", &.{.{
-        "app",
-        \\const builtin = import("builtin");
-        \\fn main() -> void {
-        \\    builtin.print("hi");
-        \\}
-    }});
+    const src = try helpers.probeSource("probes/cases", "llir_asm_module_symbols_image");
+    defer testing.allocator.free(src);
+    var c = try compileText("app", &.{.{ "app", src }});
     defer c.deinit();
     const program = &c.program.?;
 
@@ -197,22 +180,9 @@ test "5.1 LLIR assembly: module symbols resolve from the image, not the source p
 }
 
 test "5.1 LLIR assembly: every block label maps 1:1 to a distinct PC and every unresolvable id appears in the table" {
-    var c = try compileOpt("app", &.{
-        .{
-            "app",
-            \\const builtin = import("builtin");
-            \\union Result { Ok(int32), Err(int32) }
-            \\fn choose(t: bool, a: int32, b: int32) -> int32 { if (t) { a } else { b } }
-            \\fn tag(r: Result) -> int32 {
-            \\    match (r) { Result::Ok(n) => n, Result::Err(n) => n }
-            \\}
-            \\fn main() -> void {
-            \\    let v = choose(true, 1, 2);
-            \\    let k = tag(Result::Ok(9));
-            \\    builtin.print(builtin.str(v + k));
-            \\}
-        },
-    });
+    const src = try helpers.probeSource("probes/cases", "llir_asm_block_label_pcs");
+    defer testing.allocator.free(src);
+    var c = try compileOpt("app", &.{.{ "app", src }});
     defer c.deinit();
     const program = &c.program.?;
 
@@ -248,13 +218,9 @@ test "5.2 llir.print re-exports the assembly printer from the LLIR module" {
     // `src/llir.zig` now re-exports the printer (5.2), replacing the
     // deleted `llir_print` binding. The functions are the same, so the
     // two spellings must return byte-identical assembly for one image.
-    var c = try compileText("app", &.{
-        .{
-            "app",
-            \\fn add(a: int32, b: int32) -> int32 { a + b }
-            \\fn main() -> void {}
-        },
-    });
+    const src = try helpers.probeSource("probes/cases", "llir_print_reexport");
+    defer testing.allocator.free(src);
+    var c = try compileText("app", &.{.{ "app", src }});
     defer c.deinit();
     const program = &c.program.?;
 
@@ -279,15 +245,9 @@ test "5.2 LLIR assembly: binary64 constants print at full precision" {
     // Phase 5: the assembly projection renders a binary64 constant from
     // its full {a, b} payload (the {d} shortest round-trip form), never
     // narrowed through binary32.
-    var c = try compileText("app", &.{.{
-        "app",
-        \\fn f(a: float64) -> int32 { a as int32 }
-        \\fn main() -> int32 {
-        \\    let pi: float64 = 3.141592653589793;
-        \\    let r = f(pi);
-        \\    r
-        \\}
-    }});
+    const src = try helpers.probeSource("probes/cases", "llir_asm_binary64_precision");
+    defer testing.allocator.free(src);
+    var c = try compileText("app", &.{.{ "app", src }});
     defer c.deinit();
     const program = &c.program.?;
 
@@ -315,29 +275,9 @@ test "5.1 LLIR assembly: i64/u64/f64 ops and conversions print stable serialized
     // explicit `cvt.<src>.<dst>` conversions print their dedicated
     // names, and full-width constants print from their complete 64-bit
     // payloads.
-    var c = try compileText("app", &.{.{
-        "app",
-        \\fn mul64(a: int64, b: int64) -> int64 { a * b }
-        \\fn sh64(x: uint64, k: uint64) -> uint64 { x >> k }
-        \\fn lt64(a: uint64, b: uint64) -> bool { a < b }
-        \\fn fmul(a: float64, b: float64) -> float64 { a * b }
-        \\fn fge(a: float64, b: float64) -> bool { a >= b }
-        \\fn b2f(x: byte) -> float64 { x as float64 }
-        \\fn i2f(x: int32) -> float64 { x as float64 }
-        \\fn u2f(x: uint32) -> float64 { x as float64 }
-        \\fn f2f(x: float32) -> float64 { x as float64 }
-        \\fn f2i(x: float64) -> int32 { x as int32 }
-        \\fn main() -> int32 {
-        \\    let a: int64 = 9223372036854775807;
-        \\    let b: uint64 = 18446744073709551615;
-        \\    let c: float64 = 3.141592653589793;
-        \\    let d = mul64(a, a);
-        \\    let e = sh64(b, b);
-        \\    let g = fmul(c, c);
-        \\    let h = f2i(g);
-        \\    0
-        \\}
-    }});
+    const src = try helpers.probeSource("probes/cases", "llir_asm_wide_ops_conversions");
+    defer testing.allocator.free(src);
+    var c = try compileText("app", &.{.{ "app", src }});
     defer c.deinit();
     const program = &c.program.?;
 
@@ -377,10 +317,9 @@ test "5.1 LLIR assembly: the twelve move-wide opcodes print unsigned imm16 lane 
     // 0xffff → 65535), with no new assembly syntax. The frontend lowering
     // does not emit them yet (TODO.md 阶段 5), so the image is a compiled
     // program whose code is patched in place with the twelve rows.
-    var c = try compileText("app", &.{.{
-        "app",
-        \\fn main() -> int32 { 0 }
-    }});
+    const src = try helpers.probeSource("probes/cases", "llir_tiny_main");
+    defer testing.allocator.free(src);
+    var c = try compileText("app", &.{.{ "app", src }});
     defer c.deinit();
     const program = &c.program.?;
 
@@ -439,17 +378,9 @@ test "5.2 LLIR assembly: host syscalls and any payload TypeIds project symbolica
     // payload TypeId (the packed source / recovery target) and
     // syscalls with their binding member name — the text form a host
     // reads to resolve bindings (Runtime §2.6).
-    var c = try compileText("app", &.{.{
-        "app",
-        \\const builtin = import("builtin");
-        \\fn wrap(a: int64) -> any { a }
-        \\fn main() -> void {
-        \\    let v: int64 = 9007199254740993;
-        \\    let a = wrap(v);
-        \\    let w = (move a) as int64;
-        \\    builtin.print(builtin.str(1));
-        \\}
-    }});
+    const src = try helpers.probeSource("probes/cases", "llir_asm_syscall_any_typeid");
+    defer testing.allocator.free(src);
+    var c = try compileText("app", &.{.{ "app", src }});
     defer c.deinit();
     const program = &c.program.?;
 
@@ -482,10 +413,9 @@ test "3.4 LLIR assembly: all seven formats print mnemonic, operands, and negativ
     // operand prints as a signed value or resolves backward to `$entry`.
     // Rows are hand-encoded print fixtures; they assert the printer, not
     // a validated program.
-    var c = try compileText("app", &.{.{
-        "app",
-        \\fn main() -> int32 { 0 }
-    }});
+    const src = try helpers.probeSource("probes/cases", "llir_tiny_main");
+    defer testing.allocator.free(src);
+    var c = try compileText("app", &.{.{ "app", src }});
     defer c.deinit();
     const program = &c.program.?;
 
@@ -559,19 +489,9 @@ test "3.4 LLIR assembly: direct-call jal prints the callee name and take follows
     // frame call's function-entry target through `functionAtPc`, the
     // implicit `ra` link stays unencoded in both, and each call is
     // followed by its generic `take`.
-    var c = try compileOpt("app", &.{.{
-        "app",
-        \\fn recurse(n: int32) -> int32 {
-        \\    if (n <= 0) { 0 } else { n + recurse(n - 1) }
-        \\}
-        \\fn apply(f: fn(int32) -> int32, x: int32) -> int32 { f(x) }
-        \\fn inc(a: int32) -> int32 { a + 1 }
-        \\fn main() -> int32 {
-        \\    let t = recurse(3);
-        \\    let u = apply(inc, 4);
-        \\    t + u
-        \\}
-    }});
+    const src = try helpers.probeSource("probes/cases", "llir_asm_direct_call_jal");
+    defer testing.allocator.free(src);
+    var c = try compileOpt("app", &.{.{ "app", src }});
     defer c.deinit();
     const program = &c.program.?;
 
@@ -622,26 +542,9 @@ test "3.4 LLIR assembly: comparison swaps and the immediate-compare aliases prin
     // comparisons (slti/sgti/snei) print their literal values. The
     // register-form conditional branch is the materialized-bool shape
     // (`beq reg, zero`) the boolean lowering emits.
-    var c = try compileOpt("probe", &.{.{
-        "probe",
-        \\fn sum(n: int32) -> int32 { if (n <= 0) { 0 } else { n + sum(n - 1) } }
-        \\fn gtB(a: int32, b: int32) -> int32 { if (a > b) { 1 } else { 0 } }
-        \\fn geUB(a: uint32, b: uint32) -> int32 { if (a >= b) { 1 } else { 0 } }
-        \\fn eqF(a: float64, b: float64) -> int32 { if (a == b) { 1 } else { 0 } }
-        \\fn neI(a: int32) -> int32 { if (a != 5) { 1 } else { 0 } }
-        \\fn cmp3(k: int32, a: int32) -> bool { k < a }
-        \\fn main() -> int32 {
-        \\    let s = sum(4);
-        \\    let p = gtB(s, 10);
-        \\    let q = geUB(3 as uint32, 4 as uint32);
-        \\    let f1: float64 = 1.5;
-        \\    let f2: float64 = -2.5;
-        \\    let r = eqF(f1, f2);
-        \\    let t = neI(7);
-        \\    let v = cmp3(2, 9);
-        \\    s
-        \\}
-    }});
+    const src = try helpers.probeSource("probes/cases", "llir_asm_comparison_swaps");
+    defer testing.allocator.free(src);
+    var c = try compileOpt("probe", &.{.{ "probe", src }});
     defer c.deinit();
     const program = &c.program.?;
 
@@ -680,10 +583,9 @@ test "3.4 LLIR assembly: lui prints the shifted constant and auipc the pc delta 
     // the raw decoded i20 while `auipc` renders its <<12 displacement as a
     // signed hexadecimal delta — positive, zero, and at both sign extremes.
     // Patched print fixture; the frontend does not emit these yet.
-    var c = try compileText("app", &.{.{
-        "app",
-        \\fn main() -> int32 { 0 }
-    }});
+    const src = try helpers.probeSource("probes/cases", "llir_tiny_main");
+    defer testing.allocator.free(src);
+    var c = try compileText("app", &.{.{ "app", src }});
     defer c.deinit();
     const program = &c.program.?;
 
@@ -729,19 +631,9 @@ test "5.1 LLIR assembly: the variant tag prints as a number, not a register" {
     // immediate value, never a register. Under the re-encoding the tag 1
     // numerically equals the `cond` encoding, so the printer must render
     // it as `1` (the schema role is `.imm`), never as `cond`.
-    var c = try compileOpt("app", &.{
-        .{
-            "app",
-            \\union Shape { circle(int32), rect(int32, int32) }
-            \\fn area(s: Shape) -> int32 {
-            \\    match (s) {
-            \\        Shape::rect(w, h) => w * h,
-            \\        Shape::circle(r) => r,
-            \\    }
-            \\}
-            \\fn main() -> void {}
-        },
-    });
+    const src = try helpers.probeSource("probes/cases", "llir_asm_variant_tag");
+    defer testing.allocator.free(src);
+    var c = try compileOpt("app", &.{.{ "app", src }});
     defer c.deinit();
     const program = &c.program.?;
 
@@ -767,32 +659,11 @@ test "5.1 LLIR assembly: a per-module artifact pairs functions with the scoped n
     // entry-module headers, and lambda/hook names shifted likewise.
     // Unoptimized: the fix is about name pairing, and the optimizer may
     // reshape fn_ref/jal records (the other tests cover optimized shapes).
-    var c = try compileText("app", &.{
-        .{
-            "dep",
-            \\fn f(a: int32) -> int32 { a + 1 }
-        },
-        .{
-            "app",
-            \\const dep = import("dep");
-            \\const builtin = import("builtin");
-            \\struct U0 {
-            \\    x: int32;
-            \\    y: int32;
-            \\    drop(u) {
-            \\        builtin.assert((u.x) == (u.y), "uok");
-            \\    }
-            \\}
-            \\fn apply(g: fn(int32) -> int32, v: int32) -> int32 { g(v) }
-            \\fn main() -> void {
-            \\    let u: U0 = U0 { x: 1, y: 1 };
-            \\    let d = dep.f(1);
-            \\    let r = apply(fn(a: int32) -> int32 { a + 1 }, d);
-            \\    builtin.assert(r == 3, "r");
-            \\    drop u;
-            \\}
-        },
-    });
+    const dep_src = try helpers.probeSource("probes/cases", "llir_per_module_artifact_dep");
+    defer testing.allocator.free(dep_src);
+    const app_src = try helpers.probeSource("probes/cases", "llir_per_module_artifact_app");
+    defer testing.allocator.free(app_src);
+    var c = try compileText("app", &.{ .{ "dep", dep_src }, .{ "app", app_src } });
     defer c.deinit();
     const program = &c.program.?;
 

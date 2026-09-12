@@ -20,6 +20,7 @@ const frontend = @import("frontend.zig");
 const interpreter = @import("interpreter.zig");
 const support = @import("interpreter_test_support.zig");
 const artifact_bundle = @import("artifact_bundle.zig");
+const probe_corpus = @import("probe_corpus.zig");
 const testing = std.testing;
 
 const CaptureAdapter = support.CaptureAdapter;
@@ -149,12 +150,9 @@ fn expectFuncBody(b: *Built, name: []const u8, expected: []const u8) !void {
 // ---------------------------------------------------------------------------
 
 test "SEG: constant folding + let forwarding + integer algebra" {
-    var b = try buildText("app", &.{.{
-        "app",
-        \\fn f(x: int32) -> int32 { x + 0 }
-        \\fn g(a: int32) -> int32 { (a * 1) + (2 + 3) }
-        \\fn main() -> void { }
-    }});
+    const src = try probe_corpus.read(testing.allocator, "probes/cases", "seg_constant_folding");
+    defer testing.allocator.free(src);
+    var b = try buildText("app", &.{.{ "app", src }});
     defer b.deinit();
     const stats = try segAll(&b);
     try testing.expect(stats.folds >= 1);
@@ -164,12 +162,9 @@ test "SEG: constant folding + let forwarding + integer algebra" {
 }
 
 test "SEG: β→let binds the argument exactly once (no duplication)" {
-    var b = try buildText("app", &.{.{
-        "app",
-        \\fn idf(x: int32) -> int32 { x }
-        \\fn dup(v: int32) -> int32 { (fn(a: int32) -> int32 { a + a })(idf(v)) }
-        \\fn main() -> void { }
-    }});
+    const src = try probe_corpus.read(testing.allocator, "probes/cases", "seg_beta_let_no_duplication");
+    defer testing.allocator.free(src);
+    var b = try buildText("app", &.{.{ "app", src }});
     defer b.deinit();
     const stats = try segAll(&b);
     try testing.expect(stats.beta >= 1);
@@ -179,12 +174,9 @@ test "SEG: β→let binds the argument exactly once (no duplication)" {
 }
 
 test "SEG: β is refused for an effectful body and for a non-Copy argument" {
-    var b = try buildText("app", &.{.{
-        "app",
-        \\const builtin = import("builtin");
-        \\fn eff(x: int32) -> void { (fn(a: int32) -> void { builtin.print("hi") })(x) }
-        \\fn main() -> void { }
-    }});
+    const src = try probe_corpus.read(testing.allocator, "probes/cases", "seg_beta_refused_effectful");
+    defer testing.allocator.free(src);
+    var b = try buildText("app", &.{.{ "app", src }});
     defer b.deinit();
     _ = try segAll(&b);
     // The λ body calls a host binding: not cleanup-free / not observable-
@@ -194,12 +186,9 @@ test "SEG: β is refused for an effectful body and for a non-Copy argument" {
 }
 
 test "SEG: may-trap ops never enter an island (div is left to the runtime)" {
-    var b = try buildText("app", &.{.{
-        "app",
-        \\fn q(a: int32, b: int32) -> int32 { a / b }
-        \\fn keep() -> int32 { let x = 10 / 2; 0 }
-        \\fn main() -> void { }
-    }});
+    const src = try probe_corpus.read(testing.allocator, "probes/cases", "seg_div_left_to_runtime");
+    defer testing.allocator.free(src);
+    var b = try buildText("app", &.{.{ "app", src }});
     defer b.deinit();
     _ = try segAll(&b);
     try expectFuncBody(&b, "app.q", "fn (B0: i32, B1: i32) => div.i32(%B0, %B1)");
@@ -209,13 +198,9 @@ test "SEG: may-trap ops never enter an island (div is left to the runtime)" {
 }
 
 test "SEG: float algebra is not applied (only integer identities + folding)" {
-    var b = try buildText("app", &.{.{
-        "app",
-        \\fn fadd(x: float32) -> float32 { x + 0.0 }
-        \\fn fmul(x: float32) -> float32 { x * 1.0 }
-        \\fn fzero(x: float32) -> float32 { x * 0.0 }
-        \\fn main() -> void { }
-    }});
+    const src = try probe_corpus.read(testing.allocator, "probes/cases", "seg_float_algebra_not_applied");
+    defer testing.allocator.free(src);
+    var b = try buildText("app", &.{.{ "app", src }});
     defer b.deinit();
     _ = try segAll(&b);
     try expectFuncBody(&b, "app.fadd", "fn (B0: f32) => add.f32(%B0, 0f32)");
@@ -224,12 +209,9 @@ test "SEG: float algebra is not applied (only integer identities + folding)" {
 }
 
 test "SEG: constant if / and / or select the taken island branch" {
-    var b = try buildText("app", &.{.{
-        "app",
-        \\fn pick() -> int32 { let x = if (1 < 2) { 10 } else { 20 }; x }
-        \\fn shorty() -> bool { let x = true or false; x }
-        \\fn main() -> void { }
-    }});
+    const src = try probe_corpus.read(testing.allocator, "probes/cases", "seg_constant_if_and_or");
+    defer testing.allocator.free(src);
+    var b = try buildText("app", &.{.{ "app", src }});
     defer b.deinit();
     _ = try segAll(&b);
     try expectFuncBody(&b, "app.pick", "fn () => 10i32");
@@ -237,14 +219,9 @@ test "SEG: constant if / and / or select the taken island branch" {
 }
 
 test "SEG: a trapping untaken branch keeps the branch node out of an island" {
-    var b = try buildText("app", &.{.{
-        "app",
-        \\fn guarded(a: int32) -> int32 {
-        \\    let r = if (a > 0) { 1 } else { 10 / 0 };
-        \\    r
-        \\}
-        \\fn main() -> void { }
-    }});
+    const src = try probe_corpus.read(testing.allocator, "probes/cases", "seg_trapping_untaken_branch");
+    defer testing.allocator.free(src);
+    var b = try buildText("app", &.{.{ "app", src }});
     defer b.deinit();
     _ = try segAll(&b);
     // The `div` in the untaken branch makes the whole branch non-total, so
@@ -254,20 +231,9 @@ test "SEG: a trapping untaken branch keeps the branch node out of an island" {
 }
 
 test "SEG: known-variant match reduces to the arm body (single / nullary / multi payload)" {
-    var b = try buildText("app", &.{.{
-        "app",
-        \\union Value { number(int32), empty }
-        \\union Flag { on, off }
-        \\union Two { pair(int32, int32), none }
-        \\fn single(x: int32) -> int32 {
-        \\    match (Value::number(x)) { Value::number(n) => n + 1, Value::empty => 0 }
-        \\}
-        \\fn nullary() -> int32 { match (Flag::off) { Flag::on => 1, Flag::off => 2 } }
-        \\fn multi(x: int32, y: int32) -> int32 {
-        \\    match (Two::pair(x, y)) { Two::pair(a, b) => a - b, Two::none => 0 }
-        \\}
-        \\fn main() -> void { }
-    }});
+    const src = try probe_corpus.read(testing.allocator, "probes/cases", "seg_known_variant_match");
+    defer testing.allocator.free(src);
+    var b = try buildText("app", &.{.{ "app", src }});
     defer b.deinit();
     const stats = try segAll(&b);
     try testing.expect(stats.matches >= 3);
@@ -277,15 +243,9 @@ test "SEG: known-variant match reduces to the arm body (single / nullary / multi
 }
 
 test "SEG: known-variant match with a wildcard / catch-all payload drops the value" {
-    var b = try buildText("app", &.{.{
-        "app",
-        \\union Value { number(int32), empty }
-        \\fn wild(x: int32) -> int32 {
-        \\    match (Value::number(x)) { Value::number(_) => 7, Value::empty => 0 }
-        \\}
-        \\fn catchall(x: int32) -> int32 { match (Value::number(x)) { v => 7 } }
-        \\fn main() -> void { }
-    }});
+    const src = try probe_corpus.read(testing.allocator, "probes/cases", "seg_known_variant_match_wildcard");
+    defer testing.allocator.free(src);
+    var b = try buildText("app", &.{.{ "app", src }});
     defer b.deinit();
     const stats = try segAll(&b);
     try testing.expect(stats.matches >= 2);
@@ -294,18 +254,9 @@ test "SEG: known-variant match with a wildcard / catch-all payload drops the val
 }
 
 test "SEG: a consuming or borrowed scrutinee keeps the match out of an island" {
-    var b = try buildText("app", &.{.{
-        "app",
-        \\struct Token { value: int32; drop(token) {} }
-        \\union Owned { token(Token), empty }
-        \\fn take(move value: Owned) -> int32 {
-        \\    match (move value) { Owned::token(t) => t.value, Owned::empty => 0 }
-        \\}
-        \\fn inspect(borrow value: Owned) -> int32 {
-        \\    match (value) { Owned::token(t) => t.value, Owned::empty => 0 }
-        \\}
-        \\fn main() -> void { }
-    }});
+    const src = try probe_corpus.read(testing.allocator, "probes/cases", "seg_consuming_borrowed_scrutinee");
+    defer testing.allocator.free(src);
+    var b = try buildText("app", &.{.{ "app", src }});
     defer b.deinit();
     // Admission itself refuses the match: the scrutinee is a `move` /
     // borrowed non-Copy value, so `isSegSafe(match)` is false before any
@@ -324,18 +275,9 @@ test "SEG: a consuming or borrowed scrutinee keeps the match out of an island" {
 }
 
 test "SEG: an effectful (even untaken) arm keeps a known-variant match intact" {
-    var b = try buildText("app", &.{.{
-        "app",
-        \\const builtin = import("builtin");
-        \\union Value { number(int32), empty }
-        \\fn f(x: int32) -> int32 {
-        \\    match (Value::number(x)) {
-        \\        Value::number(n) => n,
-        \\        Value::empty => { builtin.print("no"); 0 },
-        \\    }
-        \\}
-        \\fn main() -> void { }
-    }});
+    const src = try probe_corpus.read(testing.allocator, "probes/cases", "seg_effectful_arm_match");
+    defer testing.allocator.free(src);
+    var b = try buildText("app", &.{.{ "app", src }});
     defer b.deinit();
     const stats = try segAll(&b);
     // The arm's host call makes the match summary non-pure; its region root
@@ -345,18 +287,9 @@ test "SEG: an effectful (even untaken) arm keeps a known-variant match intact" {
 }
 
 test "SEG: a nested payload pattern refuses the known-variant reduction" {
-    var b = try buildText("app", &.{.{
-        "app",
-        \\struct Point { x: int32; y: int32; }
-        \\union Shape { point(Point), empty }
-        \\fn f() -> int32 {
-        \\    match (Shape::point(Point { x: 1, y: 2 })) {
-        \\        Shape::point(Point { x, y }) => x + y,
-        \\        Shape::empty => 0,
-        \\    }
-        \\}
-        \\fn main() -> void { }
-    }});
+    const src = try probe_corpus.read(testing.allocator, "probes/cases", "seg_nested_payload_pattern");
+    defer testing.allocator.free(src);
+    var b = try buildText("app", &.{.{ "app", src }});
     defer b.deinit();
     const stats = try segAll(&b);
     // The outer tag does not discharge the nested `struct_` pattern, and
@@ -398,14 +331,9 @@ fn funcHasNode(b: *Built, func: []const u8, name: []const u8) !bool {
 }
 
 test "SEG: known-variant match splices payload lets in constructor order (one round)" {
-    var b = try buildText("app", &.{.{
-        "app",
-        \\union Pair { both(int32, int32), none }
-        \\fn f(x: int32, y: int32) -> int32 {
-        \\    match (Pair::both(x, y)) { Pair::both(a, b) => a - b, Pair::none => 0 }
-        \\}
-        \\fn main() -> void { }
-    }});
+    const src = try probe_corpus.read(testing.allocator, "probes/cases", "seg_pair_match");
+    defer testing.allocator.free(src);
+    var b = try buildText("app", &.{.{ "app", src }});
     defer b.deinit();
     const stats = try segOnce(&b);
     try testing.expectEqual(@as(usize, 1), stats.matches);
@@ -416,14 +344,9 @@ test "SEG: known-variant match splices payload lets in constructor order (one ro
 }
 
 test "SEG: an out-of-range constructor tag refuses the reduction" {
-    var b = try buildText("app", &.{.{
-        "app",
-        \\union Value { number(int32), empty }
-        \\fn f(x: int32) -> int32 {
-        \\    match (Value::number(x)) { Value::number(n) => n + 1, Value::empty => 0 }
-        \\}
-        \\fn main() -> void { }
-    }});
+    const src = try probe_corpus.read(testing.allocator, "probes/cases", "seg_value_match");
+    defer testing.allocator.free(src);
+    var b = try buildText("app", &.{.{ "app", src }});
     defer b.deinit();
     const f = try findFunc(&b, "app.f");
     const vm = try findNode(&b, f.root, "variant_make") orelse return error.TestUnexpectedResult;
@@ -436,14 +359,9 @@ test "SEG: an out-of-range constructor tag refuses the reduction" {
 }
 
 test "SEG: an out-of-range arm pattern tag refuses the reduction" {
-    var b = try buildText("app", &.{.{
-        "app",
-        \\union Value { number(int32), empty }
-        \\fn f(x: int32) -> int32 {
-        \\    match (Value::number(x)) { Value::number(n) => n + 1, Value::empty => 0 }
-        \\}
-        \\fn main() -> void { }
-    }});
+    const src = try probe_corpus.read(testing.allocator, "probes/cases", "seg_value_match");
+    defer testing.allocator.free(src);
+    var b = try buildText("app", &.{.{ "app", src }});
     defer b.deinit();
     const f = try findFunc(&b, "app.f");
     const m = try findNode(&b, f.root, "match") orelse return error.TestUnexpectedResult;
@@ -456,14 +374,9 @@ test "SEG: an out-of-range arm pattern tag refuses the reduction" {
 }
 
 test "SEG: a declaration/constructor arity mismatch refuses the reduction" {
-    var b = try buildText("app", &.{.{
-        "app",
-        \\union Pair { both(int32, int32), none }
-        \\fn f(x: int32, y: int32) -> int32 {
-        \\    match (Pair::both(x, y)) { Pair::both(a, b) => a - b, Pair::none => 0 }
-        \\}
-        \\fn main() -> void { }
-    }});
+    const src = try probe_corpus.read(testing.allocator, "probes/cases", "seg_pair_match");
+    defer testing.allocator.free(src);
+    var b = try buildText("app", &.{.{ "app", src }});
     defer b.deinit();
     const f = try findFunc(&b, "app.f");
     const vm = try findNode(&b, f.root, "variant_make") orelse return error.TestUnexpectedResult;
@@ -481,14 +394,9 @@ test "SEG: a declaration/constructor arity mismatch refuses the reduction" {
 }
 
 test "SEG: a payload-pattern arity mismatch refuses the reduction" {
-    var b = try buildText("app", &.{.{
-        "app",
-        \\union Pair { both(int32, int32), none }
-        \\fn f(x: int32, y: int32) -> int32 {
-        \\    match (Pair::both(x, y)) { Pair::both(a, b) => a - b, Pair::none => 0 }
-        \\}
-        \\fn main() -> void { }
-    }});
+    const src = try probe_corpus.read(testing.allocator, "probes/cases", "seg_pair_match");
+    defer testing.allocator.free(src);
+    var b = try buildText("app", &.{.{ "app", src }});
     defer b.deinit();
     const f = try findFunc(&b, "app.f");
     const m = try findNode(&b, f.root, "match") orelse return error.TestUnexpectedResult;
@@ -509,13 +417,9 @@ test "SEG: a payload-pattern arity mismatch refuses the reduction" {
 }
 
 test "SEG: the pass is a fixpoint (second run rewrites nothing)" {
-    var b = try buildText("app", &.{.{
-        "app",
-        \\fn idf(x: int32) -> int32 { x }
-        \\fn dup(v: int32) -> int32 { (fn(a: int32) -> int32 { a + a })(idf(v)) }
-        \\fn g(a: int32) -> int32 { (a * 1) + (2 + 3) }
-        \\fn main() -> void { }
-    }});
+    const src = try probe_corpus.read(testing.allocator, "probes/cases", "seg_fixpoint_corpus");
+    defer testing.allocator.free(src);
+    var b = try buildText("app", &.{.{ "app", src }});
     defer b.deinit();
     const first = try segAll(&b);
     try testing.expect(first.beta + first.folds + first.algebra + first.lets + first.conds > 0);
@@ -529,11 +433,8 @@ test "SEG: the pass is a fixpoint (second run rewrites nothing)" {
 }
 
 test "SEG: two fresh builds produce the same optimized text (deterministic)" {
-    const src =
-        \\fn idf(x: int32) -> int32 { x }
-        \\fn dup(v: int32) -> int32 { (fn(a: int32) -> int32 { a + a })(idf(v)) }
-        \\fn main() -> void { }
-    ;
+    const src = try probe_corpus.read(testing.allocator, "probes/cases", "seg_beta_let_no_duplication");
+    defer testing.allocator.free(src);
     var b1 = try buildText("app", &.{.{ "app", src }});
     defer b1.deinit();
     _ = try segAll(&b1);
@@ -567,12 +468,9 @@ fn compileAir(spec: []const u8, text: []const u8, seg: bool) ![]u8 {
 }
 
 test "SEG: β allocates fresh binders (no binder is declared twice)" {
-    var b = try buildText("app", &.{.{
-        "app",
-        \\fn idf(x: int32) -> int32 { x }
-        \\fn dup(v: int32) -> int32 { (fn(a: int32) -> int32 { a + a })(idf(v)) }
-        \\fn main() -> void { }
-    }});
+    const src = try probe_corpus.read(testing.allocator, "probes/cases", "seg_beta_let_no_duplication");
+    defer testing.allocator.free(src);
+    var b = try buildText("app", &.{.{ "app", src }});
     defer b.deinit();
     _ = try segAll(&b);
     const pr = &b.built.program;
@@ -588,11 +486,9 @@ test "SEG: β allocates fresh binders (no binder is declared twice)" {
 }
 
 test "SEG: a borrowed view keeps its subtree out of an island" {
-    var b = try buildText("app", &.{.{
-        "app",
-        \\fn f(borrow x: int32) -> int32 { let y = x + 0; 7 }
-        \\fn main() -> void { }
-    }});
+    const src = try probe_corpus.read(testing.allocator, "probes/cases", "seg_borrowed_view");
+    defer testing.allocator.free(src);
+    var b = try buildText("app", &.{.{ "app", src }});
     defer b.deinit();
     _ = try segAll(&b);
     // The `local` reads a `.borrow`-mode binder, so `isSegSafe` fails:
@@ -601,12 +497,9 @@ test "SEG: a borrowed view keeps its subtree out of an island" {
 }
 
 test "SEG: optimized HIR prints and parses back to the same text" {
-    var b = try buildText("app", &.{.{
-        "app",
-        \\fn idf(x: int32) -> int32 { x }
-        \\fn dup(v: int32) -> int32 { (fn(a: int32) -> int32 { a + a })(idf(v)) }
-        \\fn main() -> void { }
-    }});
+    const src = try probe_corpus.read(testing.allocator, "probes/cases", "seg_beta_let_no_duplication");
+    defer testing.allocator.free(src);
+    var b = try buildText("app", &.{.{ "app", src }});
     defer b.deinit();
     _ = try segAll(&b);
     const raw = try funcRawText(&b, "app.dup");
@@ -618,10 +511,8 @@ test "SEG: optimized HIR prints and parses back to the same text" {
 }
 
 test "SEG: off by default; enabling it rewrites the AIR; both round-trip" {
-    const src =
-        \\fn f(x: int32) -> int32 { x + 0 }
-        \\fn main() -> void { let _ = f(1); }
-    ;
+    const src = try probe_corpus.read(testing.allocator, "probes/cases", "seg_off_by_default_air");
+    defer testing.allocator.free(src);
     const off = try compileAir("app", src, false);
     defer testing.allocator.free(off);
     const on = try compileAir("app", src, true);
@@ -658,19 +549,8 @@ fn capture(text: []const u8, seg: bool) ![]u8 {
 }
 
 test "SEG: SEG-on and SEG-off execute identically (β, let, algebra, if)" {
-    const src =
-        \\const builtin = import("builtin");
-        \\fn idf(x: int32) -> int32 { x }
-        \\fn calc(v: int32) -> int32 {
-        \\    let a: int32 = (fn(x: int32) -> int32 { x + 0 })(idf(v));
-        \\    let b = if (a > 0) { a * 1 } else { 10 / 2 };
-        \\    b + (2 + 3)
-        \\}
-        \\fn main() -> void {
-        \\    builtin.print(builtin.str(calc(7)));
-        \\    builtin.print(builtin.str(calc(0)));
-        \\}
-    ;
+    const src = try probe_corpus.read(testing.allocator, "probes/cases", "seg_exec_identical");
+    defer testing.allocator.free(src);
     const off = try capture(src, false);
     defer testing.allocator.free(off);
     const on = try capture(src, true);
@@ -681,14 +561,8 @@ test "SEG: SEG-on and SEG-off execute identically (β, let, algebra, if)" {
 }
 
 test "SEG: SEG-on and SEG-off execute a known-variant match identically" {
-    const src =
-        \\const builtin = import("builtin");
-        \\union Value { number(int32), empty }
-        \\fn pick(v: int32) -> int32 {
-        \\    match (Value::number(v)) { Value::number(n) => n * 2, Value::empty => 0 }
-        \\}
-        \\fn main() -> void { builtin.print(builtin.str(pick(21))); }
-    ;
+    const src = try probe_corpus.read(testing.allocator, "probes/cases", "seg_match_exec_identical");
+    defer testing.allocator.free(src);
     const off = try capture(src, false);
     defer testing.allocator.free(off);
     const on = try capture(src, true);
@@ -770,9 +644,9 @@ fn captureTerm(text: []const u8, seg: bool) !Term {
 /// intended termination so a coincidentally identical failure cannot pass
 /// as coverage.
 fn corpusDiff(dir: []const u8, spec: []const u8, expect_panic: bool) !void {
-    const path = try std.fmt.allocPrint(testing.allocator, "{s}/{s}.st", .{ dir, spec });
+    const path = try probe_corpus.path(testing.allocator, dir, spec);
     defer testing.allocator.free(path);
-    const text = std.Io.Dir.cwd().readFileAlloc(testing.io, path, testing.allocator, .limited(1 << 20)) catch |err| {
+    const text = probe_corpus.read(testing.allocator, dir, spec) catch |err| {
         std.debug.print("SEG corpus: cannot read {s} ({s})\n", .{ path, @errorName(err) });
         return error.TestUnexpectedResult;
     };
@@ -805,9 +679,9 @@ fn corpusDiff(dir: []const u8, spec: []const u8, expect_panic: bool) !void {
 }
 
 fn corpusSeg(dir: []const u8, spec: []const u8) !void {
-    const path = try std.fmt.allocPrint(testing.allocator, "{s}/{s}.st", .{ dir, spec });
+    const path = try probe_corpus.path(testing.allocator, dir, spec);
     defer testing.allocator.free(path);
-    const text = std.Io.Dir.cwd().readFileAlloc(testing.io, path, testing.allocator, .limited(1 << 20)) catch |err| {
+    const text = probe_corpus.read(testing.allocator, dir, spec) catch |err| {
         std.debug.print("SEG corpus: cannot read {s} ({s})\n", .{ path, @errorName(err) });
         return error.TestUnexpectedResult;
     };
@@ -825,35 +699,20 @@ fn corpusSeg(dir: []const u8, spec: []const u8) !void {
     };
 }
 
-/// Probes whose `main` intentionally traps (`builtin.panic` /
-/// unreachable): the differential pins the panic instead of treating it
-/// as coverage.
-fn probePanics(spec: []const u8) bool {
-    return std.mem.eql(u8, spec, "cli_panic") or std.mem.eql(u8, spec, "control_flow");
-}
-
 test "SEG corpus — examples/*.st compile+round-trip and SEG-on/off agree" {
-    const ex = [_][]const u8{
-        "any",    "arrays", "basics",    "box",       "fib",     "fib_tail_call",
-        "floats", "fold",   "functions", "generics",  "madd",    "maps",
-        "match",  "minmax", "nest",      "ownership", "strings", "structs",
-    };
-    for (ex) |spec| {
+    var corpus = try probe_corpus.list(testing.allocator, "examples");
+    defer corpus.deinit();
+    for (corpus.names) |spec| {
         try corpusSeg("examples", spec);
         try corpusDiff("examples", spec, false);
     }
 }
 
 test "SEG corpus — probes/*.st compile+round-trip and SEG-on/off agree" {
-    const pr = [_][]const u8{
-        "aggregates",  "any",                "box",         "branch",        "calls",        "casts",
-        "cli_panic",   "cli_run",            "comparisons", "constants",     "control_flow", "fusion",
-        "generic",     "generic_aggregates", "immediates",  "integer_bits",  "lifecycle",    "list_match",
-        "numeric",     "ownership",          "patterns",    "short_circuit", "strings",      "tail_recursion",
-        "union_match",
-    };
-    for (pr) |spec| {
+    var corpus = try probe_corpus.list(testing.allocator, "probes");
+    defer corpus.deinit();
+    for (corpus.names) |spec| {
         try corpusSeg("probes", spec);
-        try corpusDiff("probes", spec, probePanics(spec));
+        try corpusDiff("probes", spec, probe_corpus.panics(spec));
     }
 }

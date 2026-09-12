@@ -165,19 +165,9 @@ test "LLIR model: nested call/ret frame contract over a toy image" {
 // ---------------------------------------------------------------------------
 
 test "2.1 LLIR lowering skeleton: dense function/block ids, entry-first order, CFG unmodified" {
-    var c = try compileText("app", &.{
-        .{
-            "app",
-            \\const builtin = import("builtin");
-            \\fn pick(a: int32, b: int32) -> int32 {
-            \\    if (a < b) { a } else { b }
-            \\}
-            \\fn main() -> void {
-            \\    let x = pick(1, 2);
-            \\    builtin.print(builtin.str(x));
-            \\}
-        },
-    });
+    const src = try helpers.probeSource("probes/cases", "core_lowering_skeleton_pick_main");
+    defer testing.allocator.free(src);
+    var c = try compileText("app", &.{.{ "app", src }});
     defer c.deinit();
     const program = &c.program.?;
 
@@ -280,19 +270,9 @@ test "2.1 LLIR lowering skeleton: optimizer block id holes never reach the LLIR"
 }
 
 test "2.2 LLIR lowering: function code ranges ordered, non-overlapping, covering the image" {
-    var c = try compileText("app", &.{
-        .{
-            "app",
-            \\const builtin = import("builtin");
-            \\fn pick(a: int32, b: int32) -> int32 {
-            \\    if (a < b) { a } else { b }
-            \\}
-            \\fn main() -> void {
-            \\    let x = pick(1, 2);
-            \\    builtin.print(builtin.str(x));
-            \\}
-        },
-    });
+    const src = try helpers.probeSource("probes/cases", "core_lowering_skeleton_pick_main");
+    defer testing.allocator.free(src);
+    var c = try compileText("app", &.{.{ "app", src }});
     defer c.deinit();
     const program = &c.program.?;
 
@@ -658,20 +638,9 @@ test "2.2 LLIR lowering: inverted-branch reach to a backward target is a signed 
 }
 
 test "2.3 LLIR lowering: physical slot mapping and frame layout" {
-    var c = try compileText("app", &.{
-        .{
-            "app",
-            \\const builtin = import("builtin");
-            \\fn pick(a: int32, b: int32) -> int32 {
-            \\    if (a < b) { a } else { b }
-            \\}
-            \\fn dead(a: int32) -> int32 { 7 }
-            \\fn main() -> void {
-            \\    let x = pick(1, 2);
-            \\    builtin.print(builtin.str(x));
-            \\}
-        },
-    });
+    const src = try helpers.probeSource("probes/cases", "core_physical_slot_mapping");
+    defer testing.allocator.free(src);
+    var c = try compileText("app", &.{.{ "app", src }});
     defer c.deinit();
     const program = &c.program.?;
 
@@ -981,19 +950,9 @@ fn valueCellCount(f: *const cfg.IrFunc) u32 {
 }
 
 test "2.4 LLIR lowering: constants and ID-operand records are interned integers" {
-    var c = try compileText("app", &.{
-        .{
-            "app",
-            \\const builtin = import("builtin");
-            \\fn pick(a: int32, b: int32) -> int32 {
-            \\    if (a < b) { a } else { b }
-            \\}
-            \\fn main() -> void {
-            \\    let x = pick(1, 2);
-            \\    builtin.print(builtin.str(x));
-            \\}
-        },
-    });
+    const src = try helpers.probeSource("probes/cases", "core_lowering_skeleton_pick_main");
+    defer testing.allocator.free(src);
+    var c = try compileText("app", &.{.{ "app", src }});
     defer c.deinit();
     const program = &c.program.?;
 
@@ -1286,25 +1245,9 @@ test "2.4 LLIR lowering: module_ref/load_member/fn_ref/type_is/store_member reco
 }
 
 test "2.4 LLIR lowering: named instantiation interning and generic template decls" {
-    var c = try compileText("app", &.{
-        .{
-            "app",
-            \\const builtin = import("builtin");
-            \\struct Option[T] {
-            \\    val: T;
-            \\}
-            \\fn unwrap[T](o: Option[T]) -> T {
-            \\    match (o) {
-            \\        Option[T] { val } => val
-            \\    }
-            \\}
-            \\fn main() -> void {
-            \\    let o: Option[int32] = Option[int32] { val: 42 };
-            \\    let v = unwrap[int32](o);
-            \\    builtin.print(builtin.str(v));
-            \\}
-        },
-    });
+    const src = try helpers.probeSource("probes/cases", "core_generic_option_unwrap");
+    defer testing.allocator.free(src);
+    var c = try compileText("app", &.{.{ "app", src }});
     defer c.deinit();
     const program = &c.program.?;
 
@@ -1377,30 +1320,9 @@ test "2.4 LLIR lowering: named instantiation interning and generic template decl
 }
 
 test "2.5 LLIR lowering: generic arithmetic specializes by concrete type" {
-    var c = try compileText("app", &.{
-        .{
-            "app",
-            \\fn iadd(a: int32, b: int32) -> int32 { a + b }
-            \\fn uadd(a: uint32, b: uint32) -> uint32 { a + b }
-            \\fn fadd(a: float32, b: float32) -> float32 { a + b }
-            \\fn imul(a: int32, b: int32) -> int32 { a * b }
-            \\fn umul(a: uint32, b: uint32) -> uint32 { a * b }
-            \\fn fdiv(a: float32, b: float32) -> float32 { a / b }
-            \\fn imod(a: int32, b: int32) -> int32 { a % b }
-            \\fn umod(a: uint32, b: uint32) -> uint32 { a % b }
-            \\fn ineg(a: int32) -> int32 { -a }
-            \\fn uneg(a: uint32) -> uint32 { -a }
-            \\fn fneg(a: float32) -> float32 { -a }
-            \\fn lnot(a: bool) -> bool { !a }
-            \\fn cat(a: str, b: str) -> str { a + b }
-            \\fn main() -> void {
-            \\    iadd(1, 2); uadd(1 as uint32, 2 as uint32); fadd(1.0, 2.0);
-            \\    imul(1, 2); umul(1 as uint32, 2 as uint32); fdiv(1.0, 2.0);
-            \\    imod(1, 2); umod(1 as uint32, 2 as uint32);
-            \\    ineg(1); uneg(1 as uint32); fneg(1.0); lnot(true); cat("a", "b");
-            \\}
-        },
-    });
+    const src = try helpers.probeSource("probes/cases", "core_generic_arithmetic_ops");
+    defer testing.allocator.free(src);
+    var c = try compileText("app", &.{.{ "app", src }});
     defer c.deinit();
     const program = &c.program.?;
 
@@ -1683,29 +1605,9 @@ test "2.5 LLIR lowering: abs/min/max/clz/popcount specialize by type and carry d
 }
 
 test "2.6 LLIR lowering: generic comparisons and casts specialize by type" {
-    var c = try compileText("app", &.{
-        .{
-            "app",
-            \\fn eqi(a: int32, b: int32) -> bool { a == b }
-            \\fn neu(a: uint32, b: uint32) -> bool { a != b }
-            \\fn ltf(a: float32, b: float32) -> bool { a < b }
-            \\fn geu(a: uint32, b: uint32) -> bool { a >= b }
-            \\fn eqb(a: byte, b: byte) -> bool { a == b }
-            \\fn eqbl(a: bool, b: bool) -> bool { a == b }
-            \\fn eqs(a: str, b: str) -> bool { a == b }
-            \\fn f2i(a: float32) -> int32 { a as int32 }
-            \\fn i2f(a: int32) -> float32 { a as float32 }
-            \\fn i2b(a: int32) -> byte { a as byte }
-            \\fn b2i(a: byte) -> int32 { a as int32 }
-            \\fn i2u(a: int32) -> uint32 { a as uint32 }
-            \\fn u2i(a: uint32) -> int32 { a as int32 }
-            \\fn main() -> void {
-            \\    eqi(1, 2); neu(1 as uint32, 2 as uint32); ltf(1.0, 2.0); geu(1 as uint32, 2 as uint32);
-            \\    eqb(1 as byte, 2 as byte); eqbl(true, false); eqs("a", "b");
-            \\    f2i(1.0); i2f(1); i2b(1); b2i(1 as byte); i2u(1); u2i(1 as uint32);
-            \\}
-        },
-    });
+    const src = try helpers.probeSource("probes/cases", "core_comparisons_and_casts");
+    defer testing.allocator.free(src);
+    var c = try compileText("app", &.{.{ "app", src }});
     defer c.deinit();
     const program = &c.program.?;
 
@@ -2093,24 +1995,9 @@ test "2.6 LLIR lowering: hand-written comparison and cast records, full opcode t
 }
 
 test "2.7 LLIR lowering: phi elimination emits copy/borrow edge records, no phi opcode" {
-    var c = try compileText("app", &.{
-        .{
-            "app",
-            \\const builtin = import("builtin");
-            \\fn pick(a: int32, b: int32) -> int32 {
-            \\    if (a < b) { a } else { b }
-            \\}
-            \\struct P { x: int32; }
-            \\fn pick_field(c: bool, borrow p1: P, borrow p2: P) -> int32 {
-            \\    let v = if (c) { p1 } else { p2 };
-            \\    v.x
-            \\}
-            \\fn main() -> void {
-            \\    let x = pick(1, 2);
-            \\    builtin.print(builtin.str(x));
-            \\}
-        },
-    });
+    const src = try helpers.probeSource("probes/cases", "core_phi_elimination_borrowed_field");
+    defer testing.allocator.free(src);
+    var c = try compileText("app", &.{.{ "app", src }});
     defer c.deinit();
     const program = &c.program.?;
 
@@ -2194,19 +2081,9 @@ test "2.3 LLIR lowering: a threaded join's phi keeps a slot its branch-edge copy
     // then value on the else path. Regression: the phi coalesces with
     // the branch-side incoming's slot, and the else edge carries a real
     // copy into it.
-    var c = try compileOpt("app", &.{
-        .{
-            "app",
-            \\const builtin = import("builtin");
-            \\fn pick_str(c: bool, a: str, b: str) -> str {
-            \\    if (c) { a } else { b }
-            \\}
-            \\fn main() -> void {
-            \\    let s = pick_str(true, "x", "y");
-            \\    builtin.print(s);
-            \\}
-        },
-    });
+    const src = try helpers.probeSource("probes/cases", "core_threaded_join_pick_str");
+    defer testing.allocator.free(src);
+    var c = try compileOpt("app", &.{.{ "app", src }});
     defer c.deinit();
     const program = &c.program.?;
 

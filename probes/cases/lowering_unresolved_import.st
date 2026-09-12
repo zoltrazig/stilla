@@ -1,0 +1,2 @@
+const missing = import("nope");
+

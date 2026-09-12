@@ -1,0 +1,5 @@
+union Value { number(int32), empty }
+fn f(x: int32) -> int32 {
+    match (Value::number(x)) { Value::number(n) => n + 1, Value::empty => 0 }
+}
+fn main() -> void { }

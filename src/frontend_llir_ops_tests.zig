@@ -172,24 +172,9 @@ fn checkImageEdge(b: *const cfg_lower_llir.Builder, image: llir.LlirProgram, pre
 }
 
 test "2.9 LLIR lowering: direct calls, void/value returns, recursion" {
-    var c = try compileText("app", &.{
-        .{
-            "app",
-            \\fn noop() -> void { }
-            \\fn id(x: int32) -> int32 { x }
-            \\fn add3(a: int32, b: int32, c: int32) -> int32 { a + b + c }
-            \\fn mid(x: int32) -> int32 { let y = id(x); add3(y, y, y) }
-            \\fn fib(n: int32) -> int32 {
-            \\    if (n < 2) { n } else { fib(n - 1) + fib(n - 2) }
-            \\}
-            \\fn main() -> int32 {
-            \\    noop();
-            \\    let a = mid(5);
-            \\    let b = fib(10);
-            \\    a + b
-            \\}
-        },
-    });
+    const src = try helpers.probeSource("probes/cases", "ops_direct_calls");
+    defer testing.allocator.free(src);
+    var c = try compileText("app", &.{.{ "app", src }});
     defer c.deinit();
     const program = &c.program.?;
 
@@ -309,21 +294,9 @@ test "2.9 Step 8: direct-call result coalescing — take dropped only when safe"
     // call (the alias is call-clobbered) keeps its take; an indirect
     // (`jalr`) call always keeps its take — it is the dynamic
     // `A`-mismatch check.
-    var c = try compileText("app", &.{
-        .{
-            "app",
-            \\fn id(x: int32) -> int32 { x }
-            \\fn apply(f: fn(int32) -> int32, x: int32) -> int32 { f(x) }
-            \\fn inc(a: int32) -> int32 { a + 1 }
-            \\fn main() -> int32 {
-            \\    let t = id(1);      // consumed by `t + 1`: coalesced
-            \\    let u = t + 1;
-            \\    let b = id(2);      // live across `apply` below: keeps its take
-            \\    let c = apply(inc, 3); // indirect: always keeps its take
-            \\    b + c + u
-            \\}
-        },
-    });
+    const src = try helpers.probeSource("probes/cases", "ops_step8_coalescing");
+    defer testing.allocator.free(src);
+    var c = try compileText("app", &.{.{ "app", src }});
     defer c.deinit();
     const program = &c.program.?;
 
@@ -377,17 +350,9 @@ test "2.9 Step 8: direct-call result coalescing — take dropped only when safe"
 }
 
 test "2.9 LLIR lowering: indirect calls through function values" {
-    var c = try compileText("app", &.{
-        .{
-            "app",
-            \\fn add(a: int32, b: int32) -> int32 { a + b }
-            \\fn apply(f: fn(int32, int32) -> int32, a: int32, b: int32) -> int32 { f(a, b) }
-            \\fn main() -> int32 {
-            \\    let z = apply(add, 20, 22);
-            \\    z
-            \\}
-        },
-    });
+    const src = try helpers.probeSource("probes/cases", "ops_indirect_calls");
+    defer testing.allocator.free(src);
+    var c = try compileText("app", &.{.{ "app", src }});
     defer c.deinit();
     const program = &c.program.?;
 
@@ -482,20 +447,9 @@ test "2.9 LLIR lowering: register-window argument moves and elision" {
     // immediately before the call, so they too are homed; the caller
     // computes nothing else between. An argument live across another
     // call (used twice) cannot be homed — both calls carry a real move.
-    var c = try compileText("app", &.{
-        .{
-            "app",
-            \\fn add(a: int32, b: int32) -> int32 { a + b }
-            \\fn apply(f: fn(int32, int32) -> int32, a: int32, b: int32) -> int32 { f(a, b) }
-            \\fn twice(x: int32) -> int32 { x }
-            \\fn main() -> int32 {
-            \\    let z = apply(add, 20, 22);
-            \\    let a = 1;
-            \\    let r = twice(a) + twice(a);
-            \\    z + r
-            \\}
-        },
-    });
+    const src = try helpers.probeSource("probes/cases", "ops_window_arg_moves");
+    defer testing.allocator.free(src);
+    var c = try compileText("app", &.{.{ "app", src }});
     defer c.deinit();
     const program = &c.program.?;
 
@@ -552,16 +506,9 @@ test "2.9 LLIR lowering: all four slot_* ownership modes on one call's argument 
     // view installs `slot_borrow`, the shared counted `str` retains
     // with `slot_retain`, and the plain Copy scalar bit-copies with
     // `slot_copy` (Instruction Set §5).
-    var c = try compileText("app", &.{.{
-        "app",
-        \\struct Box { v: int32; }
-        \\fn sink(move b: Box, borrow s: str, t: str, n: int32) -> int32 { n }
-        \\fn main() -> int32 {
-        \\    let b = Box { v: 1 };
-        \\    let s = "x";
-        \\    sink(move b, s, s, 2)
-        \\}
-    }});
+    const src = try helpers.probeSource("probes/cases", "ops_slot_modes");
+    defer testing.allocator.free(src);
+    var c = try compileText("app", &.{.{ "app", src }});
     defer c.deinit();
     const program = &c.program.?;
 
@@ -644,24 +591,9 @@ test "2.9 LLIR lowering: self tailcall reuses the frame as a pure jump" {
 }
 
 test "2.10 LLIR lowering: syscalls carry host binding, specialized signature, and args" {
-    var c = try compileText("app", &.{
-        .{
-            "app",
-            \\const builtin = import("builtin");
-            \\const L = import("list");
-            \\fn main() -> void {
-            \\    let n = 42;
-            \\    let s = builtin.str(n);
-            \\    let b = builtin.box[int32](n);
-            \\    let v = builtin.unbox[int32](move b);
-            \\    builtin.print(s);
-            \\    builtin.print(s);
-            \\    let xs = L.range[int32](0, 5);
-            \\    let len = L.len[int32](xs);
-            \\    builtin.assert(v == n and len == 5, "ok");
-            \\}
-        },
-    });
+    const src = try helpers.probeSource("probes/cases", "ops_syscall_bindings");
+    defer testing.allocator.free(src);
+    var c = try compileText("app", &.{.{ "app", src }});
     defer c.deinit();
     const program = &c.program.?;
 
@@ -791,46 +723,9 @@ test "2.11 LLIR lowering: construct/destructure/switch descriptors stay atomic" 
     // offset) rows. Descriptor ranges and operands stay in bounds;
     // identical
     // descriptors share one row.
-    var c = try compileText("app", &.{
-        .{
-            "app",
-            \\const builtin = import("builtin");
-            \\struct File { fd: int32; path: str; drop(file) {} }
-            \\struct Nothing {}
-            \\union Result { Ok(File), Err(str) }
-            \\union Shape { Circle(int32), Rect(int32, int32) }
-            \\fn open_file(path: str) -> File { File{ fd: 3, path: path } }
-            \\fn make_ok(f: File) -> Result { Result::Ok(move f) }
-            \\fn mk_pair(f: File) -> tuple[File, int32] { (move f, 42) }
-            \\fn mk_list() -> list[int32] { [1, 2, 3] }
-            \\fn take(r: Result) -> File {
-            \\    match (move r) { Result::Ok(f) => f, Result::Err(e) => open_file(e) }
-            \\}
-            \\fn area(s: Shape) -> int32 {
-            \\    match (s) { Shape::Circle(r) => r, Shape::Rect(w, h) => w * h }
-            \\}
-            \\struct Wrapper { inner: File; tag: int32; }
-            \\fn unwrap(w: Wrapper) -> File {
-            \\    let Wrapper { inner, tag } = move w;
-            \\    inner
-            \\}
-            \\fn take_t(t: tuple[File, int32]) -> File {
-            \\    let (f, n) = move t;
-            \\    f
-            \\}
-            \\fn split(xs: list[File]) -> File {
-            \\    let [f, ..rest] = move xs;
-            \\    f
-            \\}
-            \\fn main() -> void {
-            \\    let a = Nothing{};
-            \\    let b = Nothing{};
-            \\    let _ = a;
-            \\    let _ = b;
-            \\    builtin.print("x");
-            \\}
-        },
-    });
+    const src = try helpers.probeSource("probes/cases", "ops_aggregate_descriptors");
+    defer testing.allocator.free(src);
+    var c = try compileText("app", &.{.{ "app", src }});
     defer c.deinit();
     const program = c.program orelse {
         std.log.err("frontend.compile failed: {any}", .{c.diag});
@@ -1039,22 +934,9 @@ test "2.11 LLIR lowering: switch arm targets are signed pc-relative offsets, bac
 }
 
 test "2.12 LLIR lowering: explicit copy/move from source lower to distinct fast slot ops" {
-    var c = try compileText("app", &.{
-        .{
-            "app",
-            \\const builtin = import("builtin");
-            \\fn wrap(a: int32) -> any { a } // return packs into any
-            \\fn sink(move a: any) -> void { let _ = a; }
-            \\fn main() -> void {
-            \\    let x = 5;
-            \\    let y = move x; // a Copy move folds away (air.md §5.4)
-            \\    let z = y + y;
-            \\    let u = wrap(z); // u: any, unique
-            \\    sink(move u); // the unique move survives
-            \\    builtin.print(builtin.str(x));
-            \\}
-        },
-    });
+    const src = try helpers.probeSource("probes/cases", "ops_explicit_move");
+    defer testing.allocator.free(src);
+    var c = try compileText("app", &.{.{ "app", src }});
     defer c.deinit();
     const program = c.program orelse {
         std.log.err("frontend.compile failed: {any}", .{c.diag});
@@ -1285,17 +1167,9 @@ test "2.12: borrow-root move/drop are rejected by the input CFG validator (Core 
 }
 
 test "2.13 LLIR lowering: maybe-unique path arms one cleanup cell, disarm + conditional drop" {
-    var c = try compileText("app", &.{
-        .{
-            "app",
-            \\struct File { fd: int32; drop(file) {} }
-            \\fn consume(move f: File) -> void {}
-            \\fn main() -> void {
-            \\    let f = File{ fd: 1 };
-            \\    if (true) { consume(move f); } else { }
-            \\}
-        },
-    });
+    const src = try helpers.probeSource("probes/cases", "ops_maybe_unique_cleanup");
+    defer testing.allocator.free(src);
+    var c = try compileText("app", &.{.{ "app", src }});
     defer c.deinit();
     const program = c.program orelse {
         std.log.err("frontend.compile failed: {any}", .{c.diag});
@@ -1352,17 +1226,9 @@ test "2.13 LLIR lowering: maybe-unique path arms one cleanup cell, disarm + cond
 }
 
 test "2.13 LLIR lowering: definitely-released path disarms on every branch, no cleanup_drop" {
-    var c = try compileText("app", &.{
-        .{
-            "app",
-            \\struct File { fd: int32; drop(file) {} }
-            \\fn consume(move f: File) -> void {}
-            \\fn main() -> void {
-            \\    let f = File{ fd: 1 };
-            \\    if (true) { consume(move f); } else { consume(move f); }
-            \\}
-        },
-    });
+    const src = try helpers.probeSource("probes/cases", "ops_definitely_released");
+    defer testing.allocator.free(src);
+    var c = try compileText("app", &.{.{ "app", src }});
     defer c.deinit();
     const program = c.program orelse {
         std.log.err("frontend.compile failed: {any}", .{c.diag});
@@ -1404,17 +1270,9 @@ test "2.13 LLIR lowering: definitely-released path disarms on every branch, no c
 }
 
 test "2.13 LLIR lowering: definitely-owned path is a plain drop, no cleanup cells" {
-    var c = try compileText("app", &.{
-        .{
-            "app",
-            \\const builtin = import("builtin");
-            \\fn wrap(a: int32) -> any { a }
-            \\fn main() -> void {
-            \\    let u = wrap(1);
-            \\    let _ = u;
-            \\}
-        },
-    });
+    const src = try helpers.probeSource("probes/cases", "ops_definitely_owned_drop");
+    defer testing.allocator.free(src);
+    var c = try compileText("app", &.{.{ "app", src }});
     defer c.deinit();
     const program = c.program orelse {
         std.log.err("frontend.compile failed: {any}", .{c.diag});
@@ -1465,20 +1323,9 @@ test "2.10 LLIR lowering: lifecycle planning resolves name-only direct-call para
     // `move` argument is consumed (no caller-side release trails the
     // call — the ownership travels via `slot_move`), and a unique
     // `borrow` argument is not consumed (the callee gets a view).
-    var c = try compileText("app", &.{
-        .{
-            "app",
-            \\fn take(move s: str) -> void {}
-            \\struct File { fd: int32; drop(file) {} }
-            \\fn peek(borrow f: File) -> void {}
-            \\fn main() -> void {
-            \\    let s = "hi";
-            \\    take(move s);
-            \\    let f = File{ fd: 1 };
-            \\    peek(f);
-            \\}
-        },
-    });
+    const src = try helpers.probeSource("probes/cases", "ops_lifecycle_param_modes");
+    defer testing.allocator.free(src);
+    var c = try compileText("app", &.{.{ "app", src }});
     defer c.deinit();
     const program = c.program orelse {
         std.log.err("frontend.compile failed: {any}", .{c.diag});

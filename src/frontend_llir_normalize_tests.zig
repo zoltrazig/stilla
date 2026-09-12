@@ -344,11 +344,11 @@ test "3.2 LLIR normalization matrix: every record family normalizes to a valid 8
     // (3.1), an unmodified input CFG, and the family's records.
 
     // arithmetic — register ops plus an immediate fusion (2.14).
+    const src_arithmetic = try helpers.probeSource("probes/cases", "norm_arithmetic");
+    defer testing.allocator.free(src_arithmetic);
     try expectSourceNormalizes(
         "arithmetic",
-        \\fn m(a: int32, b: int32) -> int32 { (a + b) * 2 - a / b }
-        \\fn main() -> int32 { m(10, 2) }
-    ,
+        src_arithmetic,
         &.{
             .{ .op = .add_i32, .min = 1 },
             .{ .op = .muli_i32, .min = 1 },
@@ -361,15 +361,11 @@ test "3.2 LLIR normalization matrix: every record family normalizes to a valid 8
     // move-destructure back is `unpack_struct` (the single-result
     // `read_field` projections are documented placeholders, TODO 2.15
     // summary).
+    const src_construct = try helpers.probeSource("probes/cases", "norm_construct");
+    defer testing.allocator.free(src_construct);
     try expectSourceNormalizes(
         "construct",
-        \\struct Pair { x: int32; y: int32; }
-        \\fn main() -> int32 {
-        \\    let p = Pair{ x: 1, y: 2 };
-        \\    let Pair { x, y } = move p;
-        \\    x + y
-        \\}
-    ,
+        src_construct,
         &.{
             .{ .op = .construct, .min = 1 },
             .{ .op = .unpack_struct, .min = 1 },
@@ -378,23 +374,22 @@ test "3.2 LLIR normalization matrix: every record family normalizes to a valid 8
 
     // direct call — the v9 `jal ra` (a direct call record: the
     // U-type `jal` with the `ra` link).
+    const src_direct_call = try helpers.probeSource("probes/cases", "norm_direct_call");
+    defer testing.allocator.free(src_direct_call);
     try expectSourceNormalizes(
         "direct call",
-        \\fn id(x: int32) -> int32 { x }
-        \\fn main() -> int32 { id(7) }
-    ,
+        src_direct_call,
         &.{.{ .op = .jal, .min = 1 }},
     );
 
     // value call — the function value is a module member: module_ref +
     // load_member loads the entry PC, `jalr` resolves the callee from
     // the slot.
+    const src_value_call = try helpers.probeSource("probes/cases", "norm_value_call");
+    defer testing.allocator.free(src_value_call);
     try expectSourceNormalizes(
         "value call",
-        \\fn add(a: int32, b: int32) -> int32 { a + b }
-        \\fn apply(f: fn(int32, int32) -> int32, a: int32, b: int32) -> int32 { f(a, b) }
-        \\fn main() -> int32 { apply(add, 1, 2) }
-    ,
+        src_value_call,
         &.{
             .{ .op = .module_ref, .min = 1 },
             .{ .op = .load_member, .min = 1 },
@@ -403,27 +398,22 @@ test "3.2 LLIR normalization matrix: every record family normalizes to a valid 8
     );
 
     // syscall.
+    const src_syscall = try helpers.probeSource("probes/cases", "norm_syscall");
+    defer testing.allocator.free(src_syscall);
     try expectSourceNormalizes(
         "syscall",
-        \\const builtin = import("builtin");
-        \\fn main() -> void {
-        \\    builtin.print(builtin.str(42));
-        \\}
-    ,
+        src_syscall,
         &.{.{ .op = .syscall, .min = 1 }},
     );
 
     // switch — a non-consuming union match dispatches on the tag and
     // unpacks the arm's payload by reference (the `read_tag` that feeds
     // the switch is among the documented placeholder projections).
+    const src_switch = try helpers.probeSource("probes/cases", "norm_switch");
+    defer testing.allocator.free(src_switch);
     try expectSourceNormalizes(
         "switch",
-        \\union Shape { Circle(int32), Rect(int32, int32) }
-        \\fn area(s: Shape) -> int32 {
-        \\    match (s) { Shape::Circle(r) => r, Shape::Rect(w, h) => w * h }
-        \\}
-        \\fn main() -> int32 { area(Shape::Circle(3)) }
-    ,
+        src_switch,
         &.{
             .{ .op = .construct, .min = 1 },
             .{ .op = .switch_, .min = 1 },
@@ -433,14 +423,11 @@ test "3.2 LLIR normalization matrix: every record family normalizes to a valid 8
 
     // multi-result destructure — a three-element tuple unpacks into
     // three result slots.
+    const src_multi_result = try helpers.probeSource("probes/cases", "norm_multi_result_destructure");
+    defer testing.allocator.free(src_multi_result);
     try expectSourceNormalizes(
         "multi-result destructure",
-        \\fn take3(t: tuple[int32, int32, int32]) -> int32 {
-        \\    let (a, b, c) = move t;
-        \\    a + b + c
-        \\}
-        \\fn main() -> int32 { take3((1, 2, 3)) }
-    ,
+        src_multi_result,
         &.{
             .{ .op = .construct, .min = 1 },
             .{ .op = .unpack_tuple, .min = 1 },
@@ -511,15 +498,11 @@ test "3.2 LLIR normalization matrix: every record family normalizes to a valid 8
 
     // cleanup — v1 (Instruction Set §4): no token ops exist. The non-consuming
     // else-edge destroys the owner unconditionally before the merge.
+    const src_cleanup = try helpers.probeSource("probes/cases", "norm_cleanup_edge_drop");
+    defer testing.allocator.free(src_cleanup);
     try expectSourceNormalizes(
         "cleanup edge drop",
-        \\struct File { fd: int32; drop(file) {} }
-        \\fn consume(move f: File) -> void {}
-        \\fn main() -> void {
-        \\    let f = File{ fd: 1 };
-        \\    if (true) { consume(move f); } else { }
-        \\}
-    ,
+        src_cleanup,
         &.{
             .{ .op = .drop, .min = 1 },
         },
@@ -527,15 +510,11 @@ test "3.2 LLIR normalization matrix: every record family normalizes to a valid 8
 
     // dynamic drop — a definitely-owned unique `any` is dropped
     // unconditionally by the residual runtime `drop` (2.13).
+    const src_dynamic_drop = try helpers.probeSource("probes/cases", "norm_dynamic_drop");
+    defer testing.allocator.free(src_dynamic_drop);
     try expectSourceNormalizes(
         "dynamic drop",
-        \\const builtin = import("builtin");
-        \\fn wrap(a: int32) -> any { a }
-        \\fn main() -> void {
-        \\    let u = wrap(1);
-        \\    let _ = u;
-        \\}
-    ,
+        src_dynamic_drop,
         &.{.{ .op = .drop, .min = 1 }},
     );
 }
@@ -729,13 +708,9 @@ test "3.2 frame contract: direct and value calls — header, params, pc/sp/fp tr
     // Direct call: main -> add3(1, 2, 3). The MiniVm drives the call
     // record and the callee's ret, asserting every transition of spec
     // §5.3/§5.4 and the FunctionDesc rebuild after the resume.
-    var c = try compileText("app", &.{
-        .{
-            "app",
-            \\fn add3(a: int32, b: int32, c: int32) -> int32 { a + b + c }
-            \\fn main() -> int32 { add3(1, 2, 3) }
-        },
-    });
+    const src_direct = try helpers.probeSource("probes/cases", "norm_frame_direct_call");
+    defer testing.allocator.free(src_direct);
+    var c = try compileText("app", &.{.{ "app", src_direct }});
     defer c.deinit();
     const program = c.program orelse return error.TestUnexpectedResult;
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
@@ -816,17 +791,9 @@ test "3.2 frame contract: direct and value calls — header, params, pc/sp/fp tr
     // slot. The callee's signature is read from the function table at
     // the resolved target (the `f` argument is the callee selector, not
     // a parameter).
-    var c2 = try compileText("app", &.{
-        .{
-            "app",
-            \\fn add(a: int32, b: int32) -> int32 { a + b }
-            \\fn apply(f: fn(int32, int32) -> int32, a: int32, b: int32) -> int32 { f(a, b) }
-            \\fn main() -> int32 {
-            \\    let z = apply(add, 10, 20);
-            \\    z
-            \\}
-        },
-    });
+    const src_value = try helpers.probeSource("probes/cases", "norm_frame_value_call");
+    defer testing.allocator.free(src_value);
+    var c2 = try compileText("app", &.{.{ "app", src_value }});
     defer c2.deinit();
     const program2 = c2.program orelse return error.TestUnexpectedResult;
     var arena2 = std.heap.ArenaAllocator.init(testing.allocator);
@@ -893,17 +860,9 @@ test "3.2 frame contract: executing the emitted argument moves into the window" 
     // The MiniVm executes the move record, then the call; the callee
     // reads its parameter from r0..r(P-1) — the window cell the move
     // wrote.
-    var c = try compileText("app", &.{
-        .{
-            "app",
-            \\fn f(x: int32) -> int32 { x }
-            \\fn main() -> int32 {
-            \\    let a = 1;
-            \\    let r = f(a) + f(a);
-            \\    r
-            \\}
-        },
-    });
+    const src_argument_moves = try helpers.probeSource("probes/cases", "norm_argument_moves");
+    defer testing.allocator.free(src_argument_moves);
+    var c = try compileText("app", &.{.{ "app", src_argument_moves }});
     defer c.deinit();
     const program = c.program orelse return error.TestUnexpectedResult;
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
@@ -1159,9 +1118,9 @@ test "3.2 frame contract: argument-0 owner is consumed before the result publish
     // published. Here the callee takes a Copy scalar, so there is no
     // distinct owner handle — the invariant is that `returnFrom` writes
     // the result without retaining (slot 0 holds exactly the result).
-    var l = try compileText("app", &.{
-        .{ "app", "fn id(x: int32) -> int32 { x }\nfn main() -> int32 { id(5) }" },
-    });
+    const src_arg0_owner = try helpers.probeSource("probes/cases", "norm_arg0_owner");
+    defer testing.allocator.free(src_arg0_owner);
+    var l = try compileText("app", &.{.{ "app", src_arg0_owner }});
     defer l.deinit();
     const program = l.program orelse return error.TestUnexpectedResult;
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
@@ -1208,18 +1167,9 @@ test "3.2 frame contract: every call's take is adjacent with the result-alias so
     // immediately at pc+1 whose source is the result alias
     // `F(L+3+O-A)`; a void callee must see no take at its fallthrough.
     // Scan a lowering and assert both.
-    var l = try compileText("app", &.{
-        .{
-            "app",
-            \\fn f(x: int32) -> int32 { x }
-            \\fn g() -> void {}
-            \\fn main() -> int32 {
-            \\    let a = f(1);
-            \\    g();
-            \\    a
-            \\}
-        },
-    });
+    const src_take_adjacency = try helpers.probeSource("probes/cases", "norm_take_adjacency");
+    defer testing.allocator.free(src_take_adjacency);
+    var l = try compileText("app", &.{.{ "app", src_take_adjacency }});
     defer l.deinit();
     const program = l.program orelse return error.TestUnexpectedResult;
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
@@ -1484,17 +1434,11 @@ test "3.2 LLIR normalization: host syscalls and any dynamic types normalize toge
     // payload with builtin syscalls lowers to a valid image carrying
     // the payload TypeIds on the any instructions and the binding
     // signature on the syscall.
+    const src_host_any = try helpers.probeSource("probes/cases", "norm_host_any");
+    defer testing.allocator.free(src_host_any);
     try expectSourceNormalizes(
         "host_any",
-        \\const builtin = import("builtin");
-        \\fn wrap(a: int64) -> any { a }
-        \\fn main() -> void {
-        \\    let v: int64 = 9007199254740993;
-        \\    let a = wrap(v);
-        \\    let w = (move a) as int64;
-        \\    builtin.print(builtin.str(1));
-        \\}
-    ,
+        src_host_any,
         &.{
             // The i64 payload is Copy, so the return pack copies; the
             // unique-any recovery consumes the shell (move).

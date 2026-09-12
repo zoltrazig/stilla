@@ -173,6 +173,21 @@ LLIR emission modes on top; the embeddable path goes through
 `artifact_bundle.ArtifactBundle` and the interpreter entry points
 ([architecture.md](architecture.md)).
 
+## Corpus smoke coverage
+
+The `probes/*.st` directory is the dynamic smoke corpus. `probe_corpus.zig`
+enumerates it at test time (sorted), and `frontend_pass_smoke_tests.zig`
+drives every probe through CFG lowering plus the canonical-AIR round-trip,
+each Pass 7-8 rewrite individually (validated and round-tripped after each),
+the full optimized pipeline with post-optimization drop lowering, and the
+LLIR `lowerLlir` / validate / assemble / binary round-trip. The HIR build
+corpus (`hir_tests.zig`) and the consumers/SEG on-off differentials
+(`hir_simplify_tests.zig`, `hir_seg_tests.zig`) enumerate the same
+directory, so a new probe joins every suite without a hardcoded list.
+Whole-program black-box fixtures that are not part of the smoke corpus
+(host bindings, traps, intentional diagnostics) live under `probes/cases/`
+and are read by spec.
+
 ## Detail documents
 
 - [module-graph.md](module-graph.md) — module identity, resolution, loading, cycle detection.

@@ -39,34 +39,15 @@ fn expectCompiles(entry: []const u8, texts: []const struct { []const u8, []const
 
 test "spec examples compile: Core 2.8 using value alias" {
     // `using string.upper as up; up(text)` resolves to the member.
-    try expectCompiles("app", &.{
-        .{
-            "app",
-            \\const string = import("string");
-            \\using string.upper as up;
-            \\fn shout(text: str) -> str { up(text) }
-            \\fn main() -> void { let _ = shout("hi"); }
-        },
-    });
+    const src = try helpers.probeSource("probes/cases", "spec_core_2_8_using_value_alias");
+    defer testing.allocator.free(src);
+    try expectCompiles("app", &.{.{ "app", src }});
 }
 
 test "spec examples compile: Core 6.1 no implicit receiver" {
-    try expectCompiles("app", &.{
-        .{
-            "app",
-            \\struct Counter {
-            \\    value: int32;
-            \\    next: fn(borrow Counter) -> int32;
-            \\}
-            \\fn main() -> int32 {
-            \\    let counter = Counter{
-            \\        value: 10,
-            \\        next: fn(borrow c: Counter) -> int32 { c.value + 1 }
-            \\    };
-            \\    counter.next(counter)
-            \\}
-        },
-    });
+    const src = try helpers.probeSource("probes/cases", "spec_core_6_1_no_implicit_receiver");
+    defer testing.allocator.free(src);
+    try expectCompiles("app", &.{.{ "app", src }});
 }
 
 test "spec examples compile: Core 10.8 box and unbox" {
@@ -75,84 +56,35 @@ test "spec examples compile: Core 10.8 box and unbox" {
     // returns it. A *Unique* payload is extracted only by consuming the
     // box — `unbox(move b)` — the no-borrowed-returns rule of Core
     // §10.7 applied to boxes.
-    try expectCompiles("app", &.{
-        .{
-            "app",
-            \\const builtin = import("builtin");
-            \\struct Token { id: int32; }
-            \\fn main() -> int32 {
-            \\    let t = builtin.box(Token { id: 7 });
-            \\    let t2 = builtin.unbox(move t);
-            \\    t2.id
-            \\}
-        },
-    });
+    const src = try helpers.probeSource("probes/cases", "spec_core_10_8_box_and_unbox");
+    defer testing.allocator.free(src);
+    try expectCompiles("app", &.{.{ "app", src }});
 }
 
 test "spec examples compile: Core 11.6 any" {
-    try expectCompiles("app", &.{
-        .{
-            "app",
-            \\const builtin = import("builtin");
-            \\struct File { fd: int32; drop(f) { builtin.print("x"); } }
-            \\fn open_file(path: str) -> File { File{ fd: 1 } }
-            \\fn main() -> void {
-            \\    let a: any = 42;
-            \\    let b: any = "hello";
-            \\    let c: any = open_file("f");
-            \\}
-        },
-    });
+    const src = try helpers.probeSource("probes/cases", "spec_core_11_6_any");
+    defer testing.allocator.free(src);
+    try expectCompiles("app", &.{.{ "app", src }});
 }
 
 test "spec examples compile: Core 11.6.1 recovery by as" {
-    try expectCompiles("app", &.{
-        .{
-            "app",
-            \\fn main() -> int32 {
-            \\    let a: any = 42;
-            \\    let b = a as int32;
-            \\    b
-            \\}
-        },
-    });
+    const src = try helpers.probeSource("probes/cases", "spec_core_11_6_1_recovery_by_as");
+    defer testing.allocator.free(src);
+    try expectCompiles("app", &.{.{ "app", src }});
 }
 
 test "spec examples compile: Core 11.6.2 type-test match" {
-    try expectCompiles("app", &.{
-        .{
-            "app",
-            \\const builtin = import("builtin");
-            \\fn main() -> void {
-            \\    let a: any = 42;
-            \\    match (a) {
-            \\        int32 n => builtin.print(builtin.str(n)),
-            \\        str s => builtin.print(s),
-            \\        _ => builtin.print("other")
-            \\    };
-            \\}
-        },
-    });
+    const src = try helpers.probeSource("probes/cases", "spec_core_11_6_2_type_test_match");
+    defer testing.allocator.free(src);
+    try expectCompiles("app", &.{.{ "app", src }});
 }
 
 test "spec examples compile: Core 12 generics" {
     // §12.1 declarations, §12.2 inferred call, §12.3 explicit call,
     // §12.4 an explicit specialization as a first-class monomorphic value.
-    try expectCompiles("app", &.{
-        .{
-            "app",
-            \\struct Pair[A, B] { first: A; second: B; }
-            \\fn identity[T](move value: T) -> T { move value }
-            \\type PairList[T] = list[tuple[T, T]];
-            \\fn main() -> int32 {
-            \\    let p = Pair{ first: 1, second: "x" };
-            \\    let v = identity(42);
-            \\    let w = identity::[int32](43);
-            \\    let f = identity::[int32];
-            \\    f(v) + w
-            \\}
-        },
-    });
+    const src = try helpers.probeSource("probes/cases", "spec_core_12_generics");
+    defer testing.allocator.free(src);
+    try expectCompiles("app", &.{.{ "app", src }});
 }
 
 test "frontend lowers only monomorphic functions: instances, not templates" {
@@ -161,17 +93,9 @@ test "frontend lowers only monomorphic functions: instances, not templates" {
     // the unspecialized template never appears, and no `.param` type
     // survives. Calls target the instances; recursion inside a generic
     // stays a self-loop under tail-call optimization.
-    var c = try compileText("app", &.{
-        .{
-            "app",
-            \\const iter = import("iter");
-            \\const lists = import("list");
-            \\const builtin = import("builtin");
-            \\fn main() -> int32 {
-            \\    iter.fold(lists.range(1, 10), 0, fn(move a: int32, borrow x: int32) -> int32 { a + x })
-            \\}
-        },
-    });
+    const src = try helpers.probeSource("probes/cases", "spec_monomorphic_instances");
+    defer testing.allocator.free(src);
+    var c = try compileText("app", &.{.{ "app", src }});
     defer c.deinit();
     const out = try irText(&c.program.?);
     defer testing.allocator.free(out);
@@ -190,17 +114,9 @@ test "frontend distinguishes generic instantiations and types payloads" {
     // Core §12.1/§12.3: `Option[int32]` and `Option[str]` are distinct
     // instantiations; a payload read is typed by the instantiation, and a
     // payload-type mismatch is a compile error (not silently accepted).
-    var c = try compileText("app", &.{
-        .{
-            "app",
-            \\const builtin = import("builtin");
-            \\using builtin.Option;
-            \\fn main() -> int32 {
-            \\    let a: Option[int32] = Option::Some(42);
-            \\    match (a) { Option::Some(v) => v, Option::None => 0 }
-            \\}
-        },
-    });
+    const src = try helpers.probeSource("probes/cases", "spec_generic_instantiation_payload_read");
+    defer testing.allocator.free(src);
+    var c = try compileText("app", &.{.{ "app", src }});
     defer c.deinit();
     const out = try irText(&c.program.?);
     defer testing.allocator.free(out);
@@ -209,131 +125,65 @@ test "frontend distinguishes generic instantiations and types payloads" {
 
     // The payload-type mismatch is caught: Option::Some(42) is
     // Option[int32], not Option[str].
-    var c2 = try compileText("app", &.{
-        .{
-            "app",
-            \\const builtin = import("builtin");
-            \\using builtin.Option;
-            \\fn main() -> void { let x: Option[str] = Option::Some(42); }
-        },
-    });
+    const src2 = try helpers.probeSource("probes/cases", "spec_generic_instantiation_payload_mismatch");
+    defer testing.allocator.free(src2);
+    var c2 = try compileText("app", &.{.{ "app", src2 }});
     defer c2.deinit();
     try testing.expect(c2.program == null);
     try testing.expect(std.mem.indexOf(u8, c2.diag.?.message, "let type mismatch") != null);
 }
 
 test "spec examples compile: Core 13.3 match" {
-    try expectCompiles("app", &.{
-        .{
-            "app",
-            \\const builtin = import("builtin");
-            \\const lists = import("list");
-            \\union Result { Ok(str), Err(str) }
-            \\fn main() -> void {
-            \\    let result = Result::Ok("done");
-            \\    let message = match (result) {
-            \\        Result::Ok(value) => "ok: " + builtin.str(value),
-            \\        Result::Err(error) => "error: " + error
-            \\    };
-            \\    builtin.print(message);
-            \\}
-        },
-    });
+    const src = try helpers.probeSource("probes/cases", "spec_core_13_3_match");
+    defer testing.allocator.free(src);
+    try expectCompiles("app", &.{.{ "app", src }});
 }
 
 test "spec examples compile: Core 17 file module" {
     // The `os` module is a hypothetical host module, supplied here.
-    try expectCompiles("app", &.{
-        .{ "os", "fn open(path: str) -> int32;\nfn create(path: str) -> int32;\nfn close(fd: int32) -> void;" },
-        .{
-            "app",
-            \\const os = import("os");
-            \\const builtin = import("builtin");
-            \\struct File {
-            \\    fd: int32;
-            \\    path: str;
-            \\    drop(file) { os.close(file.fd); }
-            \\}
-            \\fn open(path: str) -> File { File{ fd: os.open(path), path: path } }
-            \\fn create(path: str) -> File { File{ fd: os.create(path), path: path } }
-            \\fn inspect(borrow file: File) -> void { builtin.print(file.path); }
-            \\fn main() -> void {
-            \\    let handle = open("data.txt");
-            \\    inspect(handle);
-            \\    drop handle;
-            \\}
-        },
-    });
+    const os_src = try helpers.probeSource("probes/cases", "spec_core_17_file_module_os");
+    defer testing.allocator.free(os_src);
+    const app_src = try helpers.probeSource("probes/cases", "spec_core_17_file_module_app");
+    defer testing.allocator.free(app_src);
+    try expectCompiles("app", &.{ .{ "os", os_src }, .{ "app", app_src } });
 }
 
 test "spec examples compile: StdLib 4 math and Runtime 4 box" {
-    try expectCompiles("app", &.{
-        .{
-            "app",
-            \\const math = import("math");
-            \\const builtin = import("builtin");
-            \\fn main() -> float32 {
-            \\    let radius = 2.0;
-            \\    let area = math.pi * math.pow(radius, 2.0);
-            \\    let diagonal = math.sqrt(3.0 * 3.0 + 4.0 * 4.0);
-            \\    area + diagonal
-            \\}
-        },
-    });
+    const math_src = try helpers.probeSource("probes/cases", "spec_stdlib_4_math");
+    defer testing.allocator.free(math_src);
+    try expectCompiles("app", &.{.{ "app", math_src }});
     // Runtime §4.5/§4.6: box and unbox.
-    try expectCompiles("app", &.{
-        .{
-            "app",
-            \\const builtin = import("builtin");
-            \\fn main() -> int32 {
-            \\    let b = builtin.box(42);
-            \\    let n = builtin.unbox(b);
-            \\    let u = builtin.unbox(move b);
-            \\    n + u
-            \\}
-        },
-    });
+    const box_src = try helpers.probeSource("probes/cases", "spec_runtime_4_box");
+    defer testing.allocator.free(box_src);
+    try expectCompiles("app", &.{.{ "app", box_src }});
 }
 
 test "spec examples compile: StdLib 7 iter" {
-    try expectCompiles("app", &.{
-        .{
-            "app",
-            \\const iter = import("iter");
-            \\const lists = import("list");
-            \\const builtin = import("builtin");
-            \\fn main() -> void {
-            \\    let total = iter.fold(
-            \\        lists.range(1, 10),
-            \\        0,
-            \\        fn(move acc: int32, borrow x: int32) -> int32 { acc + x }
-            \\    );
-            \\    builtin.print(builtin.str(total));
-            \\}
-        },
-    });
+    const src = try helpers.probeSource("probes/cases", "spec_stdlib_7_iter");
+    defer testing.allocator.free(src);
+    try expectCompiles("app", &.{.{ "app", src }});
 }
 
 test "frontend rejects missing, duplicate, and unknown struct fields" {
     // Core §8.1: all fields must be supplied exactly once; unknown fields
     // and duplicate fields are frontend.compile-time errors.
-    var c1 = try compileText("app", &.{
-        .{ "app", "struct P { x: int32; y: int32; }\nfn main() -> void { let p = P{ x: 1 }; }" },
-    });
+    const missing_src = try helpers.probeSource("probes/cases", "spec_reject_missing_field");
+    defer testing.allocator.free(missing_src);
+    var c1 = try compileText("app", &.{.{ "app", missing_src }});
     defer c1.deinit();
     try testing.expect(c1.program == null);
     try testing.expect(std.mem.indexOf(u8, c1.diag.?.message, "missing field") != null);
 
-    var c2 = try compileText("app", &.{
-        .{ "app", "struct P { x: int32; y: int32; }\nfn main() -> void { let p = P{ x: 1, x: 2 }; }" },
-    });
+    const duplicate_src = try helpers.probeSource("probes/cases", "spec_reject_duplicate_field");
+    defer testing.allocator.free(duplicate_src);
+    var c2 = try compileText("app", &.{.{ "app", duplicate_src }});
     defer c2.deinit();
     try testing.expect(c2.program == null);
     try testing.expect(std.mem.indexOf(u8, c2.diag.?.message, "duplicate field") != null);
 
-    var c3 = try compileText("app", &.{
-        .{ "app", "struct P { x: int32; }\nfn main() -> void { let p = P{ q: 1 }; }" },
-    });
+    const unknown_src = try helpers.probeSource("probes/cases", "spec_reject_unknown_field");
+    defer testing.allocator.free(unknown_src);
+    var c3 = try compileText("app", &.{.{ "app", unknown_src }});
     defer c3.deinit();
     try testing.expect(c3.program == null);
     try testing.expect(std.mem.indexOf(u8, c3.diag.?.message, "has no field") != null);
@@ -346,9 +196,9 @@ test "frontend rejects import outside a module constant initializer" {
     // a module value cannot be bound by a local let); a bare statement position,
     // whose result the checker discards, reaches the phase-3 backstop
     // (cfg_lower_expr.zig) tested here.
-    var c = try compileText("app", &.{
-        .{ "app", "fn main() -> void { import(\"builtin\"); }" },
-    });
+    const src = try helpers.probeSource("probes/cases", "spec_reject_import_outside_module_const");
+    defer testing.allocator.free(src);
+    var c = try compileText("app", &.{.{ "app", src }});
     defer c.deinit();
     try testing.expect(c.program == null);
     try testing.expect(std.mem.indexOf(u8, c.diag.?.message, "module constant initializer") != null);
@@ -356,14 +206,9 @@ test "frontend rejects import outside a module constant initializer" {
 
 test "frontend lowers arithmetic, comparison, and string concat operators" {
     // Core §16.3: int32 arithmetic; str + str concatenation.
-    var c = try compileText("app", &.{
-        .{
-            "app",
-            \\fn ops(a: int32, b: int32) -> int32 { (a + b) * 2 - a / b % 2 }
-            \\fn greet(name: str) -> str { "hi " + name }
-            \\fn main() -> void {}
-        },
-    });
+    const src = try helpers.probeSource("probes/cases", "spec_lower_arithmetic_comparison_concat");
+    defer testing.allocator.free(src);
+    var c = try compileText("app", &.{.{ "app", src }});
     defer c.deinit();
 
     const out = try irText(&c.program.?);
@@ -379,14 +224,9 @@ test "frontend lowers arithmetic, comparison, and string concat operators" {
 test "frontend lowers as casts" {
     // Core §16.3: `float32 as int32` and `int32 as float32` are core
     // conversions; the AIR emits a `num_cast` op.
-    var c = try compileText("app", &.{
-        .{
-            "app",
-            \\fn cvt(x: float32) -> int32 { x as int32 }
-            \\fn widen(x: int32) -> float32 { x as float32 }
-            \\fn main() -> void {}
-        },
-    });
+    const src = try helpers.probeSource("probes/cases", "spec_lower_as_casts");
+    defer testing.allocator.free(src);
+    var c = try compileText("app", &.{.{ "app", src }});
     defer c.deinit();
 
     const out = try irText(&c.program.?);
@@ -397,13 +237,9 @@ test "frontend lowers as casts" {
 test "frontend lowers shadowing with the previous binding read first" {
     // Core §4: `let x = x + 1;` — the right-hand `x` refers to the
     // previous binding.
-    var c = try compileText("app", &.{
-        .{
-            "app",
-            \\fn f() -> int32 { let x = 10; let x = x + 1; x }
-            \\fn main() -> void {}
-        },
-    });
+    const src = try helpers.probeSource("probes/cases", "spec_lower_shadowing");
+    defer testing.allocator.free(src);
+    var c = try compileText("app", &.{.{ "app", src }});
     defer c.deinit();
 
     const out = try irText(&c.program.?);
@@ -415,14 +251,9 @@ test "frontend lowers shadowing with the previous binding read first" {
 test "frontend lowers mutual recursion with declared return types" {
     // Core §6.5: functions are order-independent; mutual recursion is
     // permitted when every participant declares its return type.
-    var c = try compileText("app", &.{
-        .{
-            "app",
-            \\fn is_even(n: int32) -> bool { if (n == 0) { true } else { is_odd(n - 1) } }
-            \\fn is_odd(n: int32) -> bool { if (n == 0) { false } else { is_even(n - 1) } }
-            \\fn main() -> void { let r = is_even(4); }
-        },
-    });
+    const src = try helpers.probeSource("probes/cases", "spec_lower_mutual_recursion");
+    defer testing.allocator.free(src);
+    var c = try compileText("app", &.{.{ "app", src }});
     defer c.deinit();
 
     const out = try irText(&c.program.?);
@@ -436,15 +267,9 @@ test "frontend lowers mutual recursion with declared return types" {
 test "frontend lowers tuple destructuring to read_tuple projections" {
     // Core §14.2 / §14.6: tuple patterns project elements; the whole
     // tuple is consumed as one value.
-    var c = try compileText("app", &.{
-        .{
-            "app",
-            \\const builtin = import("builtin");
-            \\const lists = import("list");
-            \\fn f(t: tuple[int32, str]) -> int32 { let (a, b) = t; lists.len(["x"]) }
-            \\fn main() -> void {}
-        },
-    });
+    const src = try helpers.probeSource("probes/cases", "spec_lower_tuple_destructuring");
+    defer testing.allocator.free(src);
+    var c = try compileText("app", &.{.{ "app", src }});
     defer c.deinit();
 
     const out = try irText(&c.program.?);
@@ -459,19 +284,9 @@ test "frontend lowers list pattern reads with read_index" {
     // does not exist); element reads happen by list matching. A
     // non-consuming `[h, ..t]` pattern lowers to the bounds-checked
     // `read_index` op (borrowed view of a *Unique* element).
-    var c = try compileText("app", &.{
-        .{
-            "app",
-            \\const lists = import("list");
-            \\fn f(xs: list[int32]) -> int32 {
-            \\    match (xs) {
-            \\        [] => 0,
-            \\        [h, ..t] => h,
-            \\    }
-            \\}
-            \\fn main() -> void {}
-        },
-    });
+    const src = try helpers.probeSource("probes/cases", "spec_lower_list_pattern_read_index");
+    defer testing.allocator.free(src);
+    var c = try compileText("app", &.{.{ "app", src }});
     defer c.deinit();
 
     const out = try irText(&c.program.?);
@@ -484,14 +299,9 @@ test "frontend rejects list.get as a removed member" {
     // returned by value without consuming the list (Core §10.7), and no
     // function returns a borrowed value, so element reads happen by
     // matching instead. The binding no longer exists.
-    var c = try compileText("app", &.{
-        .{
-            "app",
-            \\const lists = import("list");
-            \\fn f(xs: list[int32]) -> int32 { lists.get(xs, 0) }
-            \\fn main() -> void {}
-        },
-    });
+    const src = try helpers.probeSource("probes/cases", "spec_reject_list_get");
+    defer testing.allocator.free(src);
+    var c = try compileText("app", &.{.{ "app", src }});
     defer c.deinit();
     try testing.expect(c.program == null);
     try testing.expect(std.mem.indexOf(u8, c.diag.?.message, "no member 'get'") != null);
@@ -502,18 +312,9 @@ test "frontend lowers consuming list-pattern destructuring with split_list" {
     // `let [head, ..rest] = move xs` consumes the collection as a whole;
     // one atomic `split_list` defines the item and the owned rest (air.md
     // §5.3) — each unique element becomes an owner.
-    var c = try compileText("app", &.{
-        .{
-            "app",
-            \\struct File { fd: int32; drop(file) {} }
-            \\fn consume(move f: File) -> void {}
-            \\fn main() -> void {
-            \\    let xs = [File{ fd: 1 }];
-            \\    let [f, ..rest] = move xs;
-            \\    consume(move f);
-            \\}
-        },
-    });
+    const src = try helpers.probeSource("probes/cases", "spec_lower_split_list");
+    defer testing.allocator.free(src);
+    var c = try compileText("app", &.{.{ "app", src }});
     defer c.deinit();
 
     const program = c.program orelse {
@@ -529,16 +330,9 @@ test "frontend lowers consuming list-pattern destructuring with split_list" {
 test "frontend lowers box and unbox to syscalls" {
     // Core §10.8 / Runtime §4.5–§4.6: box/unbox are host bindings;
     // box takes ownership, unbox(move b) transfers ownership back.
-    var c = try compileText("app", &.{
-        .{
-            "app",
-            \\const builtin = import("builtin");
-            \\fn main() -> void {
-            \\    let b = builtin.box(42);
-            \\    let y = builtin.unbox(move b);
-            \\}
-        },
-    });
+    const src = try helpers.probeSource("probes/cases", "spec_lower_box_unbox_syscalls");
+    defer testing.allocator.free(src);
+    var c = try compileText("app", &.{.{ "app", src }});
     defer c.deinit();
 
     const out = try irText(&c.program.?);
@@ -557,13 +351,9 @@ test "frontend rejects an unspecialized generic used as a value" {
     // template, not a runtime function value; `let f = identity` references
     // the template itself and is rejected. A specialization (`identity::[int32]`)
     // is a valid monomorphic function value.
-    var c = try compileText("app", &.{
-        .{
-            "app",
-            \\fn identity[T](move value: T) -> T { move value }
-            \\fn main() -> void { let f = identity; }
-        },
-    });
+    const src = try helpers.probeSource("probes/cases", "spec_reject_unspecialized_generic");
+    defer testing.allocator.free(src);
+    var c = try compileText("app", &.{.{ "app", src }});
     defer c.deinit();
     try testing.expect(c.program == null);
     try testing.expect(c.diag != null);
@@ -575,13 +365,9 @@ test "frontend accepts an explicitly specialized generic as a value" {
     // value of type `fn(move int32) -> int32`; the checker records the
     // specialization and the lowering emits a `fn_ref` to the instance's
     // monomorphic function (`{module}.{fn}.{id}`).
-    var c = try compileText("app", &.{
-        .{
-            "app",
-            \\fn identity[T](move value: T) -> T { move value }
-            \\fn main() -> int32 { let f = identity::[int32]; f(42) }
-        },
-    });
+    const src = try helpers.probeSource("probes/cases", "spec_accept_specialized_generic_value");
+    defer testing.allocator.free(src);
+    var c = try compileText("app", &.{.{ "app", src }});
     defer c.deinit();
     try testing.expect(c.program != null);
     const out = try irText(&c.program.?);
@@ -593,13 +379,9 @@ test "frontend accepts an explicitly specialized generic as a value" {
 test "frontend lowers an explicitly specialized generic call" {
     // Core §12.3: `identity::[int32](42)` is frontend.compile-time specialization
     // syntax; the call lowers to the concrete monomorphic function.
-    var c = try compileText("app", &.{
-        .{
-            "app",
-            \\fn identity[T](move value: T) -> T { move value }
-            \\fn main() -> void { let x = identity::[int32](42); }
-        },
-    });
+    const src = try helpers.probeSource("probes/cases", "spec_lower_specialized_generic_call");
+    defer testing.allocator.free(src);
+    var c = try compileText("app", &.{.{ "app", src }});
     defer c.deinit();
 
     const out = try irText(&c.program.?);
@@ -610,9 +392,9 @@ test "frontend lowers an explicitly specialized generic call" {
 
 test "frontend rejects moving an unknown binding" {
     // Core §10.4: `move` names a complete local binding.
-    var c = try compileText("app", &.{
-        .{ "app", "fn main() -> void { let x = move nope; }" },
-    });
+    const src = try helpers.probeSource("probes/cases", "spec_reject_move_unknown_binding");
+    defer testing.allocator.free(src);
+    var c = try compileText("app", &.{.{ "app", src }});
     defer c.deinit();
     try testing.expect(c.program == null);
     try testing.expect(std.mem.indexOf(u8, c.diag.?.message, "move of unknown binding") != null);
@@ -620,9 +402,9 @@ test "frontend rejects moving an unknown binding" {
 
 test "frontend rejects dropping an unknown binding" {
     // Core §9.4: explicit drop applies only to an owning unique local.
-    var c = try compileText("app", &.{
-        .{ "app", "fn main() -> void { drop nope; }" },
-    });
+    const src = try helpers.probeSource("probes/cases", "spec_reject_drop_unknown_binding");
+    defer testing.allocator.free(src);
+    var c = try compileText("app", &.{.{ "app", src }});
     defer c.deinit();
     try testing.expect(c.program == null);
     try testing.expect(std.mem.indexOf(u8, c.diag.?.message, "drop of unknown binding") != null);
@@ -631,15 +413,9 @@ test "frontend rejects dropping an unknown binding" {
 test "frontend lowers list.range and list.len with generics" {
     // Core §12.2: inferred specialization resolves `len[T]` against the
     // concrete `list[int32]` from `range` (Runtime §4.3–§4.4).
-    var c = try compileText("app", &.{
-        .{
-            "app",
-            \\const lists = import("list");
-            \\fn main() -> void {
-            \\    let n = lists.len(lists.range(0, 5));
-            \\}
-        },
-    });
+    const src = try helpers.probeSource("probes/cases", "spec_lower_list_range_len");
+    defer testing.allocator.free(src);
+    var c = try compileText("app", &.{.{ "app", src }});
     defer c.deinit();
 
     const out = try irText(&c.program.?);
@@ -651,16 +427,9 @@ test "frontend lowers list.range and list.len with generics" {
 test "frontend lowers a never-returning call to a trap path" {
     // Core §13.2 / Runtime §7.1: `never` coerces to any type; a panic
     // call terminates the block (trap), so the if/else join type-checks.
-    var c = try compileText("app", &.{
-        .{
-            "app",
-            \\const builtin = import("builtin");
-            \\fn die() -> never { builtin.panic("x") }
-            \\fn main() -> void {
-            \\    let r = if (true) { 1 } else { die() };
-            \\}
-        },
-    });
+    const src = try helpers.probeSource("probes/cases", "spec_lower_never_trap");
+    defer testing.allocator.free(src);
+    var c = try compileText("app", &.{.{ "app", src }});
     defer c.deinit();
 
     const out = try irText(&c.program.?);
@@ -670,19 +439,20 @@ test "frontend lowers a never-returning call to a trap path" {
 }
 
 test "frontend rejects calling a non-function value" {
-    var c = try compileText("app", &.{
-        .{ "app", "fn main() -> void { let x = 42; x(); }" },
-    });
+    const src = try helpers.probeSource("probes/cases", "spec_reject_call_non_function");
+    defer testing.allocator.free(src);
+    var c = try compileText("app", &.{.{ "app", src }});
     defer c.deinit();
     try testing.expect(c.program == null);
     try testing.expect(std.mem.indexOf(u8, c.diag.?.message, "calling a non-function") != null);
 }
 
 test "frontend rejects an unknown module member" {
-    var c = try compileText("app", &.{
-        .{ "calc", "fn add(a: int32, b: int32) -> int32 { a + b }" },
-        .{ "app", "const calc = import(\"calc\");\nfn main() -> void { let x = calc.sub(1, 2); }" },
-    });
+    const calc_src = try helpers.probeSource("probes/cases", "spec_reject_unknown_module_member_calc");
+    defer testing.allocator.free(calc_src);
+    const app_src = try helpers.probeSource("probes/cases", "spec_reject_unknown_module_member_app");
+    defer testing.allocator.free(app_src);
+    var c = try compileText("app", &.{ .{ "calc", calc_src }, .{ "app", app_src } });
     defer c.deinit();
     try testing.expect(c.program == null);
     try testing.expect(std.mem.indexOf(u8, c.diag.?.message, "no member") != null);
@@ -691,14 +461,11 @@ test "frontend rejects an unknown module member" {
 test "frontend resolves chained module-valued member calls" {
     // Core §2.7: `std.math.sqrt` is chained value-member access through
     // nested module-valued consts.
-    var c = try compileText("app", &.{
-        .{ "std", "const math = import(\"math\");\n" },
-        .{
-            "app",
-            \\const std = import("std");
-            \\fn main() -> void { let x = std.math.sqrt(16.0); }
-        },
-    });
+    const std_src = try helpers.probeSource("probes/cases", "spec_chained_module_member_std");
+    defer testing.allocator.free(std_src);
+    const app_src = try helpers.probeSource("probes/cases", "spec_chained_module_member_app");
+    defer testing.allocator.free(app_src);
+    var c = try compileText("app", &.{ .{ "std", std_src }, .{ "app", app_src } });
     defer c.deinit();
 
     const out = try irText(&c.program.?);

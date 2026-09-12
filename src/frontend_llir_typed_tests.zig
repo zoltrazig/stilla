@@ -20,16 +20,9 @@ const helpers = @import("frontend_test_support.zig");
 const compileText = helpers.compileText;
 
 test "typed printer is faithful to the typed record" {
-    var c = try compileText("app", &.{
-        .{
-            "app",
-            \\const builtin = import("builtin");
-            \\fn main(p: int32, q: int32) -> void {
-            \\    let r = p + q;
-            \\    builtin.print(builtin.str(r));
-            \\}
-        },
-    });
+    const src = try helpers.probeSource("probes/cases", "typed_i32_add");
+    defer testing.allocator.free(src);
+    var c = try compileText("app", &.{.{ "app", src }});
     defer c.deinit();
     const program = &c.program.?;
     const main = helpers.findFunc(program, "app.main");
@@ -54,16 +47,9 @@ test "typed printer is faithful to the typed record" {
 }
 
 test "an i32 add lowers to exactly one `add.i32` record — no canonicalization" {
-    var c = try compileText("app", &.{
-        .{
-            "app",
-            \\const builtin = import("builtin");
-            \\fn main(p: int32, q: int32) -> void {
-            \\    let r = p + q;
-            \\    builtin.print(builtin.str(r));
-            \\}
-        },
-    });
+    const src = try helpers.probeSource("probes/cases", "typed_i32_add");
+    defer testing.allocator.free(src);
+    var c = try compileText("app", &.{.{ "app", src }});
     defer c.deinit();
     const program = &c.program.?;
 
@@ -87,14 +73,9 @@ test "an i32 add lowers to exactly one `add.i32` record — no canonicalization"
 test "a u32 divide lowers to exactly one `div.u32` record — no staging" {
     // Using a cast (not a constant dividend) keeps the divide in the
     // CFG instead of constant-folding it away.
-    var c = try compileText("app", &.{
-        .{
-            "app",
-            \\const builtin = import("builtin");
-            \\fn q(x: int32, p: uint32) -> uint32 { let u = x as uint32; u / p }
-            \\fn main() -> void {}
-        },
-    });
+    const src = try helpers.probeSource("probes/cases", "typed_u32_divide");
+    defer testing.allocator.free(src);
+    var c = try compileText("app", &.{.{ "app", src }});
     defer c.deinit();
     const program = &c.program.?;
 
@@ -114,16 +95,9 @@ test "a u32 divide lowers to exactly one `div.u32` record — no staging" {
 }
 
 test "shift counts ride in the typed shift record — no mod-32 masking record" {
-    var c = try compileText("app", &.{
-        .{
-            "app",
-            \\const builtin = import("builtin");
-            \\fn main(p: int32, s: int32) -> void {
-            \\    let r = p << s;
-            \\    builtin.print(builtin.str(r));
-            \\}
-        },
-    });
+    const src = try helpers.probeSource("probes/cases", "typed_shift_count");
+    defer testing.allocator.free(src);
+    var c = try compileText("app", &.{.{ "app", src }});
     defer c.deinit();
     const program = &c.program.?;
 

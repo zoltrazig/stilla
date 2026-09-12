@@ -61,6 +61,16 @@ pub fn compileAggressive(entry: []const u8, texts: []const struct { []const u8, 
     return frontend.compile(testing.allocator, .{ .entry = entry, .sources = sources, .entry_fn = "main", .optimize = true, .optimize_aggressive = true });
 }
 
+/// Read a black-box fixture from `dir/<spec>.st` (e.g. `probes/cases`).
+/// The returned text is heap-owned by the caller and must outlive any
+/// compilation that borrows identifiers from it (compiled programs keep
+/// slices into the source, so free it after the compilation's deinit).
+pub fn probeSource(dir: []const u8, spec: []const u8) ![]u8 {
+    const path = try std.fmt.allocPrint(testing.allocator, "{s}/{s}.st", .{ dir, spec });
+    defer testing.allocator.free(path);
+    return std.Io.Dir.cwd().readFileAlloc(testing.io, path, testing.allocator, .limited(1 << 20));
+}
+
 /// The printed body of one function (after its `func @…` header, before
 /// the closing brace), or "" when the header is absent.
 pub fn funcBody(out: []const u8, header: []const u8) []const u8 {

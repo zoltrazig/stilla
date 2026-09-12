@@ -56,20 +56,9 @@ test "2.14 LLIR lowering: compiled const+op folds to immediate variants" {
     // (uint32 has no source literals — `7` is always int32,
     // and `a * 7` with `a: uint32` is a checker-level mismatch — so the
     // u32 immediate forms are exercised by the text-AIR test below.)
-    var c = try compileText("app", &.{
-        .{
-            "app",
-            \\const builtin = import("builtin");
-            \\fn f(a: int32) -> int32 { a + 2 }
-            \\fn g(a: int32) -> int32 { if (3 < a) { 1 } else { 0 } }
-            \\fn k(a: float32) -> float32 { a * 2.5 }
-            \\fn main() -> void {
-            \\    let _ = f(1);
-            \\    let _ = g(2);
-            \\    let _ = k(4.0);
-            \\}
-        },
-    });
+    const src = try helpers.probeSource("probes/cases", "imm_const_op_fusion");
+    defer testing.allocator.free(src);
+    var c = try compileText("app", &.{.{ "app", src }});
     defer c.deinit();
     const program = &c.program.?;
 
@@ -132,24 +121,9 @@ test "2.14 LLIR lowering: shifts lower to the unified family and fuse counts" {
     // source literal, so the u32 register form (`a >> b`) comes from the
     // compiled program and the u32 immediate form (`shrui`) from the
     // text-AIR fixture below.
-    var c = try compileText("app", &.{
-        .{
-            "app",
-            \\const builtin = import("builtin");
-            \\fn f(a: int32) -> int32 { a << 2 }
-            \\fn g(a: int32) -> int32 { a >> 3 }
-            \\fn j(a: int32, b: int32) -> int32 { a << b }
-            \\fn k(a: uint32, b: uint32) -> uint32 { a >> b }
-            \\fn m(a: int32) -> int32 { 2 << a }
-            \\fn main() -> void {
-            \\    let _ = f(1);
-            \\    let _ = g(2);
-            \\    let _ = j(4, 5);
-            \\    let _ = k(6 as uint32, 7 as uint32);
-            \\    let _ = m(8);
-            \\}
-        },
-    });
+    const src = try helpers.probeSource("probes/cases", "imm_shift_fusion");
+    defer testing.allocator.free(src);
+    var c = try compileText("app", &.{.{ "app", src }});
     defer c.deinit();
     const program = &c.program.?;
 
@@ -280,26 +254,9 @@ test "2.14 LLIR lowering: bitwise ops lower to the unified family and fuse" {
     // mask semantics). Bitwise ops are commutative, so a constant on
     // the left commutes and fuses too; a negative int32 constant (a
     // pattern with high bits set) never fuses and materializes.
-    var c = try compileText("app", &.{
-        .{
-            "app",
-            \\const builtin = import("builtin");
-            \\fn f(a: int32) -> int32 { a & 63 }
-            \\fn g(a: int32) -> int32 { a | 3 }
-            \\fn h(a: int32, b: int32) -> int32 { a ^ b }
-            \\fn k(a: int32) -> int32 { 1 | a }
-            \\fn m(a: uint32, b: uint32) -> uint32 { a ^ b }
-            \\fn n(a: int32) -> int32 { a & -2 }
-            \\fn main() -> void {
-            \\    let _ = f(1);
-            \\    let _ = g(2);
-            \\    let _ = h(4, 5);
-            \\    let _ = k(6);
-            \\    let _ = m(8 as uint32, 9 as uint32);
-            \\    let _ = n(9);
-            \\}
-        },
-    });
+    const src = try helpers.probeSource("probes/cases", "imm_bitwise_fusion");
+    defer testing.allocator.free(src);
+    var c = try compileText("app", &.{.{ "app", src }});
     defer c.deinit();
     const program = &c.program.?;
 
@@ -390,22 +347,9 @@ test "2.14 LLIR lowering: shift constants fold at construction" {
     // (arithmetic, sign-filling); the count is masked mod 32
     // (WebAssembly semantics), so `1 << 33` folds to `1 << 1` = 2 and
     // `-1 << -1` to `-1 << 31`.
-    var c = try compileText("app", &.{
-        .{
-            "app",
-            \\const builtin = import("builtin");
-            \\fn f() -> int32 { 6 << 2 }
-            \\fn g() -> int32 { -16 >> 2 }
-            \\fn h() -> int32 { 1 << 33 }
-            \\fn k() -> int32 { -1 << -1 }
-            \\fn main() -> void {
-            \\    let _ = f();
-            \\    let _ = g();
-            \\    let _ = h();
-            \\    let _ = k();
-            \\}
-        },
-    });
+    const src = try helpers.probeSource("probes/cases", "imm_shift_constants_fold");
+    defer testing.allocator.free(src);
+    var c = try compileText("app", &.{.{ "app", src }});
     defer c.deinit();
     const program = c.program orelse {
         std.log.err("frontend.compile failed: {any}", .{c.diag});
@@ -907,31 +851,9 @@ test "2.14 LLIR lowering: corpus fusion metric" {
 }
 
 test "2.15 LLIR lowering: compiled mul+add folds to madd/maddi, literal list read to read_indexi" {
-    var c = try compileText("app", &.{
-        .{
-            "app",
-            \\const builtin = import("builtin");
-            \\const lists = import("list");
-            \\fn poly(x: int32, y: int32, c: int32) -> int32 { x * y + c }
-            \\fn sink(v: int32) -> int32 { v }
-            \\fn via_call(x: int32, y: int32, c: int32) -> int32 { sink(x * y + c) }
-            \\fn scale(x: int32, c: int32) -> int32 { x * 2 + c }
-            \\fn acc(c: float32, x: float32, y: float32) -> float32 { c + x * y }
-            \\fn first(xs: list[int32]) -> int32 {
-            \\    match (xs) {
-            \\        [] => 0,
-            \\        [h, ..t] => h,
-            \\    }
-            \\}
-            \\fn main() -> void {
-            \\    let _ = poly(3, 4, 1);
-            \\    let _ = via_call(3, 4, 1);
-            \\    let _ = scale(5, 1);
-            \\    let _ = acc(1.0, 2.0, 3.0);
-            \\    let _ = first(lists.range(0, 3));
-            \\}
-        },
-    });
+    const src = try helpers.probeSource("probes/cases", "imm_madd_and_list_read");
+    defer testing.allocator.free(src);
+    var c = try compileText("app", &.{.{ "app", src }});
     defer c.deinit();
     const program = &c.program.?;
 

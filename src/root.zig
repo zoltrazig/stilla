@@ -185,6 +185,7 @@ test {
     _ = @import("frontend_regression_tests.zig");
     _ = @import("frontend_optimizer_tests.zig");
     _ = @import("frontend_cfg_passes_tests.zig");
+    _ = @import("frontend_pass_smoke_tests.zig");
     _ = @import("frontend_intrinsic_tests.zig");
     _ = @import("frontend_llir_core_tests.zig");
     _ = @import("frontend_llir_ops_tests.zig");

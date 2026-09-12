@@ -55,19 +55,9 @@ test "Pass 7 rewrites a self-recursive tail call into a loop" {
     // no-pred trampoline forwards the entry so the text form's first block
     // keeps no predecessors (air.md §13). Values are renumbered in text
     // order, so the header phi prints first.
-    var c = try compileText("app", &.{
-        .{
-            "app",
-            \\fn countdown(n: int32) -> int32 {
-            \\    if (n == 0) {
-            \\        0
-            \\    } else {
-            \\        countdown(n - 1)
-            \\    }
-            \\}
-            \\fn main() -> void {}
-        },
-    });
+    const src = try helpers.probeSource("probes/cases", "opt_tail_call_self_recursive");
+    defer testing.allocator.free(src);
+    var c = try compileText("app", &.{.{ "app", src }});
     defer c.deinit();
 
     var program = c.program.?;
@@ -98,18 +88,9 @@ test "Pass 7 rewrites a void self-recursive tail call into a loop" {
     // `count` returns void; the else arm's call is followed only by the
     // lowerer's `const void` noise before the bare `ret`, so it is in tail
     // position and becomes a loop (§7.1).
-    var c = try compileText("app", &.{
-        .{
-            "app",
-            \\fn count(n: int32) -> void {
-            \\    if (n == 0) {
-            \\    } else {
-            \\        count(n - 1)
-            \\    }
-            \\}
-            \\fn main() -> void {}
-        },
-    });
+    const src = try helpers.probeSource("probes/cases", "opt_tail_call_self_recursive_void");
+    defer testing.allocator.free(src);
+    var c = try compileText("app", &.{.{ "app", src }});
     defer c.deinit();
 
     var program = c.program.?;
@@ -137,21 +118,9 @@ test "Pass 7 skips a tail call whose chain merges another arm's value" {
     // rewrite's chain-edge drop would strand the `1` — the ret block's
     // phi would reduce to only the `0` arm and the function would return
     // 0 for every n >= 1 (§7.2). The call must stay ordinary instead.
-    var c = try compileText("app", &.{
-        .{
-            "app",
-            \\fn f(n: int32) -> int32 {
-            \\    if (n <= 0) {
-            \\        0
-            \\    } else if (n == 1) {
-            \\        1
-            \\    } else {
-            \\        f(n - 1)
-            \\    }
-            \\}
-            \\fn main() -> void {}
-        },
-    });
+    const src = try helpers.probeSource("probes/cases", "opt_tail_call_chain_merge");
+    defer testing.allocator.free(src);
+    var c = try compileText("app", &.{.{ "app", src }});
     defer c.deinit();
 
     var program = c.program.?;
@@ -166,21 +135,7 @@ test "Pass 7 skips a tail call whose chain merges another arm's value" {
     try testing.expect(std.mem.indexOf(u8, text, "j header") == null);
 
     // The full pipeline keeps the result correct and validates.
-    var full = try compileText("app", &.{
-        .{
-            "app",
-            \\fn f(n: int32) -> int32 {
-            \\    if (n <= 0) {
-            \\        0
-            \\    } else if (n == 1) {
-            \\        1
-            \\    } else {
-            \\        f(n - 1)
-            \\    }
-            \\}
-            \\fn main() -> void {}
-        },
-    });
+    var full = try compileText("app", &.{.{ "app", src }});
     defer full.deinit();
     var fprogram = full.program.?;
     try lower.optimize(&fprogram, full.arena.allocator());
@@ -199,19 +154,9 @@ test "Pass 7 skips tail calls whose ret block would be orphaned" {
     // Rewriting both would leave the ret block with no predecessors and
     // dead-block elimination would delete the function's only `ret`
     // (§7.2); both calls must stay ordinary.
-    var c = try compileText("app", &.{
-        .{
-            "app",
-            \\fn f(n: int32) -> int32 {
-            \\    if (n <= 0) {
-            \\        f(n)
-            \\    } else {
-            \\        f(n - 1)
-            \\    }
-            \\}
-            \\fn main() -> void {}
-        },
-    });
+    const src = try helpers.probeSource("probes/cases", "opt_tail_call_orphaned_ret");
+    defer testing.allocator.free(src);
+    var c = try compileText("app", &.{.{ "app", src }});
     defer c.deinit();
 
     var program = c.program.?;
@@ -232,19 +177,9 @@ test "Pass 7 skips a void tail call whose chain merges another arm" {
     // chain-edge drop would strand the middle arm's edge and the
     // validator's forward-edge check would reject the result (§7.2); the
     // call must stay ordinary instead.
-    var c = try compileText("app", &.{
-        .{
-            "app",
-            \\fn log(n: int32) -> void {
-            \\    if (n <= 0) {
-            \\    } else if (n == 1) {
-            \\    } else {
-            \\        log(n - 1)
-            \\    }
-            \\}
-            \\fn main() -> void {}
-        },
-    });
+    const src = try helpers.probeSource("probes/cases", "opt_tail_call_void_chain_merge");
+    defer testing.allocator.free(src);
+    var c = try compileText("app", &.{.{ "app", src }});
     defer c.deinit();
 
     var program = c.program.?;
@@ -259,19 +194,9 @@ test "Pass 7 skips a void tail call whose chain merges another arm" {
 test "Pass 7 leaves a non-tail self-recursive call alone" {
     // The recursive call is an operand of `add`, not the last thing before
     // the join's ret, so it is not in tail position (§7.1).
-    var c = try compileText("app", &.{
-        .{
-            "app",
-            \\fn f(n: int32) -> int32 {
-            \\    if (n == 0) {
-            \\        0
-            \\    } else {
-            \\        1 + f(n - 1)
-            \\    }
-            \\}
-            \\fn main() -> void {}
-        },
-    });
+    const src = try helpers.probeSource("probes/cases", "opt_tail_call_nontail");
+    defer testing.allocator.free(src);
+    var c = try compileText("app", &.{.{ "app", src }});
     defer c.deinit();
 
     var program = c.program.?;
@@ -287,20 +212,9 @@ test "Pass 7 leaves a tail call to another function alone" {
     // The call is in tail position but targets `g`, not the enclosing
     // function, so only the enclosing function's own recursion is eligible
     // (§7.2, §7.3).
-    var c = try compileText("app", &.{
-        .{
-            "app",
-            \\fn g(n: int32) -> int32 { n }
-            \\fn f(n: int32) -> int32 {
-            \\    if (n == 0) {
-            \\        0
-            \\    } else {
-            \\        g(n - 1)
-            \\    }
-            \\}
-            \\fn main() -> void {}
-        },
-    });
+    const src = try helpers.probeSource("probes/cases", "opt_tail_call_other_fn");
+    defer testing.allocator.free(src);
+    var c = try compileText("app", &.{.{ "app", src }});
     defer c.deinit();
 
     var program = c.program.?;
@@ -316,15 +230,9 @@ test "Pass 7 leaves a value call alone" {
     // The callee is a function-typed parameter, so the target is not
     // statically known; only direct calls to a known IrFunc are candidates
     // (§7.3).
-    var c = try compileText("app", &.{
-        .{
-            "app",
-            \\fn apply(g: fn(int32) -> int32, n: int32) -> int32 {
-            \\    g(n)
-            \\}
-            \\fn main() -> void {}
-        },
-    });
+    const src = try helpers.probeSource("probes/cases", "opt_tail_call_value");
+    defer testing.allocator.free(src);
+    var c = try compileText("app", &.{.{ "app", src }});
     defer c.deinit();
 
     var program = c.program.?;
@@ -341,22 +249,11 @@ test "Pass 7 leaves a tail call with live unique state alone" {
     // so the join is not phi-only and the call's result does not reach the
     // `ret` through nothing but phis (§7.1). The rewrite must not reorder
     // the drop (§7.3).
-    var c = try compileText("app", &.{
-        .{ "os", "fn get_handle() -> hostdata;" },
-        .{
-            "app",
-            \\const os = import("os");
-            \\fn f(n: int32) -> int32 {
-            \\    let h = os.get_handle();
-            \\    if (n == 0) {
-            \\        0
-            \\    } else {
-            \\        f(n - 1)
-            \\    }
-            \\}
-            \\fn main() -> void {}
-        },
-    });
+    const os_src = try helpers.probeSource("probes/cases", "opt_tail_call_live_unique_os");
+    defer testing.allocator.free(os_src);
+    const app_src = try helpers.probeSource("probes/cases", "opt_tail_call_live_unique_app");
+    defer testing.allocator.free(app_src);
+    var c = try compileText("app", &.{ .{ "os", os_src }, .{ "app", app_src } });
     defer c.deinit();
 
     var program = c.program.?;
@@ -372,19 +269,9 @@ test "Pass 7 runs before the Pass 8 pipeline" {
     // optimizer.md: the optimizer runs Pass 7 before Pass 8. `optimize`
     // therefore rewrites the tail call into a loop first, and the later
     // passes (which keep the loop reachable) leave the rewrite intact.
-    var c = try compileText("app", &.{
-        .{
-            "app",
-            \\fn countdown(n: int32) -> int32 {
-            \\    if (n == 0) {
-            \\        0
-            \\    } else {
-            \\        countdown(n - 1)
-            \\    }
-            \\}
-            \\fn main() -> void {}
-        },
-    });
+    const src = try helpers.probeSource("probes/cases", "opt_tail_call_before_pass8");
+    defer testing.allocator.free(src);
+    var c = try compileText("app", &.{.{ "app", src }});
     defer c.deinit();
 
     var program = c.program.?;
@@ -476,20 +363,9 @@ test "Pass 8.1 simplifies bitwise identities at construction" {
     // fire at each emit site: `x | 0 -> x` and `0 ^ x -> x` reuse the
     // operand (no instruction), `x & 0 -> 0` folds to the zero constant —
     // with the zero on either side (bitwise ops commute).
-    var c = try compileText("app", &.{
-        .{
-            "app",
-            \\const builtin = import("builtin");
-            \\fn f(a: int32) -> int32 { a | 0 }
-            \\fn g(a: int32) -> int32 { 0 ^ a }
-            \\fn h(a: int32) -> int32 { a & 0 }
-            \\fn main() -> void {
-            \\    let _ = f(1);
-            \\    let _ = g(2);
-            \\    let _ = h(3);
-            \\}
-        },
-    });
+    const src = try helpers.probeSource("probes/cases", "opt_bitwise_identities");
+    defer testing.allocator.free(src);
+    var c = try compileText("app", &.{.{ "app", src }});
     defer c.deinit();
     const text = try irText(&c.program.?);
     defer testing.allocator.free(text);
@@ -975,13 +851,9 @@ test "Pass 8.1 folds the core num_casts" {
 test "Pass 8.1 folded AIR round-trips through the standalone cfg parser" {
     // Folding rewrites ops in place (no new values, no id gaps), so the
     // printed text still re-parses and re-prints identically (air.md §13).
-    var c = try compileText("app", &.{
-        .{
-            "app",
-            \\fn f() -> int32 { 2 + 3 * 4 }
-            \\fn main() -> void {}
-        },
-    });
+    const src = try helpers.probeSource("probes/cases", "opt_folded_roundtrip");
+    defer testing.allocator.free(src);
+    var c = try compileText("app", &.{.{ "app", src }});
     defer c.deinit();
 
     var program = c.program.?;
@@ -1010,17 +882,9 @@ test "Pass 8.1 folded AIR round-trips through the standalone cfg parser" {
 test "frontend reuses duplicate pure computations in a block" {
     // `a * b` computed twice in the same block is computed once; the
     // second occurrence uses the first result.
-    var c = try compileText("app", &.{
-        .{
-            "app",
-            \\fn f(a: int32, b: int32) -> int32 {
-            \\    let x = a * b;
-            \\    let y = a * b;
-            \\    x + y
-            \\}
-            \\fn main() -> void {}
-        },
-    });
+    const src = try helpers.probeSource("probes/cases", "opt_cse_duplicate_pure");
+    defer testing.allocator.free(src);
+    var c = try compileText("app", &.{.{ "app", src }});
     defer c.deinit();
 
     const out = try irText(&c.program.?);
@@ -1040,17 +904,9 @@ test "frontend reuses duplicate pure computations in a block" {
 test "frontend does not commute CSE operand order" {
     // `a * b` and `b * a` are different expressions: no commutativity
     // (floating-point and NaN behavior must be unchanged).
-    var c = try compileText("app", &.{
-        .{
-            "app",
-            \\fn f(a: int32, b: int32) -> int32 {
-            \\    let x = a * b;
-            \\    let y = b * a;
-            \\    x + y
-            \\}
-            \\fn main() -> void {}
-        },
-    });
+    const src = try helpers.probeSource("probes/cases", "opt_cse_no_commute");
+    defer testing.allocator.free(src);
+    var c = try compileText("app", &.{.{ "app", src }});
     defer c.deinit();
 
     const out = try irText(&c.program.?);
@@ -1062,20 +918,9 @@ test "frontend does not commute CSE operand order" {
 test "frontend reuses duplicate reads and casts" {
     // The CSE candidate set spans the pure projections: an identical
     // `read_field` or `cast` in the same block is computed once.
-    var c = try compileText("app", &.{
-        .{
-            "app",
-            \\struct S { x: int32; }
-            \\fn f(s: S) -> float32 {
-            \\    let a = s.x;
-            \\    let b = s.x;
-            \\    let c = a as float32;
-            \\    let d = b as float32;
-            \\    c + d
-            \\}
-            \\fn main() -> void {}
-        },
-    });
+    const src = try helpers.probeSource("probes/cases", "opt_cse_reads_casts");
+    defer testing.allocator.free(src);
+    var c = try compileText("app", &.{.{ "app", src }});
     defer c.deinit();
 
     const out = try irText(&c.program.?);
@@ -1091,17 +936,9 @@ test "frontend does not CSE unique results" {
     // schedule (air.md §6.4): `h.file` (result type File, unique) is
     // computed twice, so the outer field reads see different bases and
     // all four `read_field`s stay.
-    var c = try compileText("app", &.{
-        .{
-            "app",
-            \\struct File { fd: int32; path: str; drop(file) {} }
-            \\struct Holder { file: File; drop(h) {} }
-            \\fn f(borrow h: Holder) -> int32 {
-            \\    h.file.fd + h.file.fd
-            \\}
-            \\fn main() -> void {}
-        },
-    });
+    const src = try helpers.probeSource("probes/cases", "opt_cse_unique");
+    defer testing.allocator.free(src);
+    var c = try compileText("app", &.{.{ "app", src }});
     defer c.deinit();
 
     const out = try irText(&c.program.?);
@@ -1112,18 +949,9 @@ test "frontend does not CSE unique results" {
 test "frontend CSE is block-local" {
     // A computation in the entry block is not reused in the join after
     // an `if` — construction-time CSE only sees the current block.
-    var c = try compileText("app", &.{
-        .{
-            "app",
-            \\fn f(a: int32, b: int32, c: bool) -> int32 {
-            \\    let x = a * b;
-            \\    let y = if (c) { 1 } else { 2 };
-            \\    let z = a * b;
-            \\    x + y + z
-            \\}
-            \\fn main() -> void {}
-        },
-    });
+    const src = try helpers.probeSource("probes/cases", "opt_cse_block_local");
+    defer testing.allocator.free(src);
+    var c = try compileText("app", &.{.{ "app", src }});
     defer c.deinit();
 
     const out = try irText(&c.program.?);
@@ -1135,9 +963,9 @@ test "frontend CSE is block-local" {
 test "construction-time optimized AIR round-trips through the standalone cfg parser" {
     // The on-the-fly rewrites happen at construction; the printed text
     // re-parses and re-prints identically (air.md §13).
-    var c = try compileText("app", &.{
-        .{ "app", "fn f(a: int32, b: int32) -> int32 { (a + b) * (a + b) }\nfn main() -> void {}" },
-    });
+    const src = try helpers.probeSource("probes/cases", "opt_construction_roundtrip");
+    defer testing.allocator.free(src);
+    var c = try compileText("app", &.{.{ "app", src }});
     defer c.deinit();
 
     const out = try irText(&c.program.?);
@@ -1711,20 +1539,9 @@ test "Pass 8.3 lower.optimize on a full program round-trips through the standalo
     // arm already computed and the else arm did not: the compiled AIR is
     // genuinely partially redundant and the whole optimize pipeline
     // (fold, cse, pre) must still round-trip.
-    var c = try compileText("app", &.{
-        .{
-            "app",
-            \\fn f(a: int32, b: int32, c: bool) -> bool {
-            \\    if (c) {
-            \\        a < b
-            \\    } else {
-            \\        false
-            \\    };
-            \\    a < b
-            \\}
-            \\fn main() -> void {}
-        },
-    });
+    const src = try helpers.probeSource("probes/cases", "opt_pre_full_program_roundtrip");
+    defer testing.allocator.free(src);
+    var c = try compileText("app", &.{.{ "app", src }});
     defer c.deinit();
 
     var program = c.program.?;
@@ -1753,20 +1570,9 @@ test "Pass 8.3 lower.optimize on a full program round-trips through the standalo
 test "frontend emits no copies for Copy moves, keeps move_ for unique" {
     // `consume(move a)` on an int32 is the value itself; `move` of an
     // unique owner still emits `move_` (ownership transfer, air.md §5.4).
-    var c = try compileText("app", &.{
-        .{
-            "app",
-            \\struct File { fd: int32; path: str; drop(file) {} }
-            \\fn consume(move n: int32) -> void {}
-            \\fn take(move file: File) -> void {}
-            \\fn main() -> void {
-            \\    let a = 5;
-            \\    consume(move a);
-            \\    let f = File{ fd: 1, path: "p" };
-            \\    take(move f);
-            \\}
-        },
-    });
+    const src = try helpers.probeSource("probes/cases", "opt_copy_moves");
+    defer testing.allocator.free(src);
+    var c = try compileText("app", &.{.{ "app", src }});
     defer c.deinit();
 
     const out = try irText(&c.program.?);
@@ -1948,19 +1754,9 @@ test "Pass 8.5 optimized AIR round-trips through the standalone cfg parser" {
 test "Pass 8.5 lower.optimize on a program with a dead block round-trips" {
     // The whole pipeline (fold, cse, pre, copyProp, deadBlock) must keep
     // the printed AIR round-tripping through the standalone parser.
-    var c = try compileText("app", &.{
-        .{
-            "app",
-            \\fn f(a: int32, b: int32) -> int32 {
-            \\    if (a < b) {
-            \\        a
-            \\    } else {
-            \\        b
-            \\    }
-            \\}
-            \\fn main() -> void {}
-        },
-    });
+    const src = try helpers.probeSource("probes/cases", "opt_dead_block_roundtrip");
+    defer testing.allocator.free(src);
+    var c = try compileText("app", &.{.{ "app", src }});
     defer c.deinit();
 
     var program = c.program.?;
@@ -1982,15 +1778,9 @@ test "Pass 8.8 if-conversion turns a pure select diamond branchless" {
     // a join phi. The diamond collapses into one `select` (the LLIR
     // image: `copy cond_reg` + `cmov`), the phis and the dead arms are
     // eliminated, and the cond block falls through to the join.
-    var c = try compileOpt("app", &.{
-        .{
-            "app",
-            \\fn sign(value: int32) -> int32 {
-            \\    if (value >= 0) { 1 } else { -1 }
-            \\}
-            \\fn main() -> void {}
-        },
-    });
+    const src = try helpers.probeSource("probes/cases", "opt_if_conversion_select");
+    defer testing.allocator.free(src);
+    var c = try compileOpt("app", &.{.{ "app", src }});
     defer c.deinit();
 
     const out = try irText(&c.program.?);
@@ -2009,25 +1799,9 @@ test "Pass 8.8 if-conversion leaves every hoisted instruction in one block" {
     // arm preceded the cond block in creation order, and the conversion
     // was rejected as "not dominated" (optimizer invariant violation) —
     // which stsmith hit with short-circuit `and`/`or` statements.
-    var c = try compileOpt("app", &.{
-        .{
-            "app",
-            \\const builtin = import("builtin");
-            \\fn f1() -> int64 {
-            \\    ((-250826282122) >> ((-196082829395) >> (-25495947749))) + (142791762226)
-            \\}
-            \\fn f4() -> uint64 {
-            \\    ((257500157809) & (249363292281)) * ((123056492540) & (165846480652))
-            \\}
-            \\fn main() -> void {
-            \\    let v1: uint32 = 9;
-            \\    let v3: uint64 = 12;
-            \\    let v45: int64 = f1();
-            \\    let v49: bool = (((v45) << (v45)) > (v45)) or ((((f4()) >> (((v45 as uint64)) >> ((v3) << ((v3) & (f4()))))) > (v3)) and (((v1) + ((v45 as uint32))) >= ((v1) & (v1))));
-            \\    builtin.assert(v49 == true, "x");
-            \\}
-        },
-    });
+    const src = try helpers.probeSource("probes/cases", "opt_if_conversion_hoisted");
+    defer testing.allocator.free(src);
+    var c = try compileOpt("app", &.{.{ "app", src }});
     defer c.deinit();
 
     // The conversion completes (the compile validated after if-conversion),
@@ -2042,13 +1816,9 @@ test "Pass 8.8 if-conversion absorbs short-circuit and/or second operands" {
     // `a > 0 and b > 0`: the short-circuit's else arm is `false`, the
     // then arm is the pure second comparison — the whole `and` becomes
     // one branchless select.
-    var c = try compileOpt("app", &.{
-        .{
-            "app",
-            \\fn both(a: int32, b: int32) -> bool { a > 0 and b > 0 }
-            \\fn main() -> void {}
-        },
-    });
+    const src = try helpers.probeSource("probes/cases", "opt_if_conversion_short_circuit");
+    defer testing.allocator.free(src);
+    var c = try compileOpt("app", &.{.{ "app", src }});
     defer c.deinit();
 
     const out = try irText(&c.program.?);
@@ -2061,16 +1831,9 @@ test "Pass 8.8 if-conversion absorbs short-circuit and/or second operands" {
 test "Pass 8.5 keeps diamonds with impure arms branchy" {
     // A side-effecting call in the then arm must stay on its path —
     // if-conversion must not hoist it. The diamond is not converted.
-    var c = try compileOpt("app", &.{
-        .{
-            "app",
-            \\const builtin = import("builtin");
-            \\fn f(c: bool, a: int32, b: int32) -> int32 {
-            \\    if (c) { builtin.print(builtin.str(a)); a } else { b }
-            \\}
-            \\fn main() -> void { let _ = f(true, 1, 2); }
-        },
-    });
+    const src = try helpers.probeSource("probes/cases", "opt_if_conversion_impure");
+    defer testing.allocator.free(src);
+    var c = try compileOpt("app", &.{.{ "app", src }});
     defer c.deinit();
 
     const out = try irText(&c.program.?);
@@ -2146,27 +1909,9 @@ test "Pass 8.9 a second iteration enables a further simplification" {
     // is the plan's "tail-call enabling a dead-block removal" family: a
     // late-pass leftover that only the next iteration's dead/forwarding
     // elimination reaches.
-    const src = &.{
-        .{
-            "app",
-            \\struct Token { id: int32; }
-            \\fn make(id: int32) -> Token {
-            \\    Token { id: id }
-            \\}
-            \\fn show(borrow t: Token) -> int32 {
-            \\    t.id
-            \\}
-            \\fn consume(move t: Token) -> void {
-            \\    drop t;
-            \\}
-            \\fn main() -> void {
-            \\    let a = make(7);
-            \\    let n = show(a);
-            \\    consume(move a);
-            \\}
-            ,
-        },
-    };
+    const src_buf = try helpers.probeSource("probes/cases", "opt_fixpoint_second_iteration");
+    defer testing.allocator.free(src_buf);
+    const src = &.{.{ "app", src_buf }};
 
     // Default single pass: the chain tail blocks survive as empty
     // forwarding blocks (`inline_join_1:` / `inline_join_2:`), each a

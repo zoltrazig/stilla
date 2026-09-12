@@ -12,6 +12,7 @@ const checker = @import("passes/checker.zig");
 const hir = @import("hir.zig");
 const hir_build = @import("passes/hir_build.zig");
 const hir_effects = @import("passes/hir_effects.zig");
+const probe_corpus = @import("probe_corpus.zig");
 const testing = std.testing;
 
 /// Compile `texts` (specifier → source), check it, and build the HIR.
@@ -116,16 +117,19 @@ test "S4: build fib-class module and validate every function root" {
     try expectEffectsAll(b.built, b.graph);
 }
 
-/// The corpus harness: compile every listed module of `dir` as its own
-/// entry (each file read from disk at the repo root — `zig build test`
-/// runs there, like `zig build examples`), build the HIR, and validate
-/// every function root. Deterministic manifest; a module that fails to
-/// build or validate is a loud failure (no silent skips).
-fn corpusList(dir: []const u8, specs: []const []const u8) !void {
+/// The corpus harness: compile every `dir/*.st` module as its own entry
+/// (each file read from disk at the repo root — `zig build test` runs
+/// there, like `zig build examples`), build the HIR, and validate every
+/// function root. The directory is enumerated at test time, so a new
+/// probe joins automatically; a module that fails to build or validate
+/// is a loud failure (no silent skips).
+fn corpusList(dir: []const u8) !void {
     var failures = std.ArrayList([]const u8).empty;
     defer failures.deinit(testing.allocator);
-    for (specs) |spec| {
-        const path = try std.fmt.allocPrint(testing.allocator, "{s}/{s}.st", .{ dir, spec });
+    var corpus = try probe_corpus.list(testing.allocator, dir);
+    defer corpus.deinit();
+    for (corpus.names) |spec| {
+        const path = try probe_corpus.path(testing.allocator, dir, spec);
         defer testing.allocator.free(path);
         const text = std.Io.Dir.cwd().readFileAlloc(testing.io, path, testing.allocator, .limited(1 << 20)) catch |err| {
             std.debug.print("HIR corpus: cannot read {s} ({s})\n", .{ path, @errorName(err) });
@@ -295,58 +299,11 @@ fn validateAllMsg(built: *const hir.BuiltProgram) ?[]const u8 {
 }
 
 test "S4: HIR corpus — examples/*.st build and validate" {
-    const ex = [_][]const u8{
-        "any",
-        "arrays",
-        "basics",
-        "box",
-        "fib",
-        "fib_tail_call",
-        "floats",
-        "fold",
-        "functions",
-        "generics",
-        "madd",
-        "maps",
-        "match",
-        "minmax",
-        "nest",
-        "ownership",
-        "strings",
-        "structs",
-    };
-    try corpusList("examples", &ex);
+    try corpusList("examples");
 }
 
 test "S4: HIR corpus — probes/*.st build and validate" {
-    const pr = [_][]const u8{
-        "aggregates",
-        "any",
-        "box",
-        "branch",
-        "calls",
-        "casts",
-        "cli_panic",
-        "cli_run",
-        "comparisons",
-        "constants",
-        "control_flow",
-        "fusion",
-        "generic",
-        "generic_aggregates",
-        "immediates",
-        "integer_bits",
-        "lifecycle",
-        "list_match",
-        "numeric",
-        "ownership",
-        "patterns",
-        "short_circuit",
-        "strings",
-        "tail_recursion",
-        "union_match",
-    };
-    try corpusList("probes", &pr);
+    try corpusList("probes");
 }
 // ---------------------------------------------------------------------------
 // S5→S6b: canonical-AIR seam checks (hir.md §10.3/§11 M1a, PROGRESS S5/S6).
@@ -385,9 +342,9 @@ fn compileText(entry: []const u8, text: []const u8) ![]u8 {
 /// round-trip (parse-back must succeed; the frontend already ran the
 /// CFG validator inside compile).
 fn airRoundTrip(dir: []const u8, spec: []const u8) !void {
-    const path = try std.fmt.allocPrint(testing.allocator, "{s}/{s}.st", .{ dir, spec });
+    const path = try probe_corpus.path(testing.allocator, dir, spec);
     defer testing.allocator.free(path);
-    const text = std.Io.Dir.cwd().readFileAlloc(testing.io, path, testing.allocator, .limited(1 << 20)) catch |err| {
+    const text = probe_corpus.read(testing.allocator, dir, spec) catch |err| {
         std.debug.print("S5 corpus: cannot read {s} ({s})\n", .{ path, @errorName(err) });
         return error.TestUnexpectedResult;
     };
@@ -407,58 +364,18 @@ fn airRoundTrip(dir: []const u8, spec: []const u8) !void {
     }
 }
 
+fn airRoundTripAll(dir: []const u8) !void {
+    var corpus = try probe_corpus.list(testing.allocator, dir);
+    defer corpus.deinit();
+    for (corpus.names) |spec| try airRoundTrip(dir, spec);
+}
+
 test "S5: canonical-AIR seam — examples/*.st compile and round-trip" {
-    const ex = [_][]const u8{
-        "any",
-        "arrays",
-        "basics",
-        "box",
-        "fib",
-        "fib_tail_call",
-        "floats",
-        "fold",
-        "functions",
-        "generics",
-        "madd",
-        "maps",
-        "match",
-        "minmax",
-        "nest",
-        "ownership",
-        "strings",
-    };
-    for (ex) |spec| try airRoundTrip("examples", spec);
+    try airRoundTripAll("examples");
 }
 
 test "S5: canonical-AIR seam — probes/*.st compile and round-trip" {
-    const pr = [_][]const u8{
-        "aggregates",
-        "any",
-        "box",
-        "branch",
-        "calls",
-        "casts",
-        "cli_panic",
-        "cli_run",
-        "comparisons",
-        "constants",
-        "control_flow",
-        "fusion",
-        "generic",
-        "generic_aggregates",
-        "immediates",
-        "integer_bits",
-        "lifecycle",
-        "list_match",
-        "numeric",
-        "ownership",
-        "patterns",
-        "short_circuit",
-        "strings",
-        "tail_recursion",
-        "union_match",
-    };
-    for (pr) |spec| try airRoundTrip("probes", spec);
+    try airRoundTripAll("probes");
 }
 
 // ---------------------------------------------------------------------------

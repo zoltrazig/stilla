@@ -23,6 +23,7 @@ const interpreter = @import("interpreter.zig");
 const effects = @import("effects.zig");
 const support = @import("interpreter_test_support.zig");
 const artifact_bundle = @import("artifact_bundle.zig");
+const probe_corpus = @import("probe_corpus.zig");
 const testing = std.testing;
 
 const CaptureAdapter = support.CaptureAdapter;
@@ -139,14 +140,9 @@ fn funcText(b: *Built, name: []const u8) ![]u8 {
 // ---------------------------------------------------------------------------
 
 test "M2b: dead let with a discardable init is eliminated" {
-    var b = try buildText("app", &.{.{
-        "app",
-        \\fn pure(x: int32) -> int32 { x + 1 }
-        \\fn f(x: int32) -> int32 {
-        \\    let unused: int32 = pure(x);
-        \\    7
-        \\}
-    }});
+    const src = try probe_corpus.read(testing.allocator, "probes/cases", "simplify_dead_let_discardable");
+    defer testing.allocator.free(src);
+    var b = try buildText("app", &.{.{ "app", src }});
     defer b.deinit();
     const stats = try simplifyAll(&b);
     try testing.expect(stats.dead_lets > 0);
@@ -154,13 +150,9 @@ test "M2b: dead let with a discardable init is eliminated" {
 }
 
 test "M2b: a trapping division is kept (may-trap is not discardable)" {
-    var b = try buildText("app", &.{.{
-        "app",
-        \\fn f(y: int32) -> int32 {
-        \\    let unused: int32 = 10 / y;
-        \\    0
-        \\}
-    }});
+    const src = try probe_corpus.read(testing.allocator, "probes/cases", "simplify_trapping_div_kept");
+    defer testing.allocator.free(src);
+    var b = try buildText("app", &.{.{ "app", src }});
     defer b.deinit();
     const stats = try simplifyAll(&b);
     try testing.expectEqual(@as(usize, 0), stats.dead_lets);
@@ -171,41 +163,27 @@ test "M2b: a trapping division is kept (may-trap is not discardable)" {
 }
 
 test "M2b: a host call is kept (observable effect)" {
-    var b = try buildText("app", &.{.{
-        "app",
-        \\const builtin = import("builtin");
-        \\fn f(x: int32) -> int32 {
-        \\    let unused: int32 = builtin.hash(x);
-        \\    0
-        \\}
-    }});
+    const src = try probe_corpus.read(testing.allocator, "probes/cases", "simplify_host_call_kept");
+    defer testing.allocator.free(src);
+    var b = try buildText("app", &.{.{ "app", src }});
     defer b.deinit();
     const stats = try simplifyAll(&b);
     try testing.expectEqual(@as(usize, 0), stats.dead_lets);
 }
 
 test "M2b: a Unique local with a drop hook is not dropped" {
-    var b = try buildText("app", &.{.{
-        "app",
-        \\struct Token { id: int32; drop(t) { let x = t.id; } }
-        \\fn make(id: int32) -> Token { Token { id: id } }
-        \\fn f(id: int32) -> int32 {
-        \\    let unused = make(id);
-        \\    0
-        \\}
-    }});
+    const src = try probe_corpus.read(testing.allocator, "probes/cases", "simplify_unique_drop_hook_kept");
+    defer testing.allocator.free(src);
+    var b = try buildText("app", &.{.{ "app", src }});
     defer b.deinit();
     const stats = try simplifyAll(&b);
     try testing.expectEqual(@as(usize, 0), stats.dead_lets);
 }
 
 test "M2b: ANF hoists the first non-floatable operand and keeps LTR" {
-    var b = try buildText("app", &.{.{
-        "app",
-        \\const builtin = import("builtin");
-        \\fn pure(x: int32) -> int32 { x * 2 }
-        \\fn f(x: int32) -> int32 { pure(1) + builtin.hash(x) }
-    }});
+    const src = try probe_corpus.read(testing.allocator, "probes/cases", "simplify_anf_hoist_ltr");
+    defer testing.allocator.free(src);
+    var b = try buildText("app", &.{.{ "app", src }});
     defer b.deinit();
     const stats = try simplifyAll(&b);
     try testing.expect(stats.hoists >= 1);
@@ -219,23 +197,18 @@ test "M2b: ANF hoists the first non-floatable operand and keeps LTR" {
 }
 
 test "M2b: ANF does not hoist a pure tree" {
-    var b = try buildText("app", &.{.{
-        "app",
-        \\fn f(a: int32, b: int32, c: int32) -> int32 { a + b * c }
-    }});
+    const src = try probe_corpus.read(testing.allocator, "probes/cases", "simplify_anf_pure_tree");
+    defer testing.allocator.free(src);
+    var b = try buildText("app", &.{.{ "app", src }});
     defer b.deinit();
     const stats = try simplifyAll(&b);
     try testing.expectEqual(@as(usize, 0), stats.hoists);
 }
 
 test "M2b: ANF materializes a Unique operand the parent transfers" {
-    var b = try buildText("app", &.{.{
-        "app",
-        \\struct Token { id: int32; drop(t) { let x = t.id; } }
-        \\fn make(id: int32) -> Token { Token { id: id } }
-        \\fn take(move t: Token) -> int32 { t.id }
-        \\fn f(x: int32) -> int32 { take(make(x)) }
-    }});
+    const src = try probe_corpus.read(testing.allocator, "probes/cases", "simplify_anf_unique_transfer");
+    defer testing.allocator.free(src);
+    var b = try buildText("app", &.{.{ "app", src }});
     defer b.deinit();
     const stats = try simplifyAll(&b);
     try testing.expect(stats.hoists >= 1);
@@ -252,13 +225,9 @@ test "M2b: ANF materializes a Unique operand the parent transfers" {
 }
 
 test "M2b: ANF leaves a Unique operand the parent only borrows in place" {
-    var b = try buildText("app", &.{.{
-        "app",
-        \\struct Token { id: int32; drop(t) { let x = t.id; } }
-        \\fn make(id: int32) -> Token { Token { id: id } }
-        \\fn show(borrow t: Token) -> int32 { t.id }
-        \\fn f(x: int32) -> int32 { show(make(x)) }
-    }});
+    const src = try probe_corpus.read(testing.allocator, "probes/cases", "simplify_anf_unique_borrow");
+    defer testing.allocator.free(src);
+    var b = try buildText("app", &.{.{ "app", src }});
     defer b.deinit();
     const stats = try simplifyAll(&b);
     try testing.expectEqual(@as(usize, 0), stats.hoists);
@@ -267,13 +236,9 @@ test "M2b: ANF leaves a Unique operand the parent only borrows in place" {
 }
 
 test "M2b: lazy-branch regions are not hoisted across" {
-    var b = try buildText("app", &.{.{
-        "app",
-        \\const builtin = import("builtin");
-        \\fn f(c: bool, x: int32) -> int32 {
-        \\    if (c) { builtin.hash(x) } else { 0 }
-        \\}
-    }});
+    const src = try probe_corpus.read(testing.allocator, "probes/cases", "simplify_lazy_branch");
+    defer testing.allocator.free(src);
+    var b = try buildText("app", &.{.{ "app", src }});
     defer b.deinit();
     const stats = try simplifyAll(&b);
     // The host call sits alone in its branch: nothing to hoist, and the
@@ -284,15 +249,9 @@ test "M2b: lazy-branch regions are not hoisted across" {
 }
 
 test "M2b: consumers are a fixpoint (second run rewrites nothing)" {
-    var b = try buildText("app", &.{.{
-        "app",
-        \\const builtin = import("builtin");
-        \\fn pure(x: int32) -> int32 { x + 1 }
-        \\fn f(x: int32) -> int32 {
-        \\    let unused: int32 = pure(x);
-        \\    pure(1) + builtin.hash(x)
-        \\}
-    }});
+    const src = try probe_corpus.read(testing.allocator, "probes/cases", "simplify_fixpoint");
+    defer testing.allocator.free(src);
+    var b = try buildText("app", &.{.{ "app", src }});
     defer b.deinit();
     const first = try simplifyAll(&b);
     try testing.expect(first.dead_lets + first.hoists > 0);
@@ -303,14 +262,8 @@ test "M2b: consumers are a fixpoint (second run rewrites nothing)" {
 }
 
 test "M2b: two fresh builds produce the same text (deterministic)" {
-    const src =
-        \\const builtin = import("builtin");
-        \\fn pure(x: int32) -> int32 { x + 1 }
-        \\fn f(x: int32) -> int32 {
-        \\    let unused: int32 = pure(x);
-        \\    pure(1) + builtin.hash(x)
-        \\}
-    ;
+    const src = try probe_corpus.read(testing.allocator, "probes/cases", "simplify_fixpoint");
+    defer testing.allocator.free(src);
     var b1 = try buildText("app", &.{.{ "app", src }});
     defer b1.deinit();
     _ = try simplifyAll(&b1);
@@ -344,11 +297,8 @@ fn compileAir(spec: []const u8, text: []const u8, simplify: bool) ![]u8 {
 }
 
 test "M2b: off by default; enabling rewrites the AIR; both round-trip" {
-    const src =
-        \\fn pure(x: int32) -> int32 { x + 1 }
-        \\fn f(x: int32) -> int32 { let unused: int32 = pure(x); 7 }
-        \\fn main() -> void { let _ = f(1); }
-    ;
+    const src = try probe_corpus.read(testing.allocator, "probes/cases", "simplify_off_by_default_air");
+    defer testing.allocator.free(src);
     const off = try compileAir("app", src, false);
     defer testing.allocator.free(off);
     const on = try compileAir("app", src, true);
@@ -384,18 +334,8 @@ fn capture(text: []const u8, simplify: bool) ![]u8 {
 }
 
 test "M2b: consumers-on and consumers-off execute identically" {
-    const src =
-        \\const builtin = import("builtin");
-        \\fn pure(x: int32) -> int32 { x * 2 }
-        \\fn calc(v: int32) -> int32 {
-        \\    let unused: int32 = pure(v);
-        \\    pure(3) + builtin.hash(builtin.str(v))
-        \\}
-        \\fn main() -> void {
-        \\    builtin.print(builtin.str(calc(7)));
-        \\    builtin.print(builtin.str(calc(0)));
-        \\}
-    ;
+    const src = try probe_corpus.read(testing.allocator, "probes/cases", "simplify_consumers_exec_identical");
+    defer testing.allocator.free(src);
     const off = try capture(src, false);
     defer testing.allocator.free(off);
     const on = try capture(src, true);
@@ -410,18 +350,8 @@ test "M2b: a materialized discarded Unique still drops at its statement" {
     // expression. Phase 4 binds it to a synthesized `let`; the sequence's
     // in-place discard must fire the destructor *before* the following
     // statement, not at the enclosing scope end (docs/effects.md §11.2).
-    const src =
-        \\const builtin = import("builtin");
-        \\struct Token { id: int32; drop(t) { builtin.print(builtin.str(t.id)); } }
-        \\fn make(id: int32) -> Token { Token { id: id } }
-        \\fn take(move t: Token) -> int32 { t.id }
-        \\fn main() -> void {
-        \\    let first = take(make(1));
-        \\    make(2);
-        \\    builtin.print(builtin.str(first));
-        \\    make(3);
-        \\}
-    ;
+    const src = try probe_corpus.read(testing.allocator, "probes/cases", "simplify_unique_discard_statement");
+    defer testing.allocator.free(src);
     const off = try capture(src, false);
     defer testing.allocator.free(off);
     const on = try capture(src, true);
@@ -438,9 +368,9 @@ test "M2b: a materialized discarded Unique still drops at its statement" {
 // ---------------------------------------------------------------------------
 
 fn corpusSimplify(dir: []const u8, spec: []const u8) !void {
-    const path = try std.fmt.allocPrint(testing.allocator, "{s}/{s}.st", .{ dir, spec });
+    const path = try probe_corpus.path(testing.allocator, dir, spec);
     defer testing.allocator.free(path);
-    const text = std.Io.Dir.cwd().readFileAlloc(testing.io, path, testing.allocator, .limited(1 << 20)) catch |err| {
+    const text = probe_corpus.read(testing.allocator, dir, spec) catch |err| {
         std.debug.print("simplify corpus: cannot read {s} ({s})\n", .{ path, @errorName(err) });
         return error.TestUnexpectedResult;
     };
@@ -518,9 +448,9 @@ fn captureTerm(text: []const u8, simplify: bool) !Term {
 /// `expect_panic` pins the intended termination so a coincidentally
 /// identical failure cannot pass as coverage.
 fn corpusDiff(dir: []const u8, spec: []const u8, expect_panic: bool) !void {
-    const path = try std.fmt.allocPrint(testing.allocator, "{s}/{s}.st", .{ dir, spec });
+    const path = try probe_corpus.path(testing.allocator, dir, spec);
     defer testing.allocator.free(path);
-    const text = std.Io.Dir.cwd().readFileAlloc(testing.io, path, testing.allocator, .limited(1 << 20)) catch |err| {
+    const text = probe_corpus.read(testing.allocator, dir, spec) catch |err| {
         std.debug.print("simplify corpus: cannot read {s} ({s})\n", .{ path, @errorName(err) });
         return error.TestUnexpectedResult;
     };
@@ -549,36 +479,21 @@ fn corpusDiff(dir: []const u8, spec: []const u8, expect_panic: bool) !void {
     }
 }
 
-/// Probes whose `main` intentionally traps (`builtin.panic` /
-/// unreachable): the differential pins the panic instead of treating it
-/// as coverage.
-fn probePanics(spec: []const u8) bool {
-    return std.mem.eql(u8, spec, "cli_panic") or std.mem.eql(u8, spec, "control_flow");
-}
-
 test "M2b corpus — examples/*.st compile+round-trip and consumers-on/off agree" {
-    const ex = [_][]const u8{
-        "any",    "arrays", "basics",    "box",       "fib",     "fib_tail_call",
-        "floats", "fold",   "functions", "generics",  "madd",    "maps",
-        "match",  "minmax", "nest",      "ownership", "strings", "structs",
-    };
-    for (ex) |spec| {
+    var corpus = try probe_corpus.list(testing.allocator, "examples");
+    defer corpus.deinit();
+    for (corpus.names) |spec| {
         try corpusSimplify("examples", spec);
         try corpusDiff("examples", spec, false);
     }
 }
 
 test "M2b corpus — probes/*.st compile+round-trip and consumers-on/off agree" {
-    const pr = [_][]const u8{
-        "aggregates",  "any",                "box",         "branch",        "calls",        "casts",
-        "cli_panic",   "cli_run",            "comparisons", "constants",     "control_flow", "fusion",
-        "generic",     "generic_aggregates", "immediates",  "integer_bits",  "lifecycle",    "list_match",
-        "numeric",     "ownership",          "patterns",    "short_circuit", "strings",      "tail_recursion",
-        "union_match",
-    };
-    for (pr) |spec| {
+    var corpus = try probe_corpus.list(testing.allocator, "probes");
+    defer corpus.deinit();
+    for (corpus.names) |spec| {
         try corpusSimplify("probes", spec);
-        try corpusDiff("probes", spec, probePanics(spec));
+        try corpusDiff("probes", spec, probe_corpus.panics(spec));
     }
 }
 
@@ -596,16 +511,13 @@ test "M2b: an observable read declared Write is kept; a Q-only read is discarded
         .may_diverge = false,
         .nondeterministic = true,
     };
+    const sensor_src = try probe_corpus.read(testing.allocator, "probes/cases", "simplify_host_read_sensor");
+    defer testing.allocator.free(sensor_src);
+    const app_src = try probe_corpus.read(testing.allocator, "probes/cases", "simplify_host_read_app");
+    defer testing.allocator.free(app_src);
     const texts = [_]struct { []const u8, []const u8 }{
-        .{ "sensor", "fn read() -> int32;" },
-        .{
-            "app",
-            \\const sensor = import("sensor");
-            \\fn f() -> int32 {
-            \\    let unused: int32 = sensor.read();
-            \\    0
-            \\}
-        },
+        .{ "sensor", sensor_src },
+        .{ "app", app_src },
     };
 
     {
@@ -633,16 +545,9 @@ test "M2b: an observable read declared Write is kept; a Q-only read is discarded
 // ---------------------------------------------------------------------------
 
 test "M2b: ANF remaps the cleanup token of a hoisted Unique parent" {
-    var b = try buildText("app", &.{.{
-        "app",
-        \\const builtin = import("builtin");
-        \\struct Token { id: int32; drop(t) { let x = t.id; } }
-        \\fn make(id: int32) -> Token { Token { id: id } }
-        \\fn f(x: int32) -> int32 {
-        \\    let _ = make(builtin.hash(x));
-        \\    7
-        \\}
-    }});
+    const src = try probe_corpus.read(testing.allocator, "probes/cases", "simplify_cleanup_token_remap");
+    defer testing.allocator.free(src);
+    var b = try buildText("app", &.{.{ "app", src }});
     defer b.deinit();
     const pr = &b.built.program;
 
@@ -689,14 +594,9 @@ test "M2b: ANF remaps the cleanup token of a hoisted Unique parent" {
 }
 
 test "M2b: a Unique binding with a discardable destructor may be dropped" {
-    var b = try buildText("app", &.{.{
-        "app",
-        \\struct Token { id: int32; drop(t) { let x = t.id; } }
-        \\fn f(id: int32) -> int32 {
-        \\    let unused = Token { id: id };
-        \\    7
-        \\}
-    }});
+    const src = try probe_corpus.read(testing.allocator, "probes/cases", "simplify_unique_discardable_dtor");
+    defer testing.allocator.free(src);
+    var b = try buildText("app", &.{.{ "app", src }});
     defer b.deinit();
     const stats = try simplifyAll(&b);
     try testing.expect(stats.dead_lets > 0);
@@ -704,17 +604,13 @@ test "M2b: a Unique binding with a discardable destructor may be dropped" {
 }
 
 test "M2b: a Unique binding with an observable destructor is kept" {
+    const hostmod_src = try probe_corpus.read(testing.allocator, "probes/cases", "simplify_unique_observable_dtor_hostmod");
+    defer testing.allocator.free(hostmod_src);
+    const app_src = try probe_corpus.read(testing.allocator, "probes/cases", "simplify_unique_observable_dtor_app");
+    defer testing.allocator.free(app_src);
     var b = try buildText("app", &.{
-        .{ "hostmod", "fn log(x: int32) -> void;" },
-        .{
-            "app",
-            \\const hostmod = import("hostmod");
-            \\struct Token { id: int32; drop(t) { hostmod.log(t.id); } }
-            \\fn f(id: int32) -> int32 {
-            \\    let unused = Token { id: id };
-            \\    7
-            \\}
-        },
+        .{ "hostmod", hostmod_src },
+        .{ "app", app_src },
     });
     defer b.deinit();
     const write = try effects.summaryOf(b.arena.allocator(), &.{.{ .resource = .{ .host = 1 }, .mode = .write }});

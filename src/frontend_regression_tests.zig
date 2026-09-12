@@ -4,9 +4,10 @@
 //! all-trap branches). Split out of the former
 //! `src/frontend_lowering_tests.zig`.
 //!
-//! Shared helpers (compilation drivers and string/CFG lookups) are aliased
-//! from `src/frontend_test_support.zig` below, so the test bodies are
-//! unchanged from the unsplit file.
+//! Shared helpers (compilation drivers, fixture reader, and string/CFG
+//! lookups) are aliased from `src/frontend_test_support.zig` below. The
+//! whole-program fixtures live in `probes/cases/*.st` and are read at test
+//! time rather than constructed inline.
 //!
 //! Run via `zig build test` (wired into `src/root.zig`'s test block).
 
@@ -29,17 +30,9 @@ test "frontend join phis own their unique inputs (if, return case)" {
     // the join block and then the phi result %5 was returned — a triple
     // destruction / use-after-return. Now the choose body must contain no
     // drop at all: inputs consumed by the phi, result transferred by ret.
-    var c = try compileText("app", &.{
-        .{
-            "app",
-            \\struct File { fd: int32; path: str; drop(file) {} }
-            \\fn open_file(path: str) -> File { File{ fd: 3, path: path } }
-            \\fn choose(c: bool) -> File {
-            \\    if (c) { open_file("a") } else { open_file("b") }
-            \\}
-            \\fn main() -> void {}
-        },
-    });
+    const src = try helpers.probeSource("probes/cases", "join_phi_if");
+    defer testing.allocator.free(src);
+    var c = try compileText("app", &.{.{ "app", src }});
     defer c.deinit();
 
     const out = try irText(&c.program.?);
@@ -53,21 +46,9 @@ test "frontend join phis own their unique inputs (match, return case)" {
     // Same rule through a union match: the arm values feed the join phi
     // and the scrutinee is the only value dropped (it was not moved). The
     // phi result is returned, and no phi input is destroyed.
-    var c = try compileText("app", &.{
-        .{
-            "app",
-            \\struct File { fd: int32; path: str; drop(file) {} }
-            \\fn open_file(path: str) -> File { File{ fd: 3, path: path } }
-            \\union MaybeFile { Some(File), None }
-            \\fn pick(m: MaybeFile) -> File {
-            \\    match (m) {
-            \\        MaybeFile::Some(f) => f,
-            \\        MaybeFile::None => open_file("x")
-            \\    }
-            \\}
-            \\fn main() -> void {}
-        },
-    });
+    const src = try helpers.probeSource("probes/cases", "join_phi_match");
+    defer testing.allocator.free(src);
+    var c = try compileText("app", &.{.{ "app", src }});
     defer c.deinit();
 
     const out = try irText(&c.program.?);
@@ -87,17 +68,9 @@ test "frontend join phis own their unique inputs (let case: one drop)" {
     // `let f = if (c) { … } else { … }`: the phi result is the owned
     // binding, so it receives exactly one scope-end drop; the phi inputs
     // (%2, %4) are consumed by the join and must not be dropped.
-    var c = try compileText("app", &.{
-        .{
-            "app",
-            \\struct File { fd: int32; path: str; drop(file) {} }
-            \\fn open_file(path: str) -> File { File{ fd: 3, path: path } }
-            \\fn main() -> void {
-            \\    let c = true;
-            \\    let f = if (c) { open_file("a") } else { open_file("b") };
-            \\}
-        },
-    });
+    const src = try helpers.probeSource("probes/cases", "join_phi_let");
+    defer testing.allocator.free(src);
+    var c = try compileText("app", &.{.{ "app", src }});
     defer c.deinit();
 
     const out = try irText(&c.program.?);
@@ -119,16 +92,9 @@ test "frontend lowers a and die() and a or die() without a crash" {
     // contributes no phi input and no edge to the join, and the join still
     // receives the const arm. Regression: the compiler segfaulted on an
     // unterminated rhs-eval block (exit 134).
-    var c = try compileText("app", &.{
-        .{
-            "app",
-            \\const builtin = import("builtin");
-            \\fn die() -> never { builtin.panic("x") }
-            \\fn f(a: bool) -> bool { a and die() }
-            \\fn g(a: bool) -> bool { a or die() }
-            \\fn main() -> void {}
-        },
-    });
+    const src = try helpers.probeSource("probes/cases", "short_circuit_and_or_die");
+    defer testing.allocator.free(src);
+    var c = try compileText("app", &.{.{ "app", src }});
     defer c.deinit();
 
     const out = try irText(&c.program.?);
@@ -149,16 +115,9 @@ test "frontend keeps never-lhs short-circuit operands trapping" {
     // `die() and a` / `die() or a`: the left operand never returns, so the
     // whole expression is unreachable and the entry block ends in trap —
     // no rhs block, no join, no phi.
-    var c = try compileText("app", &.{
-        .{
-            "app",
-            \\const builtin = import("builtin");
-            \\fn die() -> never { builtin.panic("x") }
-            \\fn f(a: bool) -> bool { die() and a }
-            \\fn g(a: bool) -> bool { die() or a }
-            \\fn main() -> void {}
-        },
-    });
+    const src = try helpers.probeSource("probes/cases", "short_circuit_never_lhs");
+    defer testing.allocator.free(src);
+    var c = try compileText("app", &.{.{ "app", src }});
     defer c.deinit();
 
     const out = try irText(&c.program.?);
@@ -179,16 +138,9 @@ test "frontend lowers nested short-circuit joins" {
     // in-edges (built in block-id order, air.md §4.3) never matched and the
     // compiler rejected the program with "phi incoming order does not
     // match predecessors" (and the never variants segfaulted).
-    var c = try compileText("app", &.{
-        .{
-            "app",
-            \\const builtin = import("builtin");
-            \\fn die() -> never { builtin.panic("x") }
-            \\fn f(a: bool, b: bool, c: bool) -> bool { a and (b and c) }
-            \\fn g(a: bool, b: bool) -> bool { a and (b or die()) }
-            \\fn main() -> void {}
-        },
-    });
+    const src = try helpers.probeSource("probes/cases", "nested_short_circuit_joins");
+    defer testing.allocator.free(src);
+    var c = try compileText("app", &.{.{ "app", src }});
     defer c.deinit();
 
     const out = try irText(&c.program.?);
@@ -208,15 +160,9 @@ test "frontend lowers nested short-circuit joins" {
 test "frontend lowers nested if joins" {
     // Same phi-pred rule for if/else: when a branch body is itself an
     // `if`, the join receives its phi input from the inner join block.
-    var c = try compileText("app", &.{
-        .{
-            "app",
-            \\fn pick(a: bool, b: bool, x: int32, y: int32, z: int32) -> int32 {
-            \\    if (a) { if (b) { x } else { y } } else { z }
-            \\}
-            \\fn main() -> void {}
-        },
-    });
+    const src = try helpers.probeSource("probes/cases", "nested_if_joins");
+    defer testing.allocator.free(src);
+    var c = try compileText("app", &.{.{ "app", src }});
     defer c.deinit();
 
     const out = try irText(&c.program.?);
@@ -230,19 +176,9 @@ test "frontend lowers nested match arm joins" {
     // Same phi-pred rule for match arms: when an arm body is itself an
     // `if`, the match join receives its phi input from that arm's inner
     // join block.
-    var c = try compileText("app", &.{
-        .{
-            "app",
-            \\union U { A(int32), B(bool) }
-            \\fn pick(u: U, d: int32) -> int32 {
-            \\    match (u) {
-            \\        U::A(n) => if (n > 0) { n } else { d },
-            \\        U::B(b) => if (b) { 1 } else { 0 }
-            \\    }
-            \\}
-            \\fn main() -> void {}
-        },
-    });
+    const src = try helpers.probeSource("probes/cases", "nested_match_joins");
+    defer testing.allocator.free(src);
+    var c = try compileText("app", &.{.{ "app", src }});
     defer c.deinit();
 
     const out = try irText(&c.program.?);
@@ -257,19 +193,9 @@ test "frontend emits unary and comparison ops" {
     // Core §16.3 / air.md §5: neg, not, and the six comparisons are
     // instructions in the AIR; the frontend emits them but no test pinned
     // the opcodes before.
-    var c = try compileText("app", &.{
-        .{
-            "app",
-            \\fn neg_(a: int32) -> int32 { -a }
-            \\fn not_(a: bool) -> bool { !a }
-            \\fn lt(a: int32, b: int32) -> bool { a < b }
-            \\fn le(a: int32, b: int32) -> bool { a <= b }
-            \\fn gt(a: int32, b: int32) -> bool { a > b }
-            \\fn ge(a: int32, b: int32) -> bool { a >= b }
-            \\fn ne(a: int32, b: int32) -> bool { a != b }
-            \\fn main() -> void {}
-        },
-    });
+    const src = try helpers.probeSource("probes/cases", "unary_comparison_ops");
+    defer testing.allocator.free(src);
+    var c = try compileText("app", &.{.{ "app", src }});
     defer c.deinit();
 
     const out = try irText(&c.program.?);
@@ -288,32 +214,9 @@ test "frontend lowers ownership-transfer destructures" {
     // multi-result op per kind — `unpack_variant` (tag-carrying),
     // `unpack_struct`, `unpack_tuple`, `split_list` — and a non-consuming
     // list pattern's rest binds a borrowed `tail` view (Core §14.5).
-    var c = try compileText("app", &.{
-        .{
-            "app",
-            \\const builtin = import("builtin");
-            \\struct File { fd: int32; path: str; drop(file) {} }
-            \\fn open_file(path: str) -> File { File{ fd: 3, path: path } }
-            \\union Result { Ok(File), Err(str) }
-            \\fn take(r: Result) -> File {
-            \\    match (move r) { Result::Ok(f) => f, Result::Err(e) => open_file(e) }
-            \\}
-            \\struct Wrapper { inner: File; tag: int32; }
-            \\fn unwrap(w: Wrapper) -> File {
-            \\    let Wrapper { inner, tag } = move w;
-            \\    inner
-            \\}
-            \\fn take_t(t: tuple[File, int32]) -> File {
-            \\    let (f, n) = move t;
-            \\    f
-            \\}
-            \\fn tail(xs: list[int32]) -> list[int32] {
-            \\    let [h, ..rest] = xs;
-            \\    rest
-            \\}
-            \\fn main() -> void { builtin.print("x"); }
-        },
-    });
+    const src = try helpers.probeSource("probes/cases", "ownership_destructures");
+    defer testing.allocator.free(src);
+    var c = try compileText("app", &.{.{ "app", src }});
     defer c.deinit();
 
     const out = try irText(&c.program.?);
@@ -331,18 +234,9 @@ test "frontend lowers nested all-trap branches without a crash" {
     // the join — the join survived with an undefined terminator and
     // finishFunc aborted (index out of bounds). The join and the trapped
     // subtree are now kept as trap-terminated dead blocks.
-    var c = try compileText("app", &.{
-        .{
-            "app",
-            \\const builtin = import("builtin");
-            \\fn die() -> never { builtin.panic("x") }
-            \\fn f(c: bool, d: bool) -> void {
-            \\    if (c) { if (d) { die() } else { die() } } else { die() }
-            \\}
-            \\fn g(c: bool) -> void { if (c) { die() } else { die() } }
-            \\fn main() -> void {}
-        },
-    });
+    const src = try helpers.probeSource("probes/cases", "nested_all_trap_branches");
+    defer testing.allocator.free(src);
+    var c = try compileText("app", &.{.{ "app", src }});
     defer c.deinit();
 
     const program = c.program orelse {

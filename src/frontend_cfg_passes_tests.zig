@@ -22,6 +22,7 @@ const lower = @import("lower.zig");
 const cfg_parse = @import("passes/cfg_parse.zig");
 const cfg_validate = @import("passes/cfg_validate.zig");
 const cfg_inline = @import("passes/cfg_inline.zig");
+const probe_corpus = @import("probe_corpus.zig");
 const testing = std.testing;
 const helpers = @import("frontend_test_support.zig");
 const compileText = helpers.compileText;
@@ -360,22 +361,9 @@ test "drop lowering expands a struct drop into hook call + reverse field drops" 
     // `unpack_struct` and per-field drops in reverse declaration order
     // (Runtime §6.2). Only the *Unique* fields are dropped; Copy fields
     // destroy nothing.
-    var c = try compileOpt("app", &.{
-        .{
-            "app",
-            \\const builtin = import("builtin");
-            \\struct File { fd: int32; drop(file) {} }
-            \\struct Other { fd: int32; drop(file) {} }
-            \\struct Pair { a: File; b: Other; }
-            \\fn open_file() -> File { File { fd: 3 } }
-            \\fn open_other() -> Other { Other { fd: 4 } }
-            \\fn main() -> void {
-            \\    let x = open_file();
-            \\    let y = open_other();
-            \\    let p = Pair { a: move x, b: move y };
-            \\}
-        },
-    });
+    const src = try helpers.probeSource("probes/cases", "cfgpass_struct_drop_hook_fields");
+    defer testing.allocator.free(src);
+    var c = try compileOpt("app", &.{.{ "app", src }});
     defer c.deinit();
     const text = try irText(&c.program.?);
     defer testing.allocator.free(text);
@@ -400,20 +388,9 @@ test "drop lowering expands a struct drop into hook call + reverse field drops" 
 test "drop lowering runs a struct's hook before its fields are destroyed" {
     // Runtime §6.2: the user hook runs while all fields remain valid —
     // the hook call is emitted on the whole value before the unpack.
-    var c = try compileOpt("app", &.{
-        .{
-            "app",
-            \\const builtin = import("builtin");
-            \\const array = import("array");
-            \\struct File {
-            \\    arr: array.Array[int32];
-            \\    drop(file) { builtin.print("closing"); }
-            \\}
-            \\fn main() -> void {
-            \\    let f = File { arr: array.make(10, 0) };
-            \\}
-        },
-    });
+    const src = try helpers.probeSource("probes/cases", "cfgpass_struct_drop_hook_order");
+    defer testing.allocator.free(src);
+    var c = try compileOpt("app", &.{.{ "app", src }});
     defer c.deinit();
     const text = try irText(&c.program.?);
     defer testing.allocator.free(text);
@@ -431,20 +408,9 @@ test "drop lowering runs a struct's hook before its fields are destroyed" {
 }
 
 test "drop lowering expands a tuple drop into reverse element drops" {
-    var c = try compileOpt("app", &.{
-        .{
-            "app",
-            \\struct File { fd: int32; drop(file) {} }
-            \\struct Other { fd: int32; drop(file) {} }
-            \\fn open_file() -> File { File { fd: 3 } }
-            \\fn open_other() -> Other { Other { fd: 4 } }
-            \\fn main() -> void {
-            \\    let x = open_file();
-            \\    let y = open_other();
-            \\    let t = (move x, move y);
-            \\}
-        },
-    });
+    const src = try helpers.probeSource("probes/cases", "cfgpass_tuple_drop");
+    defer testing.allocator.free(src);
+    var c = try compileOpt("app", &.{.{ "app", src }});
     defer c.deinit();
     const text = try irText(&c.program.?);
     defer testing.allocator.free(text);
@@ -466,18 +432,9 @@ test "drop lowering expands a box drop into unbox + contained drop" {
     // The expansion is `builtin#unbox` (which consumes the box and
     // returns ownership of the payload) followed by the payload's own
     // destruction.
-    var c = try compileOpt("app", &.{
-        .{
-            "app",
-            \\const builtin = import("builtin");
-            \\struct File { fd: int32; drop(file) {} }
-            \\fn open_file() -> File { File { fd: 3 } }
-            \\fn main() -> void {
-            \\    let f = open_file();
-            \\    let b = builtin.box(move f);
-            \\}
-        },
-    });
+    const src = try helpers.probeSource("probes/cases", "cfgpass_box_drop");
+    defer testing.allocator.free(src);
+    var c = try compileOpt("app", &.{.{ "app", src }});
     defer c.deinit();
     const text = try irText(&c.program.?);
     defer testing.allocator.free(text);
@@ -492,23 +449,9 @@ test "drop lowering expands a union drop into a tag switch" {
     // expansion dispatches on the tag: payload-less variants destroy
     // nothing; payload variants `unpack_variant` and destroy the payload
     // (which itself recurses into its own expansion).
-    var c = try compileOpt("app", &.{
-        .{
-            "app",
-            \\const builtin = import("builtin");
-            \\struct File { fd: int32; drop(file) {} }
-            \\union Maybe {
-            \\    Nothing,
-            \\    Just(File),
-            \\}
-            \\fn open_file() -> File { File { fd: 3 } }
-            \\fn main() -> void {
-            \\    let f = open_file();
-            \\    let m = Maybe::Just(move f);
-            \\    let n = Maybe::Nothing;
-            \\}
-        },
-    });
+    const src = try helpers.probeSource("probes/cases", "cfgpass_union_drop");
+    defer testing.allocator.free(src);
+    var c = try compileOpt("app", &.{.{ "app", src }});
     defer c.deinit();
     const text = try irText(&c.program.?);
     defer testing.allocator.free(text);
@@ -530,17 +473,9 @@ test "drop lowering keeps opaque and any drops" {
     // element count is dynamic (a runtime loop, Runtime §6.3). Here a
     // struct whose fields are an `any` and an opaque `Array[int32]`
     // expands to unpack + the two kept drops.
-    var c = try compileOpt("app", &.{
-        .{
-            "app",
-            \\const builtin = import("builtin");
-            \\const array = import("array");
-            \\struct S { a: any; arr: array.Array[int32]; }
-            \\fn main() -> void {
-            \\    let s = S { a: 42, arr: array.make(10, 0) };
-            \\}
-        },
-    });
+    const src = try helpers.probeSource("probes/cases", "cfgpass_opaque_any_drop");
+    defer testing.allocator.free(src);
+    var c = try compileOpt("app", &.{.{ "app", src }});
     defer c.deinit();
     const text = try irText(&c.program.?);
     defer testing.allocator.free(text);
@@ -553,21 +488,9 @@ test "drop lowering substitutes generic instantiation args" {
     // `Option[File]`'s `Some` payload is `File`, not the declaration's
     // `T` — the payload type substitutes the instantiation's arguments
     // (Core §12.1), and its drop expands to the File destruction.
-    var c = try compileOpt("app", &.{
-        .{
-            "app",
-            \\const builtin = import("builtin");
-            \\struct File { fd: int32; drop(file) {} }
-            \\union Option[T] {
-            \\    None,
-            \\    Some(T),
-            \\}
-            \\fn open_file() -> File { File { fd: 3 } }
-            \\fn main() -> void {
-            \\    let o: Option[File] = Option::Some(open_file());
-            \\}
-        },
-    });
+    const src = try helpers.probeSource("probes/cases", "cfgpass_generic_inst_drop");
+    defer testing.allocator.free(src);
+    var c = try compileOpt("app", &.{.{ "app", src }});
     defer c.deinit();
     const text = try irText(&c.program.?);
     defer testing.allocator.free(text);
@@ -581,17 +504,9 @@ test "drop lowering expands nested struct fields recursively" {
     // feeds the inner expansion, which eventually terminates in the
     // kept opaque drop. The whole sequence runs in the join of the outer
     // destruction's block.
-    var c = try compileOpt("app", &.{
-        .{
-            "app",
-            \\const array = import("array");
-            \\struct Inner { arr: array.Array[int32]; }
-            \\struct Outer { inner: Inner; }
-            \\fn main() -> void {
-            \\    let o = Outer { inner: Inner { arr: array.make(10, 0) } };
-            \\}
-        },
-    });
+    const src = try helpers.probeSource("probes/cases", "cfgpass_nested_struct_drop");
+    defer testing.allocator.free(src);
+    var c = try compileOpt("app", &.{.{ "app", src }});
     defer c.deinit();
     const text = try irText(&c.program.?);
     defer testing.allocator.free(text);
@@ -607,29 +522,9 @@ test "drop lowering handles a drop before a match in one block" {
     // explicit `drop` of a union is followed by a `match` over a second
     // union in the same block: the drop's switch, then the match's
     // switch, in one block's tail.
-    var c = try compileOpt("app", &.{
-        .{
-            "app",
-            \\const builtin = import("builtin");
-            \\struct File { fd: int32; drop(file) {} }
-            \\union Maybe {
-            \\    Nothing,
-            \\    Just(File),
-            \\}
-            \\fn open_file() -> File { File { fd: 3 } }
-            \\fn main() -> void {
-            \\    let f1 = open_file();
-            \\    let f2 = open_file();
-            \\    let m1 = Maybe::Just(move f1);
-            \\    let m2 = Maybe::Just(move f2);
-            \\    drop m1;
-            \\    match (m2) {
-            \\        Maybe::Nothing => builtin.print("none"),
-            \\        Maybe::Just(f) => builtin.print(builtin.str(f.fd)),
-            \\    }
-            \\}
-        },
-    });
+    const src = try helpers.probeSource("probes/cases", "cfgpass_drop_before_match");
+    defer testing.allocator.free(src);
+    var c = try compileOpt("app", &.{.{ "app", src }});
     defer c.deinit();
     const text = try irText(&c.program.?);
     defer testing.allocator.free(text);
@@ -652,22 +547,11 @@ test "Pass 8.4 module/member CSE reuses identical loads in a block" {
     // A user-module constant member keeps this pass's load-CSE coverage:
     // a bundle intrinsic constant materializes instead (intrinsic plan,
     // phase 2 — see frontend_intrinsic_tests.zig).
-    var c = try compileText("app", &.{
-        .{
-            "app",
-            \\const lib = import("lib");
-            \\fn f() -> float32 {
-            \\    let a = lib.ratio;
-            \\    let b = lib.ratio;
-            \\    a + b
-            \\}
-            \\fn main() -> void {}
-        },
-        .{
-            "lib",
-            \\const ratio: float32 = 1.5;
-        },
-    });
+    const app_src = try helpers.probeSource("probes/cases", "cfgpass_cse_module_member");
+    defer testing.allocator.free(app_src);
+    const lib_src = try helpers.probeSource("probes/cases", "cfgpass_cse_module_member_lib");
+    defer testing.allocator.free(lib_src);
+    var c = try compileText("app", &.{ .{ "app", app_src }, .{ "lib", lib_src } });
     defer c.deinit();
 
     var program = c.program.?;
@@ -686,13 +570,9 @@ test "Pass 8.4 copy propagation collapses copies of Copy values" {
     // (Core §10.2), so the copy is a no-op and the parameter is returned
     // directly. (`T` is deliberately a concrete Copy type: an undeclared
     // type name is now a diagnostic, Core §12.1.)
-    var c = try compileText("app", &.{
-        .{
-            "app",
-            \\fn id(move x: int32) -> int32 { x }
-            \\fn main() -> void {}
-        },
-    });
+    const src = try helpers.probeSource("probes/cases", "cfgpass_copy_prop_copy_value");
+    defer testing.allocator.free(src);
+    var c = try compileText("app", &.{.{ "app", src }});
     defer c.deinit();
 
     var program = c.program.?;
@@ -712,21 +592,9 @@ test "Pass 8.4 copy propagation collapses box round-trip copies" {
     // emit site (optimizer.md, On-the-fly optimizations), so the round-trip compiles to a
     // direct `unbox` with no `copy` instruction anywhere; the mid-level
     // pass keeps it that way.
-    var c = try compileText("app", &.{
-        .{
-            "app",
-            \\const builtin = import("builtin");
-            \\struct Token { id: int32; }
-            \\fn main() -> void {
-            \\    let b = builtin.box::[int32](42);
-            \\    let v = builtin.unbox::[int32](move b);
-            \\    builtin.assert(v == 42, "unbox");
-            \\    let t = builtin.box::[Token](Token { id: 7 });
-            \\    let t2 = builtin.unbox::[Token](move t);
-            \\    builtin.assert(t2.id == 7, "round-trip");
-            \\}
-        },
-    });
+    const src = try helpers.probeSource("probes/cases", "cfgpass_copy_prop_box_roundtrip");
+    defer testing.allocator.free(src);
+    var c = try compileText("app", &.{.{ "app", src }});
     defer c.deinit();
 
     var program = c.program.?;
@@ -747,20 +615,9 @@ test "Pass 8.4 dead-instruction elimination drops unused match payloads" {
     // the payload without using it: the `read_payload` is dead. It is a
     // guarded projection (the lowering emits it only after the tag
     // switch) with a Copy result, so the pass removes it.
-    var c = try compileText("app", &.{
-        .{
-            "app",
-            \\const builtin = import("builtin");
-            \\using builtin.Option;
-            \\fn is_some(o: Option[int32]) -> bool {
-            \\    match (o) {
-            \\        Option::Some(v) => true,
-            \\        Option::None => false,
-            \\    }
-            \\}
-            \\fn main() -> void {}
-        },
-    });
+    const src = try helpers.probeSource("probes/cases", "cfgpass_dead_instr_match_payload");
+    defer testing.allocator.free(src);
+    var c = try compileText("app", &.{.{ "app", src }});
     defer c.deinit();
 
     var program = c.program.?;
@@ -945,29 +802,13 @@ test "Pass 8.9 optimization harness: corpus compile, optimize, and measure" {
     // with the optimizer, printing instruction / block / text-byte counts
     // (optimizer.md, Pass 8.7). The optimizer must never grow the CFG, and the
     // optimized AIR must re-parse and re-print identically (air.md §13).
-    const corpus = [_][]const u8{
-        "examples/basics.st",
-        "examples/fib.st",
-        "examples/functions.st",
-        "examples/structs.st",
-        "examples/any.st",
-        "examples/fib_tail_call.st",
-        "examples/minmax.st",
-        "examples/nest.st",
-        "examples/ownership.st",
-        "examples/match.st",
-        "examples/strings.st",
-        "examples/floats.st",
-        "examples/fold.st",
-        "examples/box.st",
-        "examples/maps.st",
-        "examples/arrays.st",
-        "examples/generics.st",
-        "examples/madd.st",
-    };
-    const io = std.testing.io;
-    for (corpus) |path| {
-        const src = try std.Io.Dir.cwd().readFileAlloc(io, path, testing.allocator, .limited(1 << 20));
+    // The corpus is enumerated at test time (probe_corpus.zig).
+    var corpus = try probe_corpus.list(testing.allocator, "examples");
+    defer corpus.deinit();
+    for (corpus.names) |spec| {
+        const path = try probe_corpus.path(testing.allocator, "examples", spec);
+        defer testing.allocator.free(path);
+        const src = try probe_corpus.read(testing.allocator, "examples", spec);
         defer testing.allocator.free(src);
 
         var raw = try compileText("app", &.{.{ "app", src }});
@@ -1021,18 +862,9 @@ test "frontend dispatches a two-arm list match on an emptiness test" {
     // Core §14.5: `[]` matches only the empty list, so a `match (xs) {
     // [] => A, [_, ..tail] => B }` must test emptiness and dispatch —
     // the `[]` arm is refutable, never an unconditional fallthrough.
-    var c = try compileText("app", &.{
-        .{
-            "app",
-            \\fn count_list(xs: list[int32]) -> int32 {
-            \\    match (xs) {
-            \\        [] => 0,
-            \\        [_, ..tail] => 1 + count_list(tail),
-            \\    }
-            \\}
-            \\fn main() -> void {}
-        },
-    });
+    const src = try helpers.probeSource("probes/cases", "cfgpass_list_match_emptiness");
+    defer testing.allocator.free(src);
+    var c = try compileText("app", &.{.{ "app", src }});
     defer c.deinit();
 
     const out = try irText(&c.program.?);
@@ -1050,15 +882,12 @@ test "float fold to inf survives the optimizer round-trip" {
     // The emit-time fold of 4.0/0.0 produces an `inf` const; the
     // optimizer's print→re-parse round-trip must read it back (the text
     // form spells it `inf`/`-inf`/`nan`).
+    const src = try helpers.probeSource("probes/cases", "cfgpass_float_fold_inf");
+    defer testing.allocator.free(src);
     var sources = moduleinfo.Sources{};
     var source_map = std.StringHashMapUnmanaged([]const u8).empty;
     defer source_map.deinit(testing.allocator);
-    try source_map.put(testing.allocator, "app",
-        \\fn f() -> float32 {
-        \\    let x = 4.0 / 0.0;
-        \\    x
-        \\}
-    );
+    try source_map.put(testing.allocator, "app", src);
     sources.source = source_map;
     var c = try frontend.compile(testing.allocator, .{ .entry = "app", .sources = sources, .entry_fn = "f", .optimize = true });
     defer c.deinit();
@@ -1109,30 +938,9 @@ test "frontend type environment carries concrete TypeDecls (fields, variants, ow
     // type's layout, ownership, and destruction info without the module
     // graph — struct fields, union variants, drop-hook names, opaque
     // host ids, and generic ownership via argument substitution.
-    var c = try compileText("app", &.{
-        .{
-            "app",
-            \\const builtin = import("builtin");
-            \\const array = import("array");
-            \\using builtin.Option;
-            \\struct File {
-            \\    fd: int32;
-            \\    path: str;
-            \\    drop(f) {
-            \\        builtin.print(f.path);
-            \\    }
-            \\}
-            \\union Result {
-            \\    Ok(int32),
-            \\    Err(str),
-            \\}
-            \\fn main() -> void {
-            \\    let f = File{ fd: 3, path: "x" };
-            \\    let r = Result::Ok(1);
-            \\    builtin.print(builtin.str(1));
-            \\}
-        },
-    });
+    const src = try helpers.probeSource("probes/cases", "cfgpass_type_environment");
+    defer testing.allocator.free(src);
+    var c = try compileText("app", &.{.{ "app", src }});
     defer c.deinit();
     const program = c.program orelse return error.TestUnexpectedResult;
 
@@ -1203,19 +1011,9 @@ test "frontend materializes the module member table with distinct member and slo
     // air.md §7, §9.6: every runtime value member gets one row in member
     // index order (the `load_member` operand space); a constant member's
     // storage slot is a *separate* index space (`store_member`).
-    var c = try compileText("app", &.{
-        .{
-            "app",
-            \\const builtin = import("builtin");
-            \\const greeting: str = "hello";
-            \\fn add(a: int32, b: int32) -> int32 { a + b }
-            \\fn main() -> void {
-            \\    let s = greeting;
-            \\    let x = add(1, 2);
-            \\    builtin.print(s);
-            \\}
-        },
-    });
+    const src = try helpers.probeSource("probes/cases", "cfgpass_module_member_table");
+    defer testing.allocator.free(src);
+    var c = try compileText("app", &.{.{ "app", src }});
     defer c.deinit();
     const program = c.program orelse return error.TestUnexpectedResult;
 
@@ -1262,17 +1060,9 @@ test "validator rejects out-of-range member and slot indices by itself" {
     // The acceptance: every `load_member` / `store_member` resolves to a
     // legal member/slot via `IrProgram` alone — a mutated index is
     // rejected by `cfg.validate` with no checker involvement.
-    var c = try compileText("app", &.{
-        .{
-            "app",
-            \\const builtin = import("builtin");
-            \\const greeting: str = "hello";
-            \\fn main() -> void {
-            \\    let s = greeting;
-            \\    builtin.print(s);
-            \\}
-        },
-    });
+    const src = try helpers.probeSource("probes/cases", "cfgpass_member_slot_bounds");
+    defer testing.allocator.free(src);
+    var c = try compileText("app", &.{.{ "app", src }});
     defer c.deinit();
     const program = &c.program.?;
 
@@ -1330,14 +1120,9 @@ test "store_member into an any-typed constant slot validates" {
     // slot as-is, so the validator's store type check accepts any value
     // type for an `any`-typed slot (a regression guard — the member
     // table materialization must not reject it).
-    var c = try compileText("app", &.{
-        .{
-            "app",
-            \\const builtin = import("builtin");
-            \\const x: any = 42;
-            \\fn main() -> void { builtin.print(builtin.str(1)); }
-        },
-    });
+    const src = try helpers.probeSource("probes/cases", "cfgpass_any_const_slot");
+    defer testing.allocator.free(src);
+    var c = try compileText("app", &.{.{ "app", src }});
     defer c.deinit();
     try testing.expect(c.program != null);
     const program = c.program.?;
@@ -1349,24 +1134,13 @@ test "store_member into an any-typed constant slot validates" {
 }
 
 test "module identity resolves through chained module-valued member loads" {
-    // lib's members: math (module value) only; math's members: sqrt.
-    var c = try compileText("app", &.{
-        .{ "math", "fn sqrt(x: int32) -> int32 { x }" },
-        .{
-            "lib",
-            \\const math = import("math");
-        },
-        .{
-            "app",
-            \\const builtin = import("builtin");
-            \\const lib = import("lib");
-            \\fn main() -> void {
-            \\    let s = lib.math.sqrt;
-            \\    let r = s(4);
-            \\    builtin.print(builtin.str(r));
-            \\}
-        },
-    });
+    const math_src = try helpers.probeSource("probes/cases", "cfgpass_module_chain_math");
+    defer testing.allocator.free(math_src);
+    const lib_src = try helpers.probeSource("probes/cases", "cfgpass_module_chain_lib");
+    defer testing.allocator.free(lib_src);
+    const app_src = try helpers.probeSource("probes/cases", "cfgpass_module_chain_app");
+    defer testing.allocator.free(app_src);
+    var c = try compileText("app", &.{ .{ "math", math_src }, .{ "lib", lib_src }, .{ "app", app_src } });
     defer c.deinit();
     const program = c.program orelse return error.TestUnexpectedResult;
 
@@ -1402,15 +1176,9 @@ test "compiled syscalls carry the specialized signature" {
     // air.md §8.2, §9.3: `builtin.str`'s generic type parameter is
     // specialized from the argument, and the whole signature rides on the
     // syscall instruction.
-    var c = try compileText("app", &.{
-        .{
-            "app",
-            \\const builtin = import("builtin");
-            \\fn main() -> void {
-            \\    builtin.print(builtin.str(42));
-            \\}
-        },
-    });
+    const src = try helpers.probeSource("probes/cases", "cfgpass_syscall_signature");
+    defer testing.allocator.free(src);
+    var c = try compileText("app", &.{.{ "app", src }});
     defer c.deinit();
     const program = c.program orelse return error.TestUnexpectedResult;
 

@@ -28,6 +28,59 @@ The detailed probes cover the source-reachable operation/type matrix:
 - `strings.st`: string concatenation and comparison
 - `constants.st`: scalar constants, including 64-bit values that exercise move-wide
   materialization
+- `nested_control.st`: chained and nested `if`/`else if` joins, boolean nesting, and
+  value-producing conditionals (phi simplification, if-conversion candidates)
+- `redundancy.st`: the same pure computation in several arms and after a join
+  (CSE, copy propagation, partial redundancy elimination)
+- `unused.st`: computations and field projections whose results are never consumed
+  (dead-instruction elimination, dead-let)
+- `mutual_recursion.st`: a mutual recursion cycle, a non-tail self call, and a self
+  tail call (inlining, the tail-call pass cycle guard)
+- `nested_aggregates.st`: nested struct / tuple / union values destroyed as a whole
+  (recursive drop-lowering expansion)
+- `select.st`: scalar if-expressions of every if-convertible type plus a unique
+  aggregate that must stay branchy (if-conversion's scalar-Copy-only rule)
+- `seg.st`: every source-reachable SEG rewrite family (known-variant `match`
+  reduction, immediately-invoked-lambda β reduction, constant folding and
+  integer algebra, constant conditions, unused-let elimination)
+- `consumers.st`: the M2b effect-driven consumers (dead-let of a discardable
+  scalar call and of a discardable Unique constructor, selective ANF hoisting
+  of a Unique call result and of a dominant effectful operand, with destructor
+  placement pinned by a printing drop hook)
+
+Every `probes/*.st` file is enumerated at test time by
+`src/probe_corpus.zig`, so a new probe automatically joins the HIR build
+corpus (`hir_tests.zig`), the canonical-AIR seam round-trip, the M2b
+consumers and SEG on/off differentials (`hir_simplify_tests.zig`,
+`hir_seg_tests.zig`), and the per-pass smoke suite
+(`frontend_pass_smoke_tests.zig`) — no hardcoded list to update.
+
+## Pass smoke coverage
+
+`src/frontend_pass_smoke_tests.zig` drives every probe through every
+transform/optimization pass family:
+
+- CFG lowering plus the canonical-AIR text round-trip;
+- each Pass 7-8 rewrite applied **individually** to a fresh compilation,
+then validated and round-tripped (so a pass that only misbehaves alone
+is caught even though the ordered driver would mask it);
+- the full optimized pipeline (optimizer, then post-optimization drop
+lowering, then re-validation);
+- the LLIR backend: `lowerLlir`, structural image validation, symbolic
+assembly, and the flat binary read/write round-trip.
+A pass runs over a freshly compiled program rather than one parsed from
+canonical AIR text: the text form deliberately carries no type
+declarations, so the validator cannot run on a parsed aggregate program.
+
+## Black-box test fixtures (`probes/cases/`)
+
+Whole-program fixtures that a black-box test needs but that are *not*
+part of the smoke corpus live under `probes/cases/`. They are read by
+spec through `frontend_test_support.probeSource` / `probe_corpus.read`,
+not enumerated: a fixture may declare host bindings, trap, or intentionally
+fail to be useful to one test, and the dynamically enumerated corpus
+would run it through every differential. Add a fixture here instead of
+inlining a whole Stilla program in a test body.
 
 Some LLIR instructions have no one-to-one source construct. `spill_take`,
 `spill_put`, `result_take`, argument-window instructions, `jal`/`jalr`/`jr`,

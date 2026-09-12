@@ -35,14 +35,9 @@ const findFunc = helpers.findFunc;
 // ---------------------------------------------------------------------------
 
 test "first-class intrinsic value lowers to a synthesized wrapper fn_ref" {
-    var c = try compileText("app", &.{
-        .{
-            "app",
-            \\const math = import("math");
-            \\fn apply(f: fn(float32) -> float32, x: float32) -> float32 { f(x) }
-            \\fn main() -> float32 { apply(math.sqrt, 4.0) }
-        },
-    });
+    const src = try helpers.probeSource("probes/cases", "intrinsic_first_class_value_wrapper");
+    defer testing.allocator.free(src);
+    var c = try compileText("app", &.{.{ "app", src }});
     defer c.deinit();
 
     const program = &c.program.?;
@@ -69,18 +64,9 @@ test "first-class intrinsic value lowers to a synthesized wrapper fn_ref" {
 }
 
 test "generic intrinsics synthesize one wrapper per concrete specialization" {
-    var c = try compileText("app", &.{
-        .{
-            "app",
-            \\const builtin = import("builtin");
-            \\fn apply(f: fn(int32) -> str, x: int32) -> str { f(x) }
-            \\fn applyf(f: fn(float32) -> str, x: float32) -> str { f(x) }
-            \\fn main() -> void {
-            \\    apply(builtin.str::[int32], 7);
-            \\    applyf(builtin.str::[float32], 1.5);
-            \\}
-        },
-    });
+    const src = try helpers.probeSource("probes/cases", "intrinsic_generic_wrapper_specializations");
+    defer testing.allocator.free(src);
+    var c = try compileText("app", &.{.{ "app", src }});
     defer c.deinit();
 
     const program = &c.program.?;
@@ -99,26 +85,11 @@ test "generic intrinsics synthesize one wrapper per concrete specialization" {
 }
 
 test "cross-module uses share one synthesized wrapper" {
-    var c = try compileText("app", &.{
-        .{
-            "lib",
-            \\const math = import("math");
-            \\fn helper() -> float32 {
-            \\    let g = math.sqrt;
-            \\    g(4.0)
-            \\}
-        },
-        .{
-            "app",
-            \\const math = import("math");
-            \\const lib = import("lib");
-            \\fn base() -> float32 {
-            \\    let f = math.sqrt;
-            \\    f(9.0)
-            \\}
-            \\fn main() -> float32 { base() }
-        },
-    });
+    const lib_src = try helpers.probeSource("probes/cases", "intrinsic_cross_module_wrapper_lib");
+    defer testing.allocator.free(lib_src);
+    const app_src = try helpers.probeSource("probes/cases", "intrinsic_cross_module_wrapper_app");
+    defer testing.allocator.free(app_src);
+    var c = try compileText("app", &.{ .{ "lib", lib_src }, .{ "app", app_src } });
     defer c.deinit();
 
     const program = &c.program.?;
@@ -144,16 +115,9 @@ test "cross-module uses share one synthesized wrapper" {
 }
 
 test "never intrinsic wrapper traps after its syscall" {
-    var c = try compileText("app", &.{
-        .{
-            "app",
-            \\const builtin = import("builtin");
-            \\fn die(f: fn(str) -> never, s: str) -> never { f(s) }
-            \\fn main() -> void {
-            \\    let p = builtin.panic;
-            \\}
-        },
-    });
+    const src = try helpers.probeSource("probes/cases", "intrinsic_never_wrapper_traps");
+    defer testing.allocator.free(src);
+    var c = try compileText("app", &.{.{ "app", src }});
     defer c.deinit();
 
     const program = &c.program.?;
@@ -169,16 +133,9 @@ test "never intrinsic wrapper traps after its syscall" {
 }
 
 test "wrapper AIR round-trips through the standalone cfg parser" {
-    var c = try compileText("app", &.{
-        .{
-            "app",
-            \\const math = import("math");
-            \\fn main() -> float32 {
-            \\    let f = math.sqrt;
-            \\    f(4.0)
-            \\}
-        },
-    });
+    const src = try helpers.probeSource("probes/cases", "intrinsic_wrapper_air_roundtrip");
+    defer testing.allocator.free(src);
+    var c = try compileText("app", &.{.{ "app", src }});
     defer c.deinit();
 
     const text = try irText(&c.program.?);
@@ -202,26 +159,9 @@ test "wrapper AIR round-trips through the standalone cfg parser" {
 // ---------------------------------------------------------------------------
 
 test "bundle direct calls expand to the pre-migration syscalls" {
-    var c = try compileText("app", &.{
-        .{
-            "app",
-            \\const builtin = import("builtin");
-            \\const math = import("math");
-            \\const lists = import("list");
-            \\const string = import("string");
-            \\const array = import("array");
-            \\const hashmap = import("hashmap");
-            \\fn p() -> void {
-            \\    builtin.print("hi");
-            \\}
-            \\fn sq(x: float32) -> float32 { math.sqrt(x) }
-            \\fn n(xs: list[int32]) -> int32 { lists.len(xs) }
-            \\fn sl(s: str) -> int32 { string.len(s) }
-            \\fn al(borrow a: array.Array[int32]) -> int32 { array.len::[int32](a) }
-            \\fn hl(borrow m: hashmap.HashMap[int32, int32]) -> int32 { hashmap.len::[int32, int32](m) }
-            \\fn main() -> void {}
-        },
-    });
+    const src = try helpers.probeSource("probes/cases", "intrinsic_bundle_direct_calls");
+    defer testing.allocator.free(src);
+    var c = try compileText("app", &.{.{ "app", src }});
     defer c.deinit();
 
     const text = try irText(&c.program.?);
@@ -248,18 +188,9 @@ test "bundle direct calls expand to the pre-migration syscalls" {
 // ---------------------------------------------------------------------------
 
 test "math constants materialize as typed literals with the specified bits" {
-    var c = try compileText("app", &.{
-        .{
-            "app",
-            \\const math = import("math");
-            \\fn get_pi() -> float32 { math.pi }
-            \\fn get_e() -> float32 { math.e }
-            \\fn get_tau() -> float32 { math.tau }
-            \\fn get_inf() -> float32 { math.inf }
-            \\fn get_nan() -> float32 { math.nan }
-            \\fn main() -> void {}
-        },
-    });
+    const src = try helpers.probeSource("probes/cases", "intrinsic_math_constants");
+    defer testing.allocator.free(src);
+    var c = try compileText("app", &.{.{ "app", src }});
     defer c.deinit();
 
     // No constant-slot writes anywhere: intrinsic constants have no
@@ -312,16 +243,9 @@ test "math constants materialize as typed literals with the specified bits" {
 // ---------------------------------------------------------------------------
 
 test "builtin.panic expands to a trapping syscall with no following drop" {
-    var c = try compileText("app", &.{
-        .{
-            "app",
-            \\const builtin = import("builtin");
-            \\fn die(msg: str) -> never {
-            \\    builtin.panic(msg)
-            \\}
-            \\fn main() -> void {}
-        },
-    });
+    const src = try helpers.probeSource("probes/cases", "intrinsic_builtin_panic");
+    defer testing.allocator.free(src);
+    var c = try compileText("app", &.{.{ "app", src }});
     defer c.deinit();
 
     const program = &c.program.?;
@@ -346,21 +270,18 @@ test "caller-supplied stdlib extension keeps host-binding identity" {
     // classification and lowers to the ordinary `extra#print` syscall,
     // never the intrinsic expansion (Intrinsics §2: source spoofing
     // does not confer intrinsic identity).
+    const app_src = try helpers.probeSource("probes/cases", "intrinsic_spoofed_host_binding_app");
+    defer testing.allocator.free(app_src);
+    const extra_src = try helpers.probeSource("probes/cases", "intrinsic_spoofed_host_binding_extra");
+    defer testing.allocator.free(extra_src);
     var sources = moduleinfo.Sources{};
     var source_map = std.StringHashMapUnmanaged([]const u8).empty;
     defer source_map.deinit(testing.allocator);
-    try source_map.put(testing.allocator, "app",
-        \\const extra = import("extra");
-        \\fn shout() -> void {
-        \\    extra.print("hey");
-        \\}
-        \\fn main() -> void {}
-        \\
-    );
+    try source_map.put(testing.allocator, "app", app_src);
     sources.source = source_map;
     var std_map = std.StringHashMapUnmanaged([]const u8).empty;
     defer std_map.deinit(testing.allocator);
-    try std_map.put(testing.allocator, "extra", "fn print(msg: str) -> void;\n");
+    try std_map.put(testing.allocator, "extra", extra_src);
     sources.standard_library = std_map;
 
     var c = try frontend.compile(testing.allocator, .{ .entry = "app", .sources = sources, .entry_fn = "main" });
@@ -390,20 +311,12 @@ test "user module shadowing a bundle specifier keeps host-binding identity" {
     var sources = moduleinfo.Sources{};
     var source_map = std.StringHashMapUnmanaged([]const u8).empty;
     defer source_map.deinit(testing.allocator);
-    try source_map.put(testing.allocator, "app",
-        \\const math = import("math");
-        \\fn get_pi() -> float32 { math.pi }
-        \\fn main() -> float32 {
-        \\    let x = math.sqrt(4.0);
-        \\    x + get_pi()
-        \\}
-        \\
-    );
-    try source_map.put(testing.allocator, "math",
-        \\const pi: float32;
-        \\fn sqrt(x: float32) -> float32;
-        \\
-    );
+    const app_src = try helpers.probeSource("probes/cases", "intrinsic_shadowed_bundle_app");
+    defer testing.allocator.free(app_src);
+    const math_src = try helpers.probeSource("probes/cases", "intrinsic_shadowed_bundle_math");
+    defer testing.allocator.free(math_src);
+    try source_map.put(testing.allocator, "app", app_src);
+    try source_map.put(testing.allocator, "math", math_src);
     sources.source = source_map;
 
     var c = try frontend.compile(testing.allocator, .{ .entry = "app", .sources = sources, .entry_fn = "main" });
@@ -488,17 +401,9 @@ test "all-intrinsic modules have empty member tables and empty slots" {
     // phase 4). string/hashmap carry exactly one ordinary row each:
     // their `const builtin = import("builtin")` module value (a module
     // member is never intrinsic — it is a static reference).
-    var c = try compileText("app", &.{
-        .{
-            "app",
-            \\const builtin = import("builtin");
-            \\const math = import("math");
-            \\const string = import("string");
-            \\const array = import("array");
-            \\const hashmap = import("hashmap");
-            \\fn main() -> void {}
-        },
-    });
+    const src = try helpers.probeSource("probes/cases", "intrinsic_all_intrinsic_modules");
+    defer testing.allocator.free(src);
+    var c = try compileText("app", &.{.{ "app", src }});
     defer c.deinit();
 
     const program = &c.program.?;
@@ -527,13 +432,9 @@ test "mixed member table compacts past the intrinsic rows" {
     // member table holds only the ordinary members, with indexes
     // compacted past the intrinsic rows; the source-level `slot` still
     // counts every value member (air.md §7 vs §5.6).
-    var c = try compileText("app", &.{
-        .{
-            "app",
-            \\const lists = import("list");
-            \\fn main() -> void {}
-        },
-    });
+    const src = try helpers.probeSource("probes/cases", "intrinsic_mixed_member_table");
+    defer testing.allocator.free(src);
+    var c = try compileText("app", &.{.{ "app", src }});
     defer c.deinit();
 
     const program = &c.program.?;
@@ -563,20 +464,11 @@ test "mixed member table compacts past the intrinsic rows" {
 test "user modules keep their member tables and constant slots" {
     // A plain user module is untouched by the compaction: its function
     // and constant members occupy rows and slots as before (air.md §7).
-    var c = try compileText("app", &.{
-        .{
-            "app",
-            \\const lib = import("lib");
-            \\fn id(x: int32) -> int32 { x }
-            \\const ratio: float32 = 1.5;
-            \\fn main() -> float32 { lib.ratio }
-        },
-        .{
-            "lib",
-            \\const ratio: float32 = 1.5;
-            \\fn add(a: int32, b: int32) -> int32 { a + b }
-        },
-    });
+    const app_src = try helpers.probeSource("probes/cases", "intrinsic_user_modules_app");
+    defer testing.allocator.free(app_src);
+    const lib_src = try helpers.probeSource("probes/cases", "intrinsic_user_modules_lib");
+    defer testing.allocator.free(lib_src);
+    var c = try compileText("app", &.{ .{ "app", app_src }, .{ "lib", lib_src } });
     defer c.deinit();
 
     const program = &c.program.?;
@@ -618,14 +510,9 @@ test "load_member emits the compacted canonical index" {
     // `load_member` carries the compacted canonical index 6; the
     // trailing `.print` member then resolves through the intrinsic path
     // to a synthesized wrapper fn_ref (phase 3) — no second member row.
-    var c = try compileText("app", &.{
-        .{
-            "app",
-            \\const lists = import("list");
-            \\fn take(f: fn(str) -> void) -> void { f("hi") }
-            \\fn main() -> void { take(lists.builtin.print) }
-        },
-    });
+    const src = try helpers.probeSource("probes/cases", "intrinsic_load_member_compacted_index");
+    defer testing.allocator.free(src);
+    var c = try compileText("app", &.{.{ "app", src }});
     defer c.deinit();
 
     const program = &c.program.?;
@@ -664,70 +551,38 @@ test "builtin.str and builtin.hash reject list types that used to compile silent
     // compile-time error before canonical AIR. These exact programs
     // compiled silently before the migration; they must now fail.
     {
-        try expectDiag("app", &.{
-            .{
-                "app",
-                \\const builtin = import("builtin");
-                \\fn s() -> str { builtin.str([1, 2]) }
-                \\fn main() -> void {}
-            },
-        }, "intrinsic 'builtin.str' does not support type 'list[int32]'");
+        const src = try helpers.probeSource("probes/cases", "intrinsic_str_rejects_list");
+        defer testing.allocator.free(src);
+        try expectDiag("app", &.{.{ "app", src }}, "intrinsic 'builtin.str' does not support type 'list[int32]'");
     }
     {
-        try expectDiag("app", &.{
-            .{
-                "app",
-                \\const builtin = import("builtin");
-                \\fn h() -> int32 { builtin.hash([1, 2]) }
-                \\fn main() -> void {}
-            },
-        }, "intrinsic 'builtin.hash' does not support type 'list[int32]'");
+        const src = try helpers.probeSource("probes/cases", "intrinsic_hash_rejects_list");
+        defer testing.allocator.free(src);
+        try expectDiag("app", &.{.{ "app", src }}, "intrinsic 'builtin.hash' does not support type 'list[int32]'");
     }
 }
 
 test "builtin.str rejects a named type with the type name in the diagnostic" {
-    try expectDiag("app", &.{
-        .{
-            "app",
-            \\const builtin = import("builtin");
-            \\using builtin.Option;
-            \\fn s() -> str { builtin.str(Option::Some(1)) }
-            \\fn main() -> void {}
-        },
-    }, "intrinsic 'builtin.str' does not support type 'builtin.Option[int32]'");
+    const src = try helpers.probeSource("probes/cases", "intrinsic_str_rejects_named_type");
+    defer testing.allocator.free(src);
+    try expectDiag("app", &.{.{ "app", src }}, "intrinsic 'builtin.str' does not support type 'builtin.Option[int32]'");
 }
 
 test "first-class str/hash specializations reject unsupported types too" {
     // The wrapper path enforces the same constraint as the direct call:
     // a synthesized wrapper would carry a signature the host cannot
     // serve (Runtime §4.2/§4.9, Intrinsics §3).
-    try expectDiag("app", &.{
-        .{
-            "app",
-            \\const builtin = import("builtin");
-            \\fn main() -> void {
-            \\    let f = builtin.str::[list[int32]];
-            \\}
-        },
-    }, "intrinsic 'builtin.str' does not support type 'list[int32]'");
+    const src = try helpers.probeSource("probes/cases", "intrinsic_first_class_str_rejects_list");
+    defer testing.allocator.free(src);
+    try expectDiag("app", &.{.{ "app", src }}, "intrinsic 'builtin.str' does not support type 'list[int32]'");
 }
 
 test "str/hash accept exactly the nine supported types" {
     // The full supported set (byte, int32, uint32, i64, u64, float32,
     // f64, bool, str) compiles through the expansion; nothing else does.
-    var c = try compileText("app", &.{
-        .{
-            "app",
-            \\const builtin = import("builtin");
-            \\fn s(b: byte, i: int32, u: uint32, i2: int64, u2: uint64, f: float32, f2: float64, bo: bool, st: str) -> str {
-            \\    builtin.str(b) + builtin.str(i) + builtin.str(u) + builtin.str(i2) + builtin.str(u2) + builtin.str(f) + builtin.str(f2) + builtin.str(bo) + builtin.str(st)
-            \\}
-            \\fn h(b: byte, i: int32, u: uint32, i2: int64, u2: uint64, f: float32, f2: float64, bo: bool, st: str) -> int32 {
-            \\    builtin.hash(b) + builtin.hash(i) + builtin.hash(u) + builtin.hash(i2) + builtin.hash(u2) + builtin.hash(f) + builtin.hash(f2) + builtin.hash(bo) + builtin.hash(st)
-            \\}
-            \\fn main() -> void {}
-        },
-    });
+    const src = try helpers.probeSource("probes/cases", "intrinsic_str_hash_supported_types");
+    defer testing.allocator.free(src);
+    var c = try compileText("app", &.{.{ "app", src }});
     defer c.deinit();
     try testing.expect(c.program != null);
 }
@@ -735,40 +590,24 @@ test "str/hash accept exactly the nine supported types" {
 test "first-class hash specialization rejects an unsupported type too" {
     // The wrapper path covers `hash` exactly like `str`: an
     // unsupported specialization is a compile-time error.
-    try expectDiag("app", &.{
-        .{
-            "app",
-            \\const builtin = import("builtin");
-            \\fn main() -> void {
-            \\    let f = builtin.hash::[list[int32]];
-            \\}
-        },
-    }, "intrinsic 'builtin.hash' does not support type 'list[int32]'");
+    const src = try helpers.probeSource("probes/cases", "intrinsic_first_class_hash_rejects_list");
+    defer testing.allocator.free(src);
+    try expectDiag("app", &.{.{ "app", src }}, "intrinsic 'builtin.hash' does not support type 'list[int32]'");
 }
 
 test "monomorphized generic user functions keep the str/hash constraint" {
     // T resolves through the checker's specialization inside a generic
     // body: the supported case compiles, the unsupported one fails on
     // the same diagnostic with the concrete T.
-    var ok = try compileText("app", &.{
-        .{
-            "app",
-            \\const builtin = import("builtin");
-            \\fn show[T](x: T) -> str { builtin.str(x) }
-            \\fn main() -> void { let s = show::[int32](42); }
-        },
-    });
+    const ok_src = try helpers.probeSource("probes/cases", "intrinsic_generic_str_ok");
+    defer testing.allocator.free(ok_src);
+    var ok = try compileText("app", &.{.{ "app", ok_src }});
     defer ok.deinit();
     try testing.expect(ok.program != null);
 
-    try expectDiag("app", &.{
-        .{
-            "app",
-            \\const builtin = import("builtin");
-            \\fn show[T](x: T) -> str { builtin.str(x) }
-            \\fn main() -> void { let s = show::[list[int32]]([1, 2]); }
-        },
-    }, "intrinsic 'builtin.str' does not support type 'list[int32]'");
+    const bad_src = try helpers.probeSource("probes/cases", "intrinsic_generic_str_rejects_list");
+    defer testing.allocator.free(bad_src);
+    try expectDiag("app", &.{.{ "app", bad_src }}, "intrinsic 'builtin.str' does not support type 'list[int32]'");
 }
 
 test "math constant bit patterns survive the AIR text round-trip" {
@@ -776,18 +615,9 @@ test "math constant bit patterns survive the AIR text round-trip" {
     // (shortest-round-trip float spelling; inf/nan spellings parse back
     // to their canonical bit patterns) — no precision loss across the
     // canonical AIR boundary.
-    var c = try compileText("app", &.{
-        .{
-            "app",
-            \\const math = import("math");
-            \\fn get_pi() -> float32 { math.pi }
-            \\fn get_e() -> float32 { math.e }
-            \\fn get_tau() -> float32 { math.tau }
-            \\fn get_inf() -> float32 { math.inf }
-            \\fn get_nan() -> float32 { math.nan }
-            \\fn main() -> void {}
-        },
-    });
+    const src = try helpers.probeSource("probes/cases", "intrinsic_math_constants");
+    defer testing.allocator.free(src);
+    var c = try compileText("app", &.{.{ "app", src }});
     defer c.deinit();
 
     const text = try irText(&c.program.?);
@@ -833,35 +663,24 @@ test "array/hashmap members that carry types only in the token/result type requi
     // interface is what binds, not the spelling: a caller-supplied
     // stdlib extension named `array` keeps inference (origin guard,
     // Intrinsics §2).
-    const cases = [_]struct { src: []const u8, needle: []const u8 }{
-        .{ .src = "fn al(borrow a: array.Array[int32]) -> int32 { array.len(a) }", .needle = "type arguments of 'array.len' must be written explicitly" },
-        .{ .src = "fn ag(borrow a: array.Array[int32]) -> int32 { array.get(a, 0) }", .needle = "type arguments of 'array.get' must be written explicitly" },
-        .{ .src = "fn ac(borrow a: array.Array[int32]) -> array.Array[int32] { array.clone(a) }", .needle = "type arguments of 'array.clone' must be written explicitly" },
-        .{ .src = "fn hl(borrow m: hashmap.HashMap[int32, int32]) -> int32 { hashmap.len(m) }", .needle = "type arguments of 'hashmap.len' must be written explicitly" },
-        .{ .src = "fn hg(borrow m: hashmap.HashMap[int32, int32], k: int32) -> void { let o = hashmap.get(m, k); }", .needle = "type arguments of 'hashmap.get' must be written explicitly" },
-        .{ .src = "fn he() -> hashmap.HashMap[int32, int32] { hashmap.empty() }", .needle = "type arguments of 'hashmap.empty' must be written explicitly" },
+    const cases = [_]struct { spec: []const u8, needle: []const u8 }{
+        .{ .spec = "intrinsic_array_len_needs_explicit_type_args", .needle = "type arguments of 'array.len' must be written explicitly" },
+        .{ .spec = "intrinsic_array_get_needs_explicit_type_args", .needle = "type arguments of 'array.get' must be written explicitly" },
+        .{ .spec = "intrinsic_array_clone_needs_explicit_type_args", .needle = "type arguments of 'array.clone' must be written explicitly" },
+        .{ .spec = "intrinsic_hashmap_len_needs_explicit_type_args", .needle = "type arguments of 'hashmap.len' must be written explicitly" },
+        .{ .spec = "intrinsic_hashmap_get_needs_explicit_type_args", .needle = "type arguments of 'hashmap.get' must be written explicitly" },
+        .{ .spec = "intrinsic_hashmap_empty_needs_explicit_type_args", .needle = "type arguments of 'hashmap.empty' must be written explicitly" },
     };
     for (cases) |case| {
-        const src = try std.fmt.allocPrint(testing.allocator, "const array = import(\"array\");\nconst hashmap = import(\"hashmap\");\n{s}\nfn main() -> void {{}}\n", .{case.src});
+        const src = try helpers.probeSource("probes/cases", case.spec);
         defer testing.allocator.free(src);
-        try expectDiag("app", &.{
-            .{ "app", src },
-        }, case.needle);
+        try expectDiag("app", &.{.{ "app", src }}, case.needle);
     }
     // The explicit forms compile, and `hashmap.insert` still infers
     // K/V from the key and value arguments (StdLib §3).
-    var ok = try compileText("app", &.{
-        .{
-            "app",
-            \\const array = import("array");
-            \\const hashmap = import("hashmap");
-            \\fn al(borrow a: array.Array[int32]) -> int32 { array.len::[int32](a) }
-            \\fn h(move m: hashmap.HashMap[int32, int32], k: int32) -> hashmap.HashMap[int32, int32] {
-            \\    hashmap.insert(move m, k, 7)
-            \\}
-            \\fn main() -> void {}
-        },
-    });
+    const ok_src = try helpers.probeSource("probes/cases", "intrinsic_explicit_type_args_ok");
+    defer testing.allocator.free(ok_src);
+    var ok = try compileText("app", &.{.{ "app", ok_src }});
     defer ok.deinit();
     try testing.expect(ok.program != null);
 }
@@ -875,19 +694,12 @@ test "caller-supplied array extension keeps inferred type arguments" {
     var sources = moduleinfo.Sources{};
     var source_map = std.StringHashMapUnmanaged([]const u8).empty;
     defer source_map.deinit(testing.allocator);
-    try source_map.put(testing.allocator, "app",
-        \\const array = import("array");
-        \\fn al(borrow a: array.Array[int32]) -> int32 { array.len(a) }
-        \\fn main() -> void {}
-        \\
-    );
-    try source_map.put(testing.allocator, "array",
-        \\struct Array[T] {
-        \\    data: list[T];
-        \\}
-        \\fn len[T](borrow array: Array[T]) -> int32;
-        \\
-    );
+    const app_src = try helpers.probeSource("probes/cases", "intrinsic_spoofed_array_app");
+    defer testing.allocator.free(app_src);
+    const array_src = try helpers.probeSource("probes/cases", "intrinsic_spoofed_array_module");
+    defer testing.allocator.free(array_src);
+    try source_map.put(testing.allocator, "app", app_src);
+    try source_map.put(testing.allocator, "array", array_src);
     sources.source = source_map;
 
     var c = try frontend.compile(testing.allocator, .{ .entry = "app", .sources = sources, .entry_fn = "main" });
@@ -900,28 +712,14 @@ test "hashmap Copy constraints keep rejecting unique values through the expansio
     // parameters of the declared signature at the call site — the
     // expansion path lowers arguments exactly like the host-binding
     // path, so a unique V (any is unique) still fails.
-    try expectDiag("app", &.{
-        .{
-            "app",
-            \\const hashmap = import("hashmap");
-            \\fn h(move m: hashmap.HashMap[int32, any], k: int32, v: any) -> hashmap.HashMap[int32, any] {
-            \\    hashmap.insert(move m, k, v)
-            \\}
-            \\fn main() -> void {}
-        },
-    }, "unique");
+    const bad_src = try helpers.probeSource("probes/cases", "intrinsic_hashmap_unique_rejected");
+    defer testing.allocator.free(bad_src);
+    try expectDiag("app", &.{.{ "app", bad_src }}, "unique");
     // The specialized signature still rides the syscall for supported
     // uses: explicit ::[...] args reach the syscall's signature.
-    var ok = try compileText("app", &.{
-        .{
-            "app",
-            \\const hashmap = import("hashmap");
-            \\fn h(move m: hashmap.HashMap[int32, int32]) -> hashmap.HashMap[int32, int32] {
-            \\    hashmap.insert(move m, 1, 2)
-            \\}
-            \\fn main() -> void {}
-        },
-    });
+    const ok_src = try helpers.probeSource("probes/cases", "intrinsic_hashmap_copy_ok");
+    defer testing.allocator.free(ok_src);
+    var ok = try compileText("app", &.{.{ "app", ok_src }});
     defer ok.deinit();
     try testing.expect(ok.program != null);
 }
@@ -1020,22 +818,22 @@ test "bundle function member without an expansion entry fails before canonical A
     // synthetic module is bundle-origin — same classification the
     // embedded bundle gets from `module_load` — so spelling alone cannot
     // bypass the table.
-    try lowerWithBundleModule(
-        \\const fut = import("fut");
-        \\fn main() -> float32 { fut.future_op(1.0) }
-        \\
-    , "fn future_op(x: float32) -> float32;\n", "intrinsic 'fut.future_op' has no expansion");
+    const app_src = try helpers.probeSource("probes/cases", "intrinsic_synthetic_bundle_fn_app");
+    defer testing.allocator.free(app_src);
+    const fut_src = try helpers.probeSource("probes/cases", "intrinsic_synthetic_bundle_fn_fut");
+    defer testing.allocator.free(fut_src);
+    try lowerWithBundleModule(app_src, fut_src, "intrinsic 'fut.future_op' has no expansion");
 }
 
 test "bundle constant without a materialization entry fails before canonical AIR" {
     // The same guard on the constant side: an intrinsic constant the
     // frontend cannot materialize is a compile error — there is no host
     // constant slot for it (air.md §5.6, Intrinsics §3).
-    try lowerWithBundleModule(
-        \\const fut = import("fut");
-        \\fn main() -> float32 { fut.magic_constant }
-        \\
-    , "const magic_constant: float32;\n", "intrinsic 'fut.magic_constant' has no expansion");
+    const app_src = try helpers.probeSource("probes/cases", "intrinsic_synthetic_bundle_const_app");
+    defer testing.allocator.free(app_src);
+    const fut_src = try helpers.probeSource("probes/cases", "intrinsic_synthetic_bundle_const_fut");
+    defer testing.allocator.free(fut_src);
+    try lowerWithBundleModule(app_src, fut_src, "intrinsic 'fut.magic_constant' has no expansion");
 }
 
 // ---------------------------------------------------------------------------
@@ -1050,19 +848,9 @@ test "LLIR carries no intrinsic representation — host references are (module, 
     // §8) — the symbolic projection renders `@builtin.print`,
     // `@math.sqrt`, `@list.len` — and all-intrinsic modules carry empty
     // member/slot sections in their descriptors.
-    var c = try compileText("app", &.{
-        .{
-            "app",
-            \\const builtin = import("builtin");
-            \\const math = import("math");
-            \\const lists = import("list");
-            \\fn main() -> void {
-            \\    let x = math.sqrt(4.0);
-            \\    let n = lists.len([1, 2]);
-            \\    builtin.print("ok");
-            \\}
-        },
-    });
+    const src = try helpers.probeSource("probes/cases", "intrinsic_llir_no_representation");
+    defer testing.allocator.free(src);
+    var c = try compileText("app", &.{.{ "app", src }});
     defer c.deinit();
     const program = &c.program.?;
 
