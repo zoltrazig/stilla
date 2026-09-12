@@ -15,6 +15,7 @@ const moduleinfo = @import("stilla").moduleinfo;
 const checker = @import("stilla").checker;
 const hir_build_block = @import("hir_build_block.zig");
 const hir_build_expr = @import("hir_build_expr.zig");
+const hir_build_cleanup = @import("hir_build_cleanup.zig");
 pub const BuildError = error{ OutOfMemory, Diagnostic };
 
 /// Program-wide first-class intrinsic wrapper cache key: the declaring
@@ -246,6 +247,9 @@ fn buildProgramInner(b: *Builder) BuildError!void {
     for (b.graph.modules) |info| try predeclareModule(b, info);
     for (b.graph.modules) |info| try buildModuleFuncs(b, info);
     b.built.types = try collectTypeEnv(b);
+    // Full-expression cleanup registration (docs/effects.md §11.2) —
+    // needs the type environment for the ownership class of named types.
+    try hir_build_cleanup.register(b);
 }
 
 /// Pass 1, one module: the module record, its constant records (in

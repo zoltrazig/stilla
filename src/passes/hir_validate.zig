@@ -95,6 +95,8 @@ pub fn validate(program: *const hir.Program, root: hir.ExprId, allocator: std.me
     @memset(v.parent_region, null);
     @memset(v.owner_op, 0);
 
+    if (try v.checkCleanupTokens()) |m| return m;
+
     try v.work.append(a, .{ .expr = .{ .id = root, .ctx = null } });
     while (v.work.pop()) |item| {
         const msg = switch (item) {
@@ -166,6 +168,41 @@ const Validator = struct {
     fn opName(self: *const Validator, op: hir.OpId) []const u8 {
         _ = self;
         return hir.op_descriptors[op].name;
+    }
+
+    // -- cleanup tokens -----------------------------------------------------
+
+    /// Structural checks on the program-wide cleanup-token table
+    /// (docs/effects.md §11.2): every live origin is a real expr whose
+    /// type matches the token's, and every FE id is in range with its
+    /// live `registration_index` values strictly increasing in list
+    /// (creation) order. Retired tokens (`hir.no_expr`) are ignored and
+    /// may leave gaps, so contiguity is not required. The table is
+    /// shared across roots, so this runs once per `validate` call.
+    fn checkCleanupTokens(self: *Validator) !?[]const u8 {
+        var last = std.AutoHashMapUnmanaged(hir.FullExprId, u32).empty;
+        defer last.deinit(self.arena);
+        for (self.program.cleanup_tokens.items) |tk| {
+            if (tk.full_expr >= self.program.full_exprs.items.len) {
+                return self.fail("cleanup token carries full_expr {d} out of range", .{tk.full_expr});
+            }
+            if (tk.origin_expr == hir.no_expr) continue; // retired
+            if (tk.origin_expr >= self.program.exprs.items.len) {
+                return self.fail("cleanup token origin {d} out of range ({d} exprs)", .{ tk.origin_expr, self.program.exprs.items.len });
+            }
+            const n = self.program.exprs.items[tk.origin_expr];
+            if (!meta.Type.eql(n.ty, tk.ty)) {
+                return self.fail("cleanup token for origin expr {d} carries a type that disagrees with the node", .{tk.origin_expr});
+            }
+            const gop = try last.getOrPut(self.arena, tk.full_expr);
+            if (gop.found_existing) {
+                if (tk.registration_index <= gop.value_ptr.*) {
+                    return self.fail("cleanup token registration_index {d} is not greater than the previous {d} in full_expr {d}", .{ tk.registration_index, gop.value_ptr.*, tk.full_expr });
+                }
+            }
+            gop.value_ptr.* = tk.registration_index;
+        }
+        return null;
     }
 
     // -- expr ---------------------------------------------------------------

@@ -14,6 +14,7 @@ const moduleinfo = @import("moduleinfo.zig");
 const checker = @import("passes/checker.zig");
 const cfg = @import("cfg.zig");
 const hir = @import("hir.zig");
+const meta = @import("meta.zig");
 const hir_build = @import("passes/hir_build.zig");
 const hir_effects = @import("passes/hir_effects.zig");
 const hir_simplify = @import("passes/hir_simplify.zig");
@@ -467,4 +468,101 @@ test "M2b: an observable read declared Write is kept; a Q-only read is discarded
         const stats = try simplifyAllWith(&b, &decls);
         try testing.expect(stats.dead_lets > 0);
     }
+}
+
+// ---------------------------------------------------------------------------
+// Full-expression cleanup-token remapping (docs/effects.md §11.2)
+// ---------------------------------------------------------------------------
+
+test "M2b: ANF remaps the cleanup token of a hoisted Unique parent" {
+    var b = try buildText("app", &.{.{
+        "app",
+        \\const builtin = import("builtin");
+        \\struct Token { id: int32; drop(t) { let x = t.id; } }
+        \\fn make(id: int32) -> Token { Token { id: id } }
+        \\fn f(x: int32) -> int32 {
+        \\    let _ = make(builtin.hash(x));
+        \\    7
+        \\}
+    }});
+    defer b.deinit();
+    const pr = &b.built.program;
+
+    // Before rewriting: the discarded `make(…)` call is a registered
+    // Unique temporary. Locate it as the `call`-origin token.
+    var origin: ?hir.ExprId = null;
+    for (pr.cleanup_tokens.items) |tk| {
+        if (tk.origin_expr == hir.no_expr) continue;
+        if (std.mem.eql(u8, opName(pr, tk.origin_expr), "call")) origin = tk.origin_expr;
+    }
+    try testing.expect(origin != null);
+    const idx_before = blk: {
+        for (pr.cleanup_tokens.items, 0..) |tk, i| if (tk.origin_expr == origin.?) break :blk i;
+        unreachable;
+    };
+    const reg_before = pr.cleanup_tokens.items[idx_before].registration_index;
+    const ty_before = pr.cleanup_tokens.items[idx_before].ty;
+
+    const stats = try simplifyAll(&b);
+    try testing.expect(stats.hoists >= 1);
+
+    // The rewritten parent node is now a `let`; the token must have moved
+    // to the synthesized inner producer, not stay on the overwritten node.
+    try testing.expectEqualStrings("let", opName(pr, origin.?));
+    const inner = pr.region(pr.regionsOf(origin.?)[0]).root;
+    try testing.expectEqualStrings("call", opName(pr, inner));
+    var moved = false;
+    for (pr.cleanup_tokens.items) |tk| {
+        if (tk.origin_expr != inner) continue;
+        moved = true;
+        // Relative destruction order (registration_index) and type are
+        // preserved by the remap.
+        try testing.expectEqual(reg_before, tk.registration_index);
+        try testing.expect(meta.Type.eql(ty_before, tk.ty));
+    }
+    try testing.expect(moved);
+    // No live token still names the overwritten node, and no token names
+    // a forwarding `let` (which never owns a temporary).
+    for (pr.cleanup_tokens.items) |tk| {
+        if (tk.origin_expr == hir.no_expr) continue;
+        try testing.expect(tk.origin_expr != origin.?);
+        try testing.expect(!std.mem.eql(u8, opName(pr, tk.origin_expr), "let"));
+    }
+}
+
+test "M2b: a Unique binding with a discardable destructor may be dropped" {
+    var b = try buildText("app", &.{.{
+        "app",
+        \\struct Token { id: int32; drop(t) { let x = t.id; } }
+        \\fn f(id: int32) -> int32 {
+        \\    let unused = Token { id: id };
+        \\    7
+        \\}
+    }});
+    defer b.deinit();
+    const stats = try simplifyAll(&b);
+    try testing.expect(stats.dead_lets > 0);
+    try testing.expectEqualStrings("fn (B0: i32) => 7i32", try funcText(&b, "app.f"));
+}
+
+test "M2b: a Unique binding with an observable destructor is kept" {
+    var b = try buildText("app", &.{
+        .{ "hostmod", "fn log(x: int32) -> void;" },
+        .{
+            "app",
+            \\const hostmod = import("hostmod");
+            \\struct Token { id: int32; drop(t) { hostmod.log(t.id); } }
+            \\fn f(id: int32) -> int32 {
+            \\    let unused = Token { id: id };
+            \\    7
+            \\}
+        },
+    });
+    defer b.deinit();
+    const write = try effects.summaryOf(b.arena.allocator(), &.{.{ .resource = .{ .host = 1 }, .mode = .write }});
+    const decls = [_]effects.HostDecl{
+        .{ .key = "hostmod.log", .summary = write, .stilla_execution = .forbidden },
+    };
+    const stats = try simplifyAllWith(&b, &decls);
+    try testing.expectEqual(@as(usize, 0), stats.dead_lets);
 }

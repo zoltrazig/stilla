@@ -426,7 +426,15 @@ const Rewriter = struct {
         if (std.mem.eql(u8, hir.registry.get(n.op).name, "local")) {
             if (map.get(n.payload.binder)) |mapped| nn.payload = .{ .binder = mapped };
         }
-        return pr.addExpr(nn);
+        const new_id = try pr.addExpr(nn);
+        // A cloned construct owns the same temporaries as its donor: move
+        // any cleanup token that named the donor to the clone
+        // (docs/effects.md §11.2). β's contract already requires the body
+        // to be cleanup-free, so this is a no-op for admitted rewrites;
+        // it keeps a token-bearing clone from silently pointing at the
+        // unreachable donor.
+        pr.remapCleanupOrigin(id, new_id);
+        return new_id;
     }
 
     fn clonePattern(self: *Rewriter, id: hir.PatternId, map: *std.AutoHashMapUnmanaged(hir.BinderId, hir.BinderId)) Error!hir.PatternId {

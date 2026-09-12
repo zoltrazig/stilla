@@ -73,7 +73,7 @@
     测试：指纹顺序稳定 / 各维变键、回调正负例与递归、注册-only 契约、
     可观察读（`Write`）保留 vs 仅 Q 读删除、host_bind 序列化与 embed 接线。
 
-- [ ] **3. `CleanupFootprint` / `observed_effect` 清理路径**
+- [x] **3. `CleanupFootprint` / `observed_effect` 清理路径**
       （[effects.md](effects.md) §11.2、[hir.md](hir.md) §5.6 / §10.1）
   - 范围：由 builder 登记 full-expression 清理 token（`origin_expr` +
     type + `registration_index`），使 `isDiscardable` / `canFloatAsTree`
@@ -83,8 +83,23 @@
     涉及清理注册变化时需要它。
   - 验收：token 登记不变量（origin/registration_index 一致、变换后
     重映射）；cleanup-aware 查询的正/负例；未建模清理仍失败关闭。
-  - 注意：当前 builder **未填充** `CleanupFootprint`，§5.6 / §10.1
-    中相关描述是设计而非现状。
+  - 已完成：`hir.CleanupToken`（`origin_expr` / `ty` / `full_expr` /
+    `registration_index`）+ `Program.cleanup_tokens` / `cleanup_modeled`；
+    builder 清理登记 pass（`passes/hir_build_cleanup.zig`，由
+    `hir_build.buildProgramInner` 驱动）按语句 / let 初始化器切分 FE，
+    按求值序（子先于父）只为**已转移判定之外**的 Unique 值产生节点登记
+    token（consume / let 绑定 / 聚合元素 / 返回根均视为转移；`seq` rest
+    与 region body 转发不重复登记）；`hir_effects.cleanupEffect` 逆创建序
+    折叠 `drop_effect(T)`，`observedEffect` / `canFloatAsTree` 改走它，
+    `cleanupFree` 保持字面语义；未建模 program（`cleanup_modeled=false`）或
+    含 Unique region 绑定的子树回 `null` → `Top`（失败关闭）；dead-let 对
+    Unique 绑定额外要求 `bindingCleanupDiscardable`；ANF / dead-let / SEG
+    clone 经 `Program.remapCleanupOrigin` 重映射 origin 并保留
+    `registration_index`。测试：token 不变量（origin/type/FE/registration
+    一致 + validator）、已建模纯析构正例、可观察析构负例、未建模失败关闭、
+    转移实参不计清理、ANF 重映射 + 序保持。
+  - 注：节点级 full-expression 边界标注（`ExprNode.full_expr`）仍为身份
+    占位；token 自带 FE 身份用于 `registration_index` 的 FE 局部序。
 
 - [ ] **4. selective ANF 的 Unique 物化**（[hir.md](hir.md) §5.7）
   - 范围：在清理 token 证明合成 `let` 的销毁点与原匿名临时量的

@@ -10,9 +10,9 @@
 >   `_pattern`）；module-const 依赖检查。
 > - **opt-in 消费者（默认关）**：dead-let + selective A-Normal Form
 >   （hir_simplify.zig，`--simplify`）；SEG v1（hir_seg.zig，`--seg`）。
-> - **设计已定但未实现**（§11、[todo.md](todo.md)）：full-expression 边界标注、
->   `CleanupFootprint` 清理 token 登记、η-reduction、
->   真正的 slotted e-graph、HIRTypeId canonical 表、source span side table。
+> - **设计已定但未实现**（§11、[todo.md](todo.md)）：节点级 full-expression
+>   边界标注、η-reduction、真正的 slotted e-graph、HIRTypeId canonical 表、
+>   source span side table。
 > - **阅读约定**：数据结构以 hir.zig 的落地形态为准；标 **Target** 的段落是
 >   设计意图，不是现状。
 
@@ -613,13 +613,18 @@ EvalPolicy =
 Unique 临时量在所属 full expression 结束时销毁、反向创建序。因此每个 `ExprNode`
 带 `full_expr: FullExprId`，SEG 不跨 FE 边界。
 
-> **现状**：`FullExpr` 当前是**身份占位**（`struct {}`），builder 把所有节点
-> 的 `full_expr` 置 0——**边界尚未标注**。清理 token 的登记
-> （`CleanupFootprint`，[effects.md](effects.md) §11.2）同样未填充。因此：
+> **现状**：`FullExpr` 仍是**身份占位**（`struct {}`），builder 把所有节点
+> 的 `full_expr` 置 0——**节点级边界尚未标注**。清理 token 的登记
+> （`CleanupFootprint`，[effects.md](effects.md) §11.2）已落地：builder 的
+> 清理登记步骤（`passes/hir_build_cleanup.zig`）按语句 / let 初始化器切分
+> FE，为每个已证明的全表达式 Unique 临时量登记带 FE id 与
+> `registration_index` 的 `CleanupToken`；token 自带 FE 身份，节点自身的
+> `full_expr` 不变。因此：
 >
 > - §10.1 的结构校验只检查 `full_expr` 的 **id 边界**，不检查 FE 归属或跨边界；
 >   所有节点同属 FE 0，「不跨 FE」当前等价于恒真；
-> - 清理敏感查询只走 cleanup-free 证明，Unique 物化等未放开（§5.7）。
+> - 清理敏感查询走 token footprint（`cleanupEffect`，[effects.md](effects.md)
+>   §11.2）；scope-end 绑定清理仍未建模，Unique 物化等未放开（§5.7）。
 >
 > 落地方案与依赖见 §11 与 [todo.md](todo.md)。
 
@@ -1076,6 +1081,10 @@ let B1: i32 = %B0 in
   无 binder；match arm pattern 叶与 params 双射。
 - **id 边界**：`sema` / `full_expr` 是有效下标。**membership only**——`FullExpr`
   在现状是身份占位，FE 边界与清理序**未校验**（§5.6）。
+- **清理 token 表**（program 级，`checkCleanupTokens`）：每个未退役 token 的
+  `origin_expr` 是有效下标且其 `ty` 与节点一致，`full_expr` 是有效下标，同一
+  FE 内 `registration_index` 按 list 序为 `0..n-1`。退役 token（`no_expr`）
+  跳过。
 - **不包含**：ownership 数据流与 SEG 检查（由 checker / effects 各自负责）。
 
 **效果分析校验**（`hir_effects.validate`，前端 pipeline 强制执行）：
@@ -1140,8 +1149,9 @@ lowering。可选变换每轮原位重写后重新跑结构 + 效果校验（§2
 | M2a | SEG v1 规则子集（β / let / 常折叠 / 整数代数 / known-variant match），opt-in | hir_seg.zig |
 | M2b | 摘要化消费者：函数摘要 SCC least fixpoint、精确 `drop_effect(T)`、module-const 检查、dead-let / selective ANF | hir_effects.zig / hir_simplify.zig |
 
-**尚未实现**（完整清单见 [todo.md](todo.md)）：η-reduction；full-expression
-边界标注与 `CleanupFootprint` 登记；Unique ANF 物化；间接调用目标收窄；effectful
+**尚未实现**（完整清单见 [todo.md](todo.md)）：η-reduction；**节点级**
+full-expression 边界标注（清理 token 登记已落地，见 [effects.md](effects.md)
+§11.2）；Unique ANF 物化；间接调用目标收窄；effectful
 β 实参放开；真正的 slotted e-graph / extraction；HIRTypeId canonical 表。
 
 ## 12. 开放问题

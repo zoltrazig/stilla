@@ -109,9 +109,9 @@ and the trailing section lists what the code and docs still mark open.
   closed for container positions (checker.md)
 - [ ] Only the Zig API is public for embedding — no C header yet
 - [ ] HIR / effect-model follow-ups (match-into-SEG, host ABI metadata
-  wiring, `CleanupFootprint`, indirect-call narrowing, effectful β) are
-  tracked with dependencies and acceptance criteria in
-  [docs/todo.md](docs/todo.md)
+  wiring, node-level full-expression boundary annotation, indirect-call
+  narrowing, effectful β) are tracked with dependencies and acceptance
+  criteria in [docs/todo.md](docs/todo.md)
 
 ## What is Stilla?
 

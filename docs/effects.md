@@ -9,7 +9,7 @@
 >   SEG v1（`--seg`）。
 > - **设计已定但未实现**（§14、[todo.md](todo.md)）：`never_returns` must 事实、
 >   `RewriteRule` / `Requirement` 统一接口、`RewriteContract` 类型、
->   `CleanupFootprint` token、间接调用目标收窄。
+>   间接调用目标收窄。
 >
 > 配套文档：使用该模型的 IR 见 [hir.md](hir.md)。本文自含效果模型所需的全部
 > 定义；两者重叠的概念（求值序、值使用、效果）在本文给出权威定义，[hir.md](hir.md) 保留
@@ -871,6 +871,10 @@ cleanup_footprint(expr) =
 CleanupToken { id, origin_expr: ExprId, value: TempId, type: TypeId, registration_index }
 ```
 
+落地形状（`hir.CleanupToken`）为 `{ origin_expr, ty, full_expr,
+registration_index }`：`value: TempId` 与 token 的 `Consumed / Escaped` **状态**
+都是路径敏感的，属于 destruction planner / CFG 侧（§11.3），本层不建模。
+
 - `observed_effect(expr, ctx)` 拿的是 **expr 子树对清理栈的贡献**，不是整条 FE
   的清理：`foo(make_file(), pure_expr())` 中 `discardable(pure_expr())` 不得把
   sibling `make_file()` 的 destructor 算进来；`discardable(make_file())` 必须
@@ -889,12 +893,28 @@ CleanupToken { id, origin_expr: ExprId, value: TempId, type: TypeId, registratio
   origin 重映射到新节点，registration_index 保持原 FE 内相对销毁序；「合成 let
   不改销毁注册」即此不变量。
 
-> **现状：CleanupFootprint 未实现。** `CleanupToken` / `cleanup_footprint` 在
-> 代码中不存在（仅注释引用）。`observedEffect` 已实现，但只走 cleanup-free
-> MVP：对子表达式递归证明全部类型 Copy、无非借用 Unique 绑定、无 `drop`，否则
-> cleanup 贡献 `Top`（未建模的 destructor / FE 清理失败关闭）；空注册表视为
-> 未建模、不作证明。因此清理敏感查询目前只放开已证明 cleanup-free 的子树。
-> 落地见 [todo.md](todo.md)。
+> **现状：CleanupFootprint 已落地（MVP 形状）。** `CleanupToken`
+> （`origin_expr` / `ty` / `full_expr` / `registration_index`）由 builder 的
+> 清理登记步骤（`passes/hir_build_cleanup.zig`，`hir_build.buildProgramInner`
+> 末尾对每个函数体 / 常量初始化器登记）填充；`observedEffect` 与
+> `canFloatAsTree` 走 `hir_effects.cleanupEffect`（footprint 内各 token 的
+> `drop_effect(T)` 按逆创建序折叠），不再只依赖 cleanup-free MVP。三条不变量：
+>
+> - **建模与否显式区分**。`Program.cleanup_modeled` 未置位的程序，其空 token
+>   表是「未建模」：`cleanupEffect` 返回 null，查询失败关闭为 `Top`。空表
+>   绝不构成安全证明。
+> - **scope-end 清理仍未建模**。子树含非借用 Unique region 绑定时
+>   `cleanupEffect` 返回 null（`regionOwnsUnique`）。`cleanupFree` 语义保持
+>   字面 cleanup-free 不变，仍供 β / speculatability / reorder 使用。
+> - **失败关闭**。未分类类型经 `drop_effect(T)` 升为 `Top`；dead-let 对 Unique
+>   绑定额外要求 `bindingCleanupDiscardable(bind.ty)`，避免连同绑定删掉
+>   其 scope-end 析构。
+>
+> **边界**：节点级 full-expression **边界标注**（`ExprNode.full_expr`）仍是
+> 身份占位（§5.6 未变）；token 自带 `full_expr`，按语句 / let 初始化器切分，
+> 用于定义 `registration_index` 的 FE 局部创建序。变换后 `registration_index`
+> 保持不变（相对销毁序），origin 经 `Program.remapCleanupOrigin` 重映射
+> （ANF hoist / dead-let / SEG clone）。
 
 优化器只问一个谓词：
 
@@ -1114,9 +1134,12 @@ MayTrap（含 panic）+ MayDiverge + nondeterministic
   递归；union 候选 `⊔` + payload 逆序；tuple 逆序；`list` / `box` 元素递归；
   opaque → `Release(Host(host_id))`；递归类型取 least fixpoint；`any` /
   `hostdata` / 未解析仍保守 `Top`。
-- cleanup 走 cleanup-free MVP：对已求值子树递归证明全部类型 Copy、无非借用
-  Unique 绑定、无 `drop`，否则 cleanup 贡献 `Top`。`CleanupFootprint` token
-  登记**尚未填充**，空注册表视为未建模、不作证明。
+- cleanup 走已落地的 full-expression footprint（§11.2）：builder 的清理登记步骤
+  按语句 / let 初始化器切分 FE，为不转移的 Unique 值产生节点登记 `CleanupToken`；
+  `cleanupEffect` 把子树内各 token 的 `drop_effect(T)` 逆创建序折叠，
+  `observedEffect` / `canFloatAsTree` 消费它。未建模 program
+  （`cleanup_modeled=false`）与含 Unique region 绑定的子树回 `null` → `Top`；
+  `cleanupFree` 保持字面 cleanup-free 证明不变。
 - 未知目标：间接调用 / 缺失函数摘要 / 缺失 host 声明取完整 `Top`；host 声明经
   `frontend.Options.host_decls`（符号键）→ `HostEffects.resolve` →
   `consolidate` 解析；带回调契约的 `MayExecute` host 调用按
@@ -1159,7 +1182,8 @@ MayTrap（含 panic）+ MayDiverge + nondeterministic
 - 三个 pass 的**合法性判定**没有 `switch(op)` 特判——合法性一律来自派生查询
   （规则匹配层的 applicability 按 typed opcode 分派，§10.3）；
 - **negative tests**：`let x = 10/y in 0` 不许删 x；`host.read() * 0` 不许变 0；
-  `div.i32` 不许进 SEG；带 drop hook 的临时值不许被 DCE；
+  `div.i32` 不许进 SEG；带可观察 / 未建模 drop hook 的临时值不许被 DCE
+  （纯析构的临时量经 footprint 可判 discardable，是预期精化）；
 - **Q 与 discard 的正 / 负例**：`let x = clock.now() in 0 → 0` 合法；
   `duplicable(clock.now()) == false`、两处同形 `clock.now()` 不许合并；宿主把某
   读声明为可观察读后，同形的 `let x = that_read() in 0` 不许删；

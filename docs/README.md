@@ -36,10 +36,9 @@ specifications (the spec suite index is [spec/README.md](../spec/README.md)).
 ## Unimplemented proposals
 
 The remaining unimplemented parts of the model are described inside the
-documents above rather than in a standalone proposal: the `match`
-SEG bridge (hir.md §8), the host ABI metadata wiring
-(effects.md §13), the `CleanupFootprint` cleanup path
-(effects.md §11.2), and indirect-call target narrowing
+documents above rather than in a standalone proposal: the host ABI
+metadata wiring (effects.md §13), node-level full-expression boundary
+annotation (hir.md §5.6), and indirect-call target narrowing
 (effects.md §9.2). [todo.md](todo.md) is the prioritized work list with
 dependencies and acceptance criteria. The effect infrastructure —
 lattice, transfer, SCC-fixpoint function summaries, precise

@@ -177,9 +177,20 @@ const Rewriter = struct {
         if (params.len != 1) return false;
         const bind = params[0];
         if (try self.countUses(region.root, bind) != 0) return false;
+        // Removing a Unique binding also removes its end-of-scope
+        // destructor (docs/effects.md §11.2). Block the rewrite unless
+        // the binding's destruction is itself discardable in the
+        // modelled cleanup model; Copy bindings have no destructor.
+        const bind_ty = pr.binder(bind).ty;
+        const cap = try self.analysis.capabilityOf(bind_ty) orelse .unique;
+        if (cap != .copy and !try self.analysis.bindingCleanupDiscardable(bind_ty)) return false;
         // Legality is the derived query alone — no opcode knowledge.
         if (!try self.analysis.isDiscardable(ops[0])) return false;
         pr.exprs.items[id] = pr.node(region.root);
+        // The result's value now lives at the region root; move any
+        // cleanup token that named the `let` node with it (docs/effects.md
+        // §11.2 origin remap). `registration_index` is untouched.
+        pr.remapCleanupOrigin(id, region.root);
         return true;
     }
 
@@ -264,6 +275,11 @@ const Rewriter = struct {
             .origin = n.origin,
             .sema = try pr.internSema(.owned, .pending),
         };
+        // The original construct (and any cleanup token naming it) now
+        // lives at the synthesized inner node (docs/effects.md §11.2
+        // origin remap); the hoisted `arg` node keeps its identity and
+        // registration index.
+        pr.remapCleanupOrigin(id, inner);
     }
 };
 

@@ -71,6 +71,9 @@ pub const OpId = u32;
 pub const attr_empty: AttrSetId = 0;
 /// No source span attached.
 pub const no_origin: SourceOriginId = 0;
+/// A retired cleanup-token origin: no live subtree can contain it
+/// (`ExprId`s are dense, so no real node ever equals `maxInt`).
+pub const no_expr: ExprId = std.math.maxInt(ExprId);
 
 /// A slice of ids into one of the Program's flat buffers (hir.md §3.2):
 /// `{ start, len }`, never a node-arena interval. Ranges survive buffer
@@ -237,6 +240,24 @@ pub const Scope = struct {
 /// Entry/exit and cleanup-registration metadata land with the lowering
 /// layout; this is never an executable destruction plan.
 pub const FullExpr = struct {};
+
+/// One registered full-expression temporary (docs/effects.md §11.2): a
+/// value created inside a full expression that owns a Unique temporary
+/// destroyed at that FE's end. The builder's cleanup pass
+/// (`passes/hir_build_cleanup.zig`) fills the table; an empty table is
+/// only a proof of safety when `Program.cleanup_modeled` is set.
+///
+/// `origin_expr` is the value-producing node (it must still be a live
+/// `exprs` entry); `full_expr` is the owning FE identity; and
+/// `registration_index` is the value's position in that FE's creation
+/// order (relative destruction order is the reverse). `ty` is the
+/// destroyed value's type, the input to `drop_effect(T)`.
+pub const CleanupToken = struct {
+    origin_expr: ExprId,
+    ty: meta.Type,
+    full_expr: FullExprId,
+    registration_index: u32,
+};
 
 // ---------------------------------------------------------------------------
 // Patterns (hir.md §4.3, §5.4) — shape lives here, bindings in region params
@@ -827,6 +848,15 @@ pub const Program = struct {
     scopes: std.ArrayListUnmanaged(Scope) = .empty,
     full_exprs: std.ArrayListUnmanaged(FullExpr) = .empty,
     semantic_infos: std.ArrayListUnmanaged(SemanticInfo) = .empty,
+    /// Registered full-expression cleanup temporaries (docs/effects.md
+    /// §11.2), in creation order across the whole program. Only valid
+    /// when `cleanup_modeled` is set.
+    cleanup_tokens: std.ArrayListUnmanaged(CleanupToken) = .empty,
+    /// Whether the builder's cleanup pass has modelled this program.
+    /// Absent modelling, `cleanup_footprint` is unknown and every
+    /// cleanup-sensitive query must fail closed — an empty token table
+    /// alone never proves safety (docs/effects.md §11.2).
+    cleanup_modeled: bool = false,
 
     // Flat id buffers (addressed by Range, hir.md §3.2).
     expr_buffer: std.ArrayListUnmanaged(ExprId) = .empty,
@@ -926,6 +956,40 @@ pub const Program = struct {
     pub fn addFullExpr(self: *Program) !FullExprId {
         try self.full_exprs.append(self.arena, .{});
         return @intCast(self.full_exprs.items.len - 1);
+    }
+
+    /// Register one full-expression cleanup temporary and return its
+    /// dense token id. `registration_index` must be the value's position
+    /// in `full_expr`'s creation order (the cleanup pass supplies it).
+    pub fn addCleanupToken(self: *Program, origin: ExprId, ty: meta.Type, full_expr: FullExprId, registration_index: u32) !u32 {
+        try self.cleanup_tokens.append(self.arena, .{
+            .origin_expr = origin,
+            .ty = ty,
+            .full_expr = full_expr,
+            .registration_index = registration_index,
+        });
+        return @intCast(self.cleanup_tokens.items.len - 1);
+    }
+
+    /// Rewrite every token whose origin is `from` to `to` (docs/effects.md
+    /// §11.2 "变换后的 origin 重映射"). A rewrite that copies a donor's
+    /// content into a destination maps `donor -> destination`, so the
+    /// surviving owner is never left pointing at an unreachable node.
+    /// `registration_index` is untouched: relative creation order is
+    /// preserved. A token already naming `to` makes the moved one
+    /// redundant and is retired (its origin set to a sentinel that can
+    /// never be a live subtree member). Used by the effect-driven
+    /// consumers (`hir_simplify`, `hir_seg`).
+    pub fn remapCleanupOrigin(self: *Program, from: ExprId, to: ExprId) void {
+        if (from == to) return;
+        var has_to = false;
+        for (self.cleanup_tokens.items) |tk| {
+            if (tk.origin_expr == to) has_to = true;
+        }
+        for (self.cleanup_tokens.items) |*tk| {
+            if (tk.origin_expr != from) continue;
+            tk.origin_expr = if (has_to) no_expr else to;
+        }
     }
 
     /// Append a semantic info (id 0 is the seeded default `.owned`).

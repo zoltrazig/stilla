@@ -20,17 +20,17 @@
 //! - **Pending / Ready** (docs/effects.md §8.2, §10.5) is outside the
 //!   lattice. Every query fails closed while a fact is pending; only
 //!   `Ready` facts may justify a transform.
-//! - **Cleanup** (docs/effects.md §11) is the explicitly permitted MVP
-//!   path: an expression is cleanup-free only when *every* executed node
-//!   in its subtree has a Copy type, no owned Unique region binding
-//!   exists, and no `drop` appears. `drop_effect(T)` is deliberately
-//!   minimal (Copy → `{}`, anything else → `Top`); precise destructor
-//!   summaries are deferred (docs/effects.md §14 再后 1). Unmodelled
-//!   cleanup contributes `Top` and therefore blocks deletion, floating,
-//!   duplication, and SEG admission — a Copy *result* alone never
-//!   suffices. Full-expression token registration (`CleanupFootprint`)
-//!   is not populated by the current builder, so empty registries are
-//!   treated as unmodelled, not as proof.
+//! - **Cleanup** (docs/effects.md §11) has two paths. The literal
+//!   `cleanupFree` proof (every executed node Copy, no owned Unique
+//!   region binding, no `drop`) still gates β / speculatability /
+//!   reorder. The full-expression footprint (`cleanupEffect`) consumes
+//!   the `CleanupToken`s registered by the builder's cleanup pass
+//!   (`passes/hir_build_cleanup.zig`): `observedEffect` and
+//!   `canFloatAsTree` fold `drop_effect(T)` over the subtree's tokens in
+//!   reverse creation order. An unmodelled program
+//!   (`Program.cleanup_modeled` unset) or a subtree owning a Unique region
+//!   binding yields `null` → `Top`: an empty token table is never a proof
+//!   of safety.
 //! - **Derived queries** (docs/effects.md §10.1) combine effects with
 //!   operand uses, result capability/view, and ownership/lifetime gates.
 //!   The *semantic* SEG-safety predicate (`isSegSafe`) is separate from
@@ -1290,12 +1290,78 @@ pub const Analysis = struct {
     }
 
     /// `eval_effect(expr) ; cleanup_effect(expr)` (docs/effects.md §11.2).
-    /// Null while the expression's effect is pending.
+    /// Null while the expression's effect is pending. The cleanup is the
+    /// registered full-expression footprint when modelled, otherwise
+    /// `Top` — never `Pure` for an unmodelled subtree.
     pub fn observedEffect(self: *Analysis, id: hir.ExprId) Error!?Summary {
         const e = self.readySummary(id) orelse return null;
-        const cleanup: Summary = if (try self.cleanupFree(id)) effects.pure else effects.top;
+        const cleanup: Summary = (try self.cleanupEffect(id)) orelse effects.top;
         const out = try effects.sequence(self.arena, e, cleanup);
         return out;
+    }
+
+    /// `cleanup_effect(expr)` (docs/effects.md §11.2): `drop_effect(T)`
+    /// for every registered full-expression temporary whose `origin_expr`
+    /// is in `expr`'s evaluated subtree, folded in reverse creation
+    /// order. Returns null when the cleanup is **unmodelled**:
+    ///
+    /// - the program never ran the builder cleanup pass
+    ///   (`Program.cleanup_modeled`), so an empty table is not a proof;
+    /// - the subtree owns a non-borrow region binding, whose end-of-scope
+    ///   destruction is outside this model.
+    ///
+    /// Callers must treat null as `Top`. A registered temporary with an
+    /// unclassifiable type widens to `Top` through `drop_effect(T)` and
+    /// still fails closed.
+    pub fn cleanupEffect(self: *Analysis, id: hir.ExprId) Error!?Summary {
+        const pr = self.p();
+        if (!pr.cleanup_modeled) return null;
+        var in_subtree = std.AutoHashMapUnmanaged(hir.ExprId, void).empty;
+        defer in_subtree.deinit(self.arena);
+        var work = std.ArrayListUnmanaged(hir.ExprId).empty;
+        defer work.deinit(self.arena);
+        try work.append(self.arena, id);
+        while (work.pop()) |cur| {
+            try in_subtree.put(self.arena, cur, {});
+            const n = pr.node(cur);
+            if (hir.registry.get(n.op).transfer == .lambda) continue; // deferred to the call
+            for (pr.operands(cur)) |op| try work.append(self.arena, op);
+            for (pr.regionsOf(cur)) |r| {
+                if (try self.regionOwnsUnique(r)) return null;
+                try work.append(self.arena, pr.region(r).root);
+            }
+        }
+        // Token list is append-ordered by creation; walk it backwards so
+        // destruction order (reverse creation) folds first-to-last.
+        var acc: ?Summary = null;
+        var i = pr.cleanup_tokens.items.len;
+        while (i > 0) {
+            i -= 1;
+            const tk = pr.cleanup_tokens.items[i];
+            if (!in_subtree.contains(tk.origin_expr)) continue;
+            const drop = try self.dropEffectOf(tk.ty);
+            acc = if (acc) |a| try effects.sequence(self.arena, a, drop) else drop;
+        }
+        return acc orelse effects.pure;
+    }
+
+    /// Whether `expr`'s cleanup is modelled and discardable (docs/effects.md
+    /// §11.2): `discard_view(cleanup_effect) == Pure`. Used by the derived
+    /// predicates that depend on the full-expression cleanup rather than
+    /// on the stronger, literal cleanup-free proof.
+    pub fn cleanupDiscardable(self: *Analysis, id: hir.ExprId) Error!bool {
+        const ce = (try self.cleanupEffect(id)) orelse return false;
+        return effects.isPure(try effects.discardView(self.arena, ce));
+    }
+
+    /// Whether destroying a value of `ty` is itself discardable — the
+    /// scope-end destructor a dead-`let` rewrite would remove
+    /// (docs/effects.md §11.2, [hir.md](hir.md) §6.4). Unmodelled cleanup
+    /// fails closed.
+    pub fn bindingCleanupDiscardable(self: *Analysis, ty: meta.Type) Error!bool {
+        if (!self.p().cleanup_modeled) return false;
+        const d = try self.dropEffectOf(ty);
+        return effects.isPure(try effects.discardView(self.arena, d));
     }
 
     pub fn isTotal(self: *Analysis, id: hir.ExprId) bool {
@@ -1310,12 +1376,14 @@ pub const Analysis = struct {
 
     /// `total` + `observable_effect_free` + cleanup-safe (docs/effects.md
     /// §10.1, §11). The M2 selective-A-Normal-Form predicate
-    /// (`can_float_as_tree`).
+    /// (`can_float_as_tree`). Cleanup-safety is the modelled
+    /// full-expression footprint (`cleanupDiscardable`), not the
+    /// stronger literal `cleanupFree`.
     pub fn canFloatAsTree(self: *Analysis, id: hir.ExprId) Error!bool {
         const s = self.readySummary(id) orelse return false;
         if (!effects.isTotal(s)) return false;
         if (!effects.isObservableEffectFree(s)) return false;
-        if (!try self.cleanupFree(id)) return false;
+        if (!try self.cleanupDiscardable(id)) return false;
         return self.ownershipGate(id);
     }
 
@@ -2515,4 +2583,188 @@ test "hir_effects: a registration-only contract charges the write, never the cal
     }
     try testing.expect(saw_store and saw_trigger);
     try testing.expect((try an.validate(testing.allocator)) == null);
+}
+
+// ---------------------------------------------------------------------------
+// Full-expression cleanup registration (docs/effects.md §11.2)
+// ---------------------------------------------------------------------------
+
+/// Configure every host binding with a pure, non-reentrant contract so a
+/// bodyless member contributes no effect of its own.
+fn pureHostEntries(a: std.mem.Allocator, built: *hir.BuiltProgram) ![]effects.HostEffects.Entry {
+    const entries = try a.alloc(effects.HostEffects.Entry, built.hosts.items.len);
+    for (built.hosts.items, 0..) |_, i| {
+        entries[i] = .{ .host = @intCast(i), .summary = effects.pure, .stilla_execution = .forbidden };
+    }
+    return entries;
+}
+
+test "hir_effects: a transferred Unique temporary contributes no cleanup" {
+    var f = try build("app", &.{.{
+        "app",
+        \\struct Token { id: int32; drop(t) { let x = t.id; } }
+        \\fn consume(move t: Token) -> int32;
+        \\fn make(id: int32) -> Token { Token { id: id } }
+        \\fn f(id: int32) -> int32 { consume(make(id)) }
+    }});
+    defer f.deinit();
+    try testing.expect(f.built.program.cleanup_modeled);
+    const a = f.arena.allocator();
+    var an = try Analysis.init(a, f.built, .{ .graph = f.graph, .hosts = .{ .entries = try pureHostEntries(a, f.built) } });
+    try an.analyze();
+    var found = false;
+    for (f.built.program.exprs.items, 0..) |e, i| {
+        if (e.op != call_op) continue;
+        const callee = f.built.program.node(f.built.program.operands(@intCast(i))[0]);
+        if (callee.payload != .func or callee.payload.func != .host) continue;
+        const id: hir.ExprId = @intCast(i);
+        const arg = f.built.program.operands(id)[1];
+        // The transferred argument is not a registered temporary, so the
+        // footprint carries no cleanup — the MVP `cleanupFree` rejected
+        // the subtree merely because it saw an owned Unique node.
+        for (f.built.program.cleanup_tokens.items) |tk| {
+            try testing.expect(tk.origin_expr != arg);
+        }
+        try testing.expect(try an.cleanupDiscardable(id));
+        found = true;
+        // (`isDiscardable` still fails: the ownership gate rejects the
+        // `Consume` argument slot, independent of cleanup.)
+    }
+    try testing.expect(found);
+    try testing.expect((try an.validate(testing.allocator)) == null);
+}
+
+test "hir_effects: a discarded Unique temporary is discardable through its modelled pure destructor" {
+    var f = try build("app", &.{.{
+        "app",
+        \\struct Token { id: int32; drop(t) { let x = t.id; } }
+        \\fn f(id: int32) -> int32 {
+        \\    let _ = Token { id: id };
+        \\    7
+        \\}
+    }});
+    defer f.deinit();
+    const a = f.arena.allocator();
+    var an = try Analysis.init(a, f.built, .{ .graph = f.graph });
+    try an.analyze();
+    var found = false;
+    for (f.built.program.exprs.items, 0..) |e, i| {
+        const cap = (try an.capabilityOf(e.ty)) orelse .unique;
+        if (cap != .unique) continue;
+        if (!std.mem.eql(u8, hir.registry.get(e.op).name, "struct_make")) continue;
+        const id: hir.ExprId = @intCast(i);
+        // Registered as a full-expression temporary ...
+        var registered = false;
+        for (f.built.program.cleanup_tokens.items) |tk| {
+            if (tk.origin_expr == id) registered = true;
+        }
+        try testing.expect(registered);
+        // ... with a modelled, discardable destructor (`drop` only reads
+        // `t.id`), so the query goes through the footprint instead of the
+        // MVP `cleanupFree` (which rejected every owned Unique subtree).
+        try testing.expect(try an.cleanupDiscardable(id));
+        try testing.expect(try an.isDiscardable(id));
+        try testing.expect(try an.canFloatAsTree(id));
+        found = true;
+    }
+    try testing.expect(found);
+}
+
+test "hir_effects: an observable destructor keeps a discarded temporary non-discardable" {
+    var f = try build("app", &.{
+        .{ "hostmod", "fn log(x: int32) -> void;" },
+        .{
+            "app",
+            \\const hostmod = import("hostmod");
+            \\struct Token { id: int32; drop(t) { hostmod.log(t.id); } }
+            \\fn f(id: int32) -> int32 {
+            \\    let _ = Token { id: id };
+            \\    7
+            \\}
+        },
+    });
+    defer f.deinit();
+    const a = f.arena.allocator();
+    const write = try effects.summaryOf(a, &.{.{ .resource = .{ .host = 1 }, .mode = .write }});
+    const entries = try a.alloc(effects.HostEffects.Entry, f.built.hosts.items.len);
+    for (f.built.hosts.items, 0..) |_, i| entries[i] = .{ .host = @intCast(i), .summary = write, .stilla_execution = .forbidden };
+    var an = try Analysis.init(a, f.built, .{ .graph = f.graph, .hosts = .{ .entries = entries } });
+    try an.analyze();
+    var found = false;
+    for (f.built.program.exprs.items, 0..) |e, i| {
+        const cap = (try an.capabilityOf(e.ty)) orelse .unique;
+        if (cap != .unique) continue;
+        if (!std.mem.eql(u8, hir.registry.get(e.op).name, "struct_make")) continue;
+        const id: hir.ExprId = @intCast(i);
+        const ce = (try an.cleanupEffect(id)).?;
+        try testing.expect(!effects.isPure(ce));
+        try testing.expect(!effects.isObservableEffectFree(ce));
+        try testing.expect(!(try an.isDiscardable(id)));
+        found = true;
+    }
+    try testing.expect(found);
+}
+
+test "hir_effects: an unmodelled program's empty footprint never proves safety" {
+    var f = try build("app", &.{.{
+        "app",
+        \\struct Token { id: int32; drop(t) { let x = t.id; } }
+        \\fn make(id: int32) -> Token { Token { id: id } }
+        \\fn f(id: int32) -> int32 {
+        \\    let _ = make(id);
+        \\    7
+        \\}
+    }});
+    defer f.deinit();
+    const a = f.arena.allocator();
+    // Pretend the cleanup pass never ran: the (empty) table is unmodelled,
+    // not a proof that there is no cleanup.
+    f.built.program.cleanup_modeled = false;
+    var an = try Analysis.init(a, f.built, .{ .graph = f.graph });
+    try an.analyze();
+    for (f.built.program.exprs.items, 0..) |e, i| {
+        if (e.op != call_op) continue;
+        const cap = (try an.capabilityOf(e.ty)) orelse .unique;
+        if (cap != .unique) continue;
+        const id: hir.ExprId = @intCast(i);
+        try testing.expect((try an.cleanupEffect(id)) == null);
+        try testing.expect(!(try an.isDiscardable(id)));
+        return;
+    }
+    return error.TestUnexpectedResult;
+}
+
+test "hir_effects: cleanup tokens satisfy their origin/type/FE invariants" {
+    var f = try build("app", &.{.{
+        "app",
+        \\struct Token { id: int32; drop(t) { let x = t.id; } }
+        \\fn make(id: int32) -> Token { Token { id: id } }
+        \\fn f(id: int32) -> int32 {
+        \\    let _ = make(id);
+        \\    7
+        \\}
+    }});
+    defer f.deinit();
+    const pr = &f.built.program;
+    try testing.expect(pr.cleanup_modeled);
+    try testing.expect(pr.cleanup_tokens.items.len > 0);
+    const a = f.arena.allocator();
+    var next = std.AutoHashMapUnmanaged(hir.FullExprId, u32).empty;
+    for (pr.cleanup_tokens.items) |tk| {
+        try testing.expect(tk.origin_expr < pr.exprs.items.len);
+        try testing.expect(tk.full_expr < pr.full_exprs.items.len);
+        try testing.expect(meta.Type.eql(pr.node(tk.origin_expr).ty, tk.ty));
+        // A registered temporary is never a binder read or an explicit
+        // transfer.
+        const name = hir.registry.get(pr.node(tk.origin_expr).op).name;
+        try testing.expect(!std.mem.eql(u8, name, "local"));
+        try testing.expect(!std.mem.eql(u8, name, "move"));
+        try testing.expect(!std.mem.eql(u8, name, "drop"));
+        // Registration indices within one FE are 0,1,2,… in list order.
+        const gop = try next.getOrPut(a, tk.full_expr);
+        if (!gop.found_existing) gop.value_ptr.* = 0;
+        try testing.expectEqual(gop.value_ptr.*, tk.registration_index);
+        gop.value_ptr.* += 1;
+    }
+    try testing.expect((try hir.validate(pr, f.built.funcs.items[f.built.funcs.items.len - 1].root, testing.allocator)) == null);
 }
