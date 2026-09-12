@@ -118,12 +118,27 @@
     丢弃语句）与负例（`borrow` 留在树内）、黑盒正/负例、定向 on/off 解释器
     差分（析构顺序逐字固定）、examples/probes 全语料的 on/off 差分。
 
-- [ ] **5. 间接调用目标收窄**（[effects.md](effects.md) §9.2）
+- [x] **5. 间接调用目标收窄**（[effects.md](effects.md) §9.2）
   - 范围：需求驱动的局部 fn-ref 目标传播；预算超限即回 `Top`，
     **绝不截断目标集**（截断会低报摘要）。
   - 依赖：无。
   - 验收：目标集精确化的正向用例 + 超预算回 `Top` 的负例；未知目标
     仍保守。
+  - 已完成：`hir_effects.Analysis.resolveTargets` 沿 builder 的局部绑定链反向
+    解析 callee → `{func, host}` 目标集：字面 `fn_ref`、`local`（经创建期一次
+    扫描的 `binder_init` 索引到其单参无 pattern 的 `let` 初始化器）、`if` /
+    `match` 各分支 region root、`seq` 末位 operand、`move` / `borrow` 透传；
+    其余（函数 / λ 参数、解构 / arm 绑定、`field_get` 逃逸、`call` /
+    `module_const` 结果、模块链、`any_cast`）回 `Top`。预算
+    `max_indirect_targets = 8` / `max_indirect_steps = 64` 超限即不可证明，
+    **绝不返回前 N 个**。`effectBound` / `callBound` / `callbackBound` 与
+    `collectCallees` 共用同一解析；调用图因此看到同一目标集（否则经局部
+    fn-ref 的递归会漏掉 SCC `Diverge` seed）。`binder_init` 在 `Analysis.init`
+    构建一次。测试：let / 分支有限集正向 + 精确值为目标 join、参数与
+    `field_get` 仍 `Top`、预算边界（恰好 8 个可解析、9 个回 `Top`——所有目标
+    同读一常量，故可区分“截断”与真回 `Top`）、局部 fn-ref 递归 seed
+    `may_diverge`、回调解经 let 绑定实参；黑盒：间接调用读较早 module const
+    的初始化器被接受；新增 `probes/indirect_targets.st` 进全语料差分。
 
 - [ ] **6. effectful β 实参放开**（[effects.md](effects.md) §10.4）
   - 范围：在 β 契约（求值次数与顺序保持 + scope/FE 映射 + cleanup

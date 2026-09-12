@@ -4,12 +4,11 @@
 >
 > - **已实现**：固定乘积格与派生查询、函数摘要 SCC least fixpoint、精确
 >   `drop_effect(T)` 全链、module-const 检查、`StillaExecution` 三态与符号键
->   host 声明解析。
+>   host 声明解析、间接调用目标收窄（§9.2 局部 fn-ref 传播）。
 > - **opt-in 消费者（默认关）**：dead-let + selective ANF（`--simplify`）、
 >   SEG v1（`--seg`）。
 > - **设计已定但未实现**（§14、[todo.md](todo.md)）：`never_returns` must 事实、
->   `RewriteRule` / `Requirement` 统一接口、`RewriteContract` 类型、
->   间接调用目标收窄。
+>   `RewriteRule` / `Requirement` 统一接口、`RewriteContract` 类型。
 >
 > 配套文档：使用该模型的 IR 见 [hir.md](hir.md)。本文自含效果模型所需的全部
 > 定义；两者重叠的概念（求值序、值使用、效果）在本文给出权威定义，[hir.md](hir.md) 保留
@@ -520,10 +519,10 @@ until stable
   `solveComponent` 做 callee-first Kleene / Jacobi 迭代；同 SCC 读 `cur`、已完成
   读 final），递归 SCC 播种 `may_diverge`。注册表在本轮推导期间固定，单调
   transfer 与有限高度保证收敛。
-- **调用图构成**：SCC 建在分析实际使用的调用图上——`collectCallees` 只为
-  **直接** `fn_ref` callee（以及 `drop` 的类型 hook）加边，可以是跨模块的调用环。
-  经实参传递 / 高阶 / 未知目标不进图、取 `Top`（§9.1），所以 v1 的 SCC 不含
-  “函数值形成的运行期环”。
+- **调用图构成**：SCC 建在分析实际使用的调用图上——`collectCallees` 为可直接解析
+  的 callee（直接 `fn_ref`、§9.2 局部收窄得到的有限目标集，以及 `drop` 的类型
+  hook）加边，可以是跨模块的调用环。不可证明的未知目标（经参数传递 / 高阶 /
+  逃逸）不进图、取 `Top`。
 - **从 Bottom 迭代本身不能发现发散**：`f → f` 必须额外 seed。**递归 SCC 一律
   保守标 `may_diverge = true`**，只有另有独立终止证明才可取消。
 - **分析状态不属于格**：使用 `Pending` / `Ready(EffectSummary)`；SCC 内部可读
@@ -566,16 +565,17 @@ effects）。
 
 ## 9. 一等函数与间接调用
 
-### 9.1 间接调用 v1 = TOP
+### 9.1 间接调用缺省 = TOP
 
 ```text
 callback.f(x)   // 目标静态未知
 ```
 
-v1 取 `Top`：`accesses = All`，`may_trap`（含 panic）、`may_diverge`、
-`nondeterministic` 全 true。不能只是「有副作用」一位，也不能遗漏发散或非确定性。
+目标无法由 §9.2 收窄时取 `Top`：`accesses = All`，`may_trap`（含 panic）、
+`may_diverge`、`nondeterministic` 全 true。不能只是「有副作用」一位，也不能遗漏
+发散或非确定性。
 
-### 9.2 数据流收窄（可选精化，未实现）
+### 9.2 数据流收窄：局部 fn-ref 传播
 
 ```text
 FnValueInfo { type: FnTypeId, effect_bound: EffectSummaryId }
@@ -584,15 +584,32 @@ FnValueInfo { type: FnTypeId, effect_bound: EffectSummaryId }
 若 callee 操作数静态可见地绑定到有限目标集 `f ∈ {foo, bar}`，则
 `effect_bound(f) = summary(foo) ⊔ summary(bar)`。
 
-**收窄档位**（未立项）：
+**已落地的一档**：`hir_effects.Analysis.resolveTargets` 沿 builder 生成的
+**局部**绑定链把 callee 值反向解析成 `{func, host}` 目标集，命中以下形态即收窄：
 
-- v1 间接调用摘要 = `Top`（§9.1）。
-- 首个精化档为**局部 fn-ref 传播**：callee 操作数经字面 `fn_ref` / `let` 绑定 /
-  分支内有限集可达，且**不跨函数边界、无逃逸路径**时收窄；任何逃逸立即回 `Top`。
-- 该档**需求驱动**：只对真实消费点（module-const 检查与优化 legality）现场、按
-  预算解析。
-- 超限 / 不可证明是**精度预算**：必须 over-approximate 回 `Top`，**绝不截取前
-  N 个目标**（截断是 under-approx，soundness bug）。
+- 字面 `fn_ref`（首个目标）；
+- `local` → 其绑定 `let` 的单参、无 pattern 初始化器（`Analysis.binder_init`
+  索引，创建期一次扫描）；
+- `if` / `match` 的**各分支 region root**（有限集并集；任一分支解析不出即整
+  体失败）；
+- `seq` 转发到末位 operand、`move` / `borrow` 透传 operand 0。
+
+其余一律是边界并回 `Top`：函数 / λ 参数、`match` arm 与解构绑定、`field_get`
+（值已逃逸进结构体）与任何 `call` / `module_const` 结果、value-position 模块
+链、`any_cast` 恢复。这同时就是“**不跨函数边界、无逃逸路径**”的实现：解析只
+沿绑定链走，遇到不是 `let` 的绑定点即停。
+
+**需求驱动**：只在真实消费点现场解析——`effectBound` / `callBound` /
+`callbackBound`（摘要推导）与 `collectCallees`（调用图构图），不建全局缓存。
+
+**预算是精度预算，不是截断**：超过 `max_indirect_targets`（不同目标数）或
+`max_indirect_steps`（节点访问数）即返回“不可证明” → 调用点取 `Top`，**绝不
+返回前 N 个目标**（截断是 under-approx，soundness bug）。
+
+**调用图必须看到同一目标集**：`collectCallees` 用同一份 `resolveTargets` 把收窄
+得到的有 `FuncId` 目标加进 call graph（host 目标照 §13 契约实例化回调实参），
+否则经局部 fn-ref 的递归会漏掉 SCC `may_diverge` seed。`resolveTargets` 本身不读
+任何摘要，故构图期无循环。
 
 ### 9.3 host 元数据缺失 → TOP
 
@@ -630,7 +647,8 @@ ownership 可用性与 lifetime 栅栏，**缺一不可**。
 `observableEffectFree` / `canFloatAsTree` / `isDiscardable` / `isDuplicable` /
 `isSegSafe` / `hasSegEncoding` / `isSegAdmissible` /
 `isIntrinsicallySpeculatable` / `canSwapOperands` / `orderCompatible` /
-`cleanupFree` / `ownershipGate`；纯摘要级 `effects.isTotal` /
+`cleanupFree` / `ownershipGate`；间接调用目标收窄的 `resolveTargets` /
+`effectBound` / `targetCallBound`；纯摘要级 `effects.isTotal` /
 `isObservableEffectFree` / `discardView` / `isPure`。**没有** `is_droppable` /
 `drop_is_observable` 这类额外查询。没有「facts table」缓存——查询按需从
 `readySummary` 计算。
@@ -1132,10 +1150,11 @@ MayTrap（含 panic）+ MayDiverge + nondeterministic
 - transfer 按 descriptor 的 `own_effect` + `TransferKind` 组合 operand / region
   / callee；`OperandUse` 由 `UsePolicy` + callee 签名 / operand capability 逐
   occurrence 解析。
-- 函数摘要：调用图建在已解析 `fn_ref` 目标上（间接 / 未知 Stilla 目标不进图 →
-  `Top`；host 目标只在显式 `StillaExecution.forbidden` 声明下用声明的摘要，
-  否则 `Top`），Kosaraju + callee-first Kleene 迭代（递归 SCC 播种 `Diverge`，
-  同 SCC 读 `cur`、已完成读 final）；`drop` 把类型的 hook 接入调用图。`validate`
+- 函数摘要：调用图建在可解析目标上（直接 `fn_ref`、§9.2 局部收窄得到的有限
+  目标集；不可证明的未知 Stilla 目标不进图 → `Top`；host 目标只在显式
+  `StillaExecution.forbidden` 声明下用声明的摘要，否则 `Top`），Kosaraju +
+  callee-first Kleene 迭代（递归 SCC 播种 `Diverge`，同 SCC 读 `cur`、已完成读
+  final）；`drop` 把类型的 hook 接入调用图。`validate`
   重跑同一 fixpoint 后拒绝低报 callee 摘要的节点注解。
 - `drop_effect(T)` 全链：Copy → `{}`；struct 自身 hook `;` Unique 字段逆声明序
   递归；union 候选 `⊔` + payload 逆序；tuple 逆序；`list` / `box` 元素递归；
@@ -1147,7 +1166,8 @@ MayTrap（含 panic）+ MayDiverge + nondeterministic
   `observedEffect` / `canFloatAsTree` 消费它。未建模 program
   （`cleanup_modeled=false`）与含 Unique region 绑定的子树回 `null` → `Top`；
   `cleanupFree` 保持字面 cleanup-free 证明不变。
-- 未知目标：间接调用 / 缺失函数摘要 / 缺失 host 声明取完整 `Top`；host 声明经
+- 未知目标：无法由 §9.2 收窄的间接调用 / 缺失函数摘要 / 缺失 host 声明取完整
+  `Top`；host 声明经
   `frontend.Options.host_decls`（符号键）→ `HostEffects.resolve` →
   `consolidate` 解析；带回调契约的 `MayExecute` host 调用按
   `own ⊔ ⨆ effect_bound(target_i)` 收紧（见 §13），`collectCallees` 同步把

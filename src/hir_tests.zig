@@ -224,6 +224,19 @@ test "M2b: accepts reading an earlier module constant" {
     );
 }
 
+test "M2b: accepts an indirect call reading an earlier module constant" {
+    // The callable is a `let`-bound local, so the §9.2 target narrowing
+    // resolves it to `pick` and the initializer's read set is `Read(a)` —
+    // not the unknown read set an unresolved indirect call would carry
+    // (which §7.1/§9.4 reject). Without the narrowing this program is
+    // refused with "reads 'a' before it is initialized".
+    try expectModuleOk(
+        \\const a: int32 = 1;
+        \\fn pick() -> int32 { a }
+        \\const b: int32 = { let f = pick; f() };
+    );
+}
+
 test "M2b: a function reading a later constant is fine when nothing calls it" {
     try expectModuleOk(
         \\const a = 1;

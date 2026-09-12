@@ -47,6 +47,9 @@ The detailed probes cover the source-reachable operation/type matrix:
   scalar call and of a discardable Unique constructor, selective ANF hoisting
   of a Unique call result and of a dominant effectful operand, with destructor
   placement pinned by a printing drop hook)
+- `indirect_targets.st`: the §9.2 indirect-call target narrowing (a `let`-bound
+  fn-ref, a `let`-bound λ, and an `if`-selected finite set) next to the
+  unresolvable function-parameter callee that stays `Top`
 
 Every `probes/*.st` file is enumerated at test time by
 `src/probe_corpus.zig`, so a new probe automatically joins the HIR build

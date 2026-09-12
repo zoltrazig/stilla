@@ -707,8 +707,9 @@ EffectSummary {
   摘要层可交换）。这只说明摘要不携带顺序信息；程序级交换仍只由 `reorderable`
   放行。
 - `effect_transfer` 组合（`hir_effects.compute`）：callee 表达式求值 → LTR
-  实参 → 所得 callable 的 `effect_bound`；函数体摘要含正常退出清理。间接调用、
-  缺失摘要、缺失 host metadata 一律 `Top`。
+  实参 → 所得 callable 的 `effect_bound`；函数体摘要含正常退出清理。间接调用先经
+  [effects.md](effects.md) §9.2 的局部目标收窄解析有限目标集；解析不出、缺失
+  摘要、缺失 host metadata 一律 `Top`。
 - 递归函数在 call-graph SCC 上求 least fixpoint（Kosaraju + callee-first
   Kleene 迭代），递归 SCC 保守 seed `may_diverge`；任何变换后摘要重算。
 
@@ -775,7 +776,8 @@ let Bk: ty = v in body  →  body
   除法 trap、IEEE 754、`str` 拼接各不相同），SEG 规则不带「通用 BinaryOp」。
 - **λ 创建效果与潜在调用效果分离**：λ / fn_ref 的**创建**无效果、total；
   `call` 先组合 callee 与实参求值效果，再组合 callee 的 `effect_bound`。直接
-  调用用 callee 摘要；间接调用 v1 取 `Top`。
+  调用用 callee 摘要；间接调用先经局部目标收窄（[effects.md](effects.md)
+  §9.2），解析不出才取 `Top`。
 
 ### 6.5 module_const 不是字面量
 
@@ -1157,8 +1159,8 @@ lowering。可选变换每轮原位重写后重新跑结构 + 效果校验（§2
 
 **尚未实现**（完整清单见 [todo.md](todo.md)）：η-reduction；**节点级**
 full-expression 边界标注（清理 token 登记已落地，见 [effects.md](effects.md)
-§11.2）；Unique ANF 物化；间接调用目标收窄；effectful
-β 实参放开；真正的 slotted e-graph / extraction；HIRTypeId canonical 表。
+§11.2）；effectful β 实参放开；真正的 slotted e-graph / extraction；
+HIRTypeId canonical 表。
 
 ## 12. 开放问题
 

@@ -56,12 +56,52 @@ const lambda_op = hir.opId("lambda").?;
 const fn_ref_op = hir.opId("fn_ref").?;
 const call_op = hir.opId("call").?;
 const drop_op = hir.opId("drop").?;
+const let_op = hir.opId("let").?;
+const local_op = hir.opId("local").?;
+const if_op = hir.opId("if").?;
+const match_op = hir.opId("match").?;
+const seq_op = hir.opId("seq").?;
+const move_op = hir.opId("move").?;
+const borrow_op = hir.opId("borrow").?;
 
 /// Recursion bound for the `drop_effect` type walk (docs/effects.md
 /// §11.1). Named-type recursion is cut by identity; this cap is the
 /// safety net for an uninhabited non-regular instantiation chain, whose
 /// summary falls back to the conservative `Top`.
 const max_drop_type_depth = 64;
+
+/// Precision budget for indirect-call target narrowing (docs/effects.md
+/// §9.2). Exceeding either bound makes resolution *unprovable*, not
+/// approximate: the call site falls back to `Top`. Truncating to the
+/// first N targets would under-approximate the summary, which is a
+/// soundness bug, so the budget is never a cut-off point for the set.
+pub const max_indirect_targets: usize = 8;
+pub const max_indirect_steps: usize = 64;
+
+/// One statically-resolved indirect-call target (docs/effects.md §9.2).
+/// Only the two *finite* target kinds are representable: a Stilla
+/// function record and a host binding. An inline λ node cannot reach
+/// call position from source (the builder hoists every source λ to a
+/// `fn_ref` to a `FuncKind.lambda` record), so `resolveTargets` has no λ
+/// case; `effectBound` / `callbackBound` keep their λ fast path for
+/// white-box callers.
+pub const ResolvedTarget = union(enum) {
+    func: hir.FuncId,
+    host: hir.HostBindingId,
+};
+
+fn targetEq(a: ResolvedTarget, b: ResolvedTarget) bool {
+    return switch (a) {
+        .func => |f| switch (b) {
+            .func => |g| f == g,
+            else => false,
+        },
+        .host => |h| switch (b) {
+            .host => |k| h == k,
+            else => false,
+        },
+    };
+}
 
 /// Kosaraju pass 1: DFS finishing order over the caller→callee graph.
 fn finishOrder(arena: std.mem.Allocator, adj: []const std.ArrayListUnmanaged(hir.FuncId)) Error![]hir.FuncId {
@@ -159,6 +199,12 @@ pub const Analysis = struct {
     solving: ?u32,
     /// The in-progress approximation for the SCC in `solving`.
     cur: []Summary,
+    /// Binder → its `let` initializer (docs/effects.md §9.2): the local
+    /// fn-ref propagation index. `hir.no_expr` for every binder that is
+    /// not bound by a plain single-identifier `let` — a function / λ
+    /// parameter, a match-arm or destructuring binding — where
+    /// `resolveTargets` stops and the call site falls back to `Top`.
+    binder_init: []hir.ExprId,
 
     pub fn init(arena: std.mem.Allocator, built: *hir.BuiltProgram, config: Config) Error!Analysis {
         const memo = try arena.alloc(?Summary, built.program.exprs.items.len);
@@ -171,6 +217,23 @@ pub const Analysis = struct {
         @memset(comp_of, 0);
         const cur = try arena.alloc(Summary, built.funcs.items.len);
         @memset(cur, effects.pure);
+        // The local fn-ref propagation index (docs/effects.md §9.2): one
+        // pass over the node store mapping a plain `let`'s single binder
+        // to the initializer it is bound to. Destructuring lets
+        // (`pattern != null`) and every other region kind stay `no_expr`.
+        const binder_init = try arena.alloc(hir.ExprId, built.program.binders.items.len);
+        @memset(binder_init, hir.no_expr);
+        for (built.program.exprs.items, 0..) |e, i| {
+            if (e.op != let_op) continue;
+            const ops = built.program.operands(@intCast(i));
+            if (ops.len != 1) continue;
+            const regs = built.program.regionsOf(@intCast(i));
+            if (regs.len != 1) continue;
+            if (built.program.region(regs[0]).pattern != null) continue;
+            const params = built.program.params(regs[0]);
+            if (params.len != 1) continue;
+            binder_init[params[0]] = ops[0];
+        }
         // Resolve the symbol-keyed ABI declarations against this
         // program's bindings, then fold in the id-keyed entries some
         // white-box callers pass. `consolidate` makes a conflicting
@@ -193,6 +256,7 @@ pub const Analysis = struct {
             .comp_of = comp_of,
             .solving = null,
             .cur = cur,
+            .binder_init = binder_init,
         };
     }
 
@@ -800,89 +864,203 @@ pub const Analysis = struct {
 
     /// The effect of *calling* the value `callee` evaluates to
     /// (docs/effects.md §6.1 `effect_bound`), distinct from `effects(callee)`.
+    ///
+    /// An inline λ is the one special case (its body is not a `fn_ref`
+    /// target); every other callee — including a direct `fn_ref` — goes
+    /// through the local target narrowing of docs/effects.md §9.2, which
+    /// resolves a literal `fn_ref` to its singleton set. When narrowing
+    /// yields no finite target set the result is the full `top` (§9.1).
     pub fn effectBound(self: *Analysis, callee: hir.ExprId) Error!Summary {
-        const n = self.p().node(callee);
-        if (n.op == fn_ref_op) {
-            return switch (n.payload) {
-                .func => |fr| switch (fr) {
-                    .func => |fid| self.functionSummary(fid),
-                    // A host binding with no declaration is the full `top`
-                    // (docs/effects.md §13): the compiler cannot prove it
-                    // cannot execute Stilla code, so it may reach any
-                    // module constant. A declaration is honoured only as
-                    // far as `HostEffects.Entry.effectiveSummary` allows.
-                    .host => |hb| self.hosts.lookup(hb) orelse effects.top,
-                },
-                else => effects.top,
-            };
+        if (self.p().node(callee).op == lambda_op) return self.lambdaBodySummary(callee);
+        var targets = std.ArrayListUnmanaged(ResolvedTarget).empty;
+        defer targets.deinit(self.arena);
+        if (try self.resolveTargets(callee, &targets)) {
+            if (targets.items.len > 0) {
+                var acc: ?Summary = null;
+                for (targets.items) |t| {
+                    const b = try self.targetBound(t);
+                    acc = if (acc) |a| try effects.join(self.arena, a, b) else b;
+                }
+                return acc.?;
+            }
         }
-        if (n.op == lambda_op) return self.lambdaBodySummary(callee);
-        // Indirect call: v1 is Top (docs/effects.md §9.1).
         return effects.top;
+    }
+
+    /// The context-free `effect_bound` of one resolved target
+    /// (docs/effects.md §6.1, §13): a function / λ record reads its
+    /// finalized (or in-progress) summary; a host binding with no
+    /// declaration is the full `top`, and a declaration is honoured only
+    /// as far as `HostEffects.Entry.effectiveSummary` allows. The call-site
+    /// refinement (callback parameterization) lives in `targetCallBound`.
+    fn targetBound(self: *Analysis, t: ResolvedTarget) Error!Summary {
+        return switch (t) {
+            .func => |fid| self.functionSummary(fid),
+            .host => |hb| self.hosts.lookup(hb) orelse effects.top,
+        };
+    }
+
+    /// The provable finite target set of an indirect callee
+    /// (docs/effects.md §9.2), demand-driven and budgeted.
+    ///
+    /// Traces the callee value backwards along the *local* binding chain
+    /// the builder emits: a literal `fn_ref`, a `let`-bound local, the
+    /// regions of an `if` / `match`, a `seq`'s forwarded last operand, and
+    /// a `move` / `borrow` wrapper. Everything else is a boundary and
+    /// returns false (→ `Top` at every caller): a function / λ parameter,
+    /// a match-arm or destructuring binding, a `field_get` (the value
+    /// escaped into a structure), any `call` / `module_const` result, a
+    /// value-position module chain, an `any_cast` recovery. That is also
+    /// the "no cross-function boundary, no escape path" rule: the walk
+    /// only follows binding chains and stops at any other binding site.
+    ///
+    /// The budget is a precision limit, never a truncation: exceeding
+    /// `max_indirect_targets` distinct targets or `max_indirect_steps`
+    /// node visits returns false, it never returns the first N targets.
+    /// `collectCallees` drives the same function, so the call graph always
+    /// sees exactly the target set the summaries use; this never reads an
+    /// effect summary, so graph construction has no circularity.
+    fn resolveTargets(self: *Analysis, callee: hir.ExprId, out: *std.ArrayListUnmanaged(ResolvedTarget)) Error!bool {
+        const pr = self.p();
+        var work = std.ArrayListUnmanaged(hir.ExprId).empty;
+        defer work.deinit(self.arena);
+        try work.append(self.arena, callee);
+        var steps: usize = 0;
+        while (work.pop()) |id| {
+            steps += 1;
+            if (steps > max_indirect_steps) return false;
+            const n = pr.node(id);
+            // A value-position module chain runs module initialization, an
+            // effect this model does not represent (docs/effects.md §14),
+            // so it is a boundary — same as in `compute`.
+            if (n.access_hops.len > 0) return false;
+            if (n.op == fn_ref_op) {
+                switch (n.payload) {
+                    .func => |fr| {
+                        const t: ResolvedTarget = switch (fr) {
+                            .func => |fid| .{ .func = fid },
+                            .host => |hb| .{ .host = hb },
+                        };
+                        if (!try self.addTarget(out, t)) return false;
+                    },
+                    else => return false,
+                }
+            } else if (n.op == local_op) {
+                const bind = switch (n.payload) {
+                    .binder => |b| b,
+                    else => return false,
+                };
+                if (bind >= self.binder_init.len) return false;
+                const initializer = self.binder_init[bind];
+                if (initializer == hir.no_expr) return false;
+                try work.append(self.arena, initializer);
+            } else if (n.op == if_op or n.op == match_op) {
+                for (pr.regionsOf(id)) |r| try work.append(self.arena, pr.region(r).root);
+            } else if (n.op == seq_op) {
+                const ops = pr.operands(id);
+                if (ops.len == 0) return false;
+                try work.append(self.arena, ops[ops.len - 1]);
+            } else if (n.op == move_op or n.op == borrow_op) {
+                const ops = pr.operands(id);
+                if (ops.len != 1) return false;
+                try work.append(self.arena, ops[0]);
+            } else {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /// Add one target to the set, deduplicated, refusing (never
+    /// truncating) once the set would exceed `max_indirect_targets`.
+    fn addTarget(self: *Analysis, out: *std.ArrayListUnmanaged(ResolvedTarget), t: ResolvedTarget) Error!bool {
+        for (out.items) |x| if (targetEq(x, t)) return true;
+        if (out.items.len >= max_indirect_targets) return false;
+        try out.append(self.arena, t);
+        return true;
     }
 
     /// `effect_bound` of a *call site* (docs/effects.md §6.1, §13).
     ///
-    /// For a host binding declared `may_execute` with an exhaustive
-    /// callback contract, an invocation that passes a provable finite
-    /// target at every listed argument position is bounded by the host's
-    /// own declared summary joined with those targets' effect bounds
-    /// (`own ⊔ ⨆ effect_bound(target_i)`). The contract attests the
+    /// The callee's target set is resolved once (docs/effects.md §9.2);
+    /// the site's bound is the join over the targets. A `may_execute` host
+    /// binding with an exhaustive callback contract is bounded by
+    /// `own ⊔ ⨆ effect_bound(target_i)` — the contract attests the
     /// execution happens synchronously, during this invocation, and only
-    /// through those arguments — so a binding that stores a callable for
-    /// a later call cannot use it, and the later invocation (with no such
-    /// argument) is `Top`.
+    /// through the listed argument positions, so a binding that stores a
+    /// callable for a later call cannot use it.
     ///
-    /// Every other case is `Top`: no contract, no declaration, an
-    /// out-of-range position, or a callback with no provable finite
-    /// target set. The refinement is a precision budget, never a
-    /// truncation. `collectCallees` adds the same targets to the call
-    /// graph, so this only ever reads finalized or in-progress SCC facts.
+    /// Any unresolved callee, a missing declaration, an out-of-range
+    /// position, or a callback argument with no provable finite target set
+    /// makes the site `Top`. The same target set feeds `collectCallees`, so
+    /// this only ever reads finalized or in-progress SCC facts.
     fn callBound(self: *Analysis, ops: []const hir.ExprId) Error!Summary {
         if (ops.len == 0) return effects.top;
-        const callee = self.p().node(ops[0]);
-        if (callee.op == fn_ref_op and callee.payload == .func) {
-            switch (callee.payload.func) {
-                .host => |hb| {
-                    const entry = self.hosts.lookupEntry(hb) orelse return effects.top;
-                    if (entry.stilla_execution != .may_execute) return self.effectBound(ops[0]);
-                    const positions = entry.callbacks orelse return self.effectBound(ops[0]);
-                    var acc = entry.summary;
-                    for (positions) |pos| {
-                        // Bounds-check before widening: `pos + 1` would
-                        // overflow on a 32-bit target when `pos` is
-                        // `maxInt(u32)`, and a wrapped index is a wrong
-                        // answer, not a conservative one. Arg 0 is ops[1],
-                        // so a valid position is `< ops.len - 1`.
-                        if (pos >= ops.len - 1) return effects.top;
-                        const bound = try self.callbackBound(ops[@as(usize, pos) + 1]) orelse return effects.top;
-                        acc = try effects.join(self.arena, acc, bound);
-                    }
-                    return acc;
-                },
-                .func => {},
+        var targets = std.ArrayListUnmanaged(ResolvedTarget).empty;
+        defer targets.deinit(self.arena);
+        if (try self.resolveTargets(ops[0], &targets)) {
+            if (targets.items.len > 0) {
+                var acc: ?Summary = null;
+                for (targets.items) |t| {
+                    const b = try self.targetCallBound(t, ops);
+                    acc = if (acc) |a| try effects.join(self.arena, a, b) else b;
+                }
+                return acc.?;
             }
         }
+        // Includes the λ-callee white-box case `resolveTargets` does not
+        // model; every other unresolved callee is `Top` there.
         return self.effectBound(ops[0]);
     }
 
-    /// `effect_bound` of a callable value passed as an argument, when it
-    /// has a provable finite target set — the singleton forms v1 supports
-    /// (a direct `fn_ref`, an inline λ). A `let`-bound or otherwise
-    /// indirect value is null, which the caller maps to `Top` (the
-    /// general local-propagation refinement of docs/effects.md §9.2 is
-    /// separate and unimplemented). A value-position module chain would
-    /// run module initialization, so it is null too.
+    /// One resolved target's `effect_bound` at a call site. A `may_execute`
+    /// host with a callback contract is the only case richer than
+    /// `targetBound`; `ops[1..]` are the call's arguments.
+    fn targetCallBound(self: *Analysis, t: ResolvedTarget, ops: []const hir.ExprId) Error!Summary {
+        switch (t) {
+            .func => |fid| return self.functionSummary(fid),
+            .host => |hb| {
+                const entry = self.hosts.lookupEntry(hb) orelse return effects.top;
+                if (entry.stilla_execution != .may_execute) return entry.effectiveSummary();
+                const positions = entry.callbacks orelse return entry.effectiveSummary();
+                var acc = entry.summary;
+                for (positions) |pos| {
+                    // Bounds-check before widening: `pos + 1` would overflow
+                    // on a 32-bit target when `pos` is `maxInt(u32)`, and a
+                    // wrapped index is a wrong answer, not a conservative
+                    // one. Arg 0 is ops[1], so a valid position is
+                    // `< ops.len - 1`.
+                    if (pos >= ops.len - 1) return effects.top;
+                    const bound = try self.callbackBound(ops[@as(usize, pos) + 1]) orelse return effects.top;
+                    acc = try effects.join(self.arena, acc, bound);
+                }
+                return acc;
+            },
+        }
+    }
+
+    /// `effect_bound` of a callable value passed as an argument
+    /// (docs/effects.md §13 callback parameterization), for the local
+    /// target narrowing of §9.2. Null when no provable finite target set
+    /// exists, which the contract path maps to `Top` for the whole call
+    /// (never a truncated set). A value-position module chain would run
+    /// module initialization, so it is null too.
     fn callbackBound(self: *Analysis, arg: hir.ExprId) Error!?Summary {
         const n = self.p().node(arg);
         if (n.access_hops.len > 0) return null;
-        if (n.op == fn_ref_op and n.payload == .func) {
-            return switch (n.payload.func) {
-                .func => |fid| try self.functionSummary(fid),
-                .host => |hb| self.hosts.lookup(hb),
-            };
-        }
         if (n.op == lambda_op) return try self.lambdaBodySummary(arg);
+        var targets = std.ArrayListUnmanaged(ResolvedTarget).empty;
+        defer targets.deinit(self.arena);
+        if (try self.resolveTargets(arg, &targets)) {
+            if (targets.items.len > 0) {
+                var acc: ?Summary = null;
+                for (targets.items) |t| {
+                    const b = try self.targetBound(t);
+                    acc = if (acc) |a| try effects.join(self.arena, a, b) else b;
+                }
+                return acc.?;
+            }
+        }
         return null;
     }
 
@@ -963,9 +1141,12 @@ pub const Analysis = struct {
         }
     }
 
-    /// Every `call` target in `fid`'s body that resolves to a function
-    /// record (transitive through nested inline λ bodies, which the
-    /// enclosing body's summary consumes).
+    /// Every `call` target in `fid`'s body that the local narrowing of
+    /// docs/effects.md §9.2 can resolve to a function record, plus the
+    /// designated callback arguments of a host contract. The graph must
+    /// see exactly the target set the summaries consume (`callBound`),
+    /// otherwise a recursion that runs through a `let`-bound fn-ref would
+    /// miss the SCC `Diverge` seed (docs/effects.md §8.2).
     fn collectCallees(self: *Analysis, fid: hir.FuncId, out: *std.ArrayListUnmanaged(hir.FuncId)) Error!void {
         const pr = self.p();
         var work = std.ArrayListUnmanaged(hir.ExprId).empty;
@@ -975,9 +1156,11 @@ pub const Analysis = struct {
             const node = pr.node(id);
             if (node.op == call_op) {
                 const ops = pr.operands(id);
-                if (ops.len > 0 and pr.node(ops[0]).op == fn_ref_op) {
-                    if (pr.node(ops[0]).payload == .func) {
-                        switch (pr.node(ops[0]).payload.func) {
+                if (ops.len > 0) {
+                    var targets = std.ArrayListUnmanaged(ResolvedTarget).empty;
+                    defer targets.deinit(self.arena);
+                    if (try self.resolveTargets(ops[0], &targets)) {
+                        for (targets.items) |t| switch (t) {
                             .func => |target| if (target < self.built.funcs.items.len and !std.mem.containsAtLeastScalar(hir.FuncId, out.items, 1, target)) {
                                 try out.append(self.arena, target);
                             },
@@ -997,7 +1180,7 @@ pub const Analysis = struct {
                                     };
                                 }
                             },
-                        }
+                        };
                     }
                 }
             }
@@ -1014,18 +1197,20 @@ pub const Analysis = struct {
         }
     }
 
-    /// Record the function target of a callable value when it is a direct
-    /// `fn_ref`, so a callback instantiated at a host call site becomes an
-    /// edge of this body's call graph.
+    /// Record the function targets of a callable argument (a host
+    /// contract's instantiated callback) so they become edges of this
+    /// body's call graph — resolved through the same local narrowing as
+    /// any other indirect value.
     fn collectCallableTarget(self: *Analysis, arg: hir.ExprId, out: *std.ArrayListUnmanaged(hir.FuncId)) Error!void {
-        const n = self.p().node(arg);
-        if (n.access_hops.len > 0 or n.op != fn_ref_op or n.payload != .func) return;
-        switch (n.payload.func) {
+        var targets = std.ArrayListUnmanaged(ResolvedTarget).empty;
+        defer targets.deinit(self.arena);
+        if (!try self.resolveTargets(arg, &targets)) return;
+        for (targets.items) |t| switch (t) {
             .func => |target| if (target < self.built.funcs.items.len and !std.mem.containsAtLeastScalar(hir.FuncId, out.items, 1, target)) {
                 try out.append(self.arena, target);
             },
             .host => {},
-        }
+        };
     }
 
     /// Solve one SCC to its least fixpoint from `Bottom`, with the
@@ -2436,7 +2621,7 @@ test "hir_effects: an inline-lambda callback argument bounds the host call" {
     try testing.expect((try an.validate(testing.allocator)) == null);
 }
 
-test "hir_effects: a host callback contract with an unbounded or invalid argument is Top" {
+test "hir_effects: a host callback contract honours a let-bound target and refuses invalid positions" {
     var f = try build("app", &.{
         .{ "hostmod", "fn apply(f: fn(int32) -> int32, x: int32) -> int32;" },
         .{ "impl", "fn inc(x: int32) -> int32 { x + 1 }" },
@@ -2454,13 +2639,13 @@ test "hir_effects: a host callback contract with an unbounded or invalid argumen
     const call = findHostCall(&f).?;
     const pos0 = [_]u32{0};
 
-    // An indirect callable (a `let`-bound value) has no provable finite
-    // target set, so the refinement is refused: Top, never a truncated
-    // target set.
+    // A `let`-bound callable resolves to a provable finite target set by
+    // the §9.2 local propagation, so the contract applies: the call is
+    // `own ⊔ summary(impl.inc)` — both pure here.
     const indirect = try declareCallbackHost(&f, "hostmod.apply", effects.pure, &pos0);
     var an = try Analysis.init(f.arena.allocator(), f.built, .{ .graph = f.graph, .hosts = indirect });
     try an.analyze();
-    try testing.expect((try an.effectOf(call)).eql(effects.top));
+    try testing.expect((try an.effectOf(call)).eql(effects.pure));
 
     // A listed position outside the call's arguments is refused too.
     const oob = [_]u32{5};
@@ -2492,6 +2677,193 @@ test "hir_effects: a host callback contract with an unbounded or invalid argumen
     var an3 = try Analysis.init(a, f.built, .{ .graph = f.graph, .hosts = .{ .entries = entries } });
     try an3.analyze();
     try testing.expect((try an3.effectOf(call)).eql(effects.may_trap));
+}
+
+test "hir_effects: a callback argument with no provable target set is Top" {
+    var f = try build("app", &.{
+        .{ "hostmod", "fn apply(f: fn(int32) -> int32, x: int32) -> int32;" },
+        .{
+            "app",
+            \\const hostmod = import("hostmod");
+            \\fn run(cb: fn(int32) -> int32) -> int32 { hostmod.apply(cb, 3) }
+            \\fn main() -> int32 { run(fn(x: int32) -> int32 { x }) }
+        },
+    });
+    defer f.deinit();
+    const call = findHostCall(&f).?;
+    const pos0 = [_]u32{0};
+    // `cb` is a λ parameter, not a `let` binding: resolution stops at the
+    // binding site and the contract is refused, Top for the whole call
+    // (never a truncated target set).
+    const hosts = try declareCallbackHost(&f, "hostmod.apply", effects.pure, &pos0);
+    var an = try Analysis.init(f.arena.allocator(), f.built, .{ .graph = f.graph, .hosts = hosts });
+    try an.analyze();
+    try testing.expect((try an.effectOf(call)).eql(effects.top));
+}
+
+/// The first `call` node whose callee is not a direct `fn_ref` — the
+/// §9.2 indirect form the narrowing tests target.
+fn findIndirectCall(f: *Fixture) ?hir.ExprId {
+    const p = &f.built.program;
+    for (p.exprs.items, 0..) |e, i| {
+        if (e.op != call_op) continue;
+        const ops = p.operands(@intCast(i));
+        if (ops.len == 0) continue;
+        const callee = p.node(ops[0]);
+        if (callee.op == fn_ref_op or callee.op == lambda_op) continue;
+        return @intCast(i);
+    }
+    return null;
+}
+
+test "hir_effects: an indirect call resolves a let-bound target and its branch set" {
+    var f = try build("app", &.{.{
+        "app",
+        \\const c: int32 = 1;
+        \\fn foo() -> int32 { c }
+        \\fn bar() -> int32 { 2 }
+        \\fn main(flag: bool) -> int32 {
+        \\    let f = if (flag) { foo } else { bar };
+        \\    f()
+        \\}
+    }});
+    defer f.deinit();
+    var an = try Analysis.init(f.arena.allocator(), f.built, .{ .graph = f.graph });
+    try an.analyze();
+    const call = findIndirectCall(&f).?;
+    // The `let` names an `if` over two branches, so the target set is the
+    // finite `{foo, bar}` and the call bound is their join — the
+    // module-const read of `foo` survives, not Top.
+    const want = try effects.join(f.arena.allocator(), try an.functionSummary(funcId(&f, "app.foo").?), try an.functionSummary(funcId(&f, "app.bar").?));
+    const sum = try an.effectOf(call);
+    try testing.expect(sum.eql(want));
+    try testing.expect(!sum.eql(effects.top));
+    try testing.expectEqual(@as(usize, 1), sum.accesses.accesses.len);
+    switch (sum.accesses.accesses[0].resource) {
+        .module_const => {},
+        else => return error.TestUnexpectedResult,
+    }
+    try testing.expect((try an.validate(testing.allocator)) == null);
+}
+
+/// A source module whose `main` calls `t{n-1}` through a right-leaning
+/// `if` chain — every `t_i` reads the same module constant, so any
+/// subset-truncation of the target set would still yield `Read(c)`, and
+/// only a genuine refusal yields `Top`.
+fn indirectIfChainSource(n: usize) ![]const u8 {
+    const a = testing.allocator;
+    var buf = std.ArrayList(u8).empty;
+    errdefer buf.deinit(a);
+    try buf.appendSlice(a, "const c: int32 = 1;\n");
+    for (0..n) |i| {
+        const line = try std.fmt.allocPrint(a, "fn t{d}() -> int32 {{ c }}\n", .{i});
+        defer a.free(line);
+        try buf.appendSlice(a, line);
+    }
+    try buf.appendSlice(a, "fn main(flag: bool) -> int32 {\n    let f = ");
+    for (0..n - 1) |i| {
+        const piece = try std.fmt.allocPrint(a, "if (flag) {{ t{d} }} else {{ ", .{i});
+        defer a.free(piece);
+        try buf.appendSlice(a, piece);
+    }
+    const last = try std.fmt.allocPrint(a, "t{d}", .{n - 1});
+    defer a.free(last);
+    try buf.appendSlice(a, last);
+    for (0..n - 1) |_| try buf.appendSlice(a, " }");
+    try buf.appendSlice(a, ";\n    f()\n}\n");
+    return buf.toOwnedSlice(a);
+}
+
+test "hir_effects: indirect target resolution is exact at the budget and Top one past it" {
+    // Exactly `max_indirect_targets` distinct targets: resolvable.
+    const at_budget = try indirectIfChainSource(max_indirect_targets);
+    defer testing.allocator.free(at_budget);
+    var f1 = try build("app", &.{.{ "app", at_budget }});
+    defer f1.deinit();
+    var an1 = try Analysis.init(f1.arena.allocator(), f1.built, .{ .graph = f1.graph });
+    try an1.analyze();
+    const call1 = findIndirectCall(&f1).?;
+    const sum1 = try an1.effectOf(call1);
+    try testing.expect(!sum1.eql(effects.top));
+    try testing.expect(sum1.eql(try an1.functionSummary(funcId(&f1, "app.t0").?)));
+
+    // One more target exceeds the budget: the whole call is `Top`. A
+    // truncating resolver would instead return the first-N join, which
+    // here is `Read(c)` — so this assertion is what pins "never cut the
+    // set".
+    const over_budget = try indirectIfChainSource(max_indirect_targets + 1);
+    defer testing.allocator.free(over_budget);
+    var f2 = try build("app", &.{.{ "app", over_budget }});
+    defer f2.deinit();
+    var an2 = try Analysis.init(f2.arena.allocator(), f2.built, .{ .graph = f2.graph });
+    try an2.analyze();
+    const call2 = findIndirectCall(&f2).?;
+    try testing.expect((try an2.effectOf(call2)).eql(effects.top));
+}
+
+test "hir_effects: an escaped or parameter-bound callable stays Top" {
+    var f = try build("app", &.{.{
+        "app",
+        \\struct Holder { f: fn() -> int32; }
+        \\fn invoke(cb: fn() -> int32) -> int32 { cb() }
+        \\fn call_field(h: Holder) -> int32 { (h.f)() }
+    }});
+    defer f.deinit();
+    var an = try Analysis.init(f.arena.allocator(), f.built, .{ .graph = f.graph });
+    try an.analyze();
+    for ([_][]const u8{ "app.invoke", "app.call_field" }) |name| {
+        const fid = funcId(&f, name).?;
+        // Every indirect call in the body has no provable finite target:
+        // a λ parameter, or a struct field the value escaped into.
+        const found = try indirectCallInBody(&f, fid);
+        const sum = try an.effectOf(found);
+        try testing.expect(sum.eql(effects.top));
+    }
+    try testing.expect((try an.validate(testing.allocator)) == null);
+}
+
+/// The first non-`fn_ref` call inside one function body (asserting the
+/// fixture actually contains one).
+fn indirectCallInBody(f: *Fixture, fid: hir.FuncId) !hir.ExprId {
+    const p = &f.built.program;
+    var work = std.ArrayListUnmanaged(hir.ExprId).empty;
+    defer work.deinit(f.arena.allocator());
+    try work.append(f.arena.allocator(), f.built.funcs.items[fid].root);
+    while (work.pop()) |id| {
+        const n = p.node(id);
+        if (n.op == call_op) {
+            const ops = p.operands(id);
+            if (ops.len > 0) {
+                const callee = p.node(ops[0]);
+                if (callee.op != fn_ref_op and callee.op != lambda_op) return id;
+            }
+        }
+        for (p.operands(id)) |op| try work.append(f.arena.allocator(), op);
+        for (p.regionsOf(id)) |r| try work.append(f.arena.allocator(), p.region(r).root);
+    }
+    return error.TestUnexpectedResult;
+}
+
+test "hir_effects: recursion through a let-bound fn_ref seeds may_diverge" {
+    var f = try build("app", &.{.{
+        "app",
+        \\fn g(x: int32) -> int32 {
+        \\    let f = g;
+        \\    f(x)
+        \\}
+        \\fn main() -> int32 { g(1) }
+    }});
+    defer f.deinit();
+    var an = try Analysis.init(f.arena.allocator(), f.built, .{ .graph = f.graph });
+    try an.analyze();
+    // The only self-call is indirect (`f(x)` through the `let`), so the
+    // SCC `g -> g` edge can only come from the §9.2 resolution. Without
+    // it the component is a singleton with no self-loop and the summary
+    // would under-report divergence.
+    const g = try an.functionSummary(funcId(&f, "app.g").?);
+    try testing.expect(g.may_diverge);
+    try testing.expect(!g.eql(effects.top));
+    try testing.expect((try an.validate(testing.allocator)) == null);
 }
 
 test "hir_effects: a callback recursion is seeded may_diverge by the SCC fixpoint" {
