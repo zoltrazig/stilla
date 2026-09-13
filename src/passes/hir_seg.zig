@@ -143,9 +143,10 @@ const Rewriter = struct {
     matches: usize = 0,
 
     /// The full-expression id β maps every cloned λ-body node onto
-    /// (hir.md §8.4 `maps_full_expr`): the call site's FE. The M1a
-    /// builder keeps FE 0 everywhere, so this is the identity today; the
-    /// explicit mapping keeps β correct once real FE boundaries land.
+    /// (hir.md §8.4 `maps_full_expr`): the call site's FE. Set per β
+    /// rewrite from the call node; every node of the cloned body carries
+    /// it, so the moved body's destruction boundary follows the call
+    /// into its destination full expression.
     clone_fe: hir.FullExprId = 0,
 
     fn p(self: *Rewriter) *hir.Program {
@@ -365,8 +366,8 @@ const Rewriter = struct {
         }
 
         // Fresh binders for the λ params (maps_scope), then clone the
-        // body with every binder reference remapped (maps_full_expr is
-        // identity here: the builder keeps FE 0 for the whole tree).
+        // body with every binder reference remapped; every cloned node is
+        // stamped with the call site's FE (maps_full_expr).
         var map = std.AutoHashMapUnmanaged(hir.BinderId, hir.BinderId).empty;
         defer map.deinit(self.arena);
         const fresh = try self.arena.alloc(hir.BinderId, params.len);

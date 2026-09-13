@@ -42,7 +42,9 @@ The detailed probes cover the source-reachable operation/type matrix:
   aggregate that must stay branchy (if-conversion's scalar-Copy-only rule)
 - `seg.st`: every source-reachable SEG rewrite family (known-variant `match`
   reduction, immediately-invoked-lambda β reduction, constant folding and
-  integer algebra, constant conditions, unused-let elimination)
+  integer algebra, constant conditions, and the full-expression boundary that
+  pins a source-level `let` in place: the `if` folds inside the initializer's
+  own FE, the enclosing `let` is not an island and survives)
 - `consumers.st`: the M2b effect-driven consumers (dead-let of a discardable
   scalar call and of a discardable Unique constructor, selective ANF hoisting
   of a Unique call result and of a dominant effectful operand, with destructor

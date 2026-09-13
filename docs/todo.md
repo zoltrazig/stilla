@@ -5,26 +5,9 @@
 「近期」内各项的先后是**建议顺序**，不是串行依赖；每项单独列出前置
 依赖。设计细节仍在两篇文档正文，本文件只记范围、依赖与验收。
 已完成的历史条目按原编号归档于「已完成」节，供跨文档交叉引用；
-「近期」从第 7 项续起，新增项一律追加到队尾。
+「近期」从第 8 项续起，新增项一律追加到队尾。
 
 ## 近期（建议顺序）
-
-- [ ] **7. 节点级 full-expression 边界标注**（[hir.md](hir.md) §5.6 / §8.1 /
-      §8.7、[effects.md](effects.md) §11.2）
-  - 现状：`FullExpr`（hir.zig）只是身份占位——「S1 records identity only」，
-    builder 给每个节点 `full_expr = 0`（hir.md §5.6「所有节点同属 FE 0」）。
-    清理 token 的 FE 身份由 `hir_build_cleanup.zig` 按语句 / let 初始化器切分，
-    与节点标注并非同一事实。后果：SEG 的「不跨越 full-expression 边界」无法被
-    validator 强制（hir.md §8.7 的 FE1/FE2 例子只是设计依据），β 的
-    `maps_full_expr` 是恒等映射（hir_seg.zig 的 `clone_fe`）。
-  - 范围：builder 在构造时按 FE 切分并给 `ExprNode.full_expr` 赋真值；validator
-    增加「节点 FE 与清理 token FE 一致」与「SEG island 不跨 FE」两条不变量；β /
-    match 克隆的 FE 改为按真实 FE 映射；顺带解掉 [effects.md](effects.md) §11.2
-    中「含 Unique region 绑定子树回 `null`」的 scope-end 保守守卫。
-  - 依赖：无（承接已落地的清理 token）。
-  - 验收：FE 边界白盒正 / 负例（同 FE 内 vs 跨 FE 的两条语句）；跨 FE island
-    被拒的负例；β 克隆节点 FE == 调用点 FE；examples/probes on/off 解释器输出
-    逐字相等。
 
 - [ ] **8. η-reduction**（[hir.md](hir.md) §8.5）
   - 范围：`fn (B0: T) => call(fnref F, %B0)` → `fnref F`。v1 只允许
@@ -102,14 +85,55 @@
     不变，`;` 合并仍保守并入后缀位。
   - 范围：推导 `never_returns`（取不到即 false，递归 SCC 用 greatest-fixpoint
     语义）；调用点后同一直行区域的后缀不可达，可整段删除（含该区域的 FE 清理）。
-  - 依赖：删后缀时的 FE 清理归属依赖第 7 项（节点级 FE 边界标注）。
+  - 依赖：删后缀时的 FE 清理归属依赖第 7 项（节点级 FE 边界标注，已落地）。
   - 验收：`-> never` callee 后的语句与清理被删除；有正常返回路径的 callee 不
     删；递归 SCC 的 greatest-fixpoint 用例；on/off 解释器差分。
 
-## 已完成（归档，原「近期」第 1–6 项）
+- [ ] **15. 跨 FE 的 let 折叠（契约准入）**（[hir.md](hir.md) §8.3 / §8.7）
+  - 现状：节点级 FE 标注落地后（第 7 项），源级 `let` 的 init 自成 FE，故不是
+    island 成员，SEG 的 let 规则只在 β / match 拼接的 `let`（init 与 `let` 同
+    FE）上触发；源级 dead-let 由 `--simplify` 的 `hir_simplify.tryDeadLet`
+    承担（不经 island 门）。§8.7 的跨 FE 折叠（`let B1 = %B0 in %B1 → %B0`）
+    因此仍被推迟，且 `seg.st` 的 `unused_let` 现在固定的是边界本身。
+  - 范围：按 β 的 boundary-rewrite 契约模式（而非 island 成员资格）为
+    `ruleLet` 的 FE 安全子集增加准入：dead-let 要求 init `isDiscardable`；
+    used-once forwarding 要求 init 的 island 成员资格（Copy、cleanup-free）；
+    trivial-atom forwarding 要求原子 init `isDuplicable`（补上 borrowed-view
+    原子的准入证明）；合成结果不得跨 FE 移动清理。
+  - 依赖：**第 7 项**（已落地）。
+  - 验收：契约正例（源级纯 init 的 dead / forward / 原子复制）+ 负例
+    （Borrowed view / Unique / 可观察 init）；on/off 解释器差分。
+
+## 已完成（归档，原「近期」第 1–7 项）
 
 > 以下条目均已落地，按完成时的编号保留，供 [effects.md](effects.md) 等正文
-> 交叉引用；新工作从「近期」第 7 项续起。
+> 交叉引用；新工作从「近期」第 8 项续起。
+
+- [x] **7. 节点级 full-expression 边界标注**（[hir.md](hir.md) §5.6 / §8.1 /
+      §8.7、[effects.md](effects.md) §11.2）
+  - 范围：builder 在构造时按 FE 切分并给 `ExprNode.full_expr` 赋真值；validator
+    增加「节点 FE 与清理 token FE 一致」与「SEG island 不跨 FE」两条不变量；β /
+    match 克隆的 FE 改为按真实 FE 映射；顺带解掉 [effects.md](effects.md) §11.2
+    中「含 Unique region 绑定子树回 `null`」的 scope-end 保守守卫。
+  - 已完成：`hir_build_cleanup.register` 在既有的 FE 切分遍历里把真实 FE id 写进
+    每个节点的 `ExprNode.full_expr`（`lambda` 根用其体 FE；FE 0 仅种子默认），
+    与 token 的 FE 身份同一事实。validator（`checkCleanupTokens`）新增「live
+    token 的 `origin_expr` 节点归属 token 的 `full_expr`」。「SEG island 不跨
+    FE」由 `hir_effects.ownershipGate`（`full_expr != root_fe` 即拒）强制，island
+    准入因此真的拒绝跨 FE 子树；β 的 `clone_fe = 调用点 FE` 与 match 拼接的 FE
+    从此非平凡（克隆节点 FE == 调用点 FE 有白盒测试）。测试：FE 边界正例（同 FE
+    的整棵子树 + `let` init 自成 FE 的负例）、跨 FE island 被拒的正 / 负例、β
+    克隆 FE 断言、token / 节点 FE 一致性负例；examples/probes on/off 解释器输出
+    逐字相等。
+  - **有意未做**：scope-end 守卫（`regionOwnsUnique`）**不**随节点级 FE 放开——
+    类型匹配的 `origin_expr` 只可能是产出该值的 init 节点，而它自成一个内层 FE，
+    语义上正确的销毁点却在外层 FE 末尾，故无法满足新增的「origin 节点 FE ==
+    token FE」；`registration_index` 的契约是「该 FE 内创建序中的位置」，scope-end
+    绑定不由 FE 临时量的纪律产出。原因记于 [effects.md](effects.md) §11.2；
+    真正放开需独立的 scope-end 销毁累加与排序模型。
+  - **行为边界**：源级 `let` 的 init 自成 FE，故不再是 island 成员，SEG 的 let
+    规则只在 β / match 拼接的 `let` 上触发；源级 dead-let 仍由 `hir_simplify`
+    承担（见「近期」第 15 项：跨 FE 折叠的契约准入）。
 
 - [x] **1. `match` 进 SEG**（[hir.md](hir.md) island/规则集与
       `passes/hir_seg.zig`）
@@ -202,8 +226,9 @@
     `registration_index`。测试：token 不变量（origin/type/FE/registration
     一致 + validator）、已建模纯析构正例、可观察析构负例、未建模失败关闭、
     转移实参不计清理、ANF 重映射 + 序保持。
-  - 注：节点级 full-expression 边界标注（`ExprNode.full_expr`）仍为身份
-    占位；token 自带 FE 身份用于 `registration_index` 的 FE 局部序。
+  - 注：节点级 full-expression 边界标注（`ExprNode.full_expr`）当时仍为身份
+    占位；token 自带 FE 身份用于 `registration_index` 的 FE 局部序（第 7 项
+    已落地，见下）。
 
 - [x] **4. selective ANF 的 Unique 物化**（[hir.md](hir.md) §5.7）
   - 范围：在清理 token 证明合成 `let` 的销毁点与原匿名临时量的

@@ -311,6 +311,91 @@ fn validateAllMsg(built: *const hir.BuiltProgram) ?[]const u8 {
     return null;
 }
 
+fn findFunc(built: *const hir.BuiltProgram, name: []const u8) !hir.FuncRecord {
+    for (built.funcs.items) |f| {
+        if (std.mem.eql(u8, f.name, name)) return f;
+    }
+    return error.TestUnexpectedResult;
+}
+
+/// Assert every node of `root`'s subtree belongs to full expression `fe`.
+fn expectSubtreeFe(pr: *const hir.Program, root: hir.ExprId, fe: hir.FullExprId) !void {
+    var work = std.ArrayList(hir.ExprId).empty;
+    defer work.deinit(testing.allocator);
+    try work.append(testing.allocator, root);
+    while (work.pop()) |id| {
+        try testing.expectEqual(fe, pr.node(id).full_expr);
+        for (pr.operands(id)) |op| try work.append(testing.allocator, op);
+        for (pr.regionsOf(id)) |r| try work.append(testing.allocator, pr.region(r).root);
+    }
+}
+
+test "S4: node-level full expressions split on let initializers (hir.md §5.6)" {
+    var b = try buildText("app", &.{.{
+        "app",
+        \\fn same(x: int32) -> int32 { (x + 1) + (x + 2) }
+        \\fn split(x: int32) -> int32 { let y = x + 1; y + 2 }
+        \\fn main() -> void { }
+    }});
+    defer b.deinit();
+    const pr = &b.built.program;
+
+    // One expression, one full expression: every node shares the body's
+    // boundary, and the `lambda` root carries its body's FE too.
+    const same = try findFunc(b.built, "app.same");
+    const same_body = pr.region(pr.regionsOf(same.root)[0]).root;
+    const same_fe = pr.node(same_body).full_expr;
+    try testing.expect(same_fe != 0);
+    try testing.expectEqual(same_fe, pr.node(same.root).full_expr);
+    try expectSubtreeFe(pr, same_body, same_fe);
+
+    // A `let` initializer opens a nested boundary: the init subtree is a
+    // full expression of its own, disjoint from the `let` + body FE.
+    const split = try findFunc(b.built, "app.split");
+    const let_node = pr.region(pr.regionsOf(split.root)[0]).root;
+    try testing.expect(std.mem.eql(u8, hir.registry.get(pr.node(let_node).op).name, "let"));
+    const let_fe = pr.node(let_node).full_expr;
+    const init = pr.operands(let_node)[0];
+    const init_fe = pr.node(init).full_expr;
+    try testing.expect(init_fe != let_fe);
+    try expectSubtreeFe(pr, init, init_fe);
+    // The region body forwards its value and stays in the enclosing FE.
+    try expectSubtreeFe(pr, pr.region(pr.regionsOf(let_node)[0]).root, let_fe);
+    // A second statement would open its own FE; this body has none (the
+    // `let` is the whole result expression).
+    try testing.expectEqual(let_fe, pr.node(split.root).full_expr);
+}
+
+test "S4: a cleanup token whose origin node left its full expression is rejected" {
+    var b = try buildText("app", &.{.{
+        "app",
+        \\struct Token { id: int32; drop(t) { let x = t.id; } }
+        \\fn make(id: int32) -> Token { Token { id: id } }
+        \\fn f(id: int32) -> int32 { let _ = make(id); 7 }
+    }});
+    defer b.deinit();
+    const pr = &b.built.program;
+    try testing.expect(pr.cleanup_modeled);
+    try testing.expect(pr.cleanup_tokens.items.len > 0);
+    const tk = pr.cleanup_tokens.items[0];
+    // Consistent by construction (the validator's new FE invariant).
+    const msg = try hir.validate(pr, b.built.funcs.items[b.built.funcs.items.len - 1].root, testing.allocator);
+    if (msg) |m| {
+        defer testing.allocator.free(m);
+        std.debug.print("FE invariant should hold: {s}\n", .{m});
+        return error.TestUnexpectedResult;
+    }
+    // Move the origin node into a fresh boundary: the token now points at
+    // a value whose boundary differs from the one it is registered on.
+    pr.exprs.items[tk.origin_expr].full_expr = try pr.addFullExpr();
+    const bad = try hir.validate(pr, b.built.funcs.items[b.built.funcs.items.len - 1].root, testing.allocator);
+    if (bad) |m| {
+        testing.allocator.free(m);
+    } else {
+        return error.TestUnexpectedResult;
+    }
+}
+
 test "S4: HIR corpus — examples/*.st build and validate" {
     try corpusList("examples");
 }

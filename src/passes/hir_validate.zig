@@ -38,10 +38,13 @@
 //!   params (hir.md §5.4), and a patternless arm has no params. Each
 //!   BinderId is declared (is a param) in at most one region.
 //! - **Annotation bounds** — `full_expr` / `sema` ids are valid indices.
-//!   Membership only: `FullExpr` is an identity record in M1a (S2/S4
-//!   annotate FE 0 or fresh boundaries) — the validator does **not**
-//!   check lifetime boundaries, cleanup-registration ordering, or
-//!   cross-boundary rewrites, which are SEG/lowering-level concerns.
+//!   `sema` is membership only; `full_expr` additionally carries the
+//!   node-level full-expression boundary (hir.md §5.6), and the
+//!   program-level cleanup-token table must agree with it (`origin_expr`
+//!   belongs to the token's `full_expr`). Lifetime ordering and
+//!   cross-boundary rewrites stay SEG/lowering-level concerns — the two
+//!   FE invariants this module enforces are the id bounds and the
+//!   token/node FE agreement (`checkCleanupTokens`).
 //!
 //! `validate` walks the tree reachable from one root and does not
 //! require every arena entry to be reachable (a builder may leave
@@ -193,6 +196,13 @@ const Validator = struct {
             const n = self.program.exprs.items[tk.origin_expr];
             if (!meta.Type.eql(n.ty, tk.ty)) {
                 return self.fail("cleanup token for origin expr {d} carries a type that disagrees with the node", .{tk.origin_expr});
+            }
+            // Node-level FE boundary (hir.md §5.6): a token's origin node
+            // belongs to the same full expression the token is registered
+            // on. An origin in another FE would mean the token's
+            // destruction point had drifted off its value's boundary.
+            if (n.full_expr != tk.full_expr) {
+                return self.fail("cleanup token for origin expr {d} carries full_expr {d} but the node belongs to full_expr {d}", .{ tk.origin_expr, tk.full_expr, n.full_expr });
             }
             const gop = try last.getOrPut(self.arena, tk.full_expr);
             if (gop.found_existing) {

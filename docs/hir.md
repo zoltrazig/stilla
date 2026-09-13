@@ -613,20 +613,22 @@ EvalPolicy =
 Unique 临时量在所属 full expression 结束时销毁、反向创建序。因此每个 `ExprNode`
 带 `full_expr: FullExprId`，SEG 不跨 FE 边界。
 
-> **现状**：`FullExpr` 仍是**身份占位**（`struct {}`），builder 把所有节点
-> 的 `full_expr` 置 0——**节点级边界尚未标注**。清理 token 的登记
-> （`CleanupFootprint`，[effects.md](effects.md) §11.2）已落地：builder 的
-> 清理登记步骤（`passes/hir_build_cleanup.zig`）按语句 / let 初始化器切分
-> FE，为每个已证明的全表达式 Unique 临时量登记带 FE id 与
-> `registration_index` 的 `CleanupToken`；token 自带 FE 身份，节点自身的
-> `full_expr` 不变。因此：
+> **现状：节点级边界已标注。** `FullExpr` 仍是身份记录（无字段：身份即 id），
+> 但 builder 的清理登记步骤（`passes/hir_build_cleanup.zig`）在按语句 / let
+> 初始化器切分 FE 的同时，把真实 FE id 写进每个节点的 `ExprNode.full_expr`
+> （`lambda` 根用其体 FE；FE 0 只作种子默认，构造上无节点归属）。同一 FE 的每个
+> 已证明全表达式 Unique 临时量仍登记带 FE id 与 `registration_index` 的
+> `CleanupToken`（[effects.md](effects.md) §11.2）。因此：
 >
-> - §10.1 的结构校验只检查 `full_expr` 的 **id 边界**，不检查 FE 归属或跨边界；
->   所有节点同属 FE 0，「不跨 FE」当前等价于恒真；
+> - §10.1 的结构校验检查 `full_expr` 的 **id 边界**，并要求每个清理 token 的
+>   `origin_expr` 归属 token 的 `full_expr`；「不跨 FE」由 effect 分析的
+>   `ownershipGate` 强制，SEG 的 island 准入因此真的拒绝跨 FE 子树（§8.1）；
 > - 清理敏感查询走 token footprint（`cleanupEffect`，[effects.md](effects.md)
->   §11.2）；scope-end 绑定清理仍未建模，Unique 物化等未放开（§5.7）。
+>   §11.2）；scope-end 绑定清理仍未建模（原因见 [effects.md](effects.md) §11.2），
+>   Unique 物化等未放开（§5.7）。
 >
-> 落地方案与依赖见 §11 与 [todo.md](todo.md)。
+> §8.7 的 FE 例子现在是校验器能强制的事实；跨 FE 的 let 折叠列为单独、被证明
+> 安全后才放开的变换（[todo.md](todo.md)）。
 
 **HIR / CFG 分界**：HIR 持有 full-expression 身份、临时量创建 / 所有权事实与
 FE 内顺序约束；CFG lowering 消费这些事实**重新构造可执行销毁计划**（同一 FE
@@ -893,6 +895,9 @@ isSegSafe(e)  ==
 即 **supported、递归安全的纯 Copy island；不含 Unique / borrow / drop / host
 操作**。不属于任何 island 的部分保持原样。
 
+full-expression 边界现在是节点级真值（§5.6）：`isSegSafe` 的 ownership gate
+真的会拒绝跨 FE 子树，源级 `let`（init 自成 FE）因此不是 island 成员（§8.3）。
+
 > **两类重写**：普通 SEG 重写必须 full-expression-preserving；**boundary
 > rewrite**（v1 唯一实例是 β）把 λ 体搬进调用点。β 的 callee 是 `fn_ref`
 > （无 SEG 编码），call 节点本就不是 island 成员，因此 β **绕过 island 的编码 /
@@ -933,6 +938,12 @@ extract(eclass)      -> ExprId
 | dead let | ✅ | `x ∉ FV(body)` 且 init 在 island 内 total / 无可观察效果 |
 | used-once let forwarding | ✅ | 单次使用：把 init 内容搬进使用点 |
 | trivial-atom forwarding | ✅ | const / local / fn_ref 无求值、无 region，可复制到每个使用点 |
+
+> v1 的 let 规则准入是**同 FE** 的：`let` 的 init 自成 FE（§5.6），所以源级
+> `let` 不是 island 成员，规则只在 β / match 拼接出的 `let`（init 与 `let`
+> 同 FE）上触发。源级 dead-let 由 `--simplify` 的 `hir_simplify.tryDeadLet`
+> 承担（不经过 island 门）。跨 FE 的 let 折叠见 §8.7 与
+> [todo.md](todo.md)。
 | constant folding | ✅ | 按 typed rep；**可能 trap 的折叠被拒**（trap 归运行时） |
 | integer algebra identities | ✅ | `x + 0 → x`、`x * 1 → x` 等，仅 integer rep |
 | constant `if` / `and` / `or` | ✅ | 常量条件选中已求值分支（另一分支是 island 成员） |
@@ -1035,9 +1046,10 @@ result * 1
 
 HIR（value 为参数 B0；FE1 = init，FE2 = `result * 1`）：
 
-> **该例演示边界机制**。FE 边界标注尚未落地（§5.6），当前所有节点同属 FE 0，
-> 因此下面的「FE1 内 / FE2 内」是**设计上的**分岛依据，不是当前校验器能强制的
-> 事实。
+> **该例演示边界机制**。FE 边界标注已落地（§5.6）：源级 `let` 因此不是 island
+> 成员，把最外层 `let B1 = %B0 in %B1` 折叠成 `%B0`（跨 FE1 / FE2）不作为 v1
+> SEG 的抽取结果；β / match 拼接的 `let` 其 init 与 `let` 同 FE，仍可在 FE 内
+> 继续化简。
 
 ```text
 let B1: i32 =
@@ -1093,12 +1105,15 @@ let B1: i32 = %B0 in
   payload 与 opcode 配对；`access_hops` 只挂 const / fn_ref / module_const 叶；
   `let` region 恰好一个 binder（或不可反驳 pattern）；`if` / `and` / `or` region
   无 binder；match arm pattern 叶与 params 双射。
-- **id 边界**：`sema` / `full_expr` 是有效下标。**membership only**——`FullExpr`
-  在现状是身份占位，FE 边界与清理序**未校验**（§5.6）。
+- **id 边界**：`sema` / `full_expr` 是有效下标。`sema` 仅 membership；`full_expr`
+  的节点归属与 token 归属一致性由清理 token 表校验（§5.6、
+  [effects.md](effects.md) §11.2）：每个 live token 的 `origin_expr` 节点的
+  `full_expr` 必须等于 token 的 `full_expr`。SEG 的「不跨 FE」是 island 准入
+  谓词，不在本层。
 - **清理 token 表**（program 级，`checkCleanupTokens`）：每个未退役 token 的
-  `origin_expr` 是有效下标且其 `ty` 与节点一致，`full_expr` 是有效下标，同一
-  FE 内 `registration_index` 按 list 序为 `0..n-1`。退役 token（`no_expr`）
-  跳过。
+  `origin_expr` 是有效下标且其 `ty` 与节点一致、其节点的 `full_expr` 等于 token
+  的 `full_expr`，`full_expr` 是有效下标，同一 FE 内 `registration_index` 按
+  list 序为 `0..n-1`。退役 token（`no_expr`）跳过。
 - **不包含**：ownership 数据流与 SEG 检查（由 checker / effects 各自负责）。
 
 **效果分析校验**（`hir_effects.validate`，前端 pipeline 强制执行）：

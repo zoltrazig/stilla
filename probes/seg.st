@@ -3,9 +3,12 @@
 // `match` reduction (single / multi payload / nullary / nested payload /
 // wildcard / catch-all), immediately-invoked lambda β reduction,
 // constant folding and integer-algebra identities, constant conditions
-// and short-circuit constants, and unused-let elimination. `main` prints
-// every result so the SEG on/off differential compares observable output
-// instead of two empty runs.
+// and short-circuit constants, and the full-expression boundary itself
+// (a source-level `let` is not an island: its initializer opens a nested
+// FE, so the `if`/`or` folds inside that FE while the enclosing `let`
+// survives — hir.md §5.6/§8.7). `main` prints every result so the SEG
+// on/off differential compares observable output instead of two empty
+// runs.
 
 const builtin = import("builtin");
 

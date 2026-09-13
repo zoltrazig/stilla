@@ -930,16 +930,22 @@ registration_index }`：`value: TempId` 与 token 的 `Consumed / Escaped` **状
 >   `cleanupEffect` 返回 null（`regionOwnsUnique`）。`cleanupFree` 语义保持
 >   字面 cleanup-free 不变，仍供 β / speculatability / reorder 使用；selective
 >   ANF 合成的 Unique `let` 绑定也落入这一保守守卫（其后的派生查询回 `Top`，
->   不会因此低报）。
+>   不会因此低报）。**不因节点级 FE 标注而放开**：类型匹配的 `origin_expr`
+>   只可能是产出该值的 init 节点，而它自成一个内层 FE，语义上正确的销毁点却在
+>   **外层** FE 末尾——给它记 token 无法满足「origin 节点 FE == token FE」
+>   （见下）；而 `registration_index` 的契约是「该 FE 内创建序中的位置」，
+>   scope-end 绑定根本不由 FE 临时量的纪律产出。真正放开需要一个独立的
+>   scope-end 销毁累加与排序模型，不属于节点级 FE 标注。
 > - **失败关闭**。未分类类型经 `drop_effect(T)` 升为 `Top`；dead-let 对 Unique
 >   绑定额外要求 `bindingCleanupDiscardable(bind.ty)`，避免连同绑定删掉
 >   其 scope-end 析构。
 >
-> **边界**：节点级 full-expression **边界标注**（`ExprNode.full_expr`）仍是
-> 身份占位（§5.6 未变）；token 自带 `full_expr`，按语句 / let 初始化器切分，
-> 用于定义 `registration_index` 的 FE 局部创建序。变换后 `registration_index`
-> 保持不变（相对销毁序），origin 经 `Program.remapCleanupOrigin` 重映射
-> （ANF hoist / dead-let / SEG clone）。
+> **边界**：节点级 full-expression **边界标注**（`ExprNode.full_expr`）已落地
+> （§5.6）：builder 的清理登记步骤把真实 FE id 写进每个节点，token 的
+> `full_expr` 按同样的语句 / let 初始化器切分，用于定义 `registration_index`
+> 的 FE 局部创建序；validator 要求每个 live token 的 origin 节点归属它的
+> `full_expr`。变换后 `registration_index` 保持不变（相对销毁序），origin 经
+> `Program.remapCleanupOrigin` 重映射（ANF hoist / dead-let / SEG clone）。
 
 优化器只问一个谓词：
 

@@ -275,7 +275,10 @@ test "SEG: a full-expression boundary on a β argument refuses the reduction" {
     const outer = b.built.program.region(b.built.program.regionsOf(f.root)[0]).root;
     const call = try findNode(&b, outer, "call") orelse return error.TestUnexpectedResult;
     const arg = b.built.program.operands(call)[1];
-    b.built.program.exprs.items[arg].full_expr = 1;
+    // A genuine new boundary: the literal `1` could collide with the call
+    // site's real FE now that the builder assigns them.
+    b.built.program.exprs.items[arg].full_expr = try b.built.program.addFullExpr();
+    try testing.expect(b.built.program.node(arg).full_expr != b.built.program.node(call).full_expr);
     // Run the pass alone (the §2.4 re-validation is what would reject the
     // corrupted annotation first, and this test pins the rule's own gate).
     _ = try hir_seg.optimize(b.arena.allocator(), b.built, .{ .graph = b.graph });
@@ -325,8 +328,14 @@ test "SEG: constant if / and / or select the taken island branch" {
     var b = try buildText("app", &.{.{ "app", src }});
     defer b.deinit();
     _ = try segAll(&b);
-    try expectFuncBody(&b, "app.pick", "fn () => 10i32");
-    try expectFuncBody(&b, "app.shorty", "fn () => true");
+    // The constant condition is decided inside the initializer's own
+    // full expression (its island). The enclosing source-level `let` is
+    // *not* an island: its initializer opens a nested FE boundary
+    // (hir.md §5.6), so SEG leaves the `let` in place and only the
+    // selected branch survives. Folding it would cross FE1/FE2, which
+    // hir.md §8.7 defers to a separately proven transform.
+    try expectFuncBody(&b, "app.pick", "fn () => let B0: i32 = 10i32 in %B0");
+    try expectFuncBody(&b, "app.shorty", "fn () => let B0: bool = true in %B0");
 }
 
 test "SEG: a trapping untaken branch keeps the branch node out of an island" {
@@ -594,6 +603,59 @@ test "SEG: β allocates fresh binders (no binder is declared twice)" {
     const dup_body = pr.region(pr.regionsOf(dup.root)[0]).root;
     const let_param = pr.params(pr.regionsOf(dup_body)[0])[0];
     try testing.expect(lam_param != let_param);
+}
+
+test "SEG: β maps every cloned body node onto the call site's full expression" {
+    const src = try probe_corpus.read(testing.allocator, "probes/cases", "seg_beta_let_no_duplication");
+    defer testing.allocator.free(src);
+    var b = try buildText("app", &.{.{ "app", src }});
+    defer b.deinit();
+    _ = try segAll(&b);
+    const pr = &b.built.program;
+    const dup = try findFunc(&b, "app.dup");
+    // The λ body is now the β-synthesized outer `let`; its own `full_expr`
+    // is the call site's.
+    const body = pr.region(pr.regionsOf(dup.root)[0]).root;
+    const call_fe = pr.node(body).full_expr;
+    // Every node of the cloned body (and the original argument, which
+    // stays put as the let initializer) carries the call-site FE
+    // (hir.md §8.4 `maps_full_expr`).
+    var work = std.ArrayList(hir.ExprId).empty;
+    defer work.deinit(testing.allocator);
+    try work.append(testing.allocator, body);
+    var saw_add = false;
+    while (work.pop()) |cur| {
+        const n = pr.node(cur);
+        try testing.expectEqual(call_fe, n.full_expr);
+        if (std.mem.eql(u8, hir.registry.get(n.op).name, "add.i32")) saw_add = true;
+        for (pr.operands(cur)) |op| try work.append(testing.allocator, op);
+        for (pr.regionsOf(cur)) |r| try work.append(testing.allocator, pr.region(r).root);
+    }
+    try testing.expect(saw_add);
+}
+
+test "SEG: a full-expression boundary inside an island refuses admission" {
+    const src = try probe_corpus.read(testing.allocator, "probes/cases", "seg_constant_folding");
+    defer testing.allocator.free(src);
+    var b = try buildText("app", &.{.{ "app", src }});
+    defer b.deinit();
+    const pr = &b.built.program;
+    const f = try findFunc(&b, "app.f");
+    const body = pr.region(pr.regionsOf(f.root)[0]).root;
+    // Positive control: `x + 0` lives in one full expression, so the node
+    // is island-admissible and the algebra rule rewrites it.
+    var an = try analysisOf(&b);
+    try testing.expect(try an.isSegSafe(body));
+    // Move one operand into a fresh boundary: the node now spans two FEs,
+    // so the ownership gate refuses island membership.
+    const op0 = pr.operands(body)[0];
+    pr.exprs.items[op0].full_expr = try pr.addFullExpr();
+    try testing.expect(pr.node(op0).full_expr != pr.node(body).full_expr);
+    var an2 = try analysisOf(&b);
+    try testing.expect(!try an2.isSegSafe(body));
+    // And the rule does not fire on the now-boundary-crossing subtree.
+    _ = try hir_seg.optimize(b.arena.allocator(), b.built, .{ .graph = b.graph });
+    try testing.expect(try funcHasNode(&b, "app.f", "add.i32"));
 }
 
 test "SEG: a borrowed view keeps its subtree out of an island" {

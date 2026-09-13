@@ -72,12 +72,15 @@ pub fn register(b: *hir_build.Builder) !void {
 
 /// A function record root is a `lambda` node whose region body is the
 /// returned expression: the body is a full expression, and the root
-/// result escapes (it is the return value).
+/// result escapes (it is the return value). The `lambda` root itself
+/// carries its body's FE so every node has a real boundary id (FE 0
+/// stays the seeded default; nothing belongs to it by construction).
 fn walkFuncRoot(an: *hir_effects.Analysis, root: hir.ExprId, fe: hir.FullExprId, counter: *u32) !void {
     const pr = &an.built.program;
     if (!std.mem.eql(u8, hir.registry.get(pr.node(root).op).name, "lambda")) {
         return walk(an, root, fe, counter, .escapes);
     }
+    pr.exprs.items[root].full_expr = fe;
     for (pr.regionsOf(root)) |r| {
         try walk(an, pr.region(r).root, fe, counter, .escapes);
     }
@@ -89,6 +92,12 @@ const Context = enum { temp, escapes };
 
 fn walk(an: *hir_effects.Analysis, id: hir.ExprId, fe: hir.FullExprId, counter: *u32, ctx: Context) !void {
     const pr = &an.built.program;
+    // Node-level FE annotation (hir.md §5.6): the boundary this visit is
+    // splitting under is the node's own full expression. Operands that
+    // open a nested FE (`seq` statement, `let` initializer) recurse with
+    // their own id below, overwriting this; region bodies forward and
+    // stay in this FE.
+    pr.exprs.items[id].full_expr = fe;
     const n = pr.node(id);
     const name = hir.registry.get(n.op).name;
 
