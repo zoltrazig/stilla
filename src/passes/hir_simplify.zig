@@ -53,9 +53,28 @@ const cfg = @import("stilla").cfg;
 const hir = @import("stilla").hir;
 const moduleinfo = @import("stilla").moduleinfo;
 const hir_effects = @import("hir_effects.zig");
+const rewrite_contract = @import("rewrite_contract.zig");
 const effects = @import("stilla").effects;
 
 pub const Error = std.mem.Allocator.Error;
+
+/// dead-let's declared rule (docs/effects.md §10.3–§10.4). The *match*
+/// layer stays inline in `tryDeadLet` — the `let` / single non-pattern param
+/// / binder-unused shape is structural applicability. What is declared here
+/// is legality — the init must be `discardable` (`10 / y` is not: the trap is
+/// an effect) — and the contract: the rewrite may discard the init's
+/// evaluation, and removing the binding removes its end-of-scope destructor,
+/// admissible only under the `binder_destruction` cleanup proof. Both go
+/// through the legality engine, which knows requirements, not opcodes.
+const dead_let_rule = rewrite_contract.RewriteRule{
+    .name = "dead_let",
+    .applicability = .shape,
+    .legality = &.{.discardable},
+    .contract = .{
+        .effect = .{ .may_discard = true },
+        .preserves_cleanup = .binder_destruction,
+    },
+};
 
 pub const Stats = struct {
     /// Analysis → rewrite rounds actually run.
@@ -195,10 +214,10 @@ const Rewriter = struct {
         // the binding's destruction is itself discardable in the
         // modelled cleanup model; Copy bindings have no destructor.
         const bind_ty = pr.binder(bind).ty;
-        const cap = try self.analysis.capabilityOf(bind_ty) orelse .unique;
-        if (cap != .copy and !try self.analysis.bindingCleanupDiscardable(bind_ty)) return false;
-        // Legality is the derived query alone — no opcode knowledge.
-        if (!try self.analysis.isDiscardable(ops[0])) return false;
+        if (!try rewrite_contract.checkCleanup(dead_let_rule, self.analysis, .{ .binder_destruction = bind_ty })) return false;
+        // Legality is the declared rule's derived query alone — no opcode
+        // knowledge.
+        if (!try rewrite_contract.check(self.analysis, dead_let_rule.legality, .{ .expr = ops[0] })) return false;
         pr.exprs.items[id] = pr.node(region.root);
         // The result's value now lives at the region root; move any
         // cleanup token that named the `let` node with it (docs/effects.md

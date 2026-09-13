@@ -908,8 +908,9 @@ full-expression 边界现在是节点级真值（§5.6）：`isSegSafe` 的 owne
 > cleanup-free 求值子树与 ownership gate（**不要求实参 total / 无可观察效果**），
 > 对 λ 体仍调用完整 `isSegSafe`，再逐条检查 §8.4 的契约。η（§8.5）只重定向值
 > 位置的 `fn_ref` payload，节点树、FE、清理 token 都不变，由 §8.5 的契约
-> `tryEta` 准入。契约判定内联在 `tryBeta` / `tryEta`，没有独立的
-> `RewriteContract` 类型。
+> `tryEta` 准入。β 的契约已落为 `passes/rewrite_contract.zig` 的
+> `RewriteContract`（`beta_rule` 声明，`tryBeta` 经 `checkCleanup` /
+> `checkCleanupProof` 消费）；η 的契约仍内联在 `tryEta`。
 
 ### 8.2 投影与抽取（Target）
 
@@ -1032,15 +1033,30 @@ RewriteContract {
 }
 ```
 
-β-to-let 的 v1 契约实例（`tryBeta` 内联判定）：
+β-to-let 的 v1 契约实例（`beta_rule` 声明，`tryBeta` 消费）：
+
+```text
+beta_rule = RewriteRule {
+    name: "beta", applicability: .shape,
+    legality: [EvaluationCountPreserved],
+    contract: RewriteContract {
+        effect: PreservesEvaluationCount + PreservesOrder,
+        maps_scope: true, maps_full_expr: true,
+        preserves_cleanup: cleanup_free_subtree,
+    },
+}
+```
 
 - `preserves_eval_count` / `preserves_order`：逐参数嵌套、LTR，不复制不重排；
 - `maps_scope`：λ 参数与体内 binder 全部映射为 fresh binder（不捕获使映射无
   闭包逃逸）；
 - `maps_full_expr`：v1 只对 cleanup-free 的单表达式 λ 体做 β，其唯一 FE 并入
   调用点 FE；
-- `preserves_cleanup`：实参限 **Copy**，且 call 被求值的子树 cleanup-free、过
-  ownership gate（body 是延迟的，不计入 call 子树）；λ 体 cleanup-free。**实参不再
+- `preserves_cleanup`：契约声明 `cleanup_free_subtree`，`tryBeta` 经
+  `checkCleanupProof` 用派生查询出证：call 被求值的子树 cleanup-free、过
+  ownership gate（body 是延迟的，不计入 call 子树）；实参限 **Copy**，且
+  `tryBeta` 显式复查 call 结果与每个实参的 Copy（ownership gate 对 λ 节点
+  短路，不能单独承担这一条）。λ 体 cleanup-free。**实参不再
   要求 total / 无可观察效果**：β→let 不删除、不复制、不重排实参，故 effectful
   实参按原序求值一次即可。下游规则因此不得把 β 生成的 `let` 的 init 当纯值处置
   ——dead-let / used-once forwarding 只有 init 仍是 island 成员时才准入

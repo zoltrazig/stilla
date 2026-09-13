@@ -5,11 +5,12 @@
 > - **已实现**：固定乘积格与派生查询、函数摘要 SCC least fixpoint、精确
 >   `drop_effect(T)` 全链、module-const 检查、`StillaExecution` 三态与符号键
 >   host 声明解析、间接调用目标收窄（§9.2 局部 fn-ref 传播）、β 的 effectful
->   实参（§10.4，契约下放开求值次数 / 序 / scope / FE / cleanup）。
+>   实参（§10.4，契约下放开求值次数 / 序 / scope / FE / cleanup）、
+>   `RewriteRule` / `Requirement` 与 `RewriteContract` 类型（§10.3–§10.4，
+>   `passes/rewrite_contract.zig`；首批实例 β 与 dead-let）。
 > - **消费者**：dead-let + selective ANF（`--simplify`，默认关）、SEG v1
 >   （可执行文件默认开、`--no-seg` 关；库默认关、`Options.seg` 开启）。
-> - **设计已定但未实现**（§14、[todo.md](todo.md)）：`never_returns` must 事实、
->   `RewriteRule` / `Requirement` 统一接口、`RewriteContract` 类型。
+> - **设计已定但未实现**（§14、[todo.md](todo.md)）：`never_returns` must 事实。
 >
 > 配套文档：使用该模型的 IR 见 [hir.md](hir.md)。本文自含效果模型所需的全部
 > 定义；两者重叠的概念（求值序、值使用、效果）在本文给出权威定义，[hir.md](hir.md) 保留
@@ -704,12 +705,24 @@ opcode 无关）：
 「优化器永远不 `switch(opcode)` 决定合法性」的精确含义是后者：legality 引擎
 没有 per-opcode 分支；applicability 是规则库内部事实，随 typed opcode 注册。
 
-> **现状：无统一接口类型。** 设计中描述的
-> `RewriteRule { match, build, applicability, legality: [Requirement] }` 与
-> `Requirement = Discardable | Duplicable | SwapOperands | EvaluationCountPreserved`
-> **在代码中不存在**。当前实现是规则函数内直接调用派生查询（如 hir_seg.zig 的
-> `ruleLet` / `tryBeta`、hir_simplify.zig 的 `tryAnf` / `tryDeadLet`）；两层
-> 判定已经分离，只是没有形式化的规则 / 要求数据结构。
+**现状：两层已落地为类型**（`passes/rewrite_contract.zig`）：
+`RewriteRule { name, applicability, legality: [Requirement], contract }`、
+`Requirement = Discardable | Duplicable | SwapOperands | EvaluationCountPreserved`。
+`check(analysis, rule.legality, subjects)` 是通用 legality 引擎——它唯一的
+`switch` 在**声明的要求标签**上，每个分支只调用派生查询（`isDiscardable` /
+`isDuplicable` / `canSwapOperands`），**没有 `switch(op)`**。
+`EvaluationCountPreserved` 是规则自证的结构义务（引擎无法验证）：引擎接受声明，
+warrant 在规则自身的构造里（β→let 逐参数嵌套、LTR，不删除 / 不复制 / 不重排）。
+`applicability` 记录规则匹配层允许读什么：`.typed_opcode`（折叠 / 代数规则，按
+`add.i32` vs `add.f32` 等 typed rep 分派）与 `.shape`（结构匹配，如 β 的
+`call(fn_ref→λ, args…)`、dead-let 的 `let` 单参形状）。
+
+与设计 sketch 的差异（实现形态选择）：`legality` 是**要求标签**列表——规则声明
+是静态值，不能携带派生查询需要的 `ExprId`，主体在调用点以 `Requirement` 实例
+给出；`match` / `build` 仍是 pass 内的规则函数，由 `RewriteRule.name` 指名，v1
+不做函数指针化的表驱动；`effect` 落为 bool 集合结构体（一条规则可同时持有多个
+保证）。首批实例是 β（hir_seg.zig）与 dead-let（hir_simplify.zig）；η、
+`ruleLet`、`tryAnf` 的判定仍内联。
 
 例：
 
@@ -729,19 +742,34 @@ rewrite**（v1 唯一实例是 β）把 callee 体从 λ 内部边界搬进调�
 RewriteContract {
     effect: { PreservesEvaluationCount | PreservesOrder
             | MayDuplicate | MayDiscard | MayReorder }
-    maps_scope / maps_full_expr / preserves_cleanup   // [hir.md](hir.md) §8.4
+    maps_scope / maps_full_expr: bool
+    preserves_cleanup: ?CleanupProof   // cleanup_free_subtree | binder_destruction
 }
 
-β-to-let    : PreservesEvaluationCount + PreservesOrder + scope/FE 映射 + cleanup 证明
+β-to-let    : PreservesEvaluationCount + PreservesOrder + scope/FE 映射
+              + preserves_cleanup = cleanup_free_subtree
 let-unused  : MayDiscard(init) → 引擎自动要求 discardable(init)
+              + preserves_cleanup = binder_destruction
 ```
 
-> **现状：契约是设计概念，不是类型。** `RewriteContract` / `RewriteRule` 在
-> 代码中不存在；β 的契约由 `tryBeta`（hir_seg.zig）内联强制：call 结果 Copy、
-> 被求值的 call 子树 **cleanup-free 且过 ownership gate**、λ 体是 seg-safe 的
-> 单表达式（非 `seq` root）、λ 只经 `fn_ref` 可达，克隆时用 fresh binder 重映射
-> scope。**实参不要求 total / 无可观察效果**：β→let 不删除、不复制、不重排实参，
-> 故 effectful 实参逐字保留（求值次数与 LTR 序不变）。详见 [hir.md](hir.md) §8.4。
+**现状：契约已落地为类型**（`passes/rewrite_contract.zig`）。`RewriteContract`
+的三个映射字段声明规则会做什么，`preserves_cleanup` 声明它需要哪种清理证明；
+`RewriteRule.contract` 携带声明，`checkCleanup` 按声明的 kind 检查调用点给出的
+证明实例（kind 不符即失败关闭），`checkCleanupProof` 只用派生查询：
+
+- `cleanup_free_subtree(id)`：被求值的子树 `cleanupFree` 且过 `ownershipGate`
+  ——β 的实例（call 结果 Copy、实参 Copy 由 `tryBeta` 显式复查，因为 ownership
+  gate 对 λ 节点短路）；
+- `binder_destruction(T)`：删除绑定同时删除它的 scope-end 析构，仅当该析构本身
+  可丢弃（或 binder 是 Copy、根本没有析构）才准入——dead-let 的实例。
+
+β 的 `beta_rule`（hir_seg.zig）据此声明：`effect = PreservesEvaluationCount +
+PreservesOrder`、`maps_scope` / `maps_full_expr` 为真、
+`preserves_cleanup = cleanup_free_subtree`。**实参不要求 total / 无可观察效果**：
+β→let 不删除、不复制、不重排实参，故 effectful 实参逐字保留（求值次数与 LTR 序
+不变）。仍留在匹配层（`tryBeta` 内联）的是结构性事实：λ / 单 region / 形参实参
+arity、λ 体是 seg-safe 的单表达式（非 `seq` root）、λ 只经 `fn_ref` 可达、以及
+`beta_done` 的消耗性守卫。η 的契约仍内联（§8.5）。详见 [hir.md](hir.md) §8.4。
 
 `(fn(x) { x + 1 })(host.read())` 整体仍不能进纯 term 的 equality saturation
 ——但 β 本身不删除、不复制、不重排 `arg`，契约（求值次数 / 序 / scope / FE /

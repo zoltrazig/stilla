@@ -18,6 +18,7 @@ const meta = @import("meta.zig");
 const hir_build = @import("passes/hir_build.zig");
 const hir_effects = @import("passes/hir_effects.zig");
 const hir_simplify = @import("passes/hir_simplify.zig");
+const rewrite_contract = @import("passes/rewrite_contract.zig");
 const frontend = @import("frontend.zig");
 const interpreter = @import("interpreter.zig");
 const effects = @import("effects.zig");
@@ -619,4 +620,80 @@ test "M2b: a Unique binding with an observable destructor is kept" {
     };
     const stats = try simplifyAllWith(&b, &decls);
     try testing.expectEqual(@as(usize, 0), stats.dead_lets);
+}
+
+// The rewrite-legality engine (docs/effects.md §10.3, the "unified rewrite
+// interface" landed in `passes/rewrite_contract.zig`) answers every
+// requirement through a derived query — never an opcode — and fails closed
+// when a declared cleanup proof gets a subject of the wrong kind.
+test "M2b: the legality engine agrees with the derived queries" {
+    var b = try buildText("app", &.{.{
+        "app",
+        \\fn pure(x: int32) -> int32 { x + 1 }
+        \\fn f(x: int32, y: int32) -> int32 {
+        \\    let unused: int32 = pure(x);
+        \\    let trapped: int32 = 10 / y;
+        \\    pure(x) + y
+        \\}
+    }});
+    defer b.deinit();
+    const pr = &b.built.program;
+    var an = try hir_effects.Analysis.init(b.arena.allocator(), b.built, .{ .graph = b.graph });
+    try an.analyze();
+
+    var pure_call: ?hir.ExprId = null;
+    var div_node: ?hir.ExprId = null;
+    var add_node: ?hir.ExprId = null;
+    for (pr.exprs.items, 0..) |_, i| {
+        const id: hir.ExprId = @intCast(i);
+        const name = opName(pr, id);
+        if (std.mem.eql(u8, name, "call")) pure_call = id;
+        if (std.mem.eql(u8, name, "div.i32")) div_node = id;
+        if (std.mem.eql(u8, name, "add.i32")) add_node = id;
+    }
+    const call_id = pure_call.?;
+    const div_id = div_node.?;
+    const add_id = add_node.?;
+
+    // `.discardable` routes to `isDiscardable`; the trap is the negative
+    // case (the whole point of §10.2), the pure call the positive one.
+    try testing.expect(try an.isDiscardable(call_id));
+    try testing.expect(!(try an.isDiscardable(div_id)));
+    try testing.expectEqual(
+        try an.isDiscardable(call_id),
+        try rewrite_contract.check(&an, &.{.discardable}, .{ .expr = call_id }),
+    );
+    try testing.expectEqual(
+        try an.isDiscardable(div_id),
+        try rewrite_contract.check(&an, &.{.discardable}, .{ .expr = div_id }),
+    );
+    // `.duplicable` routes to `isDuplicable`.
+    try testing.expectEqual(
+        try an.isDuplicable(call_id),
+        try rewrite_contract.check(&an, &.{.duplicable}, .{ .expr = call_id }),
+    );
+    // `.swap_operands` routes to `canSwapOperands` and needs a swap subject:
+    // two pure Copy operands are the positive case, a missing subject fails
+    // closed.
+    try testing.expect(try an.canSwapOperands(add_id, 0, 1));
+    try testing.expectEqual(
+        try an.canSwapOperands(add_id, 0, 1),
+        try rewrite_contract.check(&an, &.{.swap_operands}, .{ .swap = .{ .parent = add_id, .lhs_slot = 0, .rhs_slot = 1 } }),
+    );
+    try testing.expect(!(try rewrite_contract.check(&an, &.{.swap_operands}, .{ .expr = add_id })));
+    // `.evaluation_count_preserved` is the rule's own structural
+    // certificate: the engine accepts the declaration without a query.
+    try testing.expect(try rewrite_contract.check(&an, &.{.evaluation_count_preserved}, .{ .expr = div_id }));
+    // A missing expr subject fails closed rather than dereferencing the
+    // `no_expr` sentinel.
+    try testing.expect(!(try rewrite_contract.check(&an, &.{.discardable}, .{})));
+
+    // `checkCleanup` refuses a subject whose kind disagrees with the
+    // declaration (a drifted declaration fails closed).
+    const rule = rewrite_contract.RewriteRule{
+        .name = "test",
+        .applicability = .shape,
+        .contract = .{ .preserves_cleanup = .binder_destruction },
+    };
+    try testing.expect(!(try rewrite_contract.checkCleanup(rule, &an, .{ .cleanup_free_subtree = call_id })));
 }

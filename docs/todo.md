@@ -5,26 +5,9 @@
 「近期」内各项的先后是**建议顺序**，不是串行依赖；每项单独列出前置
 依赖。设计细节仍在两篇文档正文，本文件只记范围、依赖与验收。
 已完成的历史条目按原编号归档于「已完成」节，供跨文档交叉引用；
-「近期」从第 12 项续起，新增项一律追加到队尾。
+「近期」从第 14 项续起，新增项一律追加到队尾。
 
 ## 近期（建议顺序）
-
-- [ ] **13. rewrite 契约形式化**（[effects.md](effects.md) §10.3–§10.4）
-  - 现状：两层判定（applicability 按 typed opcode vs operational legality 走派生
-    查询）已经分开，但只是内联在规则函数里——`RewriteRule` / `Requirement` 与
-    `RewriteContract` **在代码中不存在**，β 的契约由 `hir_seg.zig` 的 `tryBeta`
-    内联强制。
-  - 范围：把 effects.md §10.3 的 applicability / legality 两层与 §10.4 的
-    `RewriteContract` 落为类型：`RewriteRule { match, build, applicability,
-    legality: [Requirement] }`、`Requirement = Discardable | Duplicable |
-    SwapOperands | EvaluationCountPreserved`、`RewriteContract { effect,
-    maps_scope, maps_full_expr, preserves_cleanup }`；先用 β 与 hir_simplify 的
-    dead-let 做首批实例，行为逐字不变。
-  - 依赖：无（是现有内联判定的提取，不是新语义）。
-  - 验收：规则层 applicability 仍按 typed opcode 分派、legality 引擎无
-    `switch(op)`；β / dead-let 现有正负例在形式化实现下逐条通过；
-    [effects.md](effects.md) §10.3–§10.4 的「现状：无统一接口类型」段落随实现
-    删除或改写。
 
 - [ ] **14. `never_returns` must 事实与后缀删除**（[effects.md](effects.md) §10.1）
   - 现状：`never_returns(f)` 设计为**独立于摘要的 must 事实**（签名 `-> never`
@@ -54,7 +37,49 @@
 ## 已完成（归档，原「近期」第 1–12 项）
 
 > 以下条目均已落地，按完成时的编号保留，供 [effects.md](effects.md) 等正文
-> 交叉引用；新工作从「近期」第 13 项续起。
+> 交叉引用；新工作从「近期」第 14 项续起。
+
+- [x] **13. rewrite 契约形式化**（[effects.md](effects.md) §10.3–§10.4）
+  - 范围：把 §10.3 的 applicability / legality 两层与 §10.4 的 `RewriteContract`
+    落为类型：`RewriteRule { match, build, applicability, legality: [Requirement] }`、
+    `Requirement = Discardable | Duplicable | SwapOperands |
+    EvaluationCountPreserved`、`RewriteContract { effect, maps_scope,
+    maps_full_expr, preserves_cleanup }`；先用 β 与 hir_simplify 的 dead-let 做
+    首批实例，行为逐字不变。
+  - 已完成：新增 `passes/rewrite_contract.zig`，落地的形状：
+    `RewriteRule { name, applicability, legality: [Requirement], contract }`、
+    `Requirement = discardable | duplicable | swap_operands |
+    evaluation_count_preserved`、`Applicability = typed_opcode | shape`、
+    `RewriteContract { effect: Effect（bool 集合）, maps_scope, maps_full_expr,
+    preserves_cleanup: ?CleanupProofKind }`。通用 legality 引擎
+    `check(analysis, rule.legality, subjects)` 唯一的 `switch` 在**声明的要求标签**
+    上，每个分支只调用派生查询（`isDiscardable` / `isDuplicable` /
+    `canSwapOperands`）——**没有 `switch(op)`**；
+    `evaluation_count_preserved` 是规则自证的结构义务（β→let 逐参数嵌套、LTR），
+    引擎接受声明。`CleanupProof`（`cleanup_free_subtree: ExprId` /
+    `binder_destruction: Type`）+ `checkCleanup(rule, analysis, subject)`：契约声明
+    kind，调用点给实例，kind 不符即失败关闭；`checkCleanupProof` 仍只用派生查询
+    （`cleanupFree` / `ownershipGate`；`capabilityOf` + `bindingCleanupDiscardable`）。
+    首批实例：`hir_seg.beta_rule`（`.shape`，`PreservesEvaluationCount +
+    PreservesOrder`，`maps_scope` / `maps_full_expr`，
+    `preserves_cleanup = cleanup_free_subtree`）被 `tryBeta` 消费；
+    `hir_simplify.dead_let_rule`（`.shape`，legality `{.discardable}`，
+    `MayDiscard` + `preserves_cleanup = binder_destruction`）被 `tryDeadLet`
+    消费。行为逐字不变：`cleanupFree` / `ownershipGate` 的合取、`isDiscardable`、
+    `capabilityOf orelse .unique` + `bindingCleanupDiscardable` 的检查顺序与
+    短路均保持；`tryBeta` 显式保留 call 结果与每个实参的 Copy 复查（ownership
+    gate 对 λ 节点短路，不能单独承担）。与 sketch 的差异已在 §10.3–§10.4 声明：
+    `legality` 是标签列表（静态声明不能携带 `ExprId`，主体由调用点给实例）、
+    `match` / `build` 仍是 pass 内规则函数（由 `Rule.name` 指名，不做函数指针表
+    驱动）、`effect` 是 bool 集合。η / `ruleLet` / `tryAnf` 仍内联，属后续批次。
+    测试：`hir_simplify_tests.zig` 新增「legality engine agrees with the derived
+    queries」——四个 requirement 分支逐个与 `isDiscardable` / `isDuplicable` /
+    `canSwapOperands` 对账（trap 负例、纯 call / 纯 `add.i32` 正例、缺 swap 主体
+    失败关闭），并断言 kind 不符的 `checkCleanup` 拒绝；β / dead-let 的既有
+    白盒正负例与全语料 on/off 差分在形式化实现下全部通过（`zig build test`
+    1216/1216）。effects.md §10.3–§10.4 的「无统一接口类型」/「契约是设计概念」
+    段落改写为落地形态与实现差异；hir.md §8.1 / §8.4 同步。
+  - 依赖：无（是现有内联判定的提取，不是新语义）。
 
 - [x] **12. SEG 编译时间预算与默认开启**（应用面；[hir.md](hir.md) §11、
       frontend.zig / main.zig）

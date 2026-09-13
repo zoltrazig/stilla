@@ -71,12 +71,36 @@ const hir = @import("stilla").hir;
 const moduleinfo = @import("stilla").moduleinfo;
 const effects = @import("stilla").effects;
 const hir_effects = @import("hir_effects.zig");
+const rewrite_contract = @import("rewrite_contract.zig");
 
 pub const Error = std.mem.Allocator.Error;
 
 /// A `fn_ref` chain longer than this is a cycle or a pathological tower
 /// and is refused rather than followed (hir.md §8.5).
 const max_eta_chain: usize = 32;
+
+/// β's declared rule + boundary-rewrite contract (docs/effects.md §10.3–
+/// §10.4). The *match* layer stays inline in `tryBeta` — the λ shape, the
+/// region / arity facts, the `isSegSafe(body)` + single-expression
+/// precondition, and the `beta_done` consumption guard are structural
+/// applicability. What is declared here is the contract the rewrite is
+/// admitted by: evaluation count and LTR order preserved (β→let evaluates
+/// each argument once, in order), binders remapped to fresh call-site
+/// binders, cloned nodes stamped with the call-site FE, and the evaluated
+/// call subtree literally cleanup-free under the ownership gate. The
+/// legality tags and the cleanup proof are discharged by
+/// `rewrite_contract.check` / `checkCleanup` through derived queries only.
+const beta_rule = rewrite_contract.RewriteRule{
+    .name = "beta",
+    .applicability = .shape,
+    .legality = &.{.evaluation_count_preserved},
+    .contract = .{
+        .effect = .{ .preserves_evaluation_count = true, .preserves_order = true },
+        .maps_scope = true,
+        .maps_full_expr = true,
+        .preserves_cleanup = .cleanup_free_subtree,
+    },
+};
 
 /// Positional binder remapping for structural (α-)comparison in CSE
 /// sharing. Binders are globally unique to their defining region, so a map
@@ -471,8 +495,12 @@ const Rewriter = struct {
         // argument (docs/effects.md §10.4).
         const result_cap = try self.analysis.capabilityOf(n.ty) orelse return false;
         if (result_cap != .copy) return false;
-        if (!try self.analysis.cleanupFree(id)) return false;
-        if (!try self.analysis.ownershipGate(id)) return false;
+        // The declared contract (`beta_rule`) goes through the legality
+        // engine, which knows requirements, not opcodes: the
+        // evaluation-count certificate (structural — the nested LTR lets
+        // below) and the `cleanup_free_subtree` cleanup proof.
+        if (!try rewrite_contract.check(self.analysis, beta_rule.legality, .{ .expr = id })) return false;
+        if (!try rewrite_contract.checkCleanup(beta_rule, self.analysis, .{ .cleanup_free_subtree = id })) return false;
 
         const lambda = pr.node(rec.root);
         if (hir.registry.get(lambda.op).seg != .binder) return false;
@@ -487,10 +515,14 @@ const Rewriter = struct {
 
         // Arguments stay Copy (a Unique / borrowed argument would change
         // ownership at the synthesized let); their effects are preserved
-        // verbatim, so no purity is required. `cleanupFree(id)` above
-        // already covers every argument's cleanup and `ownershipGate(id)`
-        // its ownership (a `move`/borrow argument leaves `callArgUse` at
-        // `.consume`/`.borrow`, which the gate rejects).
+        // verbatim, so no purity is required. `cleanupFree(id)` inside the
+        // contract's `cleanup_free_subtree` proof above already covers every
+        // argument's cleanup and `ownershipGate(id)` its ownership (a
+        // `move`/borrow argument leaves `callArgUse` at `.consume`/`.borrow`,
+        // which the gate rejects). The explicit Copy checks are the
+        // ownership half of that proof kept explicit: the gate short-
+        // circuits `transfer == .lambda` nodes, so it does not by itself
+        // rule out a non-Copy result or argument.
         var k: usize = 1;
         while (k < ops.len) : (k += 1) {
             const arg = ops[k];
