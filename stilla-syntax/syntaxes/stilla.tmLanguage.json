@@ -24,7 +24,28 @@
       }
     },
     {
-      "match": "\\b((?:opaque\\s+)?(?:struct|union|type))\\s+([A-Za-z_][A-Za-z0-9_]*)",
+      "begin": "\\b(union)\\b\\s*([A-Za-z_][A-Za-z0-9_]*)\\s*(\\[[^\\]]*\\])?\\s*\\{",
+      "beginCaptures": {
+        "1": { "name": "keyword.declaration.stilla" },
+        "2": { "name": "entity.name.type.stilla" }
+      },
+      "end": "\\}",
+      "patterns": [
+        {
+          "begin": "\\b([A-Za-z_][A-Za-z0-9_]*)\\s*\\(",
+          "beginCaptures": { "1": { "name": "entity.name.function.stilla" } },
+          "end": "\\)",
+          "patterns": [{ "include": "source.stilla" }]
+        },
+        {
+          "match": "\\b([A-Za-z_][A-Za-z0-9_]*)\\s*(?=[,}])",
+          "captures": { "1": { "name": "entity.name.function.stilla" } }
+        },
+        { "include": "source.stilla" }
+      ]
+    },
+    {
+      "match": "\\b((?:opaque\\s+)?(?:struct|type))\\s+([A-Za-z_][A-Za-z0-9_]*)",
       "captures": {
         "1": { "name": "keyword.declaration.stilla" },
         "2": { "name": "entity.name.type.stilla" }

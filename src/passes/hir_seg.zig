@@ -19,15 +19,18 @@
 //! - **Rules** — β-reduction (→ let, the v1 boundary rewrite with the
 //!   §8.4 contract), η-reduction (a `fn_ref` value redirect, §8.5), let
 //!   simplification (dead let, used-once forwarding, trivial-atom
-//!   forwarding), constant folding over the typed reps, integer algebra
-//!   identities, and the known-variant `match` reduction to `let` (§8.6).
-//!   Not in scope: associativity / commutativity search, CSE, `move` /
-//!   `drop` / borrow, host calls (§8.3).
+//!   forwarding), struct projection (`field_get(struct_make(…), i) → vi`
+//!   for a known field index, §8.3), constant folding over the typed reps,
+//!   integer algebra identities, and the known-variant `match` reduction to
+//!   `let` (§8.6). Not in scope: tuple / list projection (`tuple_make` /
+//!   `list_make` are hard island boundaries — `seg == null`), associativity /
+//!   commutativity search, CSE, `move` / `drop` / borrow, host calls (§8.3).
 //! - **Extraction cost** — v1 uses minimal node count plus a
 //!   deterministic rule order as the tie-break (hir.md §8.2). The let /
-//!   folding / algebra rules strictly reduce `costOf`; β (a boundary
-//!   rewrite, not an e-class extraction) is admitted by its contract and
-//!   the known-variant `match` reduction by its coverage / arity proof.
+//!   folding / algebra / struct-projection rules strictly reduce `costOf`; β
+//!   (a boundary rewrite, not an e-class extraction) is admitted by its
+//!   contract and the known-variant `match` reduction by its coverage /
+//!   arity proof.
 //!   The `match` rule splices one `let` per bound payload, so a wide
 //!   constructor can add nodes: termination comes from the bounded
 //!   `max_iterations` rounds (each `match` node is consumed once), not
@@ -70,6 +73,7 @@ pub const Stats = struct {
     lets: usize = 0,
     conds: usize = 0,
     matches: usize = 0,
+    projects: usize = 0,
 };
 
 pub const Config = struct {
@@ -119,6 +123,7 @@ pub fn optimize(arena: std.mem.Allocator, built: *hir.BuiltProgram, config: Conf
         stats.lets += rw.lets;
         stats.conds += rw.conds;
         stats.matches += rw.matches;
+        stats.projects += rw.projects;
         if (!changed) break;
     }
     return stats;
@@ -149,6 +154,7 @@ const Rewriter = struct {
     lets: usize = 0,
     conds: usize = 0,
     matches: usize = 0,
+    projects: usize = 0,
 
     /// The full-expression id β maps every cloned λ-body node onto
     /// (hir.md §8.4 `maps_full_expr`): the call site's FE. Set per β
@@ -618,6 +624,12 @@ const Rewriter = struct {
                 return true;
             }
         }
+        if (std.mem.eql(u8, name, "field_get")) {
+            if (projectStruct(pr, id)) {
+                self.projects += 1;
+                return true;
+            }
+        }
         if (hir.registry.get(pr.node(id).op).typed) {
             if (try self.ruleNumeric(id)) return true;
         }
@@ -963,6 +975,29 @@ const Rewriter = struct {
         return nodeCost(self.p(), root, self.arena);
     }
 };
+
+/// Struct projection (hir.md §8.3): `field_get(struct_make(v0, …, vn), i)
+/// → vi` for a known field index. The `struct_make` operands are in
+/// declaration order (`hir_build_path.buildStructConstruct`) and the payload
+/// index is the declaration field index (`hir_build_expr.fieldRead`), so the
+/// operand at that index is the projected value. An out-of-range index or a
+/// non-constructor base is refused. Tuple projection stays out of scope:
+/// `tuple_make` has no SEG encoding, so a tuple base is never an island
+/// member (see docs/todo.md).
+///
+/// Pure structural rewrite kept standalone for the white-box test; the island
+/// gate is the caller's (`applyRules` runs it only when `encOf` is true).
+pub fn projectStruct(pr: *hir.Program, id: hir.ExprId) bool {
+    const ops = pr.operands(id);
+    if (ops.len != 1) return false;
+    const base = ops[0];
+    if (!std.mem.eql(u8, hir.registry.get(pr.node(base).op).name, "struct_make")) return false;
+    const values = pr.operands(base);
+    const idx = pr.node(id).payload.field;
+    if (@as(usize, idx) >= values.len) return false;
+    pr.exprs.items[id] = pr.node(values[idx]);
+    return true;
+}
 
 /// Minimal-node-count cost of one subtree (hir.md §8.2). The caller's
 /// scratch allocator backs the traversal worklist; the count is
@@ -1437,4 +1472,29 @@ test "minimal-node extraction cost counts the subtree" {
     try testing.expectEqual(@as(usize, 3), nodeCost(&p.program, add, testing.allocator));
     const lhs = p.program.operands(add)[0];
     try testing.expectEqual(@as(usize, 1), nodeCost(&p.program, lhs, testing.allocator));
+}
+
+test "struct projection folds field_get over struct_make for every field index" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var prog = try hir.Program.init(arena.allocator());
+    const i32ty = meta.Type{ .primitive = .int32 };
+    const c0 = try prog.addExpr(.{ .op = hir.opId("const").?, .ty = i32ty, .payload = .{ .const_value = .{ .int = 10 } } });
+    const c1 = try prog.addExpr(.{ .op = hir.opId("const").?, .ty = i32ty, .payload = .{ .const_value = .{ .int = 20 } } });
+    const c2 = try prog.addExpr(.{ .op = hir.opId("const").?, .ty = i32ty, .payload = .{ .const_value = .{ .int = 30 } } });
+    const sm = try prog.addExpr(.{ .op = hir.opId("struct_make").?, .ty = i32ty, .operands = try prog.addOperands(&.{ c0, c1, c2 }) });
+    // Every declared index projects its own operand, in declaration order.
+    const expected = [_]i64{ 10, 20, 30 };
+    for (expected, 0..) |want, i| {
+        const fg = try prog.addExpr(.{ .op = hir.opId("field_get").?, .ty = i32ty, .operands = try prog.addOperands(&.{sm}), .payload = .{ .field = @intCast(i) } });
+        try testing.expect(projectStruct(&prog, fg));
+        try testing.expectEqual(want, prog.node(fg).payload.const_value.int);
+    }
+    // Out of range: the operand list is shorter than the payload index.
+    const oob = try prog.addExpr(.{ .op = hir.opId("field_get").?, .ty = i32ty, .operands = try prog.addOperands(&.{sm}), .payload = .{ .field = 3 } });
+    try testing.expect(!projectStruct(&prog, oob));
+    try testing.expectEqualStrings("field_get", hir.registry.get(prog.node(oob).op).name);
+    // A non-constructor base is left alone.
+    const not_ctor = try prog.addExpr(.{ .op = hir.opId("field_get").?, .ty = i32ty, .operands = try prog.addOperands(&.{c1}), .payload = .{ .field = 0 } });
+    try testing.expect(!projectStruct(&prog, not_ctor));
 }

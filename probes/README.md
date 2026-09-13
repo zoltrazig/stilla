@@ -60,6 +60,11 @@ The detailed probes cover the source-reachable operation/type matrix:
   function and over another λ wrapper (the chain resolves to the member in one
   call), next to the refused shapes: a trapping callee, a call-result callee,
   and a swapped argument order
+- `struct_projection.st`: struct projection ([hir.md](hir.md) §8.3) —
+  `field_get(struct_make(…), i) → vi` for every declared field index, the
+  projected operand as a non-constant expression, and the refused shapes: a
+  non-constructor (`let`-bound) base and a constructor written out of
+  declaration order (its temp `let` chain opens a full-expression boundary)
 
 Every `probes/*.st` file is enumerated at test time by
 `src/probe_corpus.zig`, so a new probe automatically joins the HIR build

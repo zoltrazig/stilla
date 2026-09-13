@@ -5,22 +5,9 @@
 「近期」内各项的先后是**建议顺序**，不是串行依赖；每项单独列出前置
 依赖。设计细节仍在两篇文档正文，本文件只记范围、依赖与验收。
 已完成的历史条目按原编号归档于「已完成」节，供跨文档交叉引用；
-「近期」从第 9 项续起，新增项一律追加到队尾。
+「近期」从第 10 项续起，新增项一律追加到队尾。
 
 ## 近期（建议顺序）
-
-- [ ] **9. struct 投影规则**（[hir.md](hir.md) §8.3）
-  - 现状：`struct_make` 已注册 `seg = .construct`、`field_get` 已注册
-    `seg = .project`（hir.zig registry），但没有消费二者的规则：
-    `field_get(struct_make(v0, v1, …), i) → vi` 未落地。`tuple_make` /
-    `list_make` 是硬边界（`seg == null`），故本项只覆盖 struct；tuple projection
-    待 `tuple_make` 获得编码后另行立项。
-  - 范围：在 island 内把已知字段下标（`Payload.field`）的 `field_get` 归约为对应
-    operand；下标越界 / base 非 `struct_make` 拒绝。
-  - 依赖：无。
-  - 验收：白盒正例（各字段下标）+ 负例（越界、base 非构造、非 island）；新增
-    `probes/*.st` 用例进 on/off 差分与 pass smoke，并在 probes 目录的 README.md
-    加条目。
 
 - [ ] **10. CSE-style sharing → 合成 `let`**（[hir.md](hir.md) §8.3）
   - 范围：同一 island 内结构相等（`alphaEq`）且 `isDuplicable` 的纯子树合并为
@@ -94,10 +81,27 @@
   - 验收：契约正例（源级纯 init 的 dead / forward / 原子复制）+ 负例
     （Borrowed view / Unique / 可观察 init）；on/off 解释器差分。
 
-## 已完成（归档，原「近期」第 1–8 项）
+## 已完成（归档，原「近期」第 1–9 项）
 
 > 以下条目均已落地，按完成时的编号保留，供 [effects.md](effects.md) 等正文
-> 交叉引用；新工作从「近期」第 9 项续起。
+> 交叉引用；新工作从「近期」第 10 项续起。
+
+- [x] **9. struct 投影规则**（[hir.md](hir.md) §8.3）
+  - 范围：在 island 内把已知字段下标（`Payload.field`）的 `field_get` 归约为对应
+    operand；下标越界 / base 非 `struct_make` 拒绝。
+  - 已完成：`hir_seg.projectStruct`（自由函数；`applyRules` 在 `field_get` 且
+    `encOf` 为真时调用）把 `field_get(struct_make(v0, …, vn), i)` 的节点内容替换为
+    第 `i` 个 operand。`struct_make` 的 operand 按声明序、payload `field` 是声明
+    字段下标（`hir_build_expr.fieldRead`），故直接取该下标即可。越界
+    （`i >= operands.len`）与 base 非 `struct_make` 一律拒绝；乱序书写的构造被
+    builder 的临时 `let` 链隔开（init 自成 FE，§5.6），字段读取看不到裸
+    `struct_make`，本就不触发。result 是 island 成员的 operand，故拷贝内容不跨 FE、
+    无清理 token。`Stats.projects` 计归约数。测试：白盒（各字段下标 + 越界 + 非构造
+    基）、黑盒（`probes/struct_projection`：每个下标、非恒定 operand、binding base
+    与非声明序的拒绝，加 out-of-range payload 与跨 FE 破坏的负例）、on/off 解释器
+    差分与 pass smoke。tuple projection 未做（`tuple_make` / `list_make` 是硬边界，
+    `seg == null`）。
+  - 依赖：无。
 
 - [x] **8. η-reduction**（[hir.md](hir.md) §8.5）
   - 范围：`fn (B0: T) => call(fnref F, %B0)` → `fnref F`。v1 只允许

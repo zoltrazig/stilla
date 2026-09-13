@@ -557,6 +557,74 @@ test "SEG: a nested payload pattern refuses the known-variant reduction" {
     try testing.expect(try funcHasNode(&b, "app.f", "match"));
 }
 
+test "SEG: struct projection folds field_get over struct_make (every index)" {
+    const src = try probe_corpus.read(testing.allocator, "probes", "struct_projection");
+    defer testing.allocator.free(src);
+    var b = try buildText("app", &.{.{ "app", src }});
+    defer b.deinit();
+    const stats = try segAll(&b);
+    // Non-vacuous: the three declaration-ordered reads (and the operand
+    // expression) project, so at least four folds happened.
+    try testing.expect(stats.projects >= 4);
+    // Each field index projects its own operand, in declaration order.
+    try expectFuncBody(&b, "app.project_first", "fn () => 10i32");
+    try expectFuncBody(&b, "app.project_second", "fn () => 20i32");
+    try expectFuncBody(&b, "app.project_third", "fn () => 30i32");
+    // The projected operand keeps its own (non-constant) expression.
+    try expectFuncBody(&b, "app.project_expr", "fn (B0: i32) => add.i32(%B0, 1i32)");
+}
+
+test "SEG: a non-constructor base refuses struct projection" {
+    const src = try probe_corpus.read(testing.allocator, "probes", "struct_projection");
+    defer testing.allocator.free(src);
+    var b = try buildText("app", &.{.{ "app", src }});
+    defer b.deinit();
+    _ = try segAll(&b);
+    // `t.b` reads a `let`/parameter binding, not a constructor: the
+    // `field_get` survives (the printer cannot serialize it, so the
+    // non-vacuous check is the node itself).
+    try testing.expect(try funcHasNode(&b, "app.project_binding", "field_get"));
+}
+
+test "SEG: an out-of-range field index refuses struct projection" {
+    const src = try probe_corpus.read(testing.allocator, "probes", "struct_projection");
+    defer testing.allocator.free(src);
+    var b = try buildText("app", &.{.{ "app", src }});
+    defer b.deinit();
+    const f = try findFunc(&b, "app.project_second");
+    const fg = try findNode(&b, f.root, "field_get") orelse return error.TestUnexpectedResult;
+    // The checker can never emit this index; the rule must not read past
+    // the constructor's operand list.
+    b.built.program.exprs.items[fg].payload.field = 99;
+    // The corrupted index would fail re-validation, so run the pass alone.
+    const stats = try hir_seg.optimize(b.arena.allocator(), b.built, .{ .graph = b.graph });
+    try testing.expect(stats.projects >= 3); // the other reads still fold
+    try testing.expect(try funcHasNode(&b, "app.project_second", "field_get"));
+}
+
+test "SEG: a struct literal crossing a full-expression boundary is not an island" {
+    const src = try probe_corpus.read(testing.allocator, "probes", "struct_projection");
+    defer testing.allocator.free(src);
+    var b = try buildText("app", &.{.{ "app", src }});
+    defer b.deinit();
+    const pr = &b.built.program;
+    const f = try findFunc(&b, "app.project_second");
+    const fg = try findNode(&b, f.root, "field_get") orelse return error.TestUnexpectedResult;
+    const sm = pr.operands(fg)[0];
+    // Positive control: the read is an island member and projects.
+    var an = try analysisOf(&b);
+    try testing.expect(try an.isSegSafe(fg));
+    // Move one constructor operand into a fresh boundary: the read now
+    // spans two full expressions, so admission refuses and no rule fires.
+    const operand = pr.operands(sm)[0];
+    pr.exprs.items[operand].full_expr = try pr.addFullExpr();
+    var an2 = try analysisOf(&b);
+    try testing.expect(!try an2.isSegSafe(fg));
+    const stats = try hir_seg.optimize(b.arena.allocator(), b.built, .{ .graph = b.graph });
+    try testing.expect(stats.projects >= 3); // the other reads still fold
+    try testing.expect(try funcHasNode(&b, "app.project_second", "field_get"));
+}
+
 /// One analysis/rewrite round only (no fixpoint), so a rule's immediate
 /// output survives long enough to be inspected before later rounds
 /// simplify it away.

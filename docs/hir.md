@@ -951,7 +951,8 @@ extract(eclass)      -> ExprId
 | constant `if` / `and` / `or` | ✅ | 常量条件选中已求值分支（另一分支是 island 成员） |
 | η-reduction | ✅ | 值位置 `fn_ref` 重定向；λ 记录不动（§8.5） |
 | known variant `match` | ✅ | 已知 tag 的 `variant_make` scrutinee → 覆盖 arm 的 `let` 链；payload 仅 bind / wildcard 叶 |
-| struct / tuple projection | ❌ | 无规则 |
+| struct projection | ✅ | `field_get(struct_make(v0, …, vn), i) → vi`（已知字段下标；越界 / 非构造基拒绝）。`struct_make` 的 operand 按声明序，payload `field` 是声明字段下标——即 `hir_build_expr.fieldRead` 的索引。乱序书写的构造被 builder 的临时 `let` 链隔开（§5.6），故不触发 |
+| tuple / list projection | ❌ | 无规则：`tuple_make` / `list_make` 无 SEG 编码（`seg == null`） |
 | α-equivalence | ✅* | 由 β 克隆时的**捕获规避** fresh-binder 重映射承担，不是 e-graph 的 α-合并 |
 | CSE-style sharing | ❌ | 无 CSE；未来须 materialize 成 `let` |
 | associativity / commutativity | ❌ | 搜索空间问题，未立项 |
@@ -1187,7 +1188,7 @@ lowering。可选变换每轮原位重写后重新跑结构 + 效果校验（§2
 | --- | --- | --- |
 | M1a | 结构 HIR：AST→HIR 构建、结构校验、HIR→CFG lowering；直降路径删除后成为唯一前端路径 | hir_build.zig / hir_validate.zig / hir_lower.zig |
 | M1b | 效果基础设施：`SemanticInfo.effect`、固定乘积格、transfer、cleanup 门、派生查询、host 语义注册表 | effects.zig / hir_effects.zig |
-| M2a | SEG v1 规则子集（β / η / let / 常折叠 / 整数代数 / known-variant match），opt-in | hir_seg.zig |
+| M2a | SEG v1 规则子集（β / η / let / 常折叠 / 整数代数 / struct 投影 / known-variant match），opt-in | hir_seg.zig |
 | M2b | 摘要化消费者：函数摘要 SCC least fixpoint、精确 `drop_effect(T)`、module-const 检查、dead-let / selective ANF | hir_effects.zig / hir_simplify.zig |
 
 **尚未实现**（完整清单见 [todo.md](todo.md)）：**节点级**
