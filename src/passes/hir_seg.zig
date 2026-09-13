@@ -28,17 +28,26 @@
 //!   (`tuple_make` / `list_make` are hard island boundaries — `seg == null`),
 //!   non-sibling (cross-statement / cross-branch) sharing, associativity /
 //!   commutativity search, `move` / `drop` / borrow, host calls (§8.3).
-//! - **Extraction cost** — v1 uses minimal node count plus a
-//!   deterministic rule order as the tie-break (hir.md §8.2). The let /
-//!   folding / algebra / struct-projection rules strictly reduce `costOf`; β
-//!   (a boundary rewrite, not an e-class extraction) is admitted by its
-//!   contract and the known-variant `match` reduction by its coverage /
-//!   arity proof. Two rules may *add* nodes: the `match` rule splices one
-//!   `let` per bound payload and CSE sharing materializes a shared subterm,
-//!   so a wide constructor / a shared subtree can grow the tree. Termination
-//!   comes from the bounded `max_iterations` rounds (each `match` node is
-//!   consumed once; a CSE binding has at least two uses and a non-trivial
-//!   init, so no let rule undoes it), not from a globally decreasing cost.
+//! - **Extraction cost and the termination contract** — v1 uses minimal
+//!   node count plus a deterministic rule order as the tie-break (hir.md
+//!   §8.2). The let / folding / algebra / struct-projection rules strictly
+//!   reduce `costOf`; β (a boundary rewrite, not an e-class extraction) is
+//!   admitted by its contract and the known-variant `match` reduction by its
+//!   coverage / arity proof. Two rules may *add* nodes: the `match` rule
+//!   splices one `let` per bound payload and CSE sharing materializes a
+//!   shared subterm, so a wide constructor / a shared subtree can grow the
+//!   tree. v1 therefore offers a **bounded-round contract, not a decreasing-
+//!   measure one**: `optimize` runs at most `Config.max_iterations`
+//!   analysis→rewrite rounds and then stops. `Stats.converged` reports which
+//!   exit was taken — `true` for a quiet round (a fixpoint of the current
+//!   rule set), `false` for a bound hit. Stopping early is always safe: every
+//!   admitted rewrite preserves semantics, so any round prefix is a correct
+//!   program and a bound hit only forfeits further rewrites. The per-rule
+//!   guards that keep the default bound sufficient in practice: each λ is
+//!   inlined at most once (`beta_done`, so β fires at most once per λ
+//!   record), each `match` node is consumed once, each CSE binding has at
+//!   least two uses and a non-trivial init (no let rule can undo it), and
+//!   every other rule strictly reduces `costOf`.
 //! - **Re-verification** — each iteration re-derives the effect analysis
 //!   from scratch before rewriting; the caller re-validates structurally
 //!   and by effects after the pass. No transform is allowed to rely on
@@ -133,6 +142,11 @@ fn constEql(a: meta.ConstValue, b: meta.ConstValue) bool {
 /// What one `optimize` call did — for tests and the compile-time budget.
 pub const Stats = struct {
     iterations: u32 = 0,
+    /// `true` when the last round was quiet — the pass reached a fixpoint of
+    /// the current rule set within the bound. `false` when the
+    /// `max_iterations` bound was hit first (pass header's termination
+    /// contract; a bound hit is safe, only a missed optimization).
+    converged: bool = false,
     /// Reachable nodes that passed recursive island admission.
     islands: usize = 0,
     beta: usize = 0,
@@ -195,7 +209,10 @@ pub fn optimize(arena: std.mem.Allocator, built: *hir.BuiltProgram, config: Conf
         stats.matches += rw.matches;
         stats.projects += rw.projects;
         stats.shares += rw.shares;
-        if (!changed) break;
+        if (!changed) {
+            stats.converged = true;
+            break;
+        }
     }
     return stats;
 }

@@ -905,6 +905,7 @@ test "SEG: the pass is a fixpoint (second run rewrites nothing)" {
     var b = try buildText("app", &.{.{ "app", src }});
     defer b.deinit();
     const first = try segAll(&b);
+    try testing.expect(first.converged);
     try testing.expect(first.beta + first.folds + first.algebra + first.lets + first.conds + first.shares > 0);
     const after_first = try funcText(&b, "app.dup");
     const after_first_g = try funcText(&b, "app.g");
@@ -917,6 +918,31 @@ test "SEG: the pass is a fixpoint (second run rewrites nothing)" {
     // The CSE binding is stable: ≥2 uses and a non-trivial init mean no
     // let rule undoes it.
     try testing.expectEqualStrings(after_first_cse, try funcText(&b, "app.cse_pair"));
+}
+
+test "SEG: a construct needing more than one round converges within the bound" {
+    // Round 1 folds the constant `if` condition, overwriting the operand node
+    // in place; the parent add's CSE pass then refuses the just-rewritten
+    // (dirty) operand and defers to a fresh round. The pass must reach
+    // quiescence rather than stop at the `max_iterations` bound (hir.md §8.2
+    // bounded-round contract, `Stats.converged`).
+    const src = try probe_corpus.read(testing.allocator, "probes/cases", "seg_multi_round");
+    defer testing.allocator.free(src);
+    var b = try buildText("app", &.{.{ "app", src }});
+    defer b.deinit();
+    const first = try segAll(&b);
+    try testing.expect(first.iterations > 1);
+    try testing.expect(first.converged);
+    try testing.expectEqual(@as(usize, 1), first.conds);
+    try testing.expectEqual(@as(usize, 1), first.shares);
+    // The extra rounds paid off: the two α-equal `x * x` operands are now one
+    // computation read from a synthesized `let`.
+    try testing.expectEqual(@as(usize, 1), try countNodes(&b, "app.share_after_fold", "mul.i32"));
+    const after = try funcText(&b, "app.share_after_fold");
+    const second = try segAll(&b);
+    try testing.expect(second.converged);
+    try testing.expectEqual(@as(usize, 0), second.beta + second.folds + second.algebra + second.lets + second.conds + second.shares);
+    try testing.expectEqualStrings(after, try funcText(&b, "app.share_after_fold"));
 }
 
 test "SEG: two fresh builds produce the same optimized text (deterministic)" {
