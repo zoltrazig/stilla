@@ -9,18 +9,6 @@
 
 ## 近期（建议顺序）
 
-- [ ] **12. SEG 编译时间预算与默认开启**（应用面；[hir.md](hir.md) §11、
-      frontend.zig）
-  - 现状：`--seg` 默认关，pipeline 位置在 `--simplify` 之后、各自跟一次
-    `revalidateHir`（frontend.zig）；`hir_seg.Stats` 已记
-    `iterations / islands / beta / etas / folds / algebra / lets / conds / matches`，但
-    没有语料级时间 / 预算基线。
-  - 范围：以 `Stats` 与 `probes/` + `examples/` 全语料为输入，度量 SEG 编译时间、
-    轮数与 island 覆盖并形成预算；据此把 SEG 从 `--seg` 翻为默认开启（保留 opt-out）。
-  - 依赖：**第 11 项**（已落地：有界轮数契约）。
-  - 验收：语料级 SEG 编译时间 / 轮数基线记录；默认开启后 `--simplify` × `--seg`
-    四种组合的 on/off 解释器输出逐字相等；CI 时间预算不回归。
-
 - [ ] **13. rewrite 契约形式化**（[effects.md](effects.md) §10.3–§10.4）
   - 现状：两层判定（applicability 按 typed opcode vs operational legality 走派生
     查询）已经分开，但只是内联在规则函数里——`RewriteRule` / `Requirement` 与
@@ -63,10 +51,31 @@
   - 验收：契约正例（源级纯 init 的 dead / forward / 原子复制）+ 负例
     （Borrowed view / Unique / 可观察 init）；on/off 解释器差分。
 
-## 已完成（归档，原「近期」第 1–11 项）
+## 已完成（归档，原「近期」第 1–12 项）
 
 > 以下条目均已落地，按完成时的编号保留，供 [effects.md](effects.md) 等正文
-> 交叉引用；新工作从「近期」第 12 项续起。
+> 交叉引用；新工作从「近期」第 13 项续起。
+
+- [x] **12. SEG 编译时间预算与默认开启**（应用面；[hir.md](hir.md) §11、
+      frontend.zig / main.zig）
+  - 范围：以 `Stats` 与 `probes/` + `examples/` 全语料为输入，度量 SEG 编译时间、
+    轮数与 island 覆盖并形成预算；据此把 SEG 从 `--seg` 翻为默认开启（保留 opt-out）。
+  - 已完成：`hir_seg_tests.zig` 新增 `SEG budget` 测试——逐语料文件 `buildText`
+    - `hir_seg.optimize`，断言每个程序都在 `Config.max_iterations` 界内收敛
+    （`Stats.converged == true`，CI 稳定 oracle），并汇总时间 / 轮数 / island
+    覆盖；实测基线（2026-09-13、macOS/arm64，记录于 hir.md §11）：56 个程序 /
+    4306 个可达节点，2347 个 island 成员（≈54%），69 轮、51 次重写，总时间
+    ≈70 ms，单文件最慢 `examples/fold`（10 ms / 2 轮）。据此 `stilla` 可执行文件
+    默认开启 SEG：`main.zig` 的 `Options.seg` 默认 true，新增 `--no-seg` 保留
+    opt-out，`--seg` 仍为显式开启；库 `frontend.Options.seg` 保持默认关（与
+    `optimize` 同一约定，避免对约 70 处测试 compile 站点产生 golden churn），
+    其文档注释改写为「可执行文件默认开、嵌入者显式设置」。全语料 `--simplify` ×
+    `--seg` 四种组合的解释器输出逐字相等由 `corpusDiff` 覆盖：按 AIR 去重（AIR
+    逐字相同即同一程序，仅对确有改写的组合重跑比对），并对每种组合的 canonical
+    AIR 做 standalone parser round-trip；probes 测试断言 simplify-only 与 seg-only
+    两个组合都至少改写了一个程序，避免空跑。CI 实测 `zig build test` 由基线
+    ≈108 s 降至 ≈92 s（去重后的运行次数少于旧的 SEG-on/off 两次执行，未回归）。
+  - 依赖：**第 11 项**（已落地：有界轮数契约）。
 
 - [x] **11. SEG 终止性：有界轮数契约**（[hir.md](hir.md) §8.2、hir_seg.zig）
   - 范围：为 v1 规则集显式选定终止性契约——每轮严格递减的度量，或「有界轮数、
@@ -343,7 +352,6 @@
       类型相等与摘要 interning 给 `meta.Type` 加一张 canonical 表。
 - [ ] source span side table（[hir.md](hir.md) §3.6）：`ExprNode.origin` 的 span
       表尚未落地。
-- [ ] SEG 从可选变默认（前置：近期第 12 项的编译时间预算基线）。
 - [ ] Unique / consuming / borrowed 情形进 SEG（需线性等式系统）。
 - [ ] Typed HIR Target 形态：monomorphization / ownership 检查在 HIR 上
       完成（[hir.md](hir.md) §2.3 远期边界；未立项）。

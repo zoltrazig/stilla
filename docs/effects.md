@@ -6,8 +6,8 @@
 >   `drop_effect(T)` 全链、module-const 检查、`StillaExecution` 三态与符号键
 >   host 声明解析、间接调用目标收窄（§9.2 局部 fn-ref 传播）、β 的 effectful
 >   实参（§10.4，契约下放开求值次数 / 序 / scope / FE / cleanup）。
-> - **opt-in 消费者（默认关）**：dead-let + selective ANF（`--simplify`）、
->   SEG v1（`--seg`）。
+> - **消费者**：dead-let + selective ANF（`--simplify`，默认关）、SEG v1
+>   （可执行文件默认开、`--no-seg` 关；库默认关、`Options.seg` 开启）。
 > - **设计已定但未实现**（§14、[todo.md](todo.md)）：`never_returns` must 事实、
 >   `RewriteRule` / `Requirement` 统一接口、`RewriteContract` 类型。
 >
@@ -965,7 +965,7 @@ planner / CFG 层生成。effect 系统保证 DCE 不会误删带重要 destruct
 
 三个首要消费者，共同点是**合法性全部来自派生查询，任何一个都没有 `switch(op)`
 特判**。dead-let 与 selective ANF 在 hir_simplify.zig（`--simplify`，默认关），
-SEG 准入在 hir_seg.zig（`--seg`，默认关）。
+SEG 准入在 hir_seg.zig（可执行文件默认开、`--no-seg` 关；库默认关）。
 
 ### 12.1 Selective A-Normal Form
 

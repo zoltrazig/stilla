@@ -53,7 +53,8 @@ const usage =
     \\                    --emit-hir, --emit-asm, --emit-bin, --output,
     \\                    --no-entry-fn
     \\  --seg             enable the M2a SEG pass (hir.md §11) before CFG
-    \\                    lowering; off by default
+    \\                    lowering; on by default
+    \\  --no-seg          disable the M2a SEG pass (the opt-out)
     \\  --simplify        enable the M2b effect-driven HIR consumers
     \\                    (dead-let + selective A-Normal Form, hir.md
     \\                    §11) before CFG lowering; off by default
@@ -91,9 +92,11 @@ const Options = struct {
     /// True when `--run` was given: compile (or load a binary) and
     /// execute. Mutually exclusive with the emission flags.
     run: bool = false,
-    /// True when `--seg` was given: run the M2a SEG pass (hir.md §11)
-    /// before CFG lowering. Off by default; SEG is opt-in.
-    seg: bool = false,
+    /// Run the M2a SEG pass (hir.md §11) before CFG lowering. The
+    /// executable ships SEG on by default (like `optimize`, the library
+    /// default is off and embedders set `Options.seg` explicitly);
+    /// `--no-seg` is the opt-out.
+    seg: bool = true,
     /// True when `--simplify` was given: run the M2b effect-driven HIR
     /// consumers (dead-let + selective A-Normal Form, hir.md §11) before
     /// CFG lowering. Off by default.
@@ -491,6 +494,8 @@ fn parseArgs(io: std.Io, gpa: std.mem.Allocator, args: []const []const u8) !?Opt
             opts.run = true;
         } else if (parse_options and std.mem.eql(u8, a, "--seg")) {
             opts.seg = true;
+        } else if (parse_options and std.mem.eql(u8, a, "--no-seg")) {
+            opts.seg = false;
         } else if (parse_options and std.mem.eql(u8, a, "--simplify")) {
             opts.simplify = true;
         } else if (parse_options and std.mem.eql(u8, a, "--emit-bin")) {
@@ -832,25 +837,32 @@ test "parseArgs --emit-hir sets the HIR mode; defaults off" {
     try testing.expect(!o2.emit_hir);
 }
 
-test "parseArgs --seg enables the SEG pass; defaults off" {
-    var o1 = (try parseArgs(std.Io.failing, testing.allocator, &.{ "stilla", "--seg", "app.st" })).?;
+test "parseArgs SEG defaults on; --no-seg opts out" {
+    var o1 = (try parseArgs(std.Io.failing, testing.allocator, &.{ "stilla", "app.st" })).?;
     defer o1.search_dirs.deinit(testing.allocator);
     try testing.expect(o1.seg);
 
-    var o2 = (try parseArgs(std.Io.failing, testing.allocator, &.{ "stilla", "app.st" })).?;
+    var o2 = (try parseArgs(std.Io.failing, testing.allocator, &.{ "stilla", "--no-seg", "app.st" })).?;
     defer o2.search_dirs.deinit(testing.allocator);
     try testing.expect(!o2.seg);
+
+    // `--seg` stays an explicit enable (the default already), also when it
+    // follows `--no-seg`.
+    var o3 = (try parseArgs(std.Io.failing, testing.allocator, &.{ "stilla", "--no-seg", "--seg", "app.st" })).?;
+    defer o3.search_dirs.deinit(testing.allocator);
+    try testing.expect(o3.seg);
 }
 
 test "parseArgs --simplify enables the M2b consumers; defaults off" {
     var o1 = (try parseArgs(std.Io.failing, testing.allocator, &.{ "stilla", "--simplify", "app.st" })).?;
     defer o1.search_dirs.deinit(testing.allocator);
     try testing.expect(o1.simplify);
-    try testing.expect(!o1.seg);
+    try testing.expect(o1.seg);
 
     var o2 = (try parseArgs(std.Io.failing, testing.allocator, &.{ "stilla", "app.st" })).?;
     defer o2.search_dirs.deinit(testing.allocator);
     try testing.expect(!o2.simplify);
+    try testing.expect(o2.seg);
 }
 
 test "parseArgs --emit-hir conflicts with the other emission modes" {

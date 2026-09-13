@@ -10,7 +10,7 @@ Zig implementation of the Stilla v1.3 runtime and Stilla-to-CFG-AIR compiler. Us
 - `zig fmt src/` formats sources. Run it before `zig fmt --check src/`; the tree is currently format-clean.
 - `zig build -fincremental run -- examples/fib.st` compiles one Stilla source to CFG AIR on stdout; with no input it defaults to `examples/fib.st`.
 - `zig build -fincremental examples` always regenerates AIR, LLIR assembly, and LLIR binary artifacts under `zig-out/examples/` and prints their sizes.
-- CLI options must precede the input file. Important forms are `--output <file>`, `--emit-hir`, `--emit-asm`, `--emit-bin <file>`, `--module <spec>`, `--entry-fn <name>`, `--no-entry-fn`, `-I <dir>`, `--seg` (enable the M2a SEG pass, off by default), `--simplify` (enable the M2b consumers, off by default), and `--run`. The emission modes (`--emit-hir`, `--emit-asm`, `--emit-bin`) are mutually exclusive; `--emit-bin` and `--run` cannot be combined with `--output`, and `--run` cannot be combined with `--no-entry-fn`.
+- CLI options must precede the input file. Important forms are `--output <file>`, `--emit-hir`, `--emit-asm`, `--emit-bin <file>`, `--module <spec>`, `--entry-fn <name>`, `--no-entry-fn`, `-I <dir>`, `--seg`/`--no-seg` (the M2a SEG pass is on by default; `--no-seg` opts out), `--simplify` (enable the M2b consumers, off by default), and `--run`. The emission modes (`--emit-hir`, `--emit-asm`, `--emit-bin`) are mutually exclusive; `--emit-bin` and `--run` cannot be combined with `--output`, and `--run` cannot be combined with `--no-entry-fn`.
 
 ## Conventions
 

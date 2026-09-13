@@ -52,7 +52,11 @@
 //!   from scratch before rewriting; the caller re-validates structurally
 //!   and by effects after the pass. No transform is allowed to rely on
 //!   the pre-rewrite static conclusions (hir.md §2.4).
-//! - **Off by default** — enabled by `frontend.Options.seg` / `--seg`.
+//! - **Default-on in the executable** — the `stilla` CLI runs this pass by
+//!   default (`--no-seg` opts out); the library default stays off
+//!   (`frontend.Options.seg`), matching `optimize`, so embedders and tests
+//!   keep explicit control. The compile-time / round budget that justifies
+//!   the default is recorded in docs/hir.md §11.
 //!
 //! The rewriter is deliberately in-place: HIR is an append-only arena and
 //! every node has exactly one parent (§3.7), so mutating a node's fields

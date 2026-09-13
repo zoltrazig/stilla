@@ -3,8 +3,9 @@
 //! `passes/hir_seg.zig`; this file builds real modules through the
 //! checker + HIR builder, runs the pass, re-validates structure and
 //! effects, and checks the observable rule set, the negative cases, the
-//! corpus (compiles through the seam with SEG on), and SEG-on vs SEG-off
-//! interpreter equivalence.
+//! corpus (compiles through the seam with SEG on), the four
+//! `--simplify` × `--seg` combinations interpreting every corpus program
+//! identically, and the corpus-level compile-time / round budget.
 //!
 //! Wired into root.zig's test block; run via `zig build test`.
 
@@ -966,8 +967,8 @@ test "SEG: two fresh builds produce the same optimized text (deterministic)" {
 }
 
 // ---------------------------------------------------------------------------
-// Whole-pipeline: the flag is off by default; SEG-on AIR validates and
-// round-trips; SEG-on and SEG-off execution agree.
+// Whole-pipeline: enabling SEG rewrites the AIR; both the SEG-on and
+// SEG-off forms validate and round-trip.
 // ---------------------------------------------------------------------------
 
 fn compileAir(spec: []const u8, text: []const u8, seg: bool) ![]u8 {
@@ -1084,16 +1085,16 @@ test "SEG: optimized HIR prints and parses back to the same text" {
     try testing.expectEqualStrings(raw, again);
 }
 
-test "SEG: off by default; enabling it rewrites the AIR; both round-trip" {
+test "SEG: enabling the pass rewrites the AIR; both forms round-trip" {
     const src = try probe_corpus.read(testing.allocator, "probes/cases", "seg_off_by_default_air");
     defer testing.allocator.free(src);
     const off = try compileAir("app", src, false);
     defer testing.allocator.free(off);
     const on = try compileAir("app", src, true);
     defer testing.allocator.free(on);
-    // The default (SEG off) and SEG on differ: `f`'s `x + 0` is folded
-    // away only when the pass runs. Both programs are structurally valid
-    // canonical AIR (the frontend validator runs inside compile); a
+    // `Options.seg` off (the library default) and on differ: `f`'s `x + 0`
+    // is folded away only when the pass runs. Both programs are structurally
+    // valid canonical AIR (the frontend validator runs inside compile); a
     // standalone parser round-trip confirms the serialized form too.
     try testing.expect(!std.mem.eql(u8, off, on));
     for ([_][]const u8{ off, on }) |air| {
@@ -1171,26 +1172,47 @@ const Term = struct {
     }
 };
 
-/// Run one corpus program to completion, capturing output, termination,
-/// and the panic / error detail. `capture`'s variant that does not fail
-/// the test on a panic — the differential only requires SEG-on and
-/// SEG-off agree.
+/// A compiled corpus program: the whole-pipeline load result (kept alive
+/// for running) plus its canonical AIR text. The AIR is what makes the
+/// four combinations comparable without recompiling: two combinations
+/// whose AIR is byte-identical are the same program and cannot behave
+/// differently, so only distinct AIRs are executed.
+const Compiled = struct {
+    l: support.Loaded,
+    air: []u8,
+
+    fn deinit(self: *Compiled) void {
+        self.l.deinit();
+        testing.allocator.free(self.air);
+    }
+};
+
+/// Compile one corpus program through the whole pipeline under one
+/// `--simplify` × `--seg` combination and print its canonical AIR.
+fn compileProgram(text: []const u8, seg: bool, simplify: bool) !Compiled {
+    var l = try support.loadOpts(text, false, seg, simplify);
+    errdefer l.deinit();
+    const program = l.compilation.program orelse return error.TestUnexpectedResult;
+    return .{ .l = l, .air = try cfg.print(&program, testing.allocator) };
+}
+
+/// Run a compiled corpus program to completion, capturing output,
+/// termination, and the panic / error detail. Does not fail the test on a
+/// panic — the differential only requires the four combinations agree.
 ///
 /// Each run uses its own arena: `VmHeap.deinit` frees only the
 /// provenance registry, so Copy heap objects (strings, list cells) can
 /// still be live when a run ends, and the leak checker is not part of
 /// this semantic differential. The harness owns that arena and releases
 /// it whole; it does not verify runtime leak-freedom.
-fn captureTerm(text: []const u8, seg: bool) !Term {
+fn runCompiled(c: *Compiled) !Term {
     var state = CaptureAdapter{};
-    var l = try support.loadOpts(text, false, seg, false);
-    defer l.deinit();
     // The corpus imports std modules, so the root image alone cannot run:
     // build the whole-program artifact bundle and resolve `import`s through
     // its loader (the load-tests' pattern).
     var bundle_arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer bundle_arena.deinit();
-    var bundle = try artifact_bundle.ArtifactBundle.build(bundle_arena.allocator(), &(l.compilation.program orelse return error.TestUnexpectedResult));
+    var bundle = try artifact_bundle.ArtifactBundle.build(bundle_arena.allocator(), &(c.l.compilation.program orelse return error.TestUnexpectedResult));
     var run_arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer run_arena.deinit();
     const run_alloc = run_arena.allocator();
@@ -1213,58 +1235,22 @@ fn captureTerm(text: []const u8, seg: bool) !Term {
     };
 }
 
-/// SEG-on and SEG-off interpretation must agree verbatim — output,
-/// termination, and panic message (hir.md §10.3). `expect_panic` pins the
-/// intended termination so a coincidentally identical failure cannot pass
-/// as coverage.
-fn corpusDiff(dir: []const u8, spec: []const u8, expect_panic: bool) !void {
-    const path = try probe_corpus.path(testing.allocator, dir, spec);
-    defer testing.allocator.free(path);
-    const text = probe_corpus.read(testing.allocator, dir, spec) catch |err| {
-        std.debug.print("SEG corpus: cannot read {s} ({s})\n", .{ path, @errorName(err) });
-        return error.TestUnexpectedResult;
-    };
-    defer testing.allocator.free(text);
-    var off = try captureTerm(text, false);
-    defer off.deinit();
-    var on = try captureTerm(text, true);
-    defer on.deinit();
-    // The differential must actually execute the program. A run error, or
-    // the capture adapter's overflow sentinel, would make a matching
-    // failure vacuous, so surface them.
-    if (off.end == .failed) {
-        std.debug.print("SEG corpus: {s} did not run with SEG off: {s} (output {d} bytes)\n", .{ path, off.detail, off.out.len });
-        return error.TestUnexpectedResult;
-    }
-    if (off.end == .panic and std.mem.eql(u8, off.detail, "capture buffer overflow")) {
-        std.debug.print("SEG corpus: {s} overflowed the capture buffer\n", .{path});
-        return error.TestUnexpectedResult;
-    }
-    const End = @TypeOf(off.end);
-    const want: End = if (expect_panic) .panic else .normal;
-    if (off.end != want or on.end != want) {
-        std.debug.print("SEG corpus: {s} expected {s} termination, got off={s} {s} / on={s} {s}\n", .{ path, @tagName(want), @tagName(off.end), off.detail, @tagName(on.end), on.detail });
-        return error.TestUnexpectedResult;
-    }
-    if (!Term.eql(off, on)) {
-        std.debug.print("SEG corpus: {s} SEG-on/off interpretation differs (off={s} {s}, on={s} {s})\n", .{ path, @tagName(off.end), off.detail, @tagName(on.end), on.detail });
-        return error.TestUnexpectedResult;
-    }
-}
+/// The four `--simplify` × `--seg` combinations (hir.md §11): the M2b
+/// consumers and SEG are independent passes, so every combination must
+/// interpret a corpus program identically — output, termination, and
+/// panic message (hir.md §10.3). Combination 0 is the all-off baseline
+/// the other three are compared against.
+const combos = [4]struct { seg: bool, simplify: bool }{
+    .{ .seg = false, .simplify = false },
+    .{ .seg = false, .simplify = true },
+    .{ .seg = true, .simplify = false },
+    .{ .seg = true, .simplify = true },
+};
 
-fn corpusSeg(dir: []const u8, spec: []const u8) !void {
-    const path = try probe_corpus.path(testing.allocator, dir, spec);
-    defer testing.allocator.free(path);
-    const text = probe_corpus.read(testing.allocator, dir, spec) catch |err| {
-        std.debug.print("SEG corpus: cannot read {s} ({s})\n", .{ path, @errorName(err) });
-        return error.TestUnexpectedResult;
-    };
-    defer testing.allocator.free(text);
-    const air = compileAir(spec, text, true) catch |err| {
-        std.debug.print("SEG corpus: {s} failed to compile with --seg ({s})\n", .{ path, @errorName(err) });
-        return error.TestUnexpectedResult;
-    };
-    defer testing.allocator.free(air);
+/// Parse a canonical AIR text with the standalone parser (air.md §13):
+/// every combination's serialized form must round-trip, not just the
+/// default one.
+fn roundTripAir(air: []const u8, path: []const u8) !void {
     var p = cfg.Parser.init(testing.allocator);
     defer p.deinit();
     _ = p.parse(air) catch |err| {
@@ -1273,20 +1259,175 @@ fn corpusSeg(dir: []const u8, spec: []const u8) !void {
     };
 }
 
-test "SEG corpus — examples/*.st compile+round-trip and SEG-on/off agree" {
+/// Every `--simplify` × `--seg` combination must agree with the all-off
+/// baseline verbatim — output, termination, and panic message (hir.md
+/// §10.3) — and every combination's canonical AIR must round-trip
+/// through the standalone parser. `expect_panic` pins the intended
+/// termination so a coincidentally identical failure cannot pass as
+/// coverage.
+///
+/// Combinations whose AIR equals the baseline's are not re-executed:
+/// byte-identical AIR is the same program, so a second run could only
+/// duplicate the baseline result. Only combinations that actually
+/// rewrote something are run and compared. Returns a bitmask of the
+/// differing combinations (`combos[1..]` order: bit 0 = simplify-only,
+/// bit 1 = seg-only, bit 2 = both) so the caller can assert both passes
+/// were exercised.
+fn corpusDiff(dir: []const u8, spec: []const u8, expect_panic: bool) !usize {
+    const path = try probe_corpus.path(testing.allocator, dir, spec);
+    defer testing.allocator.free(path);
+    const text = probe_corpus.read(testing.allocator, dir, spec) catch |err| {
+        std.debug.print("SEG corpus: cannot read {s} ({s})\n", .{ path, @errorName(err) });
+        return error.TestUnexpectedResult;
+    };
+    defer testing.allocator.free(text);
+    // The differential must actually execute the program. A run error, or
+    // the capture adapter's overflow sentinel, would make a matching
+    // failure vacuous, so surface them.
+    var base = try compileProgram(text, false, false);
+    defer base.deinit();
+    try roundTripAir(base.air, path);
+    var baseline = try runCompiled(&base);
+    defer baseline.deinit();
+    const End = @TypeOf(baseline.end);
+    const want: End = if (expect_panic) .panic else .normal;
+    if (baseline.end == .failed) {
+        std.debug.print("SEG corpus: {s} did not run (all off): {s} (output {d} bytes)\n", .{ path, baseline.detail, baseline.out.len });
+        return error.TestUnexpectedResult;
+    }
+    if (baseline.end == .panic and std.mem.eql(u8, baseline.detail, "capture buffer overflow")) {
+        std.debug.print("SEG corpus: {s} overflowed the capture buffer (all off)\n", .{path});
+        return error.TestUnexpectedResult;
+    }
+    if (baseline.end != want) {
+        std.debug.print("SEG corpus: {s} expected {s} termination, got (all off) {s} {s}\n", .{ path, @tagName(want), @tagName(baseline.end), baseline.detail });
+        return error.TestUnexpectedResult;
+    }
+    var differed: usize = 0;
+    for (combos[1..], 1..) |c, i| {
+        var cc = try compileProgram(text, c.seg, c.simplify);
+        defer cc.deinit();
+        try roundTripAir(cc.air, path);
+        if (std.mem.eql(u8, base.air, cc.air)) continue;
+        differed |= @as(usize, 1) << @intCast(i - 1);
+        var got = try runCompiled(&cc);
+        defer got.deinit();
+        const label = try std.fmt.allocPrint(testing.allocator, "simplify={} seg={}", .{ c.simplify, c.seg });
+        defer testing.allocator.free(label);
+        if (got.end == .failed) {
+            std.debug.print("SEG corpus: {s} did not run ({s}): {s} (output {d} bytes)\n", .{ path, label, got.detail, got.out.len });
+            return error.TestUnexpectedResult;
+        }
+        if (got.end == .panic and std.mem.eql(u8, got.detail, "capture buffer overflow")) {
+            std.debug.print("SEG corpus: {s} overflowed the capture buffer ({s})\n", .{ path, label });
+            return error.TestUnexpectedResult;
+        }
+        if (got.end != want) {
+            std.debug.print("SEG corpus: {s} expected {s} termination, got {s} ({s}) {s}\n", .{ path, @tagName(want), label, @tagName(got.end), got.detail });
+            return error.TestUnexpectedResult;
+        }
+        if (!Term.eql(baseline, got)) {
+            std.debug.print("SEG corpus: {s} {s} interpretation differs from the all-off baseline\n", .{ path, label });
+            return error.TestUnexpectedResult;
+        }
+    }
+    return differed;
+}
+
+test "SEG corpus — examples/*.st compile+round-trip and every simplify×seg combination agrees" {
     var corpus = try probe_corpus.list(testing.allocator, "examples");
     defer corpus.deinit();
     for (corpus.names) |spec| {
-        try corpusSeg("examples", spec);
-        try corpusDiff("examples", spec, false);
+        _ = try corpusDiff("examples", spec, false);
     }
 }
 
-test "SEG corpus — probes/*.st compile+round-trip and SEG-on/off agree" {
+test "SEG corpus — probes/*.st compile+round-trip and every simplify×seg combination agrees" {
     var corpus = try probe_corpus.list(testing.allocator, "probes");
     defer corpus.deinit();
+    var differed: usize = 0;
     for (corpus.names) |spec| {
-        try corpusSeg("probes", spec);
-        try corpusDiff("probes", spec, probe_corpus.panics(spec));
+        differed |= try corpusDiff("probes", spec, probe_corpus.panics(spec));
     }
+    // Non-vacuity: the probes carry the rewrite-triggering programs
+    // (`consumers` / `cse` / `seg`, …), so each pass must have changed at
+    // least one probe's AIR on its own and been run against the baseline.
+    try testing.expect(differed & 0b01 != 0); // simplify alone rewrote something
+    try testing.expect(differed & 0b10 != 0); // seg alone rewrote something
+}
+
+// ---------------------------------------------------------------------------
+// Corpus budget: the recorded SEG compile-time / rounds / island baseline
+// ---------------------------------------------------------------------------
+
+// Drive SEG over the whole corpus (`probes/` + `examples/`), asserting
+// the bounded-round contract holds for every program (`Stats.converged`)
+// and aggregating the SEG compile time, rounds, and island coverage.
+//
+// This is the CI-safe half of the item-12 budget: a round-bound hit is
+// exactly the regression the §8.2 contract makes observable, so the
+// assertion is `converged`, never wall-clock (CI timing is not a stable
+// oracle). The aggregate printed here — plus the measured figures
+// recorded in hir.md §11 — is the baseline the default-on decision
+// rests on.
+//
+// `slow` names the slowest corpus program (copied into a local buffer,
+// since the corpus names are arena-freed per directory).
+test "SEG budget — every corpus program converges inside the round bound" {
+    var total_ns: u64 = 0;
+    var total_iters: u64 = 0;
+    var total_rewrites: u64 = 0;
+    var total_islands: usize = 0;
+    var total_nodes: usize = 0;
+    var covered: usize = 0;
+    var files: usize = 0;
+    var slow_ns: u64 = 0;
+    var slow_iters: u32 = 0;
+    var slow_islands: usize = 0;
+    var slow_buf: [96]u8 = undefined;
+    var slow: []const u8 = "";
+
+    for ([_][]const u8{ "probes", "examples" }) |dir| {
+        var corpus = try probe_corpus.list(testing.allocator, dir);
+        defer corpus.deinit();
+        for (corpus.names) |spec| {
+            const text = try probe_corpus.read(testing.allocator, dir, spec);
+            defer testing.allocator.free(text);
+            var b = buildText("app", &.{.{ "app", text }}) catch |err| {
+                std.debug.print("SEG budget: {s}/{s} HIR build failed ({s})\n", .{ dir, spec, @errorName(err) });
+                return error.TestUnexpectedResult;
+            };
+            defer b.deinit();
+            const nodes = b.built.program.exprs.items.len;
+            const t0 = std.Io.Clock.awake.now(testing.io);
+            const stats = hir_seg.optimize(b.arena.allocator(), b.built, .{ .graph = b.graph }) catch |err| {
+                std.debug.print("SEG budget: {s}/{s} SEG failed ({s})\n", .{ dir, spec, @errorName(err) });
+                return error.TestUnexpectedResult;
+            };
+            const ns: u64 = @intCast(t0.durationTo(std.Io.Clock.awake.now(testing.io)).nanoseconds);
+            if (!stats.converged) {
+                std.debug.print("SEG budget: {s}/{s} hit the round bound without converging ({d} rounds)\n", .{ dir, spec, stats.iterations });
+                return error.TestUnexpectedResult;
+            }
+            files += 1;
+            total_ns += ns;
+            total_iters += stats.iterations;
+            total_rewrites += stats.beta + stats.etas + stats.folds + stats.algebra + stats.lets + stats.conds + stats.matches + stats.projects + stats.shares;
+            total_islands += stats.islands;
+            total_nodes += nodes;
+            if (stats.islands > 0) covered += 1;
+            if (ns > slow_ns) {
+                slow_ns = ns;
+                slow_iters = stats.iterations;
+                slow_islands = stats.islands;
+                slow = std.fmt.bufPrint(&slow_buf, "{s}/{s}", .{ dir, spec }) catch unreachable;
+            }
+        }
+    }
+    std.debug.print(
+        "SEG budget baseline: {d} files, {d} islands / {d} reachable nodes ({d} files with islands), {d} rounds, {d} rewrites, {d} ms total; slowest {s} {d} ms ({d} rounds, {d} islands)\n",
+        .{ files, total_islands, total_nodes, covered, total_iters, total_rewrites, total_ns / std.time.ns_per_ms, slow, slow_ns / std.time.ns_per_ms, slow_iters, slow_islands },
+    );
+    try testing.expect(files > 0);
+    try testing.expect(covered > 0);
 }

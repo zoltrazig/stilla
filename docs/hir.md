@@ -8,8 +8,9 @@
 >   （hir_validate.zig）；效果分析（hir_effects.zig，模型见 effects.zig）；
 >   HIR→CFG lowering（hir_lower.zig 与 hir_lower_expr / `_control` / `_call` /
 >   `_pattern`）；module-const 依赖检查。
-> - **opt-in 消费者（默认关）**：dead-let + selective A-Normal Form
->   （hir_simplify.zig，`--simplify`）；SEG v1（hir_seg.zig，`--seg`）。
+> - **消费者**：dead-let + selective A-Normal Form（hir_simplify.zig，
+>   `--simplify`，默认关）；SEG v1（hir_seg.zig，可执行文件默认开、
+>   `--no-seg` 关闭；库默认关、`Options.seg` 开启）。
 > - **设计已定但未实现**（§11、[todo.md](todo.md)）：节点级 full-expression
 >   边界标注、真正的 slotted e-graph、HIRTypeId canonical 表、
 >   source span side table。
@@ -80,17 +81,18 @@ flowchart TD
     EFF --> MC[checkModuleDependencies]
     MC --> SIMPQ{--simplify?}
     SIMPQ -->|是| ANF[dead-let / selective ANF] --> RV1[revalidateHir]
-    SIMPQ -->|否| SEGQ{--seg?}
+    SIMPQ -->|否| SEGQ{--no-seg?}
     RV1 --> SEGQ
-    SEGQ -->|是| SEG[SEG v1 island 重写] --> RV2[revalidateHir]
-    SEGQ -->|否| LOWER[HIR→CFG lowering]
+    SEGQ -->|否| SEG[SEG v1 island 重写] --> RV2[revalidateHir]
+    SEGQ -->|是| LOWER[HIR→CFG lowering]
     RV2 --> LOWER
     LOWER --> AIRC[CFG AIR]
     AIRC --> OPT[optimizer + drop lowering]
     OPT --> LLIR[LLIR]
 ```
 
-`--simplify` 与 `--seg` **先后独立**：两者都开时先 ANF 再 SEG，各自改写后都要
+`--simplify` 与 SEG **先后独立**：`--simplify` 默认关，SEG 默认开
+（`--no-seg` 关闭）；两者都开时先 ANF 再 SEG，各自改写后都要
 `revalidateHir`（§2.4）。两者都不长在 CFG 上。
 
 **Target 形态（未立项）：**
@@ -110,7 +112,8 @@ flowchart TD
 ### 2.3 与现状管线的边界
 
 现状（唯一路径）：`module graph → checker（AST 注解）→ HIR 构建 → 结构校验 →
-效果分析校验 → module-const 检查 → [--simplify] → [--seg] → 重新校验 →
+效果分析校验 → module-const 检查 → [--simplify] → SEG（默认开，`--no-seg`关）→
+重新校验 →
 HIR→CFG lowering → optimizer → LLIR`。直降路径不再存在。
 
 HIR 落在 checker 与 CFG lowering 之间，是**兼容边界**，不是对两者的重写：
@@ -1214,10 +1217,19 @@ lowering。可选变换每轮原位重写后重新跑结构 + 效果校验（§2
 - 结构校验 hir_validate.zig（§10.1 第一级）；
 - 效果模型 effects.zig；HIR 集成 / 派生查询 / 函数摘要 SCC fixpoint / 精确
   `drop_effect(T)` / module-const 检查 hir_effects.zig；
-- 消费者：hir_simplify.zig（`--simplify`，默认关）、hir_seg.zig（`--seg`，默认关）；
+- 消费者：hir_simplify.zig（`--simplify`，默认关）、hir_seg.zig（可执行文件默认
+  开、`--no-seg` 关；库默认关）；
 - lowering hir_lower.zig（+ hir_lower_expr / `_control` / `_call` / `_pattern`），
   复用 lower.zig / cfg_lower_* 发射机制；
 - 测试：hir_tests.zig / hir_simplify_tests.zig / hir_seg_tests.zig。
+
+**SEG 编译时间 / 轮数基线**（第 12 项验收；`hir_seg_tests.zig` 的 `SEG budget`
+测试在 CI 每次打印，基线取 2026-09-13、macOS/arm64 的一次运行）：`probes/` +
+`examples/` 全语料 **56 个程序 / 4306 个可达节点**，SEG 接受 **2347 个
+island 成员（≈54%）**，共 **69 轮**、**51 次重写**，总编译时间 **≈70 ms**
+（单文件最慢 `examples/fold` 10 ms / 2 轮 / 163 islands）；每个程序都在
+`hir_seg.Config.max_iterations` 界内收敛（`Stats.converged == true`）。测试
+断言收敛（CI 稳定），时间仅记录、不断言（CI 计时不是稳定 oracle）。
 
 落地档映射（历史里程碑编号）：
 
@@ -1225,7 +1237,7 @@ lowering。可选变换每轮原位重写后重新跑结构 + 效果校验（§2
 | --- | --- | --- |
 | M1a | 结构 HIR：AST→HIR 构建、结构校验、HIR→CFG lowering；直降路径删除后成为唯一前端路径 | hir_build.zig / hir_validate.zig / hir_lower.zig |
 | M1b | 效果基础设施：`SemanticInfo.effect`、固定乘积格、transfer、cleanup 门、派生查询、host 语义注册表 | effects.zig / hir_effects.zig |
-| M2a | SEG v1 规则子集（β / η / let / 常折叠 / 整数代数 / struct 投影 / known-variant match / CSE sharing），opt-in | hir_seg.zig |
+| M2a | SEG v1 规则子集（β / η / let / 常折叠 / 整数代数 / struct 投影 / known-variant match / CSE sharing），可执行文件默认开、`--no-seg` 关 | hir_seg.zig |
 | M2b | 摘要化消费者：函数摘要 SCC least fixpoint、精确 `drop_effect(T)`、module-const 检查、dead-let / selective ANF | hir_effects.zig / hir_simplify.zig |
 
 **尚未实现**（完整清单见 [todo.md](todo.md)）：**节点级**

@@ -57,7 +57,8 @@ annotated HIR
     │
     │  [optional] effect consumers  dead-let + selective A-Normal Form
     │              (derived `isDiscardable` / `canFloatAsTree`; `--simplify`)
-    │  [optional] SEG v1         pure-Copy island rewrites (`--seg`)
+    │  SEG v1                    pure-Copy island rewrites (default on;
+    │              `--no-seg` opts out, library `Options.seg` opts in)
     │              each re-runs structural + effect validation (hir.md §2.4)
     ▼
     │  HIR→CFG lowering  CFG AIR generation
@@ -92,7 +93,8 @@ were removed. The effect infrastructure
 the function-summary SCC least fixpoint, the precise `drop_effect`
 chain, the summary-driven module-const init/teardown check, and the
 opt-in dead-let / selective-A-Normal-Form consumers
-(`src/passes/hir_simplify.zig`) and SEG pass (`src/passes/hir_seg.zig`).
+(`src/passes/hir_simplify.zig`) and the SEG pass (`src/passes/hir_seg.zig`,
+shipped on by the executable).
 Shape:
 
 ```text

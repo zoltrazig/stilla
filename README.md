@@ -42,8 +42,8 @@ and the trailing section lists what the code and docs still mark open.
   admission over `isSegSafe`, and four rule groups (β→let boundary
   rewrite, let simplification, typed constant folding, integer algebra)
   with minimal-node-cost extraction and post-rewrite effect
-  re-validation (`hir_seg`, off by default; `--seg` / `Options.seg`
-  enable it, [hir.md](docs/hir.md) §11)
+  re-validation (`hir_seg`, on by default in the executable; `--no-seg`
+  opts out, library `Options.seg` opts in, [hir.md](docs/hir.md) §11)
 - [x] **CFG lowering** — control flow, `match`/patterns, field paths, calls,
   intrinsic (`builtin`) expansion, destruction placement, module init
   functions, syscalls
@@ -80,7 +80,8 @@ and the trailing section lists what the code and docs still mark open.
   `examples/embed/random_demo.zig`, `libstilla.a` static library
 - [x] **CLI** — compile to canonical HIR / CFG AIR / LLIR assembly / LLIR
   binary; `--run` (source or self-contained binary);
-  `--module`/`--entry-fn`/`--no-entry-fn`/`-I`; `--seg` (optional SEG)
+  `--module`/`--entry-fn`/`--no-entry-fn`/`-I`; `--seg`/`--no-seg` (SEG is
+  on by default)
 
 **Standard library (embedded `std/` source)**
 
@@ -221,8 +222,8 @@ fn () => 42i32
 ```
 
 Options: `--output <file>`, `--module <spec>`, `--entry-fn <name>` /
-`--no-entry-fn`, `-I <dir>`, `--seg` (run the SEG pass,
-[hir.md](docs/hir.md) §11; off by default), and the emission modes
+`--no-entry-fn`, `-I <dir>`, `--seg`/`--no-seg` (SEG is on by default,
+[hir.md](docs/hir.md) §11), and the emission modes
 `--emit-hir` (the canonical HIR text form, [hir.md](docs/hir.md) §4),
 `--emit-asm`, `--emit-bin <file>`, and `--run` (compile and execute).
 Diagnostics are

@@ -93,9 +93,12 @@ pub const Options = struct {
     /// Run the SEG v1 pass (hir.md §11 M2a) between effect analysis and
     /// HIR→CFG lowering: rewrite admissible pure-Copy islands (β, let
     /// simplification, constant folding, integer algebra), then
-    /// re-validate structure and effects (§2.4). Default off — SEG is an
-    /// opt-in optimization with its own compile-time budget; the `--seg`
-    /// CLI flag enables it.
+    /// re-validate structure and effects (§2.4). The pass obeys the
+    /// bounded-round contract (hir_seg.Config.max_iterations) and its
+    /// corpus-level compile-time / iteration baseline is recorded in
+    /// hir.md §11. Default off — embedders and tests keep the faithful
+    /// unrewritten HIR; the `stilla` executable enables it by default
+    /// (`--no-seg` opts out).
     seg: bool = false,
     /// Run the effect-driven HIR consumers (hir.md §11 M2b): dead-let
     /// elimination and selective A-Normal Form, both admitted solely by
