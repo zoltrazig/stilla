@@ -21,20 +21,24 @@
 //!   simplification (dead let, used-once forwarding, trivial-atom
 //!   forwarding), struct projection (`field_get(struct_make(…), i) → vi`
 //!   for a known field index, §8.3), constant folding over the typed reps,
-//!   integer algebra identities, and the known-variant `match` reduction to
-//!   `let` (§8.6). Not in scope: tuple / list projection (`tuple_make` /
-//!   `list_make` are hard island boundaries — `seg == null`), associativity /
-//!   commutativity search, CSE, `move` / `drop` / borrow, host calls (§8.3).
+//!   integer algebra identities, the known-variant `match` reduction to
+//!   `let` (§8.6), and CSE-style sharing (two α-equivalent `isDuplicable`
+//!   operands of one `strict_ltr`, region-free island node materialize into
+//!   a synthesized `let`, §8.3). Not in scope: tuple / list projection
+//!   (`tuple_make` / `list_make` are hard island boundaries — `seg == null`),
+//!   non-sibling (cross-statement / cross-branch) sharing, associativity /
+//!   commutativity search, `move` / `drop` / borrow, host calls (§8.3).
 //! - **Extraction cost** — v1 uses minimal node count plus a
 //!   deterministic rule order as the tie-break (hir.md §8.2). The let /
 //!   folding / algebra / struct-projection rules strictly reduce `costOf`; β
 //!   (a boundary rewrite, not an e-class extraction) is admitted by its
 //!   contract and the known-variant `match` reduction by its coverage /
-//!   arity proof.
-//!   The `match` rule splices one `let` per bound payload, so a wide
-//!   constructor can add nodes: termination comes from the bounded
-//!   `max_iterations` rounds (each `match` node is consumed once), not
-//!   from a globally decreasing cost.
+//!   arity proof. Two rules may *add* nodes: the `match` rule splices one
+//!   `let` per bound payload and CSE sharing materializes a shared subterm,
+//!   so a wide constructor / a shared subtree can grow the tree. Termination
+//!   comes from the bounded `max_iterations` rounds (each `match` node is
+//!   consumed once; a CSE binding has at least two uses and a non-trivial
+//!   init, so no let rule undoes it), not from a globally decreasing cost.
 //! - **Re-verification** — each iteration re-derives the effect analysis
 //!   from scratch before rewriting; the caller re-validates structurally
 //!   and by effects after the pass. No transform is allowed to rely on
@@ -61,6 +65,71 @@ pub const Error = std.mem.Allocator.Error;
 /// and is refused rather than followed (hir.md §8.5).
 const max_eta_chain: usize = 32;
 
+/// Positional binder remapping for structural (α-)comparison in CSE
+/// sharing. Binders are globally unique to their defining region, so a map
+/// entry is stable across the whole comparison; an unmapped binder is a
+/// free variable and is compared by raw id.
+const BinderMap = std.AutoHashMapUnmanaged(hir.BinderId, hir.BinderId);
+
+/// Payload comparison for CSE's structural (α-)equivalence. A `binder`
+/// payload that `map` has seen is compared through the map; an unmapped one
+/// is a free variable and compared by raw id. `FuncRef` is two dense ids,
+/// so `std.meta.eql` is exact.
+fn payloadAlphaEq(a: hir.Payload, b: hir.Payload, map: *BinderMap) bool {
+    return switch (a) {
+        .none => b == .none,
+        .const_value => |ca| switch (b) {
+            .const_value => |cb| constEql(ca, cb),
+            else => false,
+        },
+        .binder => |ba| switch (b) {
+            .binder => |bb| if (map.get(ba)) |m| m == bb else ba == bb,
+            else => false,
+        },
+        .func => |fa| switch (b) {
+            .func => |fb| std.meta.eql(fa, fb),
+            else => false,
+        },
+        .module_const => |ca| switch (b) {
+            .module_const => |cb| ca == cb,
+            else => false,
+        },
+        .field => |fa| switch (b) {
+            .field => |fb| fa == fb,
+            else => false,
+        },
+        .tag => |ta| switch (b) {
+            .tag => |tb| ta == tb,
+            else => false,
+        },
+    };
+}
+
+/// Conservative `ConstValue` equality for CSE: strings compare by contents;
+/// floats by `==` (a NaN pair compares unequal — a missed merge, never a
+/// wrong one).
+fn constEql(a: meta.ConstValue, b: meta.ConstValue) bool {
+    return switch (a) {
+        .int => |ia| switch (b) {
+            .int => |ib| ia == ib,
+            else => false,
+        },
+        .float => |fa| switch (b) {
+            .float => |fb| fa == fb,
+            else => false,
+        },
+        .bool => |ba| switch (b) {
+            .bool => |bb| ba == bb,
+            else => false,
+        },
+        .string => |sa| switch (b) {
+            .string => |sb| std.mem.eql(u8, sa, sb),
+            else => false,
+        },
+        .void => b == .void,
+    };
+}
+
 /// What one `optimize` call did — for tests and the compile-time budget.
 pub const Stats = struct {
     iterations: u32 = 0,
@@ -74,6 +143,7 @@ pub const Stats = struct {
     conds: usize = 0,
     matches: usize = 0,
     projects: usize = 0,
+    shares: usize = 0,
 };
 
 pub const Config = struct {
@@ -124,6 +194,7 @@ pub fn optimize(arena: std.mem.Allocator, built: *hir.BuiltProgram, config: Conf
         stats.conds += rw.conds;
         stats.matches += rw.matches;
         stats.projects += rw.projects;
+        stats.shares += rw.shares;
         if (!changed) break;
     }
     return stats;
@@ -155,6 +226,15 @@ const Rewriter = struct {
     conds: usize = 0,
     matches: usize = 0,
     projects: usize = 0,
+    shares: usize = 0,
+
+    /// Node ids whose content this round has already overwritten in place.
+    /// An island-membership or analysis verdict about such a node describes
+    /// a shape that no longer exists, so no rule may consult it (the pass
+    /// header's "no transform may rely on the pre-rewrite static
+    /// conclusions"). Fresh per round (a new `Rewriter` is built each
+    /// `optimize` iteration).
+    dirty: std.AutoHashMapUnmanaged(hir.ExprId, void) = .empty,
 
     /// The full-expression id β maps every cloned λ-body node onto
     /// (hir.md §8.4 `maps_full_expr`): the call site's FE. Set per β
@@ -186,9 +266,18 @@ const Rewriter = struct {
         return true;
     }
 
+    /// Record that `id`'s content was overwritten in place this round. Its
+    /// cached island/effect verdict now describes a dead shape; `ruleCse`
+    /// refuses any operand so marked and rewrites it only next round, off a
+    /// fresh `Analysis`.
+    fn markDirty(self: *Rewriter, id: hir.ExprId) Error!void {
+        try self.dirty.put(self.arena, id, {});
+    }
+
     /// A node's analysis annotation is only meaningful while the pass has
-    /// not rewritten its *content*; β is the only rule that consults the
-    /// analysis (via `tryBeta`) and it runs before any rewrite at that id.
+    /// not rewritten its *content*. `tryBeta` runs before any rewrite at
+    /// that id (from `rewrite`); `ruleCse` guards each operand with the
+    /// dirty set instead.
     fn analysisValid(self: *Rewriter, id: hir.ExprId) bool {
         return id < self.enc.len;
     }
@@ -252,6 +341,7 @@ const Rewriter = struct {
             if (try self.tryBeta(id)) {
                 self.changed = true;
                 self.beta += 1;
+                try self.markDirty(id);
                 // The call node now holds a let chain; simplify it (and
                 // recurse into the freshly cloned body). The result is
                 // island-internal by construction, so rules are allowed
@@ -266,6 +356,7 @@ const Rewriter = struct {
             if (try self.tryEta(id)) {
                 self.changed = true;
                 self.etas += 1;
+                try self.markDirty(id);
             }
         }
         try self.rewriteChildren(id);
@@ -602,8 +693,17 @@ const Rewriter = struct {
     // Ordinary island rules
     // -----------------------------------------------------------------
 
+    /// Try every ordinary island rule at `id` (one rule per visit). A rule
+    /// that fires overwrote the node's content in place, so `id` joins the
+    /// dirty set: any later operand query about it would read a dead shape.
     fn applyRules(self: *Rewriter, id: hir.ExprId, allowed: bool) Error!bool {
         if (!allowed) return false;
+        const changed = try self.applyRulesInner(id);
+        if (changed) try self.markDirty(id);
+        return changed;
+    }
+
+    fn applyRulesInner(self: *Rewriter, id: hir.ExprId) Error!bool {
         const pr = self.p();
         const name = hir.registry.get(pr.node(id).op).name;
         if (std.mem.eql(u8, name, "if") or std.mem.eql(u8, name, "and") or std.mem.eql(u8, name, "or")) {
@@ -632,6 +732,11 @@ const Rewriter = struct {
         }
         if (hir.registry.get(pr.node(id).op).typed) {
             if (try self.ruleNumeric(id)) return true;
+        }
+        // Lowest priority: only merge operands the other rules left alone.
+        if (try self.ruleCse(id)) {
+            self.shares += 1;
+            return true;
         }
         return false;
     }
@@ -909,6 +1014,253 @@ const Rewriter = struct {
             for (pr.operands(id)) |op| try work.append(self.arena, op);
             for (pr.regionsOf(id)) |r| try work.append(self.arena, pr.region(r).root);
         }
+    }
+
+    // -----------------------------------------------------------------
+    // CSE-style sharing (hir.md §8.3; docs/todo.md 10)
+    // -----------------------------------------------------------------
+
+    /// Two α-equivalent, `isDuplicable` operands of one island node are
+    /// computed once and read from a synthesized `let` binder. In short:
+    ///
+    /// - **operand list only** — the parent must have no region and be
+    ///   `strict_ltr`, so every operand is evaluated exactly once, in order
+    ///   (typed opcodes, `call`, `seq`, the aggregate makers). A `let` /
+    ///   `lambda` / `if` / `match` / `and` / `or` parent owns regions and is
+    ///   skipped; non-sibling sharing is PRE and belongs to the CFG
+    ///   optimizer;
+    /// - **same full expression** — every candidate shares the parent's FE,
+    ///   so the synthesized `let` never crosses a boundary (`seq`'s statement
+    ///   operand and a source-level `let` init both carry their own FE);
+    /// - **`encOf` + `isDuplicable`** — island member, Copy, total, no
+    ///   observable effect, all operand uses `Read`, no `Q`. Hoisting the
+    ///   first occurrence to the let initializer therefore reorders only a
+    ///   pure, total, deterministic computation: no effect, trap, divergence
+    ///   or `Q` can be observed to move;
+    /// - **not dirty** — an operand rewritten earlier this round has a dead
+    ///   shape behind its cached verdict; deferred to a fresh analysis next
+    ///   round;
+    /// - **not a trivial atom** — a `const` / `local` / `fn_ref` operand is
+    ///   not worth a binder, and `ruleLet`'s trivial-atom forwarding would
+    ///   immediately undo the `let` (oscillation). Otherwise `ruleLet`
+    ///   cannot undo the result: a CSE binding has ≥2 uses (kills dead-let /
+    ///   used-once forwarding) and a non-trivial init (kills forwarding).
+    ///
+    /// **Cleanup registration is unchanged.** `isDuplicable` forces a Copy
+    /// result with the whole subtree under `ownershipGate` (every `.owned`
+    /// node Copy, no borrowed view, no `Consume` use); a non-borrow region
+    /// binding would make `cleanupEffect` `null` and `discardable` false.
+    /// `CleanupToken`s are registered only for owned Unique temporaries, so
+    /// no token can name a donor — no `remapCleanupOrigin` is needed, and
+    /// none is meaningful (an orphaned duplicate has no single owner).
+    fn ruleCse(self: *Rewriter, id: hir.ExprId) Error!bool {
+        const pr = self.p();
+        const n = pr.node(id);
+        const d = hir.registry.get(n.op);
+        if (d.regions != .none) return false;
+        if (d.policy != .strict_ltr) return false;
+        const ops = try self.dupOperands(id);
+        if (ops.len < 2) return false;
+        var i: usize = 0;
+        while (i < ops.len) : (i += 1) {
+            if (!try self.cseCandidate(ops[i], n.full_expr)) continue;
+            var j = i + 1;
+            while (j < ops.len) : (j += 1) {
+                if (!try self.cseCandidate(ops[j], n.full_expr)) continue;
+                if (!try self.alphaEq(ops[i], ops[j])) continue;
+                try self.spliceShare(id, ops, i);
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /// One legal sharing occurrence: island member, unrewritten this round,
+    /// in the parent's full expression, non-trivial, and `isDuplicable`.
+    fn cseCandidate(self: *Rewriter, op: hir.ExprId, fe: hir.FullExprId) Error!bool {
+        if (self.dirty.contains(op)) return false;
+        if (!self.encOf(op)) return false;
+        const pr = self.p();
+        if (pr.node(op).full_expr != fe) return false;
+        if (isTrivialAtom(pr, op)) return false;
+        return self.analysis.isDuplicable(op);
+    }
+
+    /// Overwrite `id` with `let B = ops[first] in <id with every
+    /// α-equivalent operand reading %B>`. Each replacement is a *fresh*
+    /// `local` node: HIR is a tree (§3.7), so one binder reference cannot
+    /// be a shared id. The donors stay in the arena, unreachable.
+    fn spliceShare(self: *Rewriter, id: hir.ExprId, ops: []const hir.ExprId, first: usize) Error!void {
+        const pr = self.p();
+        const n = pr.node(id);
+        const fe = n.full_expr;
+        const init = ops[first];
+        const init_ty = pr.node(init).ty;
+        const binder = try pr.addBinder(init_ty, .value);
+        const new_ops = try self.arena.alloc(hir.ExprId, ops.len);
+        @memcpy(new_ops, ops);
+        var k: usize = first;
+        while (k < ops.len) : (k += 1) {
+            // Replace only donors that pass the same gate as the pair
+            // finder (`ruleCse`): an α-equal but dirty / non-island /
+            // non-duplicable operand must not be redirected on a verdict
+            // the pass refuses to trust elsewhere.
+            if (k == first) {
+                new_ops[k] = try self.addLocal(binder, init_ty, fe);
+                continue;
+            }
+            if (!try self.cseCandidate(ops[k], fe)) continue;
+            if (!try self.alphaEq(init, ops[k])) continue;
+            new_ops[k] = try self.addLocal(binder, init_ty, fe);
+        }
+        var body = n;
+        body.operands = try pr.addOperands(new_ops);
+        const body_id = try pr.addExpr(body);
+        const rid = try pr.addRegion(&.{binder}, body_id, null);
+        const regs = try pr.addRegions(&.{rid});
+        const opr = try pr.addOperands(&.{init});
+        const let_id = try pr.addExpr(.{
+            .op = hir.opId("let").?,
+            .ty = n.ty,
+            .operands = opr,
+            .regions = regs,
+            .full_expr = fe,
+            .sema = try pr.internSema(.owned, .pending),
+        });
+        pr.exprs.items[id] = pr.node(let_id);
+    }
+
+    fn addLocal(self: *Rewriter, binder: hir.BinderId, ty: meta.Type, fe: hir.FullExprId) Error!hir.ExprId {
+        const pr = self.p();
+        return pr.addExpr(.{
+            .op = hir.opId("local").?,
+            .ty = ty,
+            .payload = .{ .binder = binder },
+            .full_expr = fe,
+            .sema = try pr.internSema(.owned, .pending),
+        });
+    }
+
+    /// Structural (α-)equivalence of two subtrees of *this* program. Region
+    /// params map positionally; a `local` binder that no compared region
+    /// binds is compared by raw id — sibling occurrences share their
+    /// enclosing scope, so a shared free binder has the same id, and two
+    /// different ids are genuinely different variables. `access_hops` is
+    /// deliberately not compared: every op carrying it (`fn_ref` /
+    /// `module_const` / `const`) is excluded by the island-member or
+    /// trivial-atom gate before `alphaEq` runs.
+    fn alphaEq(self: *Rewriter, a: hir.ExprId, b: hir.ExprId) Error!bool {
+        var map = BinderMap.empty;
+        defer map.deinit(self.arena);
+        return self.alphaEqExpr(a, b, &map);
+    }
+
+    fn alphaEqExpr(self: *Rewriter, a: hir.ExprId, b: hir.ExprId, map: *BinderMap) Error!bool {
+        const pr = self.p();
+        const na = pr.node(a);
+        const nb = pr.node(b);
+        if (na.op != nb.op) return false;
+        if (!meta.Type.eql(na.ty, nb.ty)) return false;
+        if (!payloadAlphaEq(na.payload, nb.payload, map)) return false;
+        const ao = pr.operands(a);
+        const bo = pr.operands(b);
+        if (ao.len != bo.len) return false;
+        for (ao, bo) |x, y| {
+            if (!try self.alphaEqExpr(x, y, map)) return false;
+        }
+        const ar = pr.regionsOf(a);
+        const br = pr.regionsOf(b);
+        if (ar.len != br.len) return false;
+        for (ar, br) |ra, rb| {
+            const pa = pr.params(ra);
+            const pb = pr.params(rb);
+            if (pa.len != pb.len) return false;
+            for (pa, pb) |x, y| {
+                if (!self.mapBinder(map, x, y)) return false;
+            }
+            const rga = pr.region(ra);
+            const rgb = pr.region(rb);
+            if (!try self.alphaEqExpr(rga.root, rgb.root, map)) return false;
+            if ((rga.pattern == null) != (rgb.pattern == null)) return false;
+            if (rga.pattern) |pid| {
+                if (!try self.alphaEqPattern(pid, rgb.pattern.?, map)) return false;
+            }
+        }
+        return true;
+    }
+
+    fn mapBinder(self: *Rewriter, map: *BinderMap, a: hir.BinderId, b: hir.BinderId) bool {
+        if (map.get(a)) |already| return already == b;
+        map.put(self.arena, a, b) catch return false;
+        return true;
+    }
+
+    fn alphaEqPattern(self: *Rewriter, pa: hir.PatternId, pb: hir.PatternId, map: *BinderMap) Error!bool {
+        const pr = self.p();
+        const x = pr.pattern(pa);
+        const y = pr.pattern(pb);
+        return switch (x) {
+            .wildcard => y == .wildcard,
+            .bind => |ba| switch (y) {
+                .bind => |bb| if (map.get(ba)) |m| m == bb else ba == bb,
+                else => false,
+            },
+            .literal => |ca| switch (y) {
+                .literal => |cb| constEql(ca, cb),
+                else => false,
+            },
+            .tuple => |xa| switch (y) {
+                .tuple => |xb| blk: {
+                    if (xa.len != xb.len) break :blk false;
+                    for (xa, xb) |c1, c2| {
+                        if (!try self.alphaEqPattern(c1, c2, map)) break :blk false;
+                    }
+                    break :blk true;
+                },
+                else => false,
+            },
+            .list => |la| switch (y) {
+                .list => |lb| blk: {
+                    if (la.elems.len != lb.elems.len) break :blk false;
+                    for (la.elems, lb.elems) |c1, c2| {
+                        if (!try self.alphaEqPattern(c1, c2, map)) break :blk false;
+                    }
+                    if ((la.rest == null) != (lb.rest == null)) break :blk false;
+                    if (la.rest) |r1| {
+                        if (!try self.alphaEqPattern(r1, lb.rest.?, map)) break :blk false;
+                    }
+                    break :blk true;
+                },
+                else => false,
+            },
+            .struct_ => |sa| switch (y) {
+                .struct_ => |sb| blk: {
+                    if (sa.fields.len != sb.fields.len) break :blk false;
+                    for (sa.fields, sb.fields) |f1, f2| {
+                        if (f1.field != f2.field) break :blk false;
+                        if (!try self.alphaEqPattern(f1.pat, f2.pat, map)) break :blk false;
+                    }
+                    break :blk true;
+                },
+                else => false,
+            },
+            .variant => |va| switch (y) {
+                .variant => |vb| blk: {
+                    if (va.tag != vb.tag) break :blk false;
+                    if ((va.payload == null) != (vb.payload == null)) break :blk false;
+                    if (va.payload) |p1| {
+                        if (!try self.alphaEqPattern(p1, vb.payload.?, map)) break :blk false;
+                    }
+                    break :blk true;
+                },
+                else => false,
+            },
+            .type_test => |ta| switch (y) {
+                .type_test => |tb| meta.Type.eql(ta.ty, tb.ty) and
+                    (map.get(ta.bind) orelse ta.bind) == tb.bind,
+                else => false,
+            },
+        };
     }
 
     // -----------------------------------------------------------------

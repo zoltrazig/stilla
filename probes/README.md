@@ -65,6 +65,11 @@ The detailed probes cover the source-reachable operation/type matrix:
   projected operand as a non-constant expression, and the refused shapes: a
   non-constructor (`let`-bound) base and a constructor written out of
   declaration order (its temp `let` chain opens a full-expression boundary)
+- `cse.st`: CSE-style sharing ([hir.md](hir.md) §8.3) — two α-equivalent
+  `isDuplicable` operands of one island node materialize into a synthesized
+  `let` (identical `mul`s, identical field reads, and a shared non-trivial
+  pure subtree), next to the refusal: a Unique `Token` constructor pair is
+  consumed by its aggregate, so neither is an island member / duplicable
 
 Every `probes/*.st` file is enumerated at test time by
 `src/probe_corpus.zig`, so a new probe automatically joins the HIR build

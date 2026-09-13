@@ -15,6 +15,7 @@ const cfg = @import("cfg.zig");
 const hir = @import("hir.zig");
 const hir_build = @import("passes/hir_build.zig");
 const hir_effects = @import("passes/hir_effects.zig");
+const effects = @import("effects.zig");
 const hir_seg = @import("passes/hir_seg.zig");
 const frontend = @import("frontend.zig");
 const interpreter = @import("interpreter.zig");
@@ -72,6 +73,13 @@ fn buildText(entry: []const u8, texts: []const struct { []const u8, []const u8 }
 /// §2.4): every rewrite consumer in this suite runs it, including the
 /// single-round `segOnce`. A violation is a loud failure.
 fn revalidateRewritten(b: *Built) !void {
+    return revalidateRewrittenWith(b, &.{});
+}
+
+/// `revalidateRewritten` under an explicit host-declaration environment
+/// (docs/effects.md §13), so a rewrite run and its re-validation share
+/// one effect environment (the `simplifyAllWith` pattern).
+fn revalidateRewrittenWith(b: *Built, host_decls: []const effects.HostDecl) !void {
     for (b.built.funcs.items) |f| {
         const msg = try hir.validate(&b.built.program, f.root, testing.allocator);
         if (msg) |m| {
@@ -89,7 +97,7 @@ fn revalidateRewritten(b: *Built) !void {
             return error.TestUnexpectedResult;
         }
     }
-    var an = try hir_effects.Analysis.init(b.arena.allocator(), b.built, .{ .graph = b.graph });
+    var an = try hir_effects.Analysis.init(b.arena.allocator(), b.built, .{ .graph = b.graph, .host_decls = host_decls });
     try an.analyze();
     if (try an.validate(b.arena.allocator())) |m| {
         std.debug.print("SEG effect validation failed: {s}\n", .{m});
@@ -102,6 +110,13 @@ fn revalidateRewritten(b: *Built) !void {
 fn segAll(b: *Built) !hir_seg.Stats {
     const stats = try hir_seg.optimize(b.arena.allocator(), b.built, .{ .graph = b.graph });
     try revalidateRewritten(b);
+    return stats;
+}
+
+/// `segAll` under an explicit host-declaration environment.
+fn segAllWith(b: *Built, host_decls: []const effects.HostDecl) !hir_seg.Stats {
+    const stats = try hir_seg.optimize(b.arena.allocator(), b.built, .{ .graph = b.graph, .host_decls = host_decls });
+    try revalidateRewrittenWith(b, host_decls);
     return stats;
 }
 
@@ -625,6 +640,103 @@ test "SEG: a struct literal crossing a full-expression boundary is not an island
     try testing.expect(try funcHasNode(&b, "app.project_second", "field_get"));
 }
 
+// ---------------------------------------------------------------------------
+// CSE-style sharing (hir.md §8.3)
+// ---------------------------------------------------------------------------
+
+test "SEG: CSE shares a duplicate pure island operand into a let" {
+    const src = try probe_corpus.read(testing.allocator, "probes/cases", "seg_cse_share");
+    defer testing.allocator.free(src);
+    var b = try buildText("app", &.{.{ "app", src }});
+    defer b.deinit();
+    const stats = try segAll(&b);
+    try testing.expect(stats.shares >= 1);
+    // Two `mul(%B0, %B1)` operands become one `let`-bound evaluation.
+    try expectFuncBody(&b, "app.mul_pair", "fn (B0: i32, B1: i32) => let B2: i32 = mul.i32(%B0, %B1) in add.i32(%B2, %B2)");
+    try testing.expectEqual(@as(usize, 1), try countNodes(&b, "app.mul_pair", "mul.i32"));
+    // Tree, not DAG (§3.7): the two parameter reads plus the two shared-binder
+    // reads are four distinct `local` nodes.
+    try testing.expectEqual(@as(usize, 4), try countNodes(&b, "app.mul_pair", "local"));
+    // "合成 let 不得改变销毁注册": no registered owner is orphaned.
+    try testing.expect(try cleanupOriginsReachable(&b));
+}
+
+test "SEG: CSE is refused for a non-duplicable operand and across a full expression" {
+    const src = try probe_corpus.read(testing.allocator, "probes/cases", "seg_cse_refused");
+    defer testing.allocator.free(src);
+    var b = try buildText("app", &.{.{ "app", src }});
+    defer b.deinit();
+    // The duplicate `div` pair: `div.i32` may trap, so not total — neither
+    // an island member nor `isDuplicable`.
+    const f = try findFunc(&b, "app.div_pair");
+    const div0 = try findNode(&b, f.root, "div.i32") orelse return error.TestUnexpectedResult;
+    var an = try analysisOf(&b);
+    try testing.expect(!(try an.isDuplicable(div0)));
+    try testing.expect(!try an.isSegSafe(div0));
+    // Two α-equivalent `mul`s in separate source-`let` initializers (each
+    // its own full expression) are never operands of one node.
+    const stats = try segAll(&b);
+    try testing.expectEqual(@as(usize, 0), stats.shares);
+    try testing.expectEqual(@as(usize, 2), try countNodes(&b, "app.div_pair", "div.i32"));
+    try testing.expectEqual(@as(usize, 2), try countNodes(&b, "app.cross_fe", "mul.i32"));
+}
+
+test "SEG: CSE is refused for a Unique operand (not duplicable)" {
+    const src = try probe_corpus.read(testing.allocator, "probes/cases", "seg_cse_unique");
+    defer testing.allocator.free(src);
+    var b = try buildText("app", &.{.{ "app", src }});
+    defer b.deinit();
+    // The inner `Token { value: v }` constructor result is Unique: Copy
+    // fails, so `isDuplicable` is false and the two constructors stay.
+    const f = try findFunc(&b, "app.f");
+    const two_make = try findNode(&b, f.root, "struct_make") orelse return error.TestUnexpectedResult;
+    const token_make = b.built.program.operands(two_make)[0];
+    var an = try analysisOf(&b);
+    try testing.expect(!(try an.isDuplicable(token_make)));
+    const stats = try segAll(&b);
+    try testing.expectEqual(@as(usize, 0), stats.shares);
+    // Two `Token` constructors survive (plus the `Two` aggregate).
+    try testing.expectEqual(@as(usize, 3), try countNodes(&b, "app.f", "struct_make"));
+}
+
+test "SEG: CSE is refused for an observable or Q-carrying host read" {
+    const sensor = try probe_corpus.read(testing.allocator, "probes/cases", "seg_cse_host_sensor");
+    defer testing.allocator.free(sensor);
+    const app = try probe_corpus.read(testing.allocator, "probes/cases", "seg_cse_host_app");
+    defer testing.allocator.free(app);
+    const texts = [_]struct { []const u8, []const u8 }{
+        .{ "sensor", sensor },
+        .{ "app", app },
+    };
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const write_read = try effects.summaryOf(a, &.{.{ .resource = .{ .host = 1 }, .mode = .write }});
+    const plain_read = try effects.summaryOf(a, &.{.{ .resource = .{ .host = 1 }, .mode = .read }});
+    const q_read = effects.Summary{
+        .accesses = plain_read.accesses,
+        .may_trap = false,
+        .may_diverge = false,
+        .nondeterministic = true,
+    };
+    const cases = [_]effects.Summary{ write_read, q_read };
+    for (cases) |summary| {
+        var b = try buildText("app", &texts);
+        defer b.deinit();
+        const decls = [_]effects.HostDecl{
+            .{ .key = "sensor.read", .summary = summary, .stilla_execution = .forbidden },
+        };
+        const f = try findFunc(&b, "app.f");
+        const call0 = try findNode(&b, f.root, "call") orelse return error.TestUnexpectedResult;
+        var an = try hir_effects.Analysis.init(b.arena.allocator(), b.built, .{ .graph = b.graph, .host_decls = &decls });
+        try an.analyze();
+        try testing.expect(!(try an.isDuplicable(call0)));
+        const stats = try segAllWith(&b, &decls);
+        try testing.expectEqual(@as(usize, 0), stats.shares);
+        try testing.expectEqual(@as(usize, 2), try countNodes(&b, "app.f", "call"));
+    }
+}
+
 /// One analysis/rewrite round only (no fixpoint), so a rule's immediate
 /// output survives long enough to be inspected before later rounds
 /// simplify it away.
@@ -655,6 +767,50 @@ fn findNode(b: *Built, root: hir.ExprId, name: []const u8) !?hir.ExprId {
 fn funcHasNode(b: *Built, func: []const u8, name: []const u8) !bool {
     const f = try findFunc(b, func);
     return (try findNode(b, f.root, name)) != null;
+}
+
+/// Number of `name`-op nodes reachable in `func`'s body — the
+/// non-vacuous form of "the shared subtree is evaluated once" (one copy
+/// remains after CSE, two before).
+fn countNodes(b: *Built, func: []const u8, name: []const u8) !usize {
+    const f = try findFunc(b, func);
+    const pr = &b.built.program;
+    var count: usize = 0;
+    var work = std.ArrayListUnmanaged(hir.ExprId).empty;
+    defer work.deinit(testing.allocator);
+    try work.append(testing.allocator, f.root);
+    while (work.pop()) |id| {
+        if (std.mem.eql(u8, hir.registry.get(pr.node(id).op).name, name)) count += 1;
+        for (pr.operands(id)) |op| try work.append(testing.allocator, op);
+        for (pr.regionsOf(id)) |r| try work.append(testing.allocator, pr.region(r).root);
+    }
+    return count;
+}
+
+/// Every registered cleanup owner is still reachable from a function body
+/// or constant initializer. CSE's donors become unreachable, so this
+/// pins the "合成 `let` 不得改变销毁注册" clause: no `CleanupToken` may name
+/// an orphaned duplicate.
+fn cleanupOriginsReachable(b: *Built) !bool {
+    const pr = &b.built.program;
+    var live = std.AutoHashMapUnmanaged(hir.ExprId, void).empty;
+    defer live.deinit(testing.allocator);
+    var work = std.ArrayListUnmanaged(hir.ExprId).empty;
+    defer work.deinit(testing.allocator);
+    for (b.built.funcs.items) |f| try work.append(testing.allocator, f.root);
+    for (b.built.consts.items) |c| {
+        if (c.init) |root| try work.append(testing.allocator, root);
+    }
+    while (work.pop()) |id| {
+        if (live.contains(id)) continue;
+        try live.put(testing.allocator, id, {});
+        for (pr.operands(id)) |op| try work.append(testing.allocator, op);
+        for (pr.regionsOf(id)) |r| try work.append(testing.allocator, pr.region(r).root);
+    }
+    for (pr.cleanup_tokens.items) |tk| {
+        if (!live.contains(tk.origin_expr)) return false;
+    }
+    return true;
 }
 
 test "SEG: known-variant match splices payload lets in constructor order (one round)" {
@@ -749,26 +905,38 @@ test "SEG: the pass is a fixpoint (second run rewrites nothing)" {
     var b = try buildText("app", &.{.{ "app", src }});
     defer b.deinit();
     const first = try segAll(&b);
-    try testing.expect(first.beta + first.folds + first.algebra + first.lets + first.conds > 0);
+    try testing.expect(first.beta + first.folds + first.algebra + first.lets + first.conds + first.shares > 0);
     const after_first = try funcText(&b, "app.dup");
     const after_first_g = try funcText(&b, "app.g");
+    const after_first_cse = try funcText(&b, "app.cse_pair");
 
     const second = try segAll(&b);
-    try testing.expectEqual(@as(usize, 0), second.beta + second.folds + second.algebra + second.lets + second.conds);
+    try testing.expectEqual(@as(usize, 0), second.beta + second.folds + second.algebra + second.lets + second.conds + second.shares);
     try testing.expectEqualStrings(after_first, try funcText(&b, "app.dup"));
     try testing.expectEqualStrings(after_first_g, try funcText(&b, "app.g"));
+    // The CSE binding is stable: ≥2 uses and a non-trivial init mean no
+    // let rule undoes it.
+    try testing.expectEqualStrings(after_first_cse, try funcText(&b, "app.cse_pair"));
 }
 
 test "SEG: two fresh builds produce the same optimized text (deterministic)" {
-    const src = try probe_corpus.read(testing.allocator, "probes/cases", "seg_beta_let_no_duplication");
-    defer testing.allocator.free(src);
-    var b1 = try buildText("app", &.{.{ "app", src }});
-    defer b1.deinit();
-    _ = try segAll(&b1);
-    var b2 = try buildText("app", &.{.{ "app", src }});
-    defer b2.deinit();
-    _ = try segAll(&b2);
-    try testing.expectEqualStrings(try funcText(&b1, "app.dup"), try funcText(&b2, "app.dup"));
+    // One β fixture and one CSE fixture: a CSE rewrite must also be stable
+    // across fresh builds (the `BinderMap` is never iterated, so it is).
+    const cases = [_]struct { []const u8, []const u8 }{
+        .{ "seg_beta_let_no_duplication", "app.dup" },
+        .{ "seg_cse_share", "app.mul_pair" },
+    };
+    for (cases) |case| {
+        const src = try probe_corpus.read(testing.allocator, "probes/cases", case[0]);
+        defer testing.allocator.free(src);
+        var b1 = try buildText("app", &.{.{ "app", src }});
+        defer b1.deinit();
+        _ = try segAll(&b1);
+        var b2 = try buildText("app", &.{.{ "app", src }});
+        defer b2.deinit();
+        _ = try segAll(&b2);
+        try testing.expectEqualStrings(try funcText(&b1, case[1]), try funcText(&b2, case[1]));
+    }
 }
 
 // ---------------------------------------------------------------------------

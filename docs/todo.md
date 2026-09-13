@@ -5,17 +5,9 @@
 「近期」内各项的先后是**建议顺序**，不是串行依赖；每项单独列出前置
 依赖。设计细节仍在两篇文档正文，本文件只记范围、依赖与验收。
 已完成的历史条目按原编号归档于「已完成」节，供跨文档交叉引用；
-「近期」从第 10 项续起，新增项一律追加到队尾。
+「近期」从第 11 项续起，新增项一律追加到队尾。
 
 ## 近期（建议顺序）
-
-- [ ] **10. CSE-style sharing → 合成 `let`**（[hir.md](hir.md) §8.3）
-  - 范围：同一 island 内结构相等（`alphaEq`）且 `isDuplicable` 的纯子树合并为
-    一个 `let`，后续出现替换为对该绑定量的 `local` 引用；共享子项必须是 island
-    成员（`encOf`），合成 `let` 不得改变求值次数与销毁注册。
-  - 依赖：**第 7 项**（合成 `let` 不得跨 FE 移动清理）；`isDuplicable` 查询已落地。
-  - 验收：白盒正例（两处同形、结果 Copy 且 `!Q`）+ 负例（可观察效果 / `Q` /
-    跨 FE / Unique）；`isDuplicable == false` 一律拒绝；on/off 解释器差分。
 
 - [ ] **11. SEG 终止性：递减度量或显式轮界契约**（[hir.md](hir.md) §8.2、
       hir_seg.zig）
@@ -81,10 +73,38 @@
   - 验收：契约正例（源级纯 init 的 dead / forward / 原子复制）+ 负例
     （Borrowed view / Unique / 可观察 init）；on/off 解释器差分。
 
-## 已完成（归档，原「近期」第 1–9 项）
+## 已完成（归档，原「近期」第 1–10 项）
 
 > 以下条目均已落地，按完成时的编号保留，供 [effects.md](effects.md) 等正文
-> 交叉引用；新工作从「近期」第 10 项续起。
+> 交叉引用；新工作从「近期」第 11 项续起。
+
+- [x] **10. CSE-style sharing → 合成 `let`**（[hir.md](hir.md) §8.3）
+  - 范围：同一 island 内结构相等（`alphaEq`）且 `isDuplicable` 的纯子树合并为
+    一个 `let`，后续出现替换为对该绑定量的 `local` 引用；共享子项必须是 island
+    成员（`encOf`），合成 `let` 不得改变求值次数与销毁注册。
+  - 已完成：`hir_seg.ruleCse` 在 `strict_ltr`、无 region 的 island 节点
+    （typed opcode / `call` / `seq` / aggregate maker）的 **operand 列表**里找
+    第一对 α-相等（`alphaEq`：region param 按位置映射，未映射的自由 binder 按
+    原始 id）的 operand，两者都满足 `encOf`、与父节点同 `full_expr`、非 trivial
+    atom、`isDuplicable`（Copy + total + 无可观察效果 + operand 全 `Read` +
+    无 `Q`），且本轮未被原位改写（`Rewriter.dirty`）。命中则合成
+    `let B = ops[i] in <同一节点，所有 α-相等 operand 改成 fresh local B>`，
+    donor 保持不可达。`strict_ltr` 保证每个 operand 恰好求值一次、LTR；候选是
+    纯、total、确定性子项，故提前到 init 不改变任何可观察行为。合成 `let` 与
+    候选共享父节点 FE，故不跨 FE（源级 `let`-init 对、`seq` 语句 operand 天然
+    拒绝）；`isDuplicable` 强制 Copy 与整棵子树 `ownershipGate`，`CleanupToken`
+    只为 owned Unique 临时量登记，故不改变销毁注册、donor 无 token 需重映射。
+    `!isTrivialAtom` 是抗振荡门：const / local / fn_ref 不值得 binder，且
+    `ruleLet` 的 trivial-atom forwarding 会立刻撤销；除此之外绑定至少两处使用
+    且 init 非平凡，let 规则无法撤销。`alphaEq` 不比较 `access_hops`（携带它的
+    op 都被 island / trivial-atom 门排除）。`Stats.shares` 计共享数。非 sibling
+    共享（跨语句 / 分支，即 PRE）不在 v1，属 CFG 优化器；direct call 的 callee 是
+    `fn_ref`（无 SEG 编码）故 `call` 不是 island 成员——v1 的共享子项限于纯算术 /
+    聚合 island。测试：白盒正例（`mul` 对、`local` 计数、`cleanupOriginsReachable`
+    无孤儿 token）、负例（`div` 非 total、跨 FE 的源级 `let`-init 对、Unique
+    constructor、声明为 `Write` / `Q` 的 host read 均 `isDuplicable == false` 且
+    `shares == 0`）、fixpoint（CSE 绑定稳定，二次运行零改写）、
+    `probes/cse.st` 进全语料 on/off 解释器差分与 pass smoke。
 
 - [x] **9. struct 投影规则**（[hir.md](hir.md) §8.3）
   - 范围：在 island 内把已知字段下标（`Payload.field`）的 `field_get` 归约为对应
@@ -320,7 +340,7 @@
 - [ ] Typed HIR Target 形态：monomorphization / ownership 检查在 HIR 上
       完成（[hir.md](hir.md) §2.3 远期边界；未立项）。
 - [ ] SEG 的 associativity / commutativity 搜索（正文列为 SEG 之外的
-      方向，未立项；结构相等的 CSE sharing 已上移为近期第 10 项）。
+      方向，未立项；结构相等的 CSE sharing 已落地（见「已完成」第 10 项））。
 
 ## 待决（规范措辞与契约）
 

@@ -928,9 +928,11 @@ extract(eclass)      -> ExprId
 - **cost model**：v1 用最小节点数 + 确定性 tie-break（规则的确定顺序），不用
   per-opcode 权重。cost 是优化器事实，不进 op descriptor。let / 折叠 / 代数规则
   严格减小节点数；β 按 §8.4 契约准入，known-variant `match` 按覆盖 / arity 证明
-  准入——多 payload 时每个绑定叶合成一个 `let`，节点数可能不降，终止改由
-  `max_iterations` 轮界保证（不保证收敛到不动点；每个 `match` 节点只被消费
-  一次）。
+  准入，CSE sharing（§8.3）按 `isDuplicable` 与同 FE 准入——多 payload 的
+  `match`（每个绑定叶合成一个 `let`）与 CSE（materialize 共享子项）节点数可能
+  不降，终止改由 `max_iterations` 轮界保证（不保证收敛到不动点；每个 `match`
+  节点只被消费一次，CSE 合成的绑定至少两处使用且 init 非平凡，故不会被
+  let 规则撤销）。
 
 ### 8.3 v1 重写规则集
 
@@ -954,10 +956,36 @@ extract(eclass)      -> ExprId
 | struct projection | ✅ | `field_get(struct_make(v0, …, vn), i) → vi`（已知字段下标；越界 / 非构造基拒绝）。`struct_make` 的 operand 按声明序，payload `field` 是声明字段下标——即 `hir_build_expr.fieldRead` 的索引。乱序书写的构造被 builder 的临时 `let` 链隔开（§5.6），故不触发 |
 | tuple / list projection | ❌ | 无规则：`tuple_make` / `list_make` 无 SEG 编码（`seg == null`） |
 | α-equivalence | ✅* | 由 β 克隆时的**捕获规避** fresh-binder 重映射承担，不是 e-graph 的 α-合并 |
-| CSE-style sharing | ❌ | 无 CSE；未来须 materialize 成 `let` |
+| CSE-style sharing | ✅ | 同一 island 内、**同一节点的 operand 列表**中 α-相等且 `isDuplicable` 的纯子树 materialize 成一个合成 `let`，后续出现改为该绑定量的 `local` 引用（详见下） |
 | associativity / commutativity | ❌ | 搜索空间问题，未立项 |
 | Unique rewrite | ❌ | 需线性等式系统 |
 | host calls / `drop` / consuming match / panic 重排 | ❌ | — |
+
+**CSE sharing 的 v1 形态与准入**（`hir_seg.ruleCse`）。共享子项必须同时满足：
+
+- op 无 region 且 `EvalPolicy` 为 `strict_ltr`——typed opcode、`call`、`seq`、
+  `struct_make` / `variant_make`。`let` / `lambda` / `if` / `match` / `and` / `or`
+  带 region（作用域或惰性），整节点跳过；而 `seq`、以及 callee 为 `fn_ref`
+  （无 SEG 编码，§8.1）的 `call` 本身不是 island 成员，所以 v1 实际能共享的
+  子项限于纯算术 / 聚合 island（imm-offset 的直接调用不触发）；
+- 候选 operand 是 island 成员（`encOf`）、与父节点**同一 full-expression**、
+  非 trivial atom（const / local / fn_ref）、且 `isDuplicable`——结果 Copy、total、
+  无可观察效果、operand 全 `Read`、无 `Q`；
+- 两个候选 α-相等（`alphaEq`：region param 按位置映射，未映射的自由 binder
+  按原始 id 比较，故引用同一外层绑定的两处同形可合并）；
+- 该 operand 本轮尚未被原位改写（`Rewriter.dirty`）：改写后的节点其
+  `encOf` / 效果结论描述的是已不存在的形状，一律拒绝，留待下一轮由重跑的
+  效果分析重新判定。
+
+`strict_ltr` 保证每个 operand 恰好求值一次、LTR；候选是 duplicable 的纯、
+total、确定性子项，故把首次出现提到合成 `let` 的 init、后续出现读绑定量，
+求值次数与顺序的可观察行为不变。合成 `let` 与所有候选共享父节点的 FE，故不
+跨 FE；`isDuplicable` 强制 Copy 结果与整棵子树的 `ownershipGate`（每个 `.owned`
+节点 Copy、无 borrowed view、无 `Consume`），而 `CleanupToken` 只为 owned
+Unique 临时量登记——故合成 `let` 不改变清理注册，donor 也没有需要重映射的
+token。非 sibling 的共享（跨语句 / 分支的同形，即 PRE）不在 v1：跨 FE 的
+源级 `let`-init 对不是同一节点的 operand，天然不触发；真正的 PRE 属 CFG
+优化器。
 
 ### 8.4 β-reduction 必须生成 let
 
@@ -1188,7 +1216,7 @@ lowering。可选变换每轮原位重写后重新跑结构 + 效果校验（§2
 | --- | --- | --- |
 | M1a | 结构 HIR：AST→HIR 构建、结构校验、HIR→CFG lowering；直降路径删除后成为唯一前端路径 | hir_build.zig / hir_validate.zig / hir_lower.zig |
 | M1b | 效果基础设施：`SemanticInfo.effect`、固定乘积格、transfer、cleanup 门、派生查询、host 语义注册表 | effects.zig / hir_effects.zig |
-| M2a | SEG v1 规则子集（β / η / let / 常折叠 / 整数代数 / struct 投影 / known-variant match），opt-in | hir_seg.zig |
+| M2a | SEG v1 规则子集（β / η / let / 常折叠 / 整数代数 / struct 投影 / known-variant match / CSE sharing），opt-in | hir_seg.zig |
 | M2b | 摘要化消费者：函数摘要 SCC least fixpoint、精确 `drop_effect(T)`、module-const 检查、dead-let / selective ANF | hir_effects.zig / hir_simplify.zig |
 
 **尚未实现**（完整清单见 [todo.md](todo.md)）：**节点级**
