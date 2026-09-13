@@ -5,19 +5,9 @@
 「近期」内各项的先后是**建议顺序**，不是串行依赖；每项单独列出前置
 依赖。设计细节仍在两篇文档正文，本文件只记范围、依赖与验收。
 已完成的历史条目按原编号归档于「已完成」节，供跨文档交叉引用；
-「近期」从第 8 项续起，新增项一律追加到队尾。
+「近期」从第 9 项续起，新增项一律追加到队尾。
 
 ## 近期（建议顺序）
-
-- [ ] **8. η-reduction**（[hir.md](hir.md) §8.5）
-  - 范围：`fn (B0: T) => call(fnref F, %B0)` → `fnref F`。v1 只允许
-    `callee = fn_ref`（更一般的 callee 表达式在 η 展开后可能改变求值行为）；
-    前提是 exact same fn type（含参数模式）、`B0` 在 callee 中不自由（不捕获
-    天然满足）、callee total（无效果、无 trap）。结果 `fnref` 无 SEG 编码，规则
-    在 `applyRules` 中不得要求 `encOf(result)`（与 β 的 callee 同一处理）。
-  - 依赖：无。
-  - 验收：白盒正例 + 负例（capture / trap / 非 `fn_ref` callee / fn type 或
-    参数模式不符）；`--seg` on/off 解释器输出逐字相等。
 
 - [ ] **9. struct 投影规则**（[hir.md](hir.md) §8.3）
   - 现状：`struct_make` 已注册 `seg = .construct`、`field_get` 已注册
@@ -54,7 +44,7 @@
       frontend.zig）
   - 现状：`--seg` 默认关，pipeline 位置在 `--simplify` 之后、各自跟一次
     `revalidateHir`（frontend.zig）；`hir_seg.Stats` 已记
-    `iterations / islands / beta / folds / algebra / lets / conds / matches`，但
+    `iterations / islands / beta / etas / folds / algebra / lets / conds / matches`，但
     没有语料级时间 / 预算基线。
   - 范围：以 `Stats` 与 `probes/` + `examples/` 全语料为输入，度量 SEG 编译时间、
     轮数与 island 覆盖并形成预算；据此把 SEG 从 `--seg` 翻为默认开启（保留 opt-out）。
@@ -104,10 +94,30 @@
   - 验收：契约正例（源级纯 init 的 dead / forward / 原子复制）+ 负例
     （Borrowed view / Unique / 可观察 init）；on/off 解释器差分。
 
-## 已完成（归档，原「近期」第 1–7 项）
+## 已完成（归档，原「近期」第 1–8 项）
 
 > 以下条目均已落地，按完成时的编号保留，供 [effects.md](effects.md) 等正文
-> 交叉引用；新工作从「近期」第 8 项续起。
+> 交叉引用；新工作从「近期」第 9 项续起。
+
+- [x] **8. η-reduction**（[hir.md](hir.md) §8.5）
+  - 范围：`fn (B0: T) => call(fnref F, %B0)` → `fnref F`。v1 只允许
+    `callee = fn_ref`；前提是 exact same fn type（含参数模式）、`B0` 在 callee
+    中不自由（不捕获天然满足）、callee total（无效果、无 trap）。结果 `fnref`
+    无 SEG 编码，规则不得要求 `encOf(result)`（与 β 的 callee 同一处理）。
+  - 已完成：`hir_seg.tryEta` 是与 β 并列的 boundary rewrite——λ 节点只作为
+    `FuncRecord.root` 存在，故操作形式是**重定向值位置的 `fn_ref` payload**
+    （不改 λ 记录根，否则破坏 lowering 的「函数根是 λ」不变量）。门：op 为
+    `fn_ref`；目标记录 kind == `.lambda`；body 恰好是 `call(fn_ref, %B0 …)`，
+    实参是自己的参数、按序各恰好一次（同时即捕获条件，`fn_ref` 不闭包
+    binder）；wrapper fn type 与 callee 的 `meta.Type.eql`（含参数模式）；
+    body call 的摘要 `isTotal ∧ observable_effect_free`（`callBound` 与实参
+    无关，即 callee 的摘要 / host 声明）。链 `fid → F → G` 一次调用内解析，
+    `max_eta_chain` 拒绝环 / 超长链，故每轮幂等。`Stats.etas` 计重定向数。
+    测试：正例（值位置重定向到 member、链式解析到终点、λ 记录根仍是 `lambda`、
+    二次运行是 fixpoint）与负例（trap callee / 非 `fn_ref` callee（call 结果）/
+    参数顺序不符 / 篡改的 fn type 不符 / 跨模块 access 链回 `Top`）；
+    `probes/eta.st` 进全语料 on/off 解释器差分与 pass smoke。
+  - 依赖：无。
 
 - [x] **7. 节点级 full-expression 边界标注**（[hir.md](hir.md) §5.6 / §8.1 /
       §8.7、[effects.md](effects.md) §11.2）

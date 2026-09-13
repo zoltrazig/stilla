@@ -56,6 +56,10 @@ The detailed probes cover the source-reachable operation/type matrix:
   §10.4) — a two-argument call evaluates both printing arguments left-to-right,
   and an unused / once-used parameter keeps its `let` so β neither drops nor
   moves the effect
+- `eta.st`: η-reduction ([hir.md](hir.md) §8.5) — λ wrappers over a named
+  function and over another λ wrapper (the chain resolves to the member in one
+  call), next to the refused shapes: a trapping callee, a call-result callee,
+  and a swapped argument order
 
 Every `probes/*.st` file is enumerated at test time by
 `src/probe_corpus.zig`, so a new probe automatically joins the HIR build

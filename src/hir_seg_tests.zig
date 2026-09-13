@@ -120,6 +120,36 @@ fn findFunc(b: *Built, name: []const u8) !hir.FuncRecord {
     return error.TestUnexpectedResult;
 }
 
+fn findFuncId(b: *Built, name: []const u8) !hir.FuncId {
+    for (b.built.funcs.items, 0..) |f, i| {
+        if (std.mem.eql(u8, f.name, name)) return @intCast(i);
+    }
+    return error.TestUnexpectedResult;
+}
+
+/// The function indices named by every `fn_ref` in `func`'s subtree (a
+/// host `fn_ref` is skipped — it has no `FuncId`). The η fixtures give
+/// each wrapper value exactly one `fn_ref`, so the sole entry is the
+/// wrapper's current target.
+fn fnRefTargets(b: *Built, func: []const u8, out: *std.ArrayListUnmanaged(hir.FuncId)) !void {
+    const f = try findFunc(b, func);
+    const pr = &b.built.program;
+    var work = std.ArrayListUnmanaged(hir.ExprId).empty;
+    defer work.deinit(testing.allocator);
+    try work.append(testing.allocator, f.root);
+    while (work.pop()) |id| {
+        const n = pr.node(id);
+        if (std.mem.eql(u8, hir.registry.get(n.op).name, "fn_ref")) {
+            switch (n.payload.func) {
+                .func => |fid| try out.append(testing.allocator, fid),
+                .host => {},
+            }
+        }
+        for (pr.operands(id)) |op| try work.append(testing.allocator, op);
+        for (pr.regionsOf(id)) |r| try work.append(testing.allocator, pr.region(r).root);
+    }
+}
+
 fn funcText(b: *Built, name: []const u8) ![]u8 {
     const f = try findFunc(b, name);
     const ctx = try b.built.serCtx();
@@ -262,6 +292,115 @@ test "SEG: an effectful β clone binds fresh binders (scope mapping)" {
         for (pr.regionsOf(cur)) |r| try work.append(testing.allocator, pr.region(r).root);
     }
     try testing.expect(saw_local);
+}
+
+test "SEG: η-reduction redirects a λ wrapper to its fn_ref callee" {
+    const src = try probe_corpus.read(testing.allocator, "probes", "eta");
+    defer testing.allocator.free(src);
+    var b = try buildText("eta", &.{.{ "eta", src }});
+    defer b.deinit();
+    const stats = try segAll(&b);
+    try testing.expect(stats.etas >= 1);
+    const identity_id = try findFuncId(&b, "eta.identity");
+
+    // `via_lambda`'s wrapper value now names the member function directly.
+    var targets = std.ArrayListUnmanaged(hir.FuncId).empty;
+    defer targets.deinit(testing.allocator);
+    try fnRefTargets(&b, "eta.via_lambda", &targets);
+    try testing.expectEqual(@as(usize, 1), targets.items.len);
+    try testing.expectEqual(identity_id, targets.items[0]);
+
+    // `via_chain`'s outer wrapper resolves through the inner wrapper to
+    // the same target in one call.
+    var chain_targets = std.ArrayListUnmanaged(hir.FuncId).empty;
+    defer chain_targets.deinit(testing.allocator);
+    try fnRefTargets(&b, "eta.via_chain", &chain_targets);
+    try testing.expectEqual(@as(usize, 1), chain_targets.items.len);
+    try testing.expectEqual(identity_id, chain_targets.items[0]);
+
+    // The λ record itself is untouched — the rewrite is a value redirect,
+    // not a mutation of the hoisted function root (hir_lower's invariant).
+    for (b.built.funcs.items) |f| {
+        if (f.kind == .lambda and std.mem.startsWith(u8, f.name, "eta.via_lambda")) {
+            try testing.expectEqualStrings("lambda", hir.registry.get(b.built.program.node(f.root).op).name);
+        }
+    }
+
+    // A second run is a fixpoint: no further η (or any other) rewrite.
+    const second = try segAll(&b);
+    try testing.expectEqual(@as(usize, 0), second.etas);
+    try testing.expectEqual(@as(usize, 0), second.beta + second.folds + second.algebra + second.lets + second.conds + second.matches);
+}
+
+test "SEG: η-reduction is refused for trap / non-fn_ref / swapped-argument wrappers" {
+    const src = try probe_corpus.read(testing.allocator, "probes", "eta");
+    defer testing.allocator.free(src);
+    var b = try buildText("eta", &.{.{ "eta", src }});
+    defer b.deinit();
+    _ = try segAll(&b);
+    // Each refused wrapper keeps its `fn_ref` pointing at the λ record
+    // (never at the would-be callee). The trap case fails the totality
+    // gate; the other two are structural (callee not a `fn_ref`; the
+    // arguments are not the wrapper's own parameters in order).
+    const refused = [_][]const u8{ "eta.via_boom", "eta.via_call", "eta.via_swap" };
+    for (refused) |func| {
+        var targets = std.ArrayListUnmanaged(hir.FuncId).empty;
+        defer targets.deinit(testing.allocator);
+        try fnRefTargets(&b, func, &targets);
+        try testing.expectEqual(@as(usize, 1), targets.items.len);
+        try testing.expectEqual(hir.FuncKind.lambda, b.built.funcs.items[targets.items[0]].kind);
+    }
+}
+
+test "SEG: a wrapper/callee function-type mismatch refuses η" {
+    const src = try probe_corpus.read(testing.allocator, "probes", "eta");
+    defer testing.allocator.free(src);
+    var b = try buildText("eta", &.{.{ "eta", src }});
+    defer b.deinit();
+    // Corrupt the wrapper value's function type; §8.5's "exact same fn
+    // type" gate must then refuse even though the shape is right.
+    const f = try findFunc(&b, "eta.via_lambda");
+    const ref = (try findNode(&b, f.root, "fn_ref")) orelse return error.TestUnexpectedResult;
+    b.built.program.exprs.items[ref].ty = .{ .primitive = .int32 };
+    // The corrupted type would fail re-validation, so run the pass alone.
+    _ = try hir_seg.optimize(b.arena.allocator(), b.built, .{ .graph = b.graph });
+    var targets = std.ArrayListUnmanaged(hir.FuncId).empty;
+    defer targets.deinit(testing.allocator);
+    try fnRefTargets(&b, "eta.via_lambda", &targets);
+    try testing.expectEqual(@as(usize, 1), targets.items.len);
+    try testing.expectEqual(hir.FuncKind.lambda, b.built.funcs.items[targets.items[0]].kind);
+}
+
+test "SEG: a cross-module (access-chain) callee refuses η" {
+    const src = try probe_corpus.read(testing.allocator, "probes", "eta");
+    defer testing.allocator.free(src);
+    var b = try buildText("eta", &.{.{ "eta", src }});
+    defer b.deinit();
+    // A λ wrapping `other.f` is the one shape where η would move a module
+    // initialization from call time to value-creation time. The analysis
+    // marks any callee carrying `access_hops` as `Top`, so the body loses
+    // totality and the redirect is refused. Model the marker directly on
+    // the wrapper body's callee (a cross-module fixture would read the
+    // same gate).
+    var wrapper: ?hir.ExprId = null;
+    for (b.built.funcs.items) |fr| {
+        if (fr.kind == .lambda and std.mem.startsWith(u8, fr.name, "eta.via_lambda")) {
+            wrapper = fr.root;
+            break;
+        }
+    }
+    const lam = wrapper orelse return error.TestUnexpectedResult;
+    const body = b.built.program.region(b.built.program.regionsOf(lam)[0]).root;
+    const callee = b.built.program.operands(body)[0];
+    const hop = [_]hir.AccessHop{.{ .module = 0, .name = "identity" }};
+    b.built.program.exprs.items[callee].access_hops = &hop;
+    // The corrupted chain would fail re-validation, so run the pass alone.
+    _ = try hir_seg.optimize(b.arena.allocator(), b.built, .{ .graph = b.graph });
+    var targets = std.ArrayListUnmanaged(hir.FuncId).empty;
+    defer targets.deinit(testing.allocator);
+    try fnRefTargets(&b, "eta.via_lambda", &targets);
+    try testing.expectEqual(@as(usize, 1), targets.items.len);
+    try testing.expectEqual(hir.FuncKind.lambda, b.built.funcs.items[targets.items[0]].kind);
 }
 
 test "SEG: a full-expression boundary on a β argument refuses the reduction" {

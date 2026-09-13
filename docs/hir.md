@@ -11,7 +11,7 @@
 > - **opt-in 消费者（默认关）**：dead-let + selective A-Normal Form
 >   （hir_simplify.zig，`--simplify`）；SEG v1（hir_seg.zig，`--seg`）。
 > - **设计已定但未实现**（§11、[todo.md](todo.md)）：节点级 full-expression
->   边界标注、η-reduction、真正的 slotted e-graph、HIRTypeId canonical 表、
+>   边界标注、真正的 slotted e-graph、HIRTypeId canonical 表、
 >   source span side table。
 > - **阅读约定**：数据结构以 hir.zig 的落地形态为准；标 **Target** 的段落是
 >   设计意图，不是现状。
@@ -899,12 +899,14 @@ full-expression 边界现在是节点级真值（§5.6）：`isSegSafe` 的 owne
 真的会拒绝跨 FE 子树，源级 `let`（init 自成 FE）因此不是 island 成员（§8.3）。
 
 > **两类重写**：普通 SEG 重写必须 full-expression-preserving；**boundary
-> rewrite**（v1 唯一实例是 β）把 λ 体搬进调用点。β 的 callee 是 `fn_ref`
-> （无 SEG 编码），call 节点本就不是 island 成员，因此 β **绕过 island 的编码 /
-> 成员资格**；但语义安全仍要过 `isSegSafe` 的残余部分——`tryBeta` 对 call 节点
-> 只要求 Copy 结果、cleanup-free 求值子树与 ownership gate（**不要求实参
-> total / 无可观察效果**），对 λ 体仍调用完整 `isSegSafe`，再逐条检查 §8.4 的
-> 契约。契约判定内联在 `tryBeta`，没有独立的 `RewriteContract` 类型。
+> rewrite**（v1 有 β 与 η）绕过 island 的编码 / 成员资格。β 把 λ 体搬进调用
+> 点：callee 是 `fn_ref`（无 SEG 编码），call 节点本就不是 island 成员，语义安全
+> 仍要过 `isSegSafe` 的残余部分——`tryBeta` 对 call 节点只要求 Copy 结果、
+> cleanup-free 求值子树与 ownership gate（**不要求实参 total / 无可观察效果**），
+> 对 λ 体仍调用完整 `isSegSafe`，再逐条检查 §8.4 的契约。η（§8.5）只重定向值
+> 位置的 `fn_ref` payload，节点树、FE、清理 token 都不变，由 §8.5 的契约
+> `tryEta` 准入。契约判定内联在 `tryBeta` / `tryEta`，没有独立的
+> `RewriteContract` 类型。
 
 ### 8.2 投影与抽取（Target）
 
@@ -947,7 +949,7 @@ extract(eclass)      -> ExprId
 | constant folding | ✅ | 按 typed rep；**可能 trap 的折叠被拒**（trap 归运行时） |
 | integer algebra identities | ✅ | `x + 0 → x`、`x * 1 → x` 等，仅 integer rep |
 | constant `if` / `and` / `or` | ✅ | 常量条件选中已求值分支（另一分支是 island 成员） |
-| η-reduction | ❌ | 设计见 §8.5，**未实现** |
+| η-reduction | ✅ | 值位置 `fn_ref` 重定向；λ 记录不动（§8.5） |
 | known variant `match` | ✅ | 已知 tag 的 `variant_make` scrutinee → 覆盖 arm 的 `let` 链；payload 仅 bind / wildcard 叶 |
 | struct / tuple projection | ❌ | 无规则 |
 | α-equivalence | ✅* | 由 β 克隆时的**捕获规避** fresh-binder 重映射承担，不是 e-graph 的 α-合并 |
@@ -1007,7 +1009,7 @@ RewriteContract {
 所以由**契约准入**兜底。多语句 / 带清理 λ 的 β 待 `drop_effect` 精化后再提供
 契约实例（[effects.md](effects.md) §10.4）。
 
-### 8.5 η-reduction 的限制（未实现）
+### 8.5 η-reduction
 
 设计意图：
 
@@ -1015,14 +1017,24 @@ RewriteContract {
 fn (B0: f32) => call(fnref abs, %B0)     →   fnref abs
 ```
 
-前提：
+前提（即 `hir_seg.tryEta` 的准入）：
 
 - exact same fn type（含参数模式）；
 - `x` 在 callee 中不自由（不捕获天然满足）；
 - callee 求值 total（无效果、无 trap）。
 
 v1 只允许 `callee = fn_ref`：不捕获 ≠ 参数必然缺席，更一般的 callee 表达式在 η
-展开后可能改变求值行为。**该规则当前未落地**（hir_seg.zig 只做 §8.3 的 ✅ 行）。
+展开后可能改变求值行为。第二条由「body 恰好是 `call(fn_ref, %B0, …)`，实参是
+自己的参数、按序各恰好一次」结构保证（`fn_ref` 不闭包任何 binder）；第三条读
+body call 的摘要（`isTotal ∧ observable_effect_free`；`callBound` 与实参无关，
+即 callee 的摘要或 host 声明）。
+
+**落地形态**：λ 节点只作为 `FuncRecord.root` 存在（`buildLambda` 返回的是
+`fn_ref` 值），所以规则的操作形式是**重定向值位置的 `fn_ref` payload**，而不是
+改写 λ 记录根——后者会破坏 lowering 的「函数根是 λ」不变量。它是与 β 并列的
+boundary rewrite：`fn_ref` 无 SEG 编码（`encOf` 恒 false），故不经过 island 门，
+由上面的契约 `tryEta` 准入。链 `fid → F → G` 在**一次调用内**解析到终点，
+`max_eta_chain` 轮的界拒绝环 / 超长链，因此每轮幂等、不会来回震荡。
 
 ### 8.6 match 高层保留与 consuming match 排除
 
@@ -1175,10 +1187,10 @@ lowering。可选变换每轮原位重写后重新跑结构 + 效果校验（§2
 | --- | --- | --- |
 | M1a | 结构 HIR：AST→HIR 构建、结构校验、HIR→CFG lowering；直降路径删除后成为唯一前端路径 | hir_build.zig / hir_validate.zig / hir_lower.zig |
 | M1b | 效果基础设施：`SemanticInfo.effect`、固定乘积格、transfer、cleanup 门、派生查询、host 语义注册表 | effects.zig / hir_effects.zig |
-| M2a | SEG v1 规则子集（β / let / 常折叠 / 整数代数 / known-variant match），opt-in | hir_seg.zig |
+| M2a | SEG v1 规则子集（β / η / let / 常折叠 / 整数代数 / known-variant match），opt-in | hir_seg.zig |
 | M2b | 摘要化消费者：函数摘要 SCC least fixpoint、精确 `drop_effect(T)`、module-const 检查、dead-let / selective ANF | hir_effects.zig / hir_simplify.zig |
 
-**尚未实现**（完整清单见 [todo.md](todo.md)）：η-reduction；**节点级**
+**尚未实现**（完整清单见 [todo.md](todo.md)）：**节点级**
 full-expression 边界标注（清理 token 登记已落地，见 [effects.md](effects.md)
 §11.2）；真正的 slotted e-graph / extraction；
 HIRTypeId canonical 表。

@@ -17,11 +17,12 @@
 //!   itself an island member (hir.md §8.1–§8.2). Anything else keeps its
 //!   original shape.
 //! - **Rules** — β-reduction (→ let, the v1 boundary rewrite with the
-//!   §8.4 contract), let simplification (dead let, used-once forwarding,
-//!   trivial-atom forwarding), constant folding over the typed reps,
-//!   integer algebra identities, and the known-variant `match` reduction
-//!   to `let` (§8.6). Not in scope: associativity / commutativity search,
-//!   CSE, η-reduction, `move` / `drop` / borrow, host calls (§8.3).
+//!   §8.4 contract), η-reduction (a `fn_ref` value redirect, §8.5), let
+//!   simplification (dead let, used-once forwarding, trivial-atom
+//!   forwarding), constant folding over the typed reps, integer algebra
+//!   identities, and the known-variant `match` reduction to `let` (§8.6).
+//!   Not in scope: associativity / commutativity search, CSE, `move` /
+//!   `drop` / borrow, host calls (§8.3).
 //! - **Extraction cost** — v1 uses minimal node count plus a
 //!   deterministic rule order as the tie-break (hir.md §8.2). The let /
 //!   folding / algebra rules strictly reduce `costOf`; β (a boundary
@@ -53,12 +54,17 @@ const hir_effects = @import("hir_effects.zig");
 
 pub const Error = std.mem.Allocator.Error;
 
+/// A `fn_ref` chain longer than this is a cycle or a pathological tower
+/// and is refused rather than followed (hir.md §8.5).
+const max_eta_chain: usize = 32;
+
 /// What one `optimize` call did — for tests and the compile-time budget.
 pub const Stats = struct {
     iterations: u32 = 0,
     /// Reachable nodes that passed recursive island admission.
     islands: usize = 0,
     beta: usize = 0,
+    etas: usize = 0,
     folds: usize = 0,
     algebra: usize = 0,
     lets: usize = 0,
@@ -107,6 +113,7 @@ pub fn optimize(arena: std.mem.Allocator, built: *hir.BuiltProgram, config: Conf
         stats.iterations += 1;
         stats.islands = @max(stats.islands, rw.island_count);
         stats.beta += rw.beta;
+        stats.etas += rw.etas;
         stats.folds += rw.folds;
         stats.algebra += rw.algebra;
         stats.lets += rw.lets;
@@ -136,6 +143,7 @@ const Rewriter = struct {
 
     changed: bool = false,
     beta: usize = 0,
+    etas: usize = 0,
     folds: usize = 0,
     algebra: usize = 0,
     lets: usize = 0,
@@ -245,6 +253,13 @@ const Rewriter = struct {
                 try self.rewriteChildren(id);
                 _ = try self.applyRules(id, true);
                 return;
+            }
+            // η is the other boundary rewrite: its `fn_ref` operand has no
+            // SEG encoding, so it is admitted by its own §8.5 contract
+            // rather than by island membership (`encOf`).
+            if (try self.tryEta(id)) {
+                self.changed = true;
+                self.etas += 1;
             }
         }
         try self.rewriteChildren(id);
@@ -402,6 +417,103 @@ const Rewriter = struct {
         pr.exprs.items[id] = pr.node(result);
         try self.beta_done.put(self.arena, fid, {});
         return true;
+    }
+
+    // -----------------------------------------------------------------
+    // η-reduction (hir.md §8.5)
+    // -----------------------------------------------------------------
+
+    /// `fn (B0: T) => call(fnref F, %B0)` is extensionally `fnref F`. The λ
+    /// node itself is only ever a `FuncRecord.root` (the builder's
+    /// `buildLambda` returns a `fn_ref` value), so the operational form of
+    /// the rewrite is to redirect the `fn_ref` payload at each value
+    /// position; mutating the record root would break the lowering's "a
+    /// function root is a λ" invariant (`hir_lower.zig`).
+    ///
+    /// Like β this is a boundary rewrite, not an island rewrite: a
+    /// `fn_ref` carries no SEG encoding (`encOf` is false), so island
+    /// membership must not gate it. The §8.5 precondition list replaces
+    /// that gate:
+    ///
+    /// - v1 only `callee = fn_ref` (a more general callee expression could
+    ///   change evaluation after expansion);
+    /// - the wrapper's function type equals the callee's, parameter modes
+    ///   and arity included (`meta.Type.eql`);
+    /// - the callee is applied to the wrapper's own parameters, once each,
+    ///   in order — which is also the whole of the "`B0` not free in the
+    ///   callee" / capture condition, since a `fn_ref` closes over no
+    ///   binder;
+    /// - the body is total and observable-effect-free (`isTotal` +
+    ///   `observableEffectFree` on the body call; `callBound` is
+    ///   argument-independent, so this is exactly the callee's summary or
+    ///   host declaration).
+    ///
+    /// The redirect is idempotent and lattice-monotone: a chain
+    /// `fid → F → G` resolves in one call, and once a `fn_ref` names a
+    /// non-wrapper the loop breaks immediately. A chain at the
+    /// `max_eta_chain` bound (a cycle, or a pathological tower) is
+    /// refused, so the rule never oscillates across rounds.
+    fn tryEta(self: *Rewriter, id: hir.ExprId) Error!bool {
+        const pr = self.p();
+        const n = pr.node(id);
+        if (!std.mem.eql(u8, hir.registry.get(n.op).name, "fn_ref")) return false;
+        const start = n.payload.func;
+        var target = start;
+        var steps: usize = 0;
+        while (steps < max_eta_chain) : (steps += 1) {
+            const fid = switch (target) {
+                .func => |f| f,
+                .host => break,
+            };
+            if (fid >= self.built.funcs.items.len) break;
+            const rec = self.built.funcs.items[fid];
+            if (rec.kind != .lambda) break;
+            const callee = self.etaRedexCallee(rec.root, n.ty) orelse break;
+            if (!self.redexTotal(rec.root)) break;
+            target = pr.node(callee).payload.func;
+        }
+        if (steps >= max_eta_chain) return false; // cycle / over-long chain: refuse
+        if (std.meta.eql(target, start)) return false;
+        pr.exprs.items[id].payload = .{ .func = target };
+        return true;
+    }
+
+    /// The callee operand when `lam_root`'s body is exactly
+    /// `call(fn_ref …, %B0, %B1, …)` forwarding its own parameters in
+    /// order, and `wrapper_ty` equals the callee's function type; `null`
+    /// otherwise. Pure structural predicate — the totality gate is
+    /// `redexTotal`.
+    fn etaRedexCallee(self: *Rewriter, lam_root: hir.ExprId, wrapper_ty: meta.Type) ?hir.ExprId {
+        const pr = self.p();
+        if (!std.mem.eql(u8, hir.registry.get(pr.node(lam_root).op).name, "lambda")) return null;
+        const regs = pr.regionsOf(lam_root);
+        if (regs.len != 1) return null;
+        const body = pr.region(regs[0]).root;
+        if (!std.mem.eql(u8, hir.registry.get(pr.node(body).op).name, "call")) return null;
+        const bops = pr.operands(body);
+        if (bops.len == 0) return null;
+        const callee = bops[0];
+        if (!std.mem.eql(u8, hir.registry.get(pr.node(callee).op).name, "fn_ref")) return null;
+        const params = pr.params(regs[0]);
+        if (bops.len - 1 != params.len) return null;
+        if (!wrapper_ty.eql(pr.node(callee).ty)) return null;
+        for (params, 0..) |param, i| {
+            const arg = pr.node(bops[i + 1]);
+            if (!std.mem.eql(u8, hir.registry.get(arg.op).name, "local")) return null;
+            if (arg.payload.binder != param) return null;
+        }
+        return callee;
+    }
+
+    /// §8.5's "callee total (no effects, no trap)", read off the
+    /// argument-independent body-call summary.
+    fn redexTotal(self: *Rewriter, lam_root: hir.ExprId) bool {
+        const pr = self.p();
+        const regs = pr.regionsOf(lam_root);
+        if (regs.len != 1) return false;
+        const body = pr.region(regs[0]).root;
+        if (!self.analysisValid(body)) return false;
+        return self.analysis.isTotal(body) and self.analysis.observableEffectFree(body);
     }
 
     /// Deep-copy `id`, allocating fresh regions/binders and remapping
