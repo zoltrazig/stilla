@@ -5,24 +5,9 @@
 「近期」内各项的先后是**建议顺序**，不是串行依赖；每项单独列出前置
 依赖。设计细节仍在两篇文档正文，本文件只记范围、依赖与验收。
 已完成的历史条目按原编号归档于「已完成」节，供跨文档交叉引用；
-「近期」从第 18 项续起，新增项一律追加到队尾。
+「近期」从第 19 项续起，新增项一律追加到队尾。
 
 ## 近期（建议顺序）
-
-- [ ] **18. rewrite 契约形式化的第二批（η / `tryAnf`）**
-      （[effects.md](effects.md) §10.3、[hir.md](hir.md) §8.1 / §8.5）
-  - 现状：第 13 项落地了 `rewrite_contract.RewriteRule` / `Requirement` /
-    `RewriteContract`，首批实例是 β（`hir_seg.beta_rule`）与 dead-let
-    （`hir_simplify.dead_let_rule`），第二批是 SEG 的 `ruleLet` 三分支
-    （「已完成」第 15 项）；η（`hir_seg.tryEta`）与 selective ANF
-    （`hir_simplify.tryAnf`）的判定仍内联。
-  - 范围：把 η 与 `tryAnf` 的准入声明为 `RewriteRule` 实例、经 `check` /
-    `checkCleanup` 消费，行为逐字不变（与第 13 项同为提取，不改语义）。
-    `ruleLet` 已在第 15 项按 β 的 boundary-rewrite 模式契约化，本项不动它，
-    避免冲突。
-  - 依赖：**第 13 项**（已落地）。
-  - 验收：与第 13 项同格式——每个 requirement 分支与派生查询对账；η / `tryAnf`
-    的既有白盒正负例与全语料 on/off 差分在形式化实现下通过。
 
 - [ ] **19. tuple / list 的 SEG 编码与投影规则**（[hir.md](hir.md) §8.3；
       `src/hir.zig` 的 `seg == null` 断言）
@@ -51,10 +36,43 @@
   - 验收：决定落地（删除则更新 `root.zig` / 引用并跑全测；保留则补 doc 注释指明
     M1b 遗留与生产路径归属），`zig build test` 通过。
 
-## 已完成（归档，原「近期」第 1–17 项）
+## 已完成（归档，原「近期」第 1–18 项）
 
 > 以下条目均已落地，按完成时的编号保留，供 [effects.md](effects.md) 等正文
-> 交叉引用；新工作从「近期」第 18 项续起。
+> 交叉引用；新工作从「近期」第 19 项续起。
+
+- [x] **18. rewrite 契约形式化的第二批（η / `tryAnf`）**
+      （[effects.md](effects.md) §10.3、[hir.md](hir.md) §8.1 / §8.5）
+  - 范围：把 η 与 `tryAnf` 的准入声明为 `RewriteRule` 实例、经 `check` /
+    `checkCleanup` 消费，行为逐字不变（与第 13 项同为提取，不改语义）。
+  - 依赖：**第 13 项**（已落地）。
+  - 已完成：`rewrite_contract.zig` 的 `Requirement` 新增 `materializable`
+    （主体 `Subjects.hoist = {parent, slot}`，与 `swap_operands` 的复合主体同一
+    形态），`check` 分支调用新派生查询
+    `hir_effects.canMaterializeOperand(parent, slot)`——把 selective ANF 的两条
+    ownership/lifetime 义务（其前 operand 可推迟，`Class.seq` 时更要求 Copy；
+    被提 operand 的析构点不动：Copy，或父节点已 `Consume` / 就地处弃它）从
+    `hir_simplify` 的内联助手（`deferrableOperands` / `uniqueDestructionCoincides`）
+    提取为该查询（行为逐字：seq 分支先查其前 operand 的 capability，再查被提
+    operand 的 capability / `Consume` / seq 非末位）。`hir_seg.zig` 新增
+    `eta_rule`（`.shape`，`EvaluationCountPreserved`，`PreservesEvaluationCount`，
+    无 cleanup 义务），`tryEta` 在 `fn_ref` op 检查后由 `check` 消费；
+    `hir_simplify.zig` 新增 `anf_rule`（`.shape`，
+    `{EvaluationCountPreserved, Materializable}`，
+    `PreservesEvaluationCount + MayReorder`，无 `maps_full_expr` / cleanup kind
+    ——合成 `let` 沿用父节点 FE、不跨边界），`tryAnf` 选中首个不可浮动 operand
+    后由 `check` 消费。匹配层保持结构性 applicability（η 的 `fn_ref` opcode /
+    λ 形状 / 链界 / 类型相等 / 全性；ANF 的 `strict_ltr` policy 与首个不可浮动
+    operand）。既有 η 白盒正负例、ANF 白盒正负例、全语料 `--simplify` × `--seg`
+    on/off 解释器差分与 SEG budget 基线（58 程序 / 4551 节点 / 2404 islands /
+    86 轮 / 94 次重写）均未变。
+  - 验收：`hir_simplify_tests.zig` 的「legality engine agrees with the derived
+    queries」补 `.materializable` 分支与 `canMaterializeOperand` 对账（正例、
+    越界 / 缺主体失败关闭），新增「the materializable requirement routes through
+    `canMaterializeOperand`」——同一父形状下 `Consume` 的 Unique 实参可物化、
+    `borrow` 的实参被拒，`check` 与派生查询逐项一致。`zig build test` 全绿
+    （1238/1238）。effects.md §10.1 / §10.3–§10.4 / §12.1 与 hir.md §5.7 /
+    §8.1 / §8.5 同步改写。
 
 - [x] **17. scope-end 清理建模**（[effects.md](effects.md) §11.2）
   - 范围：独立的 scope-end 销毁累加与排序模型——把 scope-end 绑定的销毁点、创建

@@ -719,7 +719,12 @@ let B0: i32 = call(fnref H0) in       // host binding：effectful → 提为 let
 > 就地处弃仍在 `can_float_as_tree` 的清理模型之外（该析构发生在语句位置、不是
 > 绑定 token 的 scope-end 锚点），跨过它会推迟一个可观察析构。合成绑定的析构
 > 点由此与未改写逐字重合（[effects.md](effects.md) §11.2）；其绑定不登记
-> scope-end token（契约已证无 scope-end 析构）。
+> scope-end token（契约已证无 scope-end 析构）。该准入落为 `anf_rule`：
+> `legality = { EvaluationCountPreserved, Materializable }`，`Materializable`
+> 分支调用 `canMaterializeOperand(parent, slot)`（[effects.md](effects.md)
+> §10.3 / §12.1），`tryAnf` 在选中首个不可浮动 operand 后由 `check` 消费。
+> 合成 `let` 与源级 `let` 不同，init 沿用父节点的 FE（不跨边界），故
+> `anf_rule` 不声明 `maps_full_expr`。
 
 ## 6. ownership、效果与借用
 
@@ -963,7 +968,8 @@ full-expression 边界现在是节点级真值（§5.6）：`isSegSafe` 的 owne
 > 不是 island 成员），其三个分支各由 `let_dead_rule` / `let_forward_rule` /
 > `let_atom_rule` 的契约准入。β 的契约已落为 `passes/rewrite_contract.zig` 的
 > `RewriteContract`（`beta_rule` 声明，`tryBeta` 经 `checkCleanup` /
-> `checkCleanupProof` 消费）；η 的契约仍内联在 `tryEta`。
+> `checkCleanupProof` 消费）；η 与 selective ANF 的契约同样已落地
+> （`eta_rule` / `anf_rule`，§8.5 / §5.7）。
 
 ### 8.2 投影与抽取（Target）
 
@@ -1162,6 +1168,25 @@ body call 的摘要（`isTotal ∧ observable_effect_free`；`callBound` 与实�
 boundary rewrite：`fn_ref` 无 SEG 编码（`encOf` 恒 false），故不经过 island 门，
 由上面的契约 `tryEta` 准入。链 `fid → F → G` 在**一次调用内**解析到终点，
 `max_eta_chain` 轮的界拒绝环 / 超长链，因此每轮幂等、不会来回震荡。
+
+v1 契约实例（`eta_rule` 声明，`tryEta` 消费）：
+
+```text
+eta_rule = RewriteRule {
+    name: "eta", applicability: .shape,
+    legality: [EvaluationCountPreserved],
+    contract: RewriteContract {
+        effect: PreservesEvaluationCount,
+        // 不求值、不删除、不复制、不重排
+        // 无 cleanup 义务：节点树、FE、清理 token 均不动
+    },
+}
+```
+
+`tryEta` 的匹配层保留结构性 applicability：`fn_ref` opcode、λ 记录 / 单 region
+/ arity、`wrapper_ty.eql(callee_ty)`、`redexTotal`（`isTotal ∧
+observable_effect_free`）与链界；`EvaluationCountPreserved` 是值重定向的结构
+证书（两侧都是不求值的 `fn_ref`）。
 
 ### 8.6 match 高层保留与 consuming match 排除
 

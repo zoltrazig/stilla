@@ -728,6 +728,17 @@ test "M2b: the legality engine agrees with the derived queries" {
     // `.evaluation_count_preserved` is the rule's own structural
     // certificate: the engine accepts the declaration without a query.
     try testing.expect(try rewrite_contract.check(&an, &.{.evaluation_count_preserved}, .{ .expr = div_id }));
+    // `.materializable` routes to `canMaterializeOperand` and needs a
+    // hoist subject: the `add.i32`'s Copy operand is the positive case, a
+    // missing or out-of-range subject fails closed.
+    try testing.expect(try an.canMaterializeOperand(add_id, 0));
+    try testing.expectEqual(
+        try an.canMaterializeOperand(add_id, 0),
+        try rewrite_contract.check(&an, &.{.materializable}, .{ .hoist = .{ .parent = add_id, .slot = 0 } }),
+    );
+    try testing.expect(!(try rewrite_contract.check(&an, &.{.materializable}, .{ .expr = add_id })));
+    try testing.expect(!(try an.canMaterializeOperand(add_id, 99)));
+    try testing.expect(!(try rewrite_contract.check(&an, &.{.materializable}, .{ .hoist = .{ .parent = add_id, .slot = 99 } })));
     // A missing expr subject fails closed rather than dereferencing the
     // `no_expr` sentinel.
     try testing.expect(!(try rewrite_contract.check(&an, &.{.discardable}, .{})));
@@ -740,4 +751,57 @@ test "M2b: the legality engine agrees with the derived queries" {
         .contract = .{ .preserves_cleanup = .binder_destruction },
     };
     try testing.expect(!(try rewrite_contract.checkCleanup(rule, &an, .{ .cleanup_free_subtree = call_id })));
+}
+
+test "M2b: the materializable requirement routes through canMaterializeOperand" {
+    // `.materializable` is selective ANF's ownership/lifetime obligation
+    // (docs/effects.md §10.3 / §12.1): a Unique argument is materializable
+    // only when the parent transfers it (`Consume`); a borrowed argument
+    // under the same parent shape is refused. The engine branch must agree
+    // with the derived query in both directions.
+    var b = try buildText("app", &.{.{
+        "app",
+        \\const builtin = import("builtin");
+        \\struct Token { id: int32; drop(t) { builtin.print(builtin.str(t.id)); } }
+        \\fn make(id: int32) -> Token { Token { id: id } }
+        \\fn take(move t: Token) -> int32 { t.id }
+        \\fn show(borrow t: Token) -> int32 { t.id }
+        \\fn f(x: int32) -> int32 {
+        \\    take(make(x)) + show(make(x))
+        \\}
+    }});
+    defer b.deinit();
+    const pr = &b.built.program;
+    var an = try hir_effects.Analysis.init(b.arena.allocator(), b.built, .{ .graph = b.graph });
+    try an.analyze();
+
+    var transferred: ?hir.ExprId = null;
+    var borrowed: ?hir.ExprId = null;
+    for (pr.exprs.items, 0..) |_, i| {
+        const id: hir.ExprId = @intCast(i);
+        if (!std.mem.eql(u8, opName(pr, id), "call")) continue;
+        const callee = pr.operands(id)[0];
+        const name = switch (pr.node(callee).payload) {
+            .func => |fr| switch (fr) {
+                .func => |fid| if (fid < b.built.funcs.items.len) b.built.funcs.items[fid].name else continue,
+                .host => continue,
+            },
+            else => continue,
+        };
+        if (std.mem.eql(u8, name, "app.take")) transferred = id;
+        if (std.mem.eql(u8, name, "app.show")) borrowed = id;
+    }
+    const take_id = transferred orelse return error.TestUnexpectedResult;
+    const show_id = borrowed orelse return error.TestUnexpectedResult;
+
+    try testing.expect(try an.canMaterializeOperand(take_id, 1));
+    try testing.expect(!(try an.canMaterializeOperand(show_id, 1)));
+    try testing.expectEqual(
+        try an.canMaterializeOperand(take_id, 1),
+        try rewrite_contract.check(&an, &.{.materializable}, .{ .hoist = .{ .parent = take_id, .slot = 1 } }),
+    );
+    try testing.expectEqual(
+        try an.canMaterializeOperand(show_id, 1),
+        try rewrite_contract.check(&an, &.{.materializable}, .{ .hoist = .{ .parent = show_id, .slot = 1 } }),
+    );
 }

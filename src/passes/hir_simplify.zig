@@ -85,6 +85,28 @@ const dead_let_rule = rewrite_contract.RewriteRule{
     },
 };
 
+/// selective ANF's declared rule (docs/effects.md §10.3–§10.4, docs/hir.md
+/// §5.7). The *match* layer stays inline in `tryAnf` — the `strict_ltr`
+/// policy and the selection of the first non-floatable operand are
+/// structural applicability. What is declared here is legality —
+/// `evaluation_count_preserved` (hoisting still evaluates the operand
+/// exactly once) plus `materializable` (the operands before it may be
+/// deferred past it and the hoisted operand's destruction point does not
+/// move; `canMaterializeOperand` supplies both, docs/effects.md §12.1) —
+/// and the contract: order may change (the preceding operands are
+/// floatable, so the reorder is unobservable), nothing is discarded or
+/// duplicated. The synthesized `let` is not a fresh boundary (its init
+/// keeps the parent's FE), so no `maps_full_expr` / cleanup kind is
+/// declared.
+const anf_rule = rewrite_contract.RewriteRule{
+    .name = "selective_anf",
+    .applicability = .shape,
+    .legality = &.{ .evaluation_count_preserved, .materializable },
+    .contract = .{
+        .effect = .{ .preserves_evaluation_count = true, .may_reorder = true },
+    },
+};
+
 pub const Stats = struct {
     /// Analysis → rewrite rounds actually run.
     iterations: u32 = 0,
@@ -400,55 +422,16 @@ const Rewriter = struct {
             // free); otherwise they would have been the first hit.
             if (try self.analysis.canFloatAsTree(op)) continue;
             // The first non-floatable operand: hoisting it keeps LTR,
-            // because every earlier operand is floatable. For a sequence
-            // the earlier operands are *discarded statements*: deferring
-            // their discard past this operand is observable when their
-            // value is Unique-owned (its destructor is not captured by
-            // `canFloatAsTree`), so require those values Copy.
-            if (!try self.deferrableOperands(id, k, ops)) return false;
-            const cap = try self.analysis.capabilityOf(pr.node(op).ty) orelse return false;
-            if (cap != .copy and !try self.uniqueDestructionCoincides(id, k, ops)) return false;
+            // because every earlier operand is floatable. Its legality is
+            // the declared rule's derived query (`canMaterializeOperand`):
+            // the earlier operands are deferrable and the hoisted
+            // operand's destruction point does not move.
+            const slot: u32 = @intCast(k);
+            if (!try rewrite_contract.check(self.analysis, anf_rule.legality, .{ .hoist = .{ .parent = id, .slot = slot } })) return false;
             try self.hoist(id, k, ops);
             return true;
         }
         return false;
-    }
-
-    /// Whether operands `0..k` may be deferred until after operand `k`.
-    /// `canFloatAsTree` already covers every preceding operand's own
-    /// evaluation and full-expression cleanup; the one shape it cannot
-    /// see is a *Unique-typed* operand whose binding destruction (a
-    /// sequence's in-place discard) is observable. A sequence discards
-    /// each operand before the next, so hoisting a later operand must
-    /// not slide past a preceding Unique discard: require those values
-    /// Copy (docs/effects.md §11.2). Other parents evaluate their
-    /// operands into one node, with no destruction between them, so a
-    /// preceding read/transfer is already safe to defer.
-    fn deferrableOperands(self: *Rewriter, id: hir.ExprId, k: usize, ops: []const hir.ExprId) Error!bool {
-        const pr = self.p();
-        if (hir.registry.get(pr.node(id).op).class != .seq) return true;
-        for (ops[0..k]) |op| {
-            const cap = try self.analysis.capabilityOf(pr.node(op).ty) orelse return false;
-            if (cap != .copy) return false;
-        }
-        return true;
-    }
-
-    /// Whether the parent already transfers or discards the Unique
-    /// operand at index `k`, so binding it to a synthesized `let` leaves
-    /// its destruction point where it was (see the file header; docs
-    /// /effects.md §11.2, docs/hir.md §5.7).
-    ///
-    /// The parent's *use* is the derived fact (`operandUseOf`, docs/effects
-    /// .md §4) — never an opcode legality table. The one op-shape fact is
-    /// the sequence's operand discipline: a `Class.seq` operand that is not
-    /// the forwarded last is a discarded statement, so both the original
-    /// temporary and the synthesized local are dropped in place at the
-    /// same point (the lowering's `discardValue`).
-    fn uniqueDestructionCoincides(self: *Rewriter, id: hir.ExprId, k: usize, ops: []const hir.ExprId) Error!bool {
-        if (try self.analysis.operandUseOf(id, k) == .consume) return true;
-        const class = hir.registry.get(self.p().node(id).op).class;
-        return class == .seq and k + 1 < ops.len;
     }
 
     /// `parent(…, op_k, …)` → `let B = op_k in parent(…, %B, …)`, with the

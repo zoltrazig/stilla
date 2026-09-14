@@ -7,8 +7,8 @@
 >   host 声明解析、间接调用目标收窄（§9.2 局部 fn-ref 传播）、β 的 effectful
 >   实参（§10.4，契约下放开求值次数 / 序 / scope / FE / cleanup）、
 >   `RewriteRule` / `Requirement` 与 `RewriteContract` 类型（§10.3–§10.4，
->   `passes/rewrite_contract.zig`；首批实例 β 与 dead-let，第二批判例是
->   `ruleLet` 的 `let_dead` / `let_forward` / `let_atom` 三分支）。
+>   `passes/rewrite_contract.zig`；首批实例 β 与 dead-let，随后是 `ruleLet` 的
+>   `let_dead` / `let_forward` / `let_atom` 三分支，以及 η 与 selective ANF）。
 > - **消费者**：dead-let + selective ANF + `never_returns` 后缀删除
 >   （`--simplify`，默认关）、SEG v1（可执行文件默认开、`--no-seg` 关；库默认关、
 >   `Options.seg` 开启）。
@@ -650,7 +650,8 @@ ownership 可用性与 lifetime 栅栏，**缺一不可**。
 **代码中的查询名**：`readySummary` / `observedEffect` / `isTotal` /
 `observableEffectFree` / `canFloatAsTree` / `isDiscardable` / `isDuplicable` /
 `isSegSafe` / `hasSegEncoding` / `isSegAdmissible` /
-`isIntrinsicallySpeculatable` / `canSwapOperands` / `orderCompatible` /
+`isIntrinsicallySpeculatable` / `canSwapOperands` / `canMaterializeOperand` /
+`orderCompatible` /
 `cleanupFree` / `ownershipGate`；间接调用目标收窄的 `resolveTargets` /
 `effectBound` / `targetCallBound`；纯摘要级 `effects.isTotal` /
 `isObservableEffectFree` / `discardView` / `isPure`。**没有** `is_droppable` /
@@ -714,10 +715,12 @@ opcode 无关）：
 
 **现状：两层已落地为类型**（`passes/rewrite_contract.zig`）：
 `RewriteRule { name, applicability, legality: [Requirement], contract }`、
-`Requirement = Discardable | Duplicable | SwapOperands | EvaluationCountPreserved`。
+`Requirement = Discardable | Duplicable | SwapOperands | EvaluationCountPreserved
+| Materializable`。
 `check(analysis, rule.legality, subjects)` 是通用 legality 引擎——它唯一的
 `switch` 在**声明的要求标签**上，每个分支只调用派生查询（`isDiscardable` /
-`isDuplicable` / `canSwapOperands`），**没有 `switch(op)`**。
+`isDuplicable` / `canSwapOperands` / `canMaterializeOperand`），**没有
+`switch(op)`**。
 `EvaluationCountPreserved` 是规则自证的结构义务（引擎无法验证）：引擎接受声明，
 warrant 在规则自身的构造里（β→let 逐参数嵌套、LTR，不删除 / 不复制 / 不重排）。
 `applicability` 记录规则匹配层允许读什么：`.typed_opcode`（折叠 / 代数规则，按
@@ -728,9 +731,15 @@ warrant 在规则自身的构造里（β→let 逐参数嵌套、LTR，不删除
 是静态值，不能携带派生查询需要的 `ExprId`，主体在调用点以 `Requirement` 实例
 给出；`match` / `build` 仍是 pass 内的规则函数，由 `RewriteRule.name` 指名，v1
 不做函数指针化的表驱动；`effect` 落为 bool 集合结构体（一条规则可同时持有多个
-保证）。首批实例是 β（hir_seg.zig）与 dead-let（hir_simplify.zig）；第二批判例是 SEG
-的 `ruleLet` 三分支（`let_dead` / `let_forward` / `let_atom`，hir_seg.zig）；
-η 与 `tryAnf` 的判定仍内联。
+保证）。首批实例是 β（hir_seg.zig）与 dead-let（hir_simplify.zig）；随后是 SEG
+的 `ruleLet` 三分支（`let_dead` / `let_forward` / `let_atom`，hir_seg.zig），
+以及 η（`eta_rule`）与 selective ANF（`anf_rule`，hir_simplify.zig）。
+`Materializable` 是这两批之后新增的标签：`canMaterializeOperand(parent, slot)`
+（§12.1 的 ANF 准入）判定「slot 处的 operand 可提为合成 `let` 的 init」——
+其前的 operand 可被推迟（`Class.seq` 时更要求 Copy，因就地处弃的 Unique 会被
+推后）且被提 operand 的析构点不动（Copy，或父节点已 `Consume` / 就地处弃它）。
+它的主体是 `Subjects.hoist`（parent + slot），与 `swap_operands` 的复合主体同一
+形态。`Subjects.expr` 仍是单表达式义务的主体。
 
 例：
 
@@ -786,7 +795,15 @@ PreservesOrder`、`maps_scope` / `maps_full_expr` 为真、
 结构性事实：λ / 单 region / 形参实参 arity、λ 体是 seg-safe 的单表达式（非
 `seq` root）、λ 只经 `fn_ref` 可达、以及 `beta_done` 的消耗性守卫；`ruleLet`
 的匹配层额外拒 `move` / `drop` 的 binder 槽与非同型 binder（隐式强制转换）。
-η 的契约仍内联（§8.5）。详见 [hir.md](hir.md) §8.4。
+η 与 selective ANF 的契约同样已落地：`eta_rule`（hir_seg.zig）声明
+`PreservesEvaluationCount`，只重定向值位置的 `fn_ref` payload，不求值、不删除、
+不复制、不重排、无清理注册变动，故无 cleanup 义务；`anf_rule`
+（hir_simplify.zig）声明 `PreservesEvaluationCount + MayReorder`，legality 是
+`materializable`——合成 `let` 与源级 `let` 不同，**不跨 FE**（init 沿用父节点的
+FE，不重盖），其唯一额外义务是析构点重合，由 `canMaterializeOperand`
+（§12.1）经派生查询出证。两者的匹配层（λ 形状 / 链界 / 类型相等 / 全性，
+以及“首个不可浮动 operand”）仍是结构性 applicability。详见
+[hir.md](hir.md) §8.4–§8.5。
 
 `(fn(x) { x + 1 })(host.read())` 整体仍不能进纯 term 的 equality saturation
 ——但 β 本身不删除、不复制、不重排 `arg`，契约（求值次数 / 序 / scope / FE /
@@ -1065,6 +1082,11 @@ callee 若本身是表达式先按 LTR 绑定；不跨 full expression；不从�
 合成绑定与原匿名临时量的析构点重合；`Read` / `Borrow` operand 留在树内。
 且 sequence 提升后来 operand 时，其先前 operand 必须全为 Copy：Unique 绑定的
 就地处弃不在 `can_float_as_tree` 的清理模型内，跨过它会推迟一个可观察析构。
+
+该准入已落为 `anf_rule`（hir_simplify.zig）：`legality = { EvaluationCountPreserved,
+Materializable }`，`Materializable` 分支经 `canMaterializeOperand(parent, slot)`
+出证（§10.3），`tryAnf` 在选中首个不可浮动 operand 后由 `check` 消费；
+`EvaluationCountPreserved` 是「每个 operand 仍恰好求值一次」的结构自证。
 
 ### 12.2 dead-let
 

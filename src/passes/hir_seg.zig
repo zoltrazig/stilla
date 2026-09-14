@@ -158,6 +158,24 @@ const let_atom_rule = rewrite_contract.RewriteRule{
     },
 };
 
+/// η's declared rule (docs/effects.md §10.3–§10.4, docs/hir.md §8.5). Like
+/// β it is a boundary rewrite — a `fn_ref` carries no SEG encoding, so the
+/// island gate never sees it. Its only operational obligation is the
+/// evaluation-count certificate: the rewrite replaces a wrapper value with
+/// the `fn_ref` it forwards to, so nothing is evaluated, discarded,
+/// duplicated or reordered and no cleanup registration moves. The *match*
+/// layer stays inline in `tryEta` — the `fn_ref` opcode, the λ / arity /
+/// type shape, the totality gate and the chain bound are structural
+/// applicability, not legality.
+const eta_rule = rewrite_contract.RewriteRule{
+    .name = "eta",
+    .applicability = .shape,
+    .legality = &.{.evaluation_count_preserved},
+    .contract = .{
+        .effect = .{ .preserves_evaluation_count = true },
+    },
+};
+
 /// Positional binder remapping for structural (α-)comparison in CSE
 /// sharing. Binders are globally unique to their defining region, so a map
 /// entry is stable across the whole comparison; an unmapped binder is a
@@ -665,6 +683,11 @@ const Rewriter = struct {
         const pr = self.p();
         const n = pr.node(id);
         if (!std.mem.eql(u8, hir.registry.get(n.op).name, "fn_ref")) return false;
+        // The declared contract (`eta_rule`): a value redirect that
+        // evaluates nothing, so the evaluation-count certificate is the
+        // whole operational obligation. Discharged through the legality
+        // engine, which knows requirements, not opcodes.
+        if (!try rewrite_contract.check(self.analysis, eta_rule.legality, .{ .expr = id })) return false;
         const start = n.payload.func;
         var target = start;
         var steps: usize = 0;

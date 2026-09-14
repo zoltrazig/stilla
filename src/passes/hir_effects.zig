@@ -1884,6 +1884,46 @@ pub const Analysis = struct {
         return effects.orderCompatible(a_s, b_s, self.config.resources);
     }
 
+    /// `canMaterializeOperand` (docs/effects.md §12.1): the operand at
+    /// `slot` of `parent` may be hoisted into a synthesized `let`
+    /// initializer. Two derived obligations:
+    ///
+    /// - the operands before `slot` are deferred past it. `canFloatAsTree`
+    ///   already covers each one's own evaluation and full-expression
+    ///   cleanup (the ANF selector only reaches a slot whose predecessors
+    ///   are floatable), but for a `Class.seq` parent each earlier operand
+    ///   is a *discarded statement*: sliding its in-place destruction past
+    ///   the hoisted operand is observable when its value is Unique-owned,
+    ///   so those must be Copy.
+    /// - the hoisted operand's destruction point must not move. Copy has no
+    ///   destructor; a Unique value is admissible only when the parent
+    ///   already transfers it (`Consume`) or discards it in place (a
+    ///   `Class.seq` non-last operand), so the synthesized binder's scope-end
+    ///   destruction coincides with the anonymous temporary's
+    ///   full-expression one (docs/effects.md §11.2).
+    ///
+    /// The one op-shape fact is the sequence's operand discipline (the same
+    /// kind of descriptor read `canSwapOperands` makes of `policy`);
+    /// `operandUseOf` supplies the parent's use. Unknown capabilities fail
+    /// closed.
+    pub fn canMaterializeOperand(self: *Analysis, parent: hir.ExprId, slot: u32) Error!bool {
+        const pr = self.p();
+        const ops = pr.operands(parent);
+        const k: usize = slot;
+        if (k >= ops.len) return false;
+        const is_seq = hir.registry.get(pr.node(parent).op).class == .seq;
+        if (is_seq) {
+            for (ops[0..k]) |op| {
+                const cap = try self.capabilityOf(pr.node(op).ty) orelse return false;
+                if (cap != .copy) return false;
+            }
+        }
+        const cap = try self.capabilityOf(pr.node(ops[k]).ty) orelse return false;
+        if (cap == .copy) return true;
+        if (try self.operandUseOf(parent, k) == .consume) return true;
+        return is_seq and k + 1 < ops.len;
+    }
+
     /// Whether two value positions are order-compatible at all (the
     /// resource/trap input to `canSwapOperands`). Unknown (pending)
     /// facts conflict.

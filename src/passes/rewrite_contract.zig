@@ -24,10 +24,10 @@
 //!   obligation through `checkCleanupProof`.
 //!
 //! `RewriteRule` ties the three together. The v1 instances are β
-//! (`hir_seg.zig`), dead-let (`hir_simplify.zig`) and the SEG `let`
-//! family's three branches (`hir_seg.zig`'s `let_dead_rule` /
-//! `let_forward_rule` / `let_atom_rule`); η and `tryAnf` still carry
-//! their conditions inline.
+//! (`hir_seg.zig`), dead-let (`hir_simplify.zig`), the SEG `let` family's
+//! three branches (`hir_seg.zig`'s `let_dead_rule` / `let_forward_rule` /
+//! `let_atom_rule`), η (`hir_seg.zig`'s `eta_rule`) and selective ANF
+//! (`hir_simplify.zig`'s `anf_rule`).
 //!
 //! Deviations from the §10.3 sketch, and why: `legality` is a list of
 //! requirement *tags* — a rule declaration is a static value and cannot
@@ -67,19 +67,34 @@ pub const Requirement = enum {
     /// engine cannot verify this; it accepts the declaration, and the
     /// warrant is the rule's construction.
     evaluation_count_preserved,
+    /// `canMaterializeOperand(parent, slot)` — the operand may be hoisted
+    /// into a synthesized `let` initializer (selective ANF): the operands
+    /// before it may be deferred past it, and the hoisted operand's
+    /// destruction lands where the anonymous temporary's did (Copy, or a
+    /// parent that already transfers / discards it in place). Needs
+    /// `Subjects.hoist`.
+    materializable,
 };
 
 /// The subject a `Requirement` is evaluated on. `expr` is the single
-/// expression every v1 obligation is stated over; `swap` carries the
-/// parent + slot pair `swap_operands` needs.
+/// expression every non-hoist obligation is stated over; `swap` carries the
+/// parent + slot pair `swap_operands` needs; `hoist` the parent + slot
+/// `materializable` needs.
 pub const Subjects = struct {
     expr: hir.ExprId = hir.no_expr,
     swap: ?SwapSlots = null,
+    hoist: ?HoistSlot = null,
 
     pub const SwapSlots = struct {
         parent: hir.ExprId,
         lhs_slot: u16,
         rhs_slot: u16,
+    };
+
+    pub const HoistSlot = struct {
+        parent: hir.ExprId,
+        /// `Range.len` is `u32`, so an operand index always fits.
+        slot: u32,
     };
 };
 
@@ -101,6 +116,10 @@ pub fn check(an: *hir_effects.Analysis, requirements: []const Requirement, subje
             if (!try an.canSwapOperands(s.parent, s.lhs_slot, s.rhs_slot)) return false;
         },
         .evaluation_count_preserved => {},
+        .materializable => {
+            const s = subjects.hoist orelse return false;
+            if (!try an.canMaterializeOperand(s.parent, s.slot)) return false;
+        },
     };
     return true;
 }
