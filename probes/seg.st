@@ -3,12 +3,12 @@
 // `match` reduction (single / multi payload / nullary / nested payload /
 // wildcard / catch-all), immediately-invoked lambda β reduction,
 // constant folding and integer-algebra identities, constant conditions
-// and short-circuit constants, and the full-expression boundary itself
-// (a source-level `let` is not an island: its initializer opens a nested
-// FE, so the `if`/`or` folds inside that FE while the enclosing `let`
-// survives — hir.md §5.6/§8.7). `main` prints every result so the SEG
-// on/off differential compares observable output instead of two empty
-// runs.
+// and short-circuit constants, and the cross-full-expression `let` folds
+// (hir.md §8.7: a source-level `let` is not an island — its initializer
+// opens a nested FE — so its dead / forwarding / atom-copy rules are
+// admitted by their boundary contracts instead). `main` prints every
+// result so the SEG on/off differential compares observable output
+// instead of two empty runs.
 
 const builtin = import("builtin");
 
@@ -102,9 +102,69 @@ fn constant_logic() -> bool {
     x
 }
 
+// The cross-FE `let` folds (hir.md §8.7). A source-level initializer
+// opens its own full expression, so the `let` is not an island member and
+// each fold is admitted by its boundary contract instead of by island
+// membership: `unused_let`'s discardable initializer is dropped,
+// `forward_once`'s island-member initializer moves to its single use, and
+// `atom_twice`'s trivial atom is copied to both uses.
 fn unused_let(x: int32) -> int32 {
     let unused: int32 = identity(x);
     x
+}
+
+fn forward_once(x: int32) -> int32 {
+    let y = x + 1;
+    y * 2
+}
+
+fn atom_twice(x: int32) -> int32 {
+    let y = x;
+    y + y
+}
+
+// The refused shapes, each keeping its `let`. `borrowed_kept`'s atom fails
+// `isDuplicable`'s ownership gate, `trapping_kept`'s initializer may trap,
+// `observable_kept`'s call prints (so it is neither an island member nor
+// effect-free), `coerced_kept`'s binder type (`any`) is the implicit
+// coercion rather than the initializer's node type (`int32`), and
+// `unique_kept`'s constructor result is Unique — neither an island member
+// nor Copy, so the drop hook still runs.
+fn borrowed_kept(borrow x: int32) -> int32 {
+    let y = x;
+    y + y
+}
+
+fn trapping_kept(x: int32) -> int32 {
+    let y = 10 / x;
+    y + 1
+}
+
+fn shout(x: int32) -> int32 {
+    builtin.print("shout");
+    x
+}
+
+fn observable_kept(x: int32) -> int32 {
+    let y = shout(x);
+    y + 1
+}
+
+fn coerced_kept(x: int32) -> int32 {
+    let dynamic: any = x;
+    dynamic as int32
+}
+
+struct Token {
+    id: int32;
+    drop(t) { builtin.print("token"); }
+}
+
+fn make_token(id: int32) -> Token { Token { id: id } }
+
+fn unique_kept(x: int32) -> int32 {
+    let t = make_token(x);
+    t.id
 }
 
 fn logic_result() -> int32 {
@@ -128,4 +188,11 @@ fn main() -> void {
     builtin.print(builtin.str(constant_if()));
     builtin.print(builtin.str(logic_result()));
     builtin.print(builtin.str(unused_let(6)));
+    builtin.print(builtin.str(forward_once(7)));
+    builtin.print(builtin.str(atom_twice(8)));
+    builtin.print(builtin.str(borrowed_kept(9)));
+    builtin.print(builtin.str(trapping_kept(10)));
+    builtin.print(builtin.str(observable_kept(11)));
+    builtin.print(builtin.str(coerced_kept(12)));
+    builtin.print(builtin.str(unique_kept(13)));
 }

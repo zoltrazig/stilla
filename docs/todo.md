@@ -5,29 +5,143 @@
 「近期」内各项的先后是**建议顺序**，不是串行依赖；每项单独列出前置
 依赖。设计细节仍在两篇文档正文，本文件只记范围、依赖与验收。
 已完成的历史条目按原编号归档于「已完成」节，供跨文档交叉引用；
-「近期」从第 15 项续起，新增项一律追加到队尾。
+「近期」从第 16 项续起，新增项一律追加到队尾。
 
 ## 近期（建议顺序）
 
-- [ ] **15. 跨 FE 的 let 折叠（契约准入）**（[hir.md](hir.md) §8.3 / §8.7）
-  - 现状：节点级 FE 标注落地后（第 7 项），源级 `let` 的 init 自成 FE，故不是
-    island 成员，SEG 的 let 规则只在 β / match 拼接的 `let`（init 与 `let` 同
-    FE）上触发；源级 dead-let 由 `--simplify` 的 `hir_simplify.tryDeadLet`
-    承担（不经 island 门）。§8.7 的跨 FE 折叠（`let B1 = %B0 in %B1 → %B0`）
-    因此仍被推迟，且 `seg.st` 的 `unused_let` 现在固定的是边界本身。
+- [ ] **16. HIR canonical 文本的 round-trip 闭合**（[hir.md](hir.md) §4.4 / §4.5 / §4.10）
+  - 现状：文本形态已知缺口（均已实测复现）——(a) `hir_print.printType` 会打印
+    `box(T)`，但 `hir_parse.parseType` 没有 `box` 分支，含 box 类型的 HIR 可打印、
+    不可解析（§4.5）；(b) `struct_make` / `field_get` / `variant_make` 无成员身份
+    的文本形态，printer 直接报 `NotSerializable`，任何 struct / union 程序都无法
+    `--emit-hir`；(c) 解构 `let`（`Region.pattern != null`）的 printer 只打印
+    `params[0]`、忽略 pattern，输出引用未声明 binder 的非法文本且**不报错**——
+    静默损坏；(d) 值位置模块链叶（`access_hops` 非空）报 `NotSerializable`
+    （刻意，`hir_print.zig` 的链叶守卫）；(e) 带 region 且无命名形状的 op 报
+    `NotSerializable`，通用形 `op(args){ params => body }` 是设计预留、parser 也
+    不接受（§4.4）。
+  - 可选子项（无消费者）：§4.6 的派生标注（`// { view / eff / fe }`）与 `fe[ … ]`
+    显式 FE 包裹——printer / parser 均无代码，仅为 SEG 验收输出预留。
+  - 不在范围：pattern 字面量在 arena 里无类型（`hir.Pattern.literal` 只有
+    `meta.ConstValue`），printer 打裸字面量、parser 按默认 rep 解析是**构造上
+    无损**的 HIR round-trip。
+  - 范围：解构 let 的**最低**修复是失败关闭（返回 `NotSerializable`，仿
+    `access_hops` 的「报错，绝不静默丢弃」先例），完整修复是按 §4.3 打印 pattern；
+    为 `struct_make` / `field_get` / `variant_make` 定义成员身份文本形态（§4.4 表
+    中 † 的规范预留）；补 `hir_parse.parseType` 的 `box` 分支；可选做 §4.6 标注。
+  - 依赖：无。
+  - 验收：`probes/box.st` / `probes/aggregates.st` / `probes/patterns.st` 是三个
+    已知报红用例（现均 `NotSerializable`）；修复后 `--emit-hir` 覆盖完整
+    `probes/` + `examples/` 语料库，`parse(print(hir))` 逐节点 α 等价并过
+    `hir_validate`，解构 let 与 box 类型至少各一个 round-trip 正例；同步删除
+    [hir.md](hir.md) §4.5 的「已知 printer / parser 不对称」说明与 §4.10 的已知
+    缺口（AGENTS.md：文档随代码更新）。
+
+- [ ] **17. scope-end 清理建模**（[effects.md](effects.md) §11.2；
+      `src/passes/hir_effects.zig:1494/1624/1634/1724`）
+  - 现状：`hir_effects.regionOwnsUnique` 在子树含非借用 Unique region 绑定时令
+    `cleanupEffect` 回 `null` → `Top`。节点级 FE 标注（第 7 项）**不**放开它：
+    类型匹配的 `origin_expr` 只可能是产出该值的 init 节点，而它自成一个内层 FE，
+    语义上正确的销毁点却在外层 FE 末尾；`registration_index` 的契约是「该 FE 内
+    创建序中的位置」，scope-end 绑定根本不由 FE 临时量的纪律产出。
+  - 范围：独立的 scope-end 销毁累加与排序模型——把 scope-end 绑定的销毁点、创建
+    序与 FE 内临时量的销毁计划统一到同一套注册 / 排序，使 `cleanupEffect` 能表达
+    「外层 FE 末尾的 scope-end 析构」。放开后 selective ANF 的 Unique region 绑定
+    与源级 Unique `let` 不再落入保守 `Top`。
+  - 依赖：无（第 3 / 7 项已落地）。
+  - 验收：复用第 4 项的字面析构点差分法——Unique 绑定物化后的析构点与未改写逐字
+    一致；正例（scope-end Unique 绑定进 `observed_effect`）+ 负例（可观察 scope-end
+    析构仍拒绝删除 / 浮动）；examples/probes on/off 解释器输出逐字相等。
+
+- [ ] **18. rewrite 契约形式化的第二批（η / `tryAnf`）**
+      （[effects.md](effects.md) §10.3、[hir.md](hir.md) §8.1 / §8.5）
+  - 现状：第 13 项落地了 `rewrite_contract.RewriteRule` / `Requirement` /
+    `RewriteContract`，首批实例是 β（`hir_seg.beta_rule`）与 dead-let
+    （`hir_simplify.dead_let_rule`），第二批是 SEG 的 `ruleLet` 三分支
+    （「已完成」第 15 项）；η（`hir_seg.tryEta`）与 selective ANF
+    （`hir_simplify.tryAnf`）的判定仍内联。
+  - 范围：把 η 与 `tryAnf` 的准入声明为 `RewriteRule` 实例、经 `check` /
+    `checkCleanup` 消费，行为逐字不变（与第 13 项同为提取，不改语义）。
+    `ruleLet` 已在第 15 项按 β 的 boundary-rewrite 模式契约化，本项不动它，
+    避免冲突。
+  - 依赖：**第 13 项**（已落地）。
+  - 验收：与第 13 项同格式——每个 requirement 分支与派生查询对账；η / `tryAnf`
+    的既有白盒正负例与全语料 on/off 差分在形式化实现下通过。
+
+- [ ] **19. tuple / list 的 SEG 编码与投影规则**（[hir.md](hir.md) §8.3；
+      `src/hir.zig` 的 `seg == null` 断言）
+  - 现状：`tuple_make` / `list_make` 无 `SegEncoding`，`hir.zig` 的注册测试把二者
+    列为「硬 island 边界」并断言 `seg == null`，因此 §8.3 的 tuple / list
+    projection 无规则。
+  - 范围：为二者补 `construct` 编码、为投影补 `project` 编码，并加已知下标归约
+    规则（`field_get`-式）。**先做 tuple**；list 投影需要可证明的常量下标 / 长度
+    （边界检查），单列。反转 `hir.zig` 的 `seg == null` 断言与 [hir.md](hir.md)
+    §8.3 的 ❌ 行。
+  - 耦合收益：编码落地后二者并入 CSE sharing 的可用子项集（`ruleCse` 现限于纯
+    算术 / 聚合 island）。
+  - 依赖：无。
+  - 验收：白盒（各 tuple 下标 + 越界 / 非构造基拒绝；list 常量下标 + 不可证
+    拒绝）、`probes/` 新语料进 on/off 解释器差分与 pass smoke、SEG budget 基线
+    更新。
+
+- [ ] **20. `effects.dropEffect` 的处置**（[effects.md](effects.md) §11.1）
+  - 现状：`effects.dropEffect`（`src/effects.zig:1003`）是 M1b 的极简版（Copy →
+    `{}`，其余 / null → `Top`），只有定义 + 单测、**无生产消费者**；生产路径是
+    `hir_effects.dropEffectOf` 的精确全链。它是 `pub` 且经 `root.zig` 导出——删除
+    会破坏嵌入者。
+  - 范围：在「删除（破坏性，走公共 API 变更）」与「保留并把文档指引到
+    `hir_effects.dropEffectOf`」之间做一次明确决定，不静默删除。
+  - 依赖：无。
+  - 验收：决定落地（删除则更新 `root.zig` / 引用并跑全测；保留则补 doc 注释指明
+    M1b 遗留与生产路径归属），`zig build test` 通过。
+
+## 已完成（归档，原「近期」第 1–15 项）
+
+> 以下条目均已落地，按完成时的编号保留，供 [effects.md](effects.md) 等正文
+> 交叉引用；新工作从「近期」第 16 项续起。
+
+- [x] **15. 跨 FE 的 let 折叠（契约准入）**（[hir.md](hir.md) §8.3 / §8.7）
   - 范围：按 β 的 boundary-rewrite 契约模式（而非 island 成员资格）为
     `ruleLet` 的 FE 安全子集增加准入：dead-let 要求 init `isDiscardable`；
     used-once forwarding 要求 init 的 island 成员资格（Copy、cleanup-free）；
     trivial-atom forwarding 要求原子 init `isDuplicable`（补上 borrowed-view
     原子的准入证明）；合成结果不得跨 FE 移动清理。
   - 依赖：**第 7 项**（已落地）。
-  - 验收：契约正例（源级纯 init 的 dead / forward / 原子复制）+ 负例
-    （Borrowed view / Unique / 可观察 init）；on/off 解释器差分。
-
-## 已完成（归档，原「近期」第 1–14 项）
-
-> 以下条目均已落地，按完成时的编号保留，供 [effects.md](effects.md) 等正文
-> 交叉引用；新工作从「近期」第 15 项续起。
+  - 已完成：`hir_seg.zig` 新增三条规则声明——`let_dead_rule`（legality
+    `.discardable`，`preserves_cleanup = binder_destruction`）、
+    `let_forward_rule`（`EvaluationCountPreserved` + `may_reorder`、
+    `maps_full_expr`、`cleanup_free_subtree`）、`let_atom_rule`
+    （`.duplicable` + `maps_full_expr`）——由 `ruleLet` 三分支经
+    `rewrite_contract.check` / `checkCleanup` 消费；pass 驱动层让**非 island**
+    节点也尝试 `ruleLet`（`applyRules` 的 boundary 分支），其余普通规则仍受
+    island 门约束。dead 分支改用 `isDiscardable(init)`（一个查询覆盖 trap /
+    效果 / `discard_view(observed_effect)` 折叠的 init 全表达式清理面）+
+    `binder_destruction`；used-once 分支保留 `encOf(init)`（Copy、单一 FE、
+    cleanup-free、过 ownership gate）并新增「本轮未被改写」守卫——改写过的节点
+    其 island 判定描述的是死形状，折叠延后到下一轮，§8.7 的例子因此晚一轮闭合；
+    atom 分支新增 `isDuplicable`（借用的 view 过不了 ownership gate，`Q` 过不了
+    no-`Q` 子句）。forwarding 搬移的 init 子树按 `maps_full_expr` 重盖使用点的
+    FE（`restampFe`；island 资格已证明整棵子树单一 FE），atom 复制的每一处按
+    使用点盖 FE；三处折叠都把 region root 的清理 token 重映射到存活节点
+    （`remapCleanupOrigin(body, id)`）。匹配层另外拒两种形状：binder 被
+    `move` / `drop` 当 operand 读（它们从 operand 节点自身的 binder payload
+    下降，只有 `local` init 可搬入该槽）与 binder 类型 ≠ init 节点类型
+    （`let b: any = %value` 的隐式强制转换，替换会抹掉它）。
+  - 验收：`hir_seg_tests.zig` 新增「source-level let folds across the
+    full-expression boundary」——改写前先用 `analysisOf` 断言每个 init 的派生
+    查询结论（dead 的 `isDiscardable`、forward 的 `isSegSafe` + `cleanupFree`、
+    atom 的 `isDuplicable`，以及 borrow / Unique / trap / effectful 四个负例与
+    coercion 的 `init.ty != binder.ty`）且三个正例的 init FE ≠ `let` FE；
+    `probes/seg.st` 的 `unused_let`（dead）→ `%B0`、`forward_once`（forward）→
+    `mul.i32(add.i32(%B0, 1i32), 2i32)`、`atom_twice` → `add.i32(%B0, %B0)`
+    三个正例逐字文本，加 `borrowed_kept` / `trapping_kept` / `observable_kept` /
+    `coerced_kept` / `unique_kept` 五个负例（`let` 保留）；改后断言
+    `maps_full_expr`（forward 的整棵被搬移子树与目标 FE 一致、atom 两处副本是
+    不同节点且同 FE）。`probes/seg.st` 扩为可运行差分语料（每个形状都
+    `print`，`--simplify` × `--seg` 四组合解释器输出逐字相等）。§8.7 的例子
+    现在真的折叠，`seg.st` 的 `unused_let` 不再固定边界。`SEG budget` 基线随
+    语料与轮数更新（57 程序 / 4491 节点 / 2395 islands / 85 轮 / 94 次重写 /
+    ≈86 ms，仍断言收敛），`zig build test` 全绿。
 
 - [x] **14. `never_returns` must 事实与后缀删除**（[effects.md](effects.md) §10.1、
       §12.4；hir_effects.zig / hir_simplify.zig / hir_lower_expr.zig）
@@ -232,8 +346,8 @@
     绑定不由 FE 临时量的纪律产出。原因记于 [effects.md](effects.md) §11.2；
     真正放开需独立的 scope-end 销毁累加与排序模型。
   - **行为边界**：源级 `let` 的 init 自成 FE，故不再是 island 成员，SEG 的 let
-    规则只在 β / match 拼接的 `let` 上触发；源级 dead-let 仍由 `hir_simplify`
-    承担（见「近期」第 15 项：跨 FE 折叠的契约准入）。
+    规则改走 boundary 契约（见「已完成」第 15 项：跨 FE 折叠的契约准入），
+    β / match 拼接的 `let` 则仍可在 FE 内继续化简。
 
 - [x] **1. `match` 进 SEG**（[hir.md](hir.md) island/规则集与
       `passes/hir_seg.zig`）
@@ -406,6 +520,16 @@
       完成（[hir.md](hir.md) §2.3 远期边界；未立项）。
 - [ ] SEG 的 associativity / commutativity 搜索（正文列为 SEG 之外的
       方向，未立项；结构相等的 CSE sharing 已落地（见「已完成」第 10 项））。
+- [ ] effect 域间层级 / alias 例外表（[effects.md](effects.md) §5.6 Target）：
+      现只有 `stable` 域集合与显式 `disjoint` 对，域内层级 / alias 例外未建模；
+      与「待决」的 overlap/disjoint 具体条目是同一方向的精度补全。
+- [ ] 函数摘要的增量失效：标脏 / 世代号 / 依赖传播（[effects.md](effects.md)
+      §8.3）。现为全量重算；触发条件是「缓存 phase-2/3 结果」——
+      `EffectEnvironmentFingerprint`（「已完成」第 2 项）是已落地的先决条件，本项
+      是其剩余部分。
+- [ ] `canMove` / `MovementContext` 暴露（[effects.md](effects.md) §10.5）：需先
+      建模移动路径上的 FE / lifetime / 清理注册变化事实；在第一个需要 code motion
+      的重写出现前，暴露恒 false 的入口无意义。
 
 ## 待决（规范措辞与契约）
 

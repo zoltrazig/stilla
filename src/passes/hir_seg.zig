@@ -19,7 +19,10 @@
 //! - **Rules** — β-reduction (→ let, the v1 boundary rewrite with the
 //!   §8.4 contract), η-reduction (a `fn_ref` value redirect, §8.5), let
 //!   simplification (dead let, used-once forwarding, trivial-atom
-//!   forwarding), struct projection (`field_get(struct_make(…), i) → vi`
+//!   forwarding — also boundary rewrites, admitted by the `let_*`
+//!   contracts of §8.7 rather than by island membership, since a
+//!   source-level `let`'s initializer opens its own full expression),
+//!   struct projection (`field_get(struct_make(…), i) → vi`
 //!   for a known field index, §8.3), constant folding over the typed reps,
 //!   integer algebra identities, the known-variant `match` reduction to
 //!   `let` (§8.6), and CSE-style sharing (two α-equivalent `isDuplicable`
@@ -99,6 +102,59 @@ const beta_rule = rewrite_contract.RewriteRule{
         .maps_scope = true,
         .maps_full_expr = true,
         .preserves_cleanup = .cleanup_free_subtree,
+    },
+};
+
+/// The `let` family's declared rules (docs/effects.md §10.3–§10.4,
+/// docs/hir.md §8.3 / §8.7). A source-level `let`'s initializer opens its
+/// own full expression (hir.md §5.6), so the `let` node is never an island
+/// member; like β / η the rules are therefore **boundary rewrites**,
+/// admitted by these contracts instead of by island membership. The
+/// *match* layer (the single-parameter `let` shape and the use count) stays
+/// inline in `ruleLet`.
+///
+/// dead-let discards the initializer's evaluation, and removing the binding
+/// also removes its scope-end destructor — the `binder_destruction` proof.
+const let_dead_rule = rewrite_contract.RewriteRule{
+    .name = "let_dead",
+    .applicability = .shape,
+    .legality = &.{.discardable},
+    .contract = .{
+        .effect = .{ .may_discard = true },
+        .preserves_cleanup = .binder_destruction,
+    },
+};
+
+/// used-once forwarding relocates the initializer's single evaluation to
+/// its use point. Nothing is deleted or duplicated, but the move crosses a
+/// full-expression boundary, so the contract needs the
+/// `cleanup_free_subtree` proof (no cleanup registration moves) and the
+/// `maps_full_expr` declaration (the moved subtree is re-stamped onto the
+/// destination). Island membership, which the proof re-checks, additionally
+/// supplies Copy (no scope-end destructor to leave behind).
+const let_forward_rule = rewrite_contract.RewriteRule{
+    .name = "let_forward",
+    .applicability = .shape,
+    .legality = &.{.evaluation_count_preserved},
+    .contract = .{
+        .effect = .{ .preserves_evaluation_count = true, .may_reorder = true },
+        .maps_full_expr = true,
+        .preserves_cleanup = .cleanup_free_subtree,
+    },
+};
+
+/// trivial-atom forwarding copies a `const` / `local` / `fn_ref`
+/// initializer to every use. The atom has no evaluation to duplicate, but
+/// its *value* must still be duplicable: a borrowed view fails the
+/// ownership gate and a `Q` read the no-`Q` clause (`isDuplicable`), which
+/// is the admission proof the v1 rule lacked.
+const let_atom_rule = rewrite_contract.RewriteRule{
+    .name = "let_atom",
+    .applicability = .shape,
+    .legality = &.{.duplicable},
+    .contract = .{
+        .effect = .{ .may_duplicate = true },
+        .maps_full_expr = true,
     },
 };
 
@@ -381,7 +437,9 @@ const Rewriter = struct {
         // β is a boundary rewrite (hir.md §8.4), not an island rewrite:
         // its callee is a `fn_ref`, which has no SEG encoding, so the
         // call is never an island member. It is admitted by its contract
-        // inside `tryBeta` instead of by the island predicate.
+        // inside `tryBeta` instead of by the island predicate. The same
+        // holds for the `let` family (`applyRules` still tries it when the
+        // node is not an island) and for η.
         if (self.analysisValid(id)) {
             if (try self.tryBeta(id)) {
                 self.changed = true;
@@ -749,11 +807,23 @@ const Rewriter = struct {
     /// Try every ordinary island rule at `id` (one rule per visit). A rule
     /// that fires overwrote the node's content in place, so `id` joins the
     /// dirty set: any later operand query about it would read a dead shape.
+    ///
+    /// `let` folding is also a **boundary rewrite** (hir.md §8.3 / §8.7): a
+    /// source-level `let`'s initializer opens its own full expression, so
+    /// the `let` node is not an island member and the island gate would
+    /// hide the rule. When `allowed` is false the `let` rules are still
+    /// tried, admitted by their `let_*` contracts (see `ruleLet`).
     fn applyRules(self: *Rewriter, id: hir.ExprId, allowed: bool) Error!bool {
-        if (!allowed) return false;
-        const changed = try self.applyRulesInner(id);
+        const changed = if (allowed) try self.applyRulesInner(id) else try self.tryLet(id);
         if (changed) try self.markDirty(id);
         return changed;
+    }
+
+    /// `ruleLet` plus its rewrite count (both drivers go through here).
+    fn tryLet(self: *Rewriter, id: hir.ExprId) Error!bool {
+        if (!try self.ruleLet(id)) return false;
+        self.lets += 1;
+        return true;
     }
 
     fn applyRulesInner(self: *Rewriter, id: hir.ExprId) Error!bool {
@@ -765,12 +835,7 @@ const Rewriter = struct {
                 return true;
             }
         }
-        if (std.mem.eql(u8, name, "let")) {
-            if (try self.ruleLet(id)) {
-                self.lets += 1;
-                return true;
-            }
-        }
+        if (try self.tryLet(id)) return true;
         if (std.mem.eql(u8, name, "match")) {
             if (try self.ruleMatch(id)) {
                 self.matches += 1;
@@ -966,16 +1031,50 @@ const Rewriter = struct {
         pr.exprs.items[id] = pr.node(result);
     }
 
-    /// Plain `let` simplification (hir.md §8.3): dead let, used-once
-    /// forwarding, and trivial-atom forwarding. All three strictly reduce
-    /// `costOf`; the island invariant makes the init discardable (dead)
-    /// and the subtree duplicable (forward). A β-generated let may bind an
-    /// effectful, non-island init (docs/effects.md §10.4), so the
-    /// dead/forward branches additionally require the init to be an island
-    /// member (`encOf`) — dropping or moving it would lose or reorder the
-    /// effect.
+    /// Plain `let` simplification (hir.md §8.3 / §8.7): dead let,
+    /// used-once forwarding, and trivial-atom forwarding. All three
+    /// strictly reduce `costOf`.
+    ///
+    /// This is a **boundary rewrite** like β / η: a source-level `let`'s
+    /// initializer opens its own full expression (hir.md §5.6), so the
+    /// `let` node is never an island member and the island gate cannot
+    /// admit it. The `let_*` contracts declared in this file replace that
+    /// gate, one per branch:
+    ///
+    /// - **dead** (`uses == 0`): `isDiscardable(init)` — dropping the
+    ///   initializer's evaluation must be unobservable (`10 / y` traps, a
+    ///   host write is observable, a borrowed view fails the ownership
+    ///   gate). The dropped initializer's own registered full-expression
+    ///   temporaries go with it, which is licensed because
+    ///   `isDiscardable` folds `discard_view(observed_effect)`. Removing
+    ///   the binding also removes its scope-end destructor, which needs
+    ///   the `binder_destruction` proof (Copy binder, or a discardable
+    ///   destructor).
+    /// - **used-once** (`uses == 1`): the initializer must be an island
+    ///   member (`encOf`) — Copy, one full expression, literally
+    ///   cleanup-free and ownership-gated — and unrewritten this round (a
+    ///   rewritten node's cached verdict describes a dead shape; the fold
+    ///   then waits for the next round's recomputed islands, which is how
+    ///   the §8.7 example closes one round after its initializer stops
+    ///   being a call). The `cleanup_free_subtree` proof re-checks that
+    ///   verdict through the engine, so the move relocates no cleanup
+    ///   registration, and Copy leaves no scope-end destructor behind.
+    ///   The moved subtree is re-stamped onto the destination full
+    ///   expression (`maps_full_expr`).
+    /// - **trivial atom** (`uses >= 2`, hir.md §8.3): a `const` / `local` /
+    ///   `fn_ref` initializer is copied to every use, which needs
+    ///   `isDuplicable` — the admission proof the v1 rule lacked for a
+    ///   borrowed (ownership gate) or nondeterministic (`Q`) atom.
+    ///
+    /// The *match* layer additionally refuses a `let` whose binder is read
+    /// from a `move` / `drop` operand slot (those lower through the operand
+    /// node's own binder payload, so only a `local` initializer may be
+    /// forwarded there) and one whose binder type differs from the
+    /// initializer's node type (an implicit coercion, which the substitution
+    /// would erase).
     fn ruleLet(self: *Rewriter, id: hir.ExprId) Error!bool {
         const pr = self.p();
+        if (!std.mem.eql(u8, hir.registry.get(pr.node(id).op).name, "let")) return false;
         const ops = pr.operands(id);
         const regs = pr.regionsOf(id);
         if (ops.len != 1 or regs.len != 1) return false;
@@ -987,53 +1086,98 @@ const Rewriter = struct {
         const init = ops[0];
         const body = region.root;
 
-        const uses = try self.countUses(body, bind);
-        // The island invariant: an island-member init is total and
-        // observable-effect-free, so dropping (dead) or forwarding
-        // (used-once) its evaluation is unobservable. A β-generated let may
-        // instead bind an effectful, non-island argument (docs/effects.md
-        // §10.4) — then the init must stay exactly where the call evaluated
-        // it. `encOf` is exact for those old argument ids, and true by fiat
-        // only for β-clone bodies / match-spliced lets, which are island-safe
-        // by construction.
-        const init_island = self.encOf(init);
+        const scan = try self.scanUses(body, bind);
+        const uses = scan.count;
         if (uses == 0) {
-            if (!init_island) return false;
+            if (!try rewrite_contract.check(self.analysis, let_dead_rule.legality, .{ .expr = init })) return false;
+            const bind_ty = pr.binder(bind).ty;
+            if (!try rewrite_contract.checkCleanup(let_dead_rule, self.analysis, .{ .binder_destruction = bind_ty })) return false;
             pr.exprs.items[id] = pr.node(body);
+            // The surviving reachable node is `id`; a cleanup token that
+            // named the region root follows its value there
+            // (docs/effects.md §11.2 origin remap).
+            pr.remapCleanupOrigin(body, id);
             return true;
         }
+        // Forwarding / duplication substitutes the initializer's *content*
+        // into binder-reference slots, which keeps the slot's type only when
+        // the initializer's node type is the binder's. A `let` may instead
+        // carry an implicit coercion (`let b: any = %value`), and the
+        // lowering dispatches on the operand node's own type (`any_cast`
+        // packs vs unpacks) — such a `let` stays.
+        if (!pr.node(init).ty.eql(pr.binder(bind).ty)) return false;
+        // `move` / `drop` lower their operand through the operand node's own
+        // binder payload (`hir_lower_expr.moveNode`), so a forwarded
+        // initializer may only land in such a slot when it is itself a
+        // `local` node.
+        if (scan.binder_operand and !std.mem.eql(u8, hir.registry.get(pr.node(init).op).name, "local")) return false;
         if (uses == 1) {
-            if (!init_island) return false;
+            if (!self.encOf(init)) return false;
+            // A node rewritten earlier this round has a dead shape behind
+            // its cached island verdict; defer the fold to next round's
+            // fresh analysis.
+            // ponytail: one-round deferral (bounded by `max_iterations`), not
+            // a mid-round island rebuild; revisit if a program ever needs the
+            // fold inside the bound.
+            if (init < self.enc.len and self.dirty.contains(init)) return false;
+            if (!try rewrite_contract.check(self.analysis, let_forward_rule.legality, .{ .expr = init })) return false;
+            if (!try rewrite_contract.checkCleanup(let_forward_rule, self.analysis, .{ .cleanup_free_subtree = init })) return false;
+            const cap = try self.analysis.capabilityOf(pr.node(init).ty) orelse return false;
+            if (cap != .copy) return false;
             try self.substOnce(body, bind, init);
             pr.exprs.items[id] = pr.node(body);
+            pr.remapCleanupOrigin(body, id);
             return true;
         }
-        if (isTrivialAtom(pr, init)) {
-            try self.substAll(body, bind, init);
-            pr.exprs.items[id] = pr.node(body);
-            return true;
-        }
-        return false;
+        if (!isTrivialAtom(pr, init)) return false;
+        if (!try rewrite_contract.check(self.analysis, let_atom_rule.legality, .{ .expr = init })) return false;
+        try self.substAll(body, bind, init);
+        pr.exprs.items[id] = pr.node(body);
+        pr.remapCleanupOrigin(body, id);
+        return true;
     }
 
-    fn countUses(self: *Rewriter, root: hir.ExprId, bind: hir.BinderId) Error!usize {
+    const UseScan = struct {
+        count: usize = 0,
+        /// Whether a use sits in a *binder-reference operand position*
+        /// (`move` / `drop` operand 0), which the lowering reads through the
+        /// operand node's own payload.
+        binder_operand: bool = false,
+    };
+
+    fn scanUses(self: *Rewriter, root: hir.ExprId, bind: hir.BinderId) Error!UseScan {
         const pr = self.p();
-        var count: usize = 0;
+        var scan = UseScan{};
         var work = std.ArrayListUnmanaged(hir.ExprId).empty;
         defer work.deinit(self.arena);
         try work.append(self.arena, root);
         while (work.pop()) |id| {
             const n = pr.node(id);
-            if (std.mem.eql(u8, hir.registry.get(n.op).name, "local") and n.payload.binder == bind) count += 1;
+            const name = hir.registry.get(n.op).name;
+            if (std.mem.eql(u8, name, "local") and n.payload.binder == bind) scan.count += 1;
+            if (std.mem.eql(u8, name, "move") or std.mem.eql(u8, name, "drop")) {
+                const ops = pr.operands(id);
+                if (ops.len > 0) {
+                    const arg = pr.node(ops[0]);
+                    if (std.mem.eql(u8, hir.registry.get(arg.op).name, "local") and arg.payload.binder == bind) {
+                        scan.binder_operand = true;
+                    }
+                }
+            }
             for (pr.operands(id)) |op| try work.append(self.arena, op);
             for (pr.regionsOf(id)) |r| try work.append(self.arena, pr.region(r).root);
         }
-        return count;
+        return scan;
     }
 
     /// Replace the single `local bind` occurrence's *content* with the
-    /// init's (a move — the init is only referenced by the let). The let
-    /// then becomes `let B = v in body'`; the caller drops the let.
+    /// init's (a move — the init is only referenced by the let), re-stamping
+    /// the moved subtree onto the use site's full expression. The island
+    /// gate proved the initializer one full expression, so nothing inside it
+    /// opens a nested boundary (hir.md §5.6); the re-stamp keeps the moved
+    /// nodes from claiming a boundary that no longer encloses them
+    /// (`maps_full_expr`). The let then becomes `let B = v in body'`; the
+    /// caller drops the let.
     fn substOnce(self: *Rewriter, root: hir.ExprId, bind: hir.BinderId, init: hir.ExprId) Error!void {
         const pr = self.p();
         var work = std.ArrayListUnmanaged(hir.ExprId).empty;
@@ -1042,6 +1186,7 @@ const Rewriter = struct {
         while (work.pop()) |id| {
             const n = pr.node(id);
             if (std.mem.eql(u8, hir.registry.get(n.op).name, "local") and n.payload.binder == bind) {
+                try self.restampFe(init, n.full_expr);
                 pr.exprs.items[id] = pr.node(init);
                 return;
             }
@@ -1051,7 +1196,8 @@ const Rewriter = struct {
     }
 
     /// Duplicate a trivial atom (const / local / fn_ref — no regions, no
-    /// evaluation) at every use of the binder.
+    /// evaluation) at every use of the binder, each copy carrying the use
+    /// site's full expression (an atom has no subtree to re-stamp).
     fn substAll(self: *Rewriter, root: hir.ExprId, bind: hir.BinderId, init: hir.ExprId) Error!void {
         const pr = self.p();
         const atom = pr.node(init);
@@ -1062,8 +1208,26 @@ const Rewriter = struct {
             const n = pr.node(id);
             if (std.mem.eql(u8, hir.registry.get(n.op).name, "local") and n.payload.binder == bind) {
                 pr.exprs.items[id] = atom;
+                pr.exprs.items[id].full_expr = n.full_expr;
                 continue;
             }
+            for (pr.operands(id)) |op| try work.append(self.arena, op);
+            for (pr.regionsOf(id)) |r| try work.append(self.arena, pr.region(r).root);
+        }
+    }
+
+    /// Move `root`'s subtree into full expression `fe`. λ bodies are
+    /// deferred exactly as `ownershipGate` defers them (a `fn_ref` value has
+    /// no λ node in it, so this is defensive).
+    fn restampFe(self: *Rewriter, root: hir.ExprId, fe: hir.FullExprId) Error!void {
+        const pr = self.p();
+        var work = std.ArrayListUnmanaged(hir.ExprId).empty;
+        defer work.deinit(self.arena);
+        try work.append(self.arena, root);
+        while (work.pop()) |id| {
+            const n = pr.node(id);
+            pr.exprs.items[id].full_expr = fe;
+            if (hir.registry.get(n.op).transfer == .lambda) continue;
             for (pr.operands(id)) |op| try work.append(self.arena, op);
             for (pr.regionsOf(id)) |r| try work.append(self.arena, pr.region(r).root);
         }

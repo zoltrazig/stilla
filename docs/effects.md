@@ -7,7 +7,8 @@
 >   host 声明解析、间接调用目标收窄（§9.2 局部 fn-ref 传播）、β 的 effectful
 >   实参（§10.4，契约下放开求值次数 / 序 / scope / FE / cleanup）、
 >   `RewriteRule` / `Requirement` 与 `RewriteContract` 类型（§10.3–§10.4，
->   `passes/rewrite_contract.zig`；首批实例 β 与 dead-let）。
+>   `passes/rewrite_contract.zig`；首批实例 β 与 dead-let，第二批判例是
+>   `ruleLet` 的 `let_dead` / `let_forward` / `let_atom` 三分支）。
 > - **消费者**：dead-let + selective ANF + `never_returns` 后缀删除
 >   （`--simplify`，默认关）、SEG v1（可执行文件默认开、`--no-seg` 关；库默认关、
 >   `Options.seg` 开启）。
@@ -727,8 +728,9 @@ warrant 在规则自身的构造里（β→let 逐参数嵌套、LTR，不删除
 是静态值，不能携带派生查询需要的 `ExprId`，主体在调用点以 `Requirement` 实例
 给出；`match` / `build` 仍是 pass 内的规则函数，由 `RewriteRule.name` 指名，v1
 不做函数指针化的表驱动；`effect` 落为 bool 集合结构体（一条规则可同时持有多个
-保证）。首批实例是 β（hir_seg.zig）与 dead-let（hir_simplify.zig）；η、
-`ruleLet`、`tryAnf` 的判定仍内联。
+保证）。首批实例是 β（hir_seg.zig）与 dead-let（hir_simplify.zig）；第二批判例是 SEG
+的 `ruleLet` 三分支（`let_dead` / `let_forward` / `let_atom`，hir_seg.zig）；
+η 与 `tryAnf` 的判定仍内联。
 
 例：
 
@@ -756,6 +758,9 @@ RewriteContract {
               + preserves_cleanup = cleanup_free_subtree
 let-unused  : MayDiscard(init) → 引擎自动要求 discardable(init)
               + preserves_cleanup = binder_destruction
+let-forward : PreservesEvaluationCount + MayReorder + maps_full_expr
+              + preserves_cleanup = cleanup_free_subtree
+let-atom    : MayDuplicate + maps_full_expr（原子可 `duplicable`）
 ```
 
 **现状：契约已落地为类型**（`passes/rewrite_contract.zig`）。`RewriteContract`
@@ -773,16 +778,24 @@ let-unused  : MayDiscard(init) → 引擎自动要求 discardable(init)
 PreservesOrder`、`maps_scope` / `maps_full_expr` 为真、
 `preserves_cleanup = cleanup_free_subtree`。**实参不要求 total / 无可观察效果**：
 β→let 不删除、不复制、不重排实参，故 effectful 实参逐字保留（求值次数与 LTR 序
-不变）。仍留在匹配层（`tryBeta` 内联）的是结构性事实：λ / 单 region / 形参实参
-arity、λ 体是 seg-safe 的单表达式（非 `seq` root）、λ 只经 `fn_ref` 可达、以及
-`beta_done` 的消耗性守卫。η 的契约仍内联（§8.5）。详见 [hir.md](hir.md) §8.4。
+不变）。`let` 三分支同样据此声明并由 `ruleLet` 消费：`let_dead_rule`
+（`.discardable` + `binder_destruction`）、`let_forward_rule`
+（`EvaluationCountPreserved + MayReorder`、`maps_full_expr`、
+`cleanup_free_subtree`）、`let_atom_rule`（`.duplicable`、`maps_full_expr`）——
+它们是与 β 并列的 boundary rewrite（§8.7）。仍留在匹配层（`tryBeta` 内联）的是
+结构性事实：λ / 单 region / 形参实参 arity、λ 体是 seg-safe 的单表达式（非
+`seq` root）、λ 只经 `fn_ref` 可达、以及 `beta_done` 的消耗性守卫；`ruleLet`
+的匹配层额外拒 `move` / `drop` 的 binder 槽与非同型 binder（隐式强制转换）。
+η 的契约仍内联（§8.5）。详见 [hir.md](hir.md) §8.4。
 
 `(fn(x) { x + 1 })(host.read())` 整体仍不能进纯 term 的 equality saturation
 ——但 β 本身不删除、不复制、不重排 `arg`，契约（求值次数 / 序 / scope / FE /
 cleanup）证明后**已允许** effectful 实参：`host.read()` 作为 λ 外实参按原序求值
 一次。随之而来的义务落在下游规则：β 生成的 `let` 可能绑一个非 island 的
-init，dead-let / forwarding 只有在 init 仍是 island 成员时才可把它当纯值删除或
-搬移，否则会丢掉或重排效果（`hir_seg.zig` 的 `ruleLet` 已按此设门）。
+init，因此 forwarding / 原子复制只有在 init 仍是 island 成员 / `isDuplicable`
+时才可把它搬移或复制，否则会丢掉或重排效果；dead-let 改用更强的
+`isDiscardable(init)`（允许可丢弃的 Unique init，同时折叠其全表达式清理面）——
+皆见 `hir_seg.zig` 的 `ruleLet` 与 §8.3。
 
 ### 10.5 实现形态（Zig）
 
@@ -1070,9 +1083,10 @@ drop / move Unique             ❌
 职责分离：v1 的 SEG 由 HIR→SEG bridge 的 legality 查询负责准入——检查的是
 **递归属性**（region body 与 ownership 依赖都纳入），而非只看根节点。
 
-**本谓词只管普通 island**：boundary rewrite（β，[hir.md](hir.md) §8.4）的 callee 是
-`fn_ref`（无 SEG 编码），call 节点不进 island，因此绕过 encoding / 成员资格；
-但 β 仍**调用** `isSegSafe`（对 call 节点与 λ 体），再叠加 §10.4 的契约条件。
+**本谓词只管普通 island**：boundary rewrite（β，[hir.md](hir.md) §8.4；η，§8.5；
+跨 FE 的 `let` 折叠，§8.3 / §8.7）的操作形式不被编码 / 成员资格覆盖，因此绕过
+`admission`；但 β 仍**调用** `isSegSafe`（对 call 节点与 λ 体），再叠加 §10.4 的
+契约条件，`let` 三分支同样逐条声明并消费 §10.4 的契约。
 
 ### 12.4 `never_returns` 后缀删除
 

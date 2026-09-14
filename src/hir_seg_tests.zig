@@ -207,6 +207,100 @@ test "SEG: constant folding + let forwarding + integer algebra" {
     try expectFuncBody(&b, "app.g", "fn (B0: i32) => add.i32(%B0, 5i32)");
 }
 
+/// The initializer of the first single-parameter `let` in `name`'s body —
+/// the shape `ruleLet` matches. The source-level fixtures put that `let` at
+/// the body root, so the first `let` found is it.
+fn letInit(b: *Built, name: []const u8) !hir.ExprId {
+    const f = try findFunc(b, name);
+    const let = (try findNode(b, f.root, "let")) orelse return error.TestUnexpectedResult;
+    return b.built.program.operands(let)[0];
+}
+
+test "SEG: a source-level let folds across the full-expression boundary (hir.md §8.7)" {
+    const src = try probe_corpus.read(testing.allocator, "probes", "seg");
+    defer testing.allocator.free(src);
+    var b = try buildText("app", &.{.{ "app", src }});
+    defer b.deinit();
+    const pr = &b.built.program;
+
+    // The contract facts the three folds are admitted by, read off the
+    // derived queries (the engine's `check` / `checkCleanup` consume
+    // exactly these) before any rewrite. A source-level initializer is its
+    // own full expression, so each init's FE differs from its `let`'s.
+    var an = try analysisOf(&b);
+    const dead_init = try letInit(&b, "app.unused_let");
+    const forward_init = try letInit(&b, "app.forward_once");
+    const atom_init = try letInit(&b, "app.atom_twice");
+    try testing.expect(try an.isDiscardable(dead_init));
+    try testing.expect(try an.isSegSafe(forward_init) and try an.cleanupFree(forward_init));
+    try testing.expect(try an.isDuplicable(atom_init));
+    for ([_]struct { []const u8, hir.ExprId }{
+        .{ "app.unused_let", dead_init },
+        .{ "app.forward_once", forward_init },
+        .{ "app.atom_twice", atom_init },
+    }) |pair| {
+        // The initializer is its own full expression: its FE differs from
+        // the `let`'s (the region body's).
+        const let = (try findNode(&b, (try findFunc(&b, pair[0])).root, "let")) orelse return error.TestUnexpectedResult;
+        try testing.expect(pr.node(pair[1]).full_expr != pr.node(let).full_expr);
+    }
+    // The negative side of the same queries: borrowed view (ownership
+    // gate), Unique constructor (not Copy), may-trap initializer and the
+    // effectful call (not an island member — `isSegSafe` is its semantic
+    // content; a `call` over a `fn_ref` also has no encoding).
+    try testing.expect(!try an.isDuplicable(try letInit(&b, "app.borrowed_kept")));
+    try testing.expect(!try an.isDuplicable(try letInit(&b, "app.unique_kept")));
+    try testing.expect(!try an.isDiscardable(try letInit(&b, "app.trapping_kept")));
+    try testing.expect(!try an.isSegSafe(try letInit(&b, "app.observable_kept")));
+    // The implicit `any` coercion is a type difference, not an effect fact.
+    const coerced_let = (try findNode(&b, (try findFunc(&b, "app.coerced_kept")).root, "let")) orelse return error.TestUnexpectedResult;
+    try testing.expect(!pr.node(pr.operands(coerced_let)[0]).ty.eql(pr.binder(pr.params(pr.regionsOf(coerced_let)[0])[0]).ty));
+
+    const stats = try segAll(&b);
+    // The three contract positives: the discardable initializer is
+    // dropped, the island-member initializer moves to its single use, and
+    // the trivial atom is copied to both uses.
+    try expectFuncBody(&b, "app.unused_let", "fn (B0: i32) => %B0");
+    try expectFuncBody(&b, "app.forward_once", "fn (B0: i32) => mul.i32(add.i32(%B0, 1i32), 2i32)");
+    try expectFuncBody(&b, "app.atom_twice", "fn (B0: i32) => add.i32(%B0, %B0)");
+    try testing.expect(stats.lets >= 3);
+    // The refused shapes keep their `let`: a borrowed-view atom, a
+    // may-trap initializer, an effectful call, an implicit coercion and a
+    // Unique constructor result. (`probes/any.st` / `probes/calls.st` pin
+    // the other two match-layer refusals: a binder read from a `move` slot
+    // and an implicit `any` coercion — both crashed lowering before the
+    // guards, and every probe is compiled and run by the corpus suite.)
+    try expectFuncBody(&b, "app.borrowed_kept", "fn (B0: i32 @borrow) => let B1: i32 = %B0 in add.i32(%B1, %B1)");
+    try expectFuncBody(&b, "app.trapping_kept", "fn (B0: i32) => let B1: i32 = div.i32(10i32, %B0) in add.i32(%B1, 1i32)");
+    try expectFuncBody(&b, "app.coerced_kept", "fn (B0: i32) => let B1: any = %B0 in any_cast(%B1): i32");
+    // `observable_kept` keeps its `let`: the call prints. The refs
+    // dictionary is per-print, and this body names one target, so it is F0.
+    try expectFuncBody(&b, "app.observable_kept", "fn (B0: i32) => let B1: i32 = call(fnref F0, %B0) in add.i32(%B1, 1i32)");
+    try testing.expect(try funcHasNode(&b, "app.unique_kept", "let"));
+
+    // `maps_full_expr`: the forwarded initializer subtree was re-stamped
+    // onto the destination, so the rewritten body is one full expression
+    // again (a stale init-boundary id would break every enclosing gate).
+    const fwd_root = pr.region(pr.regionsOf((try findFunc(&b, "app.forward_once")).root)[0]).root;
+    const fwd_fe = pr.node(fwd_root).full_expr;
+    var work = std.ArrayList(hir.ExprId).empty;
+    defer work.deinit(testing.allocator);
+    try work.append(testing.allocator, fwd_root);
+    while (work.pop()) |id| {
+        try testing.expectEqual(fwd_fe, pr.node(id).full_expr);
+        for (pr.operands(id)) |op| try work.append(testing.allocator, op);
+        for (pr.regionsOf(id)) |r| try work.append(testing.allocator, pr.region(r).root);
+    }
+    // The atom copies are distinct nodes (HIR is a tree, §3.7) and both
+    // carry the destination full expression.
+    const atom_root = pr.region(pr.regionsOf((try findFunc(&b, "app.atom_twice")).root)[0]).root;
+    const atom_ops = pr.operands(atom_root);
+    try testing.expectEqual(@as(usize, 2), atom_ops.len);
+    try testing.expect(atom_ops[0] != atom_ops[1]);
+    try testing.expectEqual(pr.node(atom_root).full_expr, pr.node(atom_ops[0]).full_expr);
+    try testing.expectEqual(pr.node(atom_root).full_expr, pr.node(atom_ops[1]).full_expr);
+}
+
 test "SEG: β→let binds the argument exactly once (no duplication)" {
     const src = try probe_corpus.read(testing.allocator, "probes/cases", "seg_beta_let_no_duplication");
     defer testing.allocator.free(src);
@@ -483,14 +577,13 @@ test "SEG: constant if / and / or select the taken island branch" {
     var b = try buildText("app", &.{.{ "app", src }});
     defer b.deinit();
     _ = try segAll(&b);
-    // The constant condition is decided inside the initializer's own
-    // full expression (its island). The enclosing source-level `let` is
-    // *not* an island: its initializer opens a nested FE boundary
-    // (hir.md §5.6), so SEG leaves the `let` in place and only the
-    // selected branch survives. Folding it would cross FE1/FE2, which
-    // hir.md §8.7 defers to a separately proven transform.
-    try expectFuncBody(&b, "app.pick", "fn () => let B0: i32 = 10i32 in %B0");
-    try expectFuncBody(&b, "app.shorty", "fn () => let B0: bool = true in %B0");
+    // The constant condition is decided inside the initializer's own full
+    // expression; the enclosing source-level `let` then folds under the
+    // §8.7 boundary contract: its initializer is an island member (Copy,
+    // total, cleanup-free), so used-once forwarding moves it to the use
+    // point and the `let` disappears.
+    try expectFuncBody(&b, "app.pick", "fn () => 10i32");
+    try expectFuncBody(&b, "app.shorty", "fn () => true");
 }
 
 test "SEG: a trapping untaken branch keeps the branch node out of an island" {
@@ -675,7 +768,9 @@ test "SEG: CSE is refused for a non-duplicable operand and across a full express
     try testing.expect(!(try an.isDuplicable(div0)));
     try testing.expect(!try an.isSegSafe(div0));
     // Two α-equivalent `mul`s in separate source-`let` initializers (each
-    // its own full expression) are never operands of one node.
+    // its own full expression) are never operands of one node. Both
+    // binders are read twice and their initializers are not trivial atoms,
+    // so neither `let` folds either — the muls stay in their own FEs.
     const stats = try segAll(&b);
     try testing.expectEqual(@as(usize, 0), stats.shares);
     try testing.expectEqual(@as(usize, 2), try countNodes(&b, "app.div_pair", "div.i32"));

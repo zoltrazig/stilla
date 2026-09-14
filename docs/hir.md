@@ -629,8 +629,8 @@ Unique 临时量在所属 full expression 结束时销毁、反向创建序。�
 >   §11.2）；scope-end 绑定清理仍未建模（原因见 [effects.md](effects.md) §11.2），
 >   Unique 物化等未放开（§5.7）。
 >
-> §8.7 的 FE 例子现在是校验器能强制的事实；跨 FE 的 let 折叠列为单独、被证明
-> 安全后才放开的变换（[todo.md](todo.md)）。
+> §8.7 的 FE 例子现在是校验器能强制的事实；跨 FE 的 let 折叠已落地（§8.3 / §8.7），
+> 按 boundary-rewrite 契约逐分支准入，不经 island 门。
 
 **HIR / CFG 分界**：HIR 持有 full-expression 身份、临时量创建 / 所有权事实与
 FE 内顺序约束；CFG lowering 消费这些事实**重新构造可执行销毁计划**（同一 FE
@@ -901,13 +901,15 @@ full-expression 边界现在是节点级真值（§5.6）：`isSegSafe` 的 owne
 真的会拒绝跨 FE 子树，源级 `let`（init 自成 FE）因此不是 island 成员（§8.3）。
 
 > **两类重写**：普通 SEG 重写必须 full-expression-preserving；**boundary
-> rewrite**（v1 有 β 与 η）绕过 island 的编码 / 成员资格。β 把 λ 体搬进调用
+> rewrite**（v1 有 β、η 与 `let` 三族）绕过 island 的编码 / 成员资格。β 把 λ 体搬进调用
 > 点：callee 是 `fn_ref`（无 SEG 编码），call 节点本就不是 island 成员，语义安全
 > 仍要过 `isSegSafe` 的残余部分——`tryBeta` 对 call 节点只要求 Copy 结果、
 > cleanup-free 求值子树与 ownership gate（**不要求实参 total / 无可观察效果**），
 > 对 λ 体仍调用完整 `isSegSafe`，再逐条检查 §8.4 的契约。η（§8.5）只重定向值
 > 位置的 `fn_ref` payload，节点树、FE、清理 token 都不变，由 §8.5 的契约
-> `tryEta` 准入。β 的契约已落为 `passes/rewrite_contract.zig` 的
+> `tryEta` 准入。`let` 折叠（§8.3 / §8.7）的 init 自成 FE（源级 `let` 因此
+> 不是 island 成员），其三个分支各由 `let_dead_rule` / `let_forward_rule` /
+> `let_atom_rule` 的契约准入。β 的契约已落为 `passes/rewrite_contract.zig` 的
 > `RewriteContract`（`beta_rule` 声明，`tryBeta` 经 `checkCleanup` /
 > `checkCleanupProof` 消费）；η 的契约仍内联在 `tryEta`。
 
@@ -951,15 +953,9 @@ extract(eclass)      -> ExprId
 | 优化 | v1 | 备注 |
 | --- | --- | --- |
 | β-reduction → `let` | ✅ | boundary rewrite，契约见 §8.4；实参限 Copy，call 子树 cleanup-free / ownership gate（可 effectful） |
-| dead let | ✅ | `x ∉ FV(body)` 且 init 在 island 内 total / 无可观察效果 |
-| used-once let forwarding | ✅ | 单次使用：把 init 内容搬进使用点 |
-| trivial-atom forwarding | ✅ | const / local / fn_ref 无求值、无 region，可复制到每个使用点 |
-
-> v1 的 let 规则准入是**同 FE** 的：`let` 的 init 自成 FE（§5.6），所以源级
-> `let` 不是 island 成员，规则只在 β / match 拼接出的 `let`（init 与 `let`
-> 同 FE）上触发。源级 dead-let 由 `--simplify` 的 `hir_simplify.tryDeadLet`
-> 承担（不经过 island 门）。跨 FE 的 let 折叠见 §8.7 与
-> [todo.md](todo.md)。
+| dead let | ✅ | `x ∉ FV(body)` 且 init `isDiscardable`（含其全表达式清理面）+ binder 析构可丢弃；boundary rewrite，跨 FE |
+| used-once let forwarding | ✅ | 单次使用：把 init 内容搬进使用点；init 需为 island 成员（Copy、cleanup-free） |
+| trivial-atom forwarding | ✅ | const / local / fn_ref 无求值、无 region，可复制到每个使用点；原子需 `isDuplicable` |
 | constant folding | ✅ | 按 typed rep；**可能 trap 的折叠被拒**（trap 归运行时） |
 | integer algebra identities | ✅ | `x + 0 → x`、`x * 1 → x` 等，仅 integer rep |
 | constant `if` / `and` / `or` | ✅ | 常量条件选中已求值分支（另一分支是 island 成员） |
@@ -972,6 +968,25 @@ extract(eclass)      -> ExprId
 | associativity / commutativity | ❌ | 搜索空间问题，未立项 |
 | Unique rewrite | ❌ | 需线性等式系统 |
 | host calls / `drop` / consuming match / panic 重排 | ❌ | — |
+
+> v1 的 let 规则也是 **boundary rewrite（§8.7）**：源级 `let` 的 init 自成 FE
+> （§5.6），所以 `let` 不是 island 成员，规则由各分支的契约准入（`hir_seg.zig`
+> 的 `let_dead_rule` / `let_forward_rule` / `let_atom_rule`），并只在 pass
+> 驱动层对非 island 节点单独尝试：
+>
+> - **dead**（binder 未使用）：`isDiscardable(init)` + `binder_destruction`
+>   清理证明——丢弃 init 求值与删除 scope-end 析构都需可丢弃。
+> - **used-once forwarding**：init 仍是 island 成员（Copy、单一 FE、cleanup-free、
+>   过 ownership gate）且本轮未被改写，再经 `cleanup_free_subtree` 证明；搬移的
+>   子树重新盖上使用点的 FE。
+> - **trivial-atom forwarding**：原子 init 需 `isDuplicable`（借用的 view 过不了
+>   ownership gate，`Q` 读过不了 no-`Q` 子句）——v1 缺的准入证明。
+>
+> 匹配层另外拒两种形状：binder 被 `move` / `drop` 作为 operand 读取（它们从
+> operand 节点自身的 binder payload 下降，只有 `local` init 可搬入该槽），以及
+> binder 类型与 init 节点类型不同（隐式强制转换，如 `let b: any = %value`，
+> 替换会抹掉它）。源级 dead-let 在 `hir_simplify.tryDeadLet` 侧另有一条
+> 不经 island 门的消费者路径。
 
 **CSE sharing 的 v1 形态与准入**（`hir_seg.ruleCse`）。共享子项必须同时满足：
 
@@ -995,9 +1010,11 @@ total、确定性子项，故把首次出现提到合成 `let` 的 init、后续
 跨 FE；`isDuplicable` 强制 Copy 结果与整棵子树的 `ownershipGate`（每个 `.owned`
 节点 Copy、无 borrowed view、无 `Consume`），而 `CleanupToken` 只为 owned
 Unique 临时量登记——故合成 `let` 不改变清理注册，donor 也没有需要重映射的
-token。非 sibling 的共享（跨语句 / 分支的同形，即 PRE）不在 v1：跨 FE 的
-源级 `let`-init 对不是同一节点的 operand，天然不触发；真正的 PRE 属 CFG
-优化器。
+token。非 sibling 的共享（跨语句 / 分支的同形，即 PRE）不在 v1：两个源级
+`let`-init 各自在自己的 FE 里，本身不是同一节点的 operand，天然不触发；
+（let 折叠把它们搬进同一节点后就是 sibling，CSE 即可合法共享——`seg_cse_refused` 的
+`cross_fe` 因 binder 被两次读取而保留 `let`，两棵 `mul` 因此仍分居两 FE。）
+真正的 PRE 属 CFG 优化器。
 
 ### 8.4 β-reduction 必须生成 let
 
@@ -1115,9 +1132,9 @@ result * 1
 HIR（value 为参数 B0；FE1 = init，FE2 = `result * 1`）：
 
 > **该例演示边界机制**。FE 边界标注已落地（§5.6）：源级 `let` 因此不是 island
-> 成员，把最外层 `let B1 = %B0 in %B1` 折叠成 `%B0`（跨 FE1 / FE2）不作为 v1
-> SEG 的抽取结果；β / match 拼接的 `let` 其 init 与 `let` 同 FE，仍可在 FE 内
-> 继续化简。
+> 成员，它的三个折叠分支（dead / used-once / trivial-atom）都是 §8.3 的
+> boundary rewrite，由契约而非 island 成员资格准入；β / match 拼接的 `let`
+> 其 init 与 `let` 同 FE，在 FE 内继续化简。
 
 ```text
 let B1: i32 =
@@ -1133,8 +1150,13 @@ let B1: i32 = %B0 in
     %B1
 ```
 
-把最外层 `let B1 = %B0 in %B1` 折叠成 `%B0` 会跨越 FE1 / FE2，列为**单独、
-被证明安全后才放开**的变换，不作为 v1 SEG 的抽取结果宣传。
+最外层 `let B1 = %B0 in %B1` 的折叠跨 FE1 / FE2：它是 used-once forwarding，
+init（这时已是 `%B0`）是 island 成员、与本轮分析一致，故下一轮以
+`cleanup_free_subtree` 证明准入，搬移的子树重新盖上 FE2，结果就是 `%B0`。
+轮次上：FE1 内的重写（β → let 折叠）本轮先把 init 的**内容**改成 `%B0`，
+而 island 表是本轮开始时的快照（那时 init 还是 `call`），所以外层的折叠等到
+下一轮（重新计算 island 后才生效）——这也是 §8.2 的有界轮数契约在
+`let` 上的代价：延后一轮，不是放弃。
 
 ## 9. HIR → CFG/AIR lowering 契约
 
@@ -1241,11 +1263,13 @@ lowering。可选变换每轮原位重写后重新跑结构 + 效果校验（§2
 
 **SEG 编译时间 / 轮数基线**（第 12 项验收；`hir_seg_tests.zig` 的 `SEG budget`
 测试在 CI 每次打印，基线取 2026-09-13、macOS/arm64 的一次运行）：`probes/` +
-`examples/` 全语料 **57 个程序 / 4372 个可达节点**，SEG 接受 **2360 个
-island 成员（≈54%）**，共 **70 轮**、**51 次重写**，总编译时间 **≈71 ms**
+`examples/` 全语料 **57 个程序 / 4491 个可达节点**，SEG 接受 **2395 个
+island 成员（≈53%）**，共 **85 轮**、**94 次重写**，总编译时间 **≈86 ms**
 （单文件最慢 `examples/fold` 10 ms / 2 轮 / 163 islands）；每个程序都在
 `hir_seg.Config.max_iterations` 界内收敛（`Stats.converged == true`）。测试
 断言收敛（CI 稳定），时间仅记录、不断言（CI 计时不是稳定 oracle）。
+§8.3 的跨 FE `let` 折叠把 70 轮 / 51 次重写推到 85 轮 / 94 次：它新增的
+重写是 let 三规则，新增的轮数是在 island 表快照之外的那一轮（§8.7）。
 
 落地档映射（历史里程碑编号）：
 

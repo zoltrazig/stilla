@@ -24,9 +24,10 @@
 //!   obligation through `checkCleanupProof`.
 //!
 //! `RewriteRule` ties the three together. The v1 instances are β
-//! (`hir_seg.zig`) and dead-let (`hir_simplify.zig`); η, `ruleLet` and
-//! `tryAnf` still carry their conditions inline (first batch of
-//! docs/todo.md item 13).
+//! (`hir_seg.zig`), dead-let (`hir_simplify.zig`) and the SEG `let`
+//! family's three branches (`hir_seg.zig`'s `let_dead_rule` /
+//! `let_forward_rule` / `let_atom_rule`); η and `tryAnf` still carry
+//! their conditions inline.
 //!
 //! Deviations from the §10.3 sketch, and why: `legality` is a list of
 //! requirement *tags* — a rule declaration is a static value and cannot
