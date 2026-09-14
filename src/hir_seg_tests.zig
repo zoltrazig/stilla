@@ -186,9 +186,30 @@ fn funcRawText(b: *Built, name: []const u8) ![]u8 {
     return hir.print(&b.built.program, f.root, b.arena.allocator(), ctx);
 }
 
+/// Collapse every whitespace run to a single space. The rewrite assertions
+/// below compare the *term* the pass produced, not the printer's line
+/// layout; the canonical layout itself is pinned by the goldens in
+/// hir_print.zig.
+fn flatText(allocator: std.mem.Allocator, text: []const u8) ![]u8 {
+    var out = std.ArrayList(u8).empty;
+    var pending = false;
+    for (text) |ch| {
+        if (std.ascii.isWhitespace(ch)) {
+            pending = out.items.len > 0;
+            continue;
+        }
+        if (pending) try out.append(allocator, ' ');
+        pending = false;
+        try out.append(allocator, ch);
+    }
+    return out.toOwnedSlice(allocator);
+}
+
 fn expectFuncBody(b: *Built, name: []const u8, expected: []const u8) !void {
     const got = try funcText(b, name);
-    try testing.expectEqualStrings(expected, got);
+    const flat = try flatText(testing.allocator, got);
+    defer testing.allocator.free(flat);
+    try testing.expectEqualStrings(expected, flat);
 }
 
 // ---------------------------------------------------------------------------
@@ -202,9 +223,9 @@ test "SEG: constant folding + let forwarding + integer algebra" {
     defer b.deinit();
     const stats = try segAll(&b);
     try testing.expect(stats.folds >= 1);
-    try expectFuncBody(&b, "app.f", "fn (B0: i32) => %B0");
+    try expectFuncBody(&b, "app.f", "fn (B0: i32) { %B0 }");
     // (a * 1) → a; (2 + 3) → 5; the outer add keeps both rewritten operands.
-    try expectFuncBody(&b, "app.g", "fn (B0: i32) => add.i32(%B0, 5i32)");
+    try expectFuncBody(&b, "app.g", "fn (B0: i32) { add.i32(%B0, 5i32) }");
 }
 
 /// The initializer of the first single-parameter `let` in `name`'s body —
@@ -260,9 +281,9 @@ test "SEG: a source-level let folds across the full-expression boundary (hir.md 
     // The three contract positives: the discardable initializer is
     // dropped, the island-member initializer moves to its single use, and
     // the trivial atom is copied to both uses.
-    try expectFuncBody(&b, "app.unused_let", "fn (B0: i32) => %B0");
-    try expectFuncBody(&b, "app.forward_once", "fn (B0: i32) => mul.i32(add.i32(%B0, 1i32), 2i32)");
-    try expectFuncBody(&b, "app.atom_twice", "fn (B0: i32) => add.i32(%B0, %B0)");
+    try expectFuncBody(&b, "app.unused_let", "fn (B0: i32) { %B0 }");
+    try expectFuncBody(&b, "app.forward_once", "fn (B0: i32) { mul.i32(add.i32(%B0, 1i32), 2i32) }");
+    try expectFuncBody(&b, "app.atom_twice", "fn (B0: i32) { add.i32(%B0, %B0) }");
     try testing.expect(stats.lets >= 3);
     // The refused shapes keep their `let`: a borrowed-view atom, a
     // may-trap initializer, an effectful call, an implicit coercion and a
@@ -270,12 +291,12 @@ test "SEG: a source-level let folds across the full-expression boundary (hir.md 
     // the other two match-layer refusals: a binder read from a `move` slot
     // and an implicit `any` coercion — both crashed lowering before the
     // guards, and every probe is compiled and run by the corpus suite.)
-    try expectFuncBody(&b, "app.borrowed_kept", "fn (B0: i32 @borrow) => let B1: i32 = %B0 in add.i32(%B1, %B1)");
-    try expectFuncBody(&b, "app.trapping_kept", "fn (B0: i32) => let B1: i32 = div.i32(10i32, %B0) in add.i32(%B1, 1i32)");
-    try expectFuncBody(&b, "app.coerced_kept", "fn (B0: i32) => let B1: any = %B0 in any_cast(%B1): i32");
+    try expectFuncBody(&b, "app.borrowed_kept", "fn (B0: i32 @borrow) { let B1: i32 = %B0 { add.i32(%B1, %B1) } }");
+    try expectFuncBody(&b, "app.trapping_kept", "fn (B0: i32) { let B1: i32 = div.i32(10i32, %B0) { add.i32(%B1, 1i32) } }");
+    try expectFuncBody(&b, "app.coerced_kept", "fn (B0: i32) { let B1: any = %B0 { any_cast(%B1): i32 } }");
     // `observable_kept` keeps its `let`: the call prints. The refs
     // dictionary is per-print, and this body names one target, so it is F0.
-    try expectFuncBody(&b, "app.observable_kept", "fn (B0: i32) => let B1: i32 = call(fnref F0, %B0) in add.i32(%B1, 1i32)");
+    try expectFuncBody(&b, "app.observable_kept", "fn (B0: i32) { let B1: i32 = call(fnref F0, %B0) { add.i32(%B1, 1i32) } }");
     try testing.expect(try funcHasNode(&b, "app.unique_kept", "let"));
 
     // `maps_full_expr`: the forwarded initializer subtree was re-stamped
@@ -310,7 +331,7 @@ test "SEG: β→let binds the argument exactly once (no duplication)" {
     try testing.expect(stats.beta >= 1);
     // The Copy/discardable argument is materialized once as a let; the
     // body then reads it from the binder — never `call(idf, …)` twice.
-    try expectFuncBody(&b, "app.dup", "fn (B0: i32) => let B1: i32 = call(fnref F0, %B0) in add.i32(%B1, %B1)");
+    try expectFuncBody(&b, "app.dup", "fn (B0: i32) { let B1: i32 = call(fnref F0, %B0) { add.i32(%B1, %B1) } }");
 }
 
 test "SEG: β is refused for an effectful body and for a non-Copy argument" {
@@ -333,8 +354,9 @@ test "SEG: β admits an effectful argument (docs/effects.md §10.4)" {
     const stats = try segAll(&b);
     try testing.expect(stats.beta >= 4);
     // The argument is evaluated once and read from the binder.
-    const doubled = try funcText(&b, "app.doubled");
-    try testing.expect(std.mem.startsWith(u8, doubled, "fn () => let "));
+    const doubled = try flatText(testing.allocator, try funcText(&b, "app.doubled"));
+    defer testing.allocator.free(doubled);
+    try testing.expect(std.mem.startsWith(u8, doubled, "fn () { let "));
     try testing.expect(std.mem.indexOf(u8, doubled, "call(") != null);
     // LTR: the first argument's effect is emitted before the second's.
     // A swap (or a used-once forwarding that moved the first init after
@@ -353,14 +375,16 @@ test "SEG: an effectful β argument keeps its let (no drop / forwarding)" {
     _ = try segAll(&b);
     // The parameter is never read, but the init's effect is observable —
     // dead-let must refuse rather than delete the call.
-    const unused = try funcText(&b, "app.unused");
-    try testing.expect(std.mem.startsWith(u8, unused, "fn () => let "));
+    const unused = try flatText(testing.allocator, try funcText(&b, "app.unused"));
+    defer testing.allocator.free(unused);
+    try testing.expect(std.mem.startsWith(u8, unused, "fn () { let "));
     try testing.expect(std.mem.indexOf(u8, unused, "call(") != null);
     // The parameter is read once, but forwarding the init to its use point
     // would move the effect off the argument position — the init must stay
     // the let it was.
-    const once = try funcText(&b, "app.once");
-    try testing.expect(std.mem.startsWith(u8, once, "fn () => let "));
+    const once = try flatText(testing.allocator, try funcText(&b, "app.once"));
+    defer testing.allocator.free(once);
+    try testing.expect(std.mem.startsWith(u8, once, "fn () { let "));
 }
 
 test "SEG: an effectful β clone binds fresh binders (scope mapping)" {
@@ -554,10 +578,10 @@ test "SEG: may-trap ops never enter an island (div is left to the runtime)" {
     var b = try buildText("app", &.{.{ "app", src }});
     defer b.deinit();
     _ = try segAll(&b);
-    try expectFuncBody(&b, "app.q", "fn (B0: i32, B1: i32) => div.i32(%B0, %B1)");
+    try expectFuncBody(&b, "app.q", "fn (B0: i32, B1: i32) { div.i32(%B0, %B1) }");
     // `10 / 2` is not total by the declared effect row, so it is neither
     // folded nor deleted even though the binding is unused.
-    try expectFuncBody(&b, "app.keep", "fn () => let B0: i32 = div.i32(10i32, 2i32) in 0i32");
+    try expectFuncBody(&b, "app.keep", "fn () { let B0: i32 = div.i32(10i32, 2i32) { 0i32 } }");
 }
 
 test "SEG: float algebra is not applied (only integer identities + folding)" {
@@ -566,9 +590,9 @@ test "SEG: float algebra is not applied (only integer identities + folding)" {
     var b = try buildText("app", &.{.{ "app", src }});
     defer b.deinit();
     _ = try segAll(&b);
-    try expectFuncBody(&b, "app.fadd", "fn (B0: f32) => add.f32(%B0, 0.0f32)");
-    try expectFuncBody(&b, "app.fmul", "fn (B0: f32) => mul.f32(%B0, 1.0f32)");
-    try expectFuncBody(&b, "app.fzero", "fn (B0: f32) => mul.f32(%B0, 0.0f32)");
+    try expectFuncBody(&b, "app.fadd", "fn (B0: f32) { add.f32(%B0, 0.0f32) }");
+    try expectFuncBody(&b, "app.fmul", "fn (B0: f32) { mul.f32(%B0, 1.0f32) }");
+    try expectFuncBody(&b, "app.fzero", "fn (B0: f32) { mul.f32(%B0, 0.0f32) }");
 }
 
 test "SEG: constant if / and / or select the taken island branch" {
@@ -582,8 +606,8 @@ test "SEG: constant if / and / or select the taken island branch" {
     // §8.7 boundary contract: its initializer is an island member (Copy,
     // total, cleanup-free), so used-once forwarding moves it to the use
     // point and the `let` disappears.
-    try expectFuncBody(&b, "app.pick", "fn () => 10i32");
-    try expectFuncBody(&b, "app.shorty", "fn () => true");
+    try expectFuncBody(&b, "app.pick", "fn () { 10i32 }");
+    try expectFuncBody(&b, "app.shorty", "fn () { true }");
 }
 
 test "SEG: a trapping untaken branch keeps the branch node out of an island" {
@@ -605,9 +629,9 @@ test "SEG: known-variant match reduces to the arm body (single / nullary / multi
     defer b.deinit();
     const stats = try segAll(&b);
     try testing.expect(stats.matches >= 3);
-    try expectFuncBody(&b, "app.single", "fn (B0: i32) => add.i32(%B0, 1i32)");
-    try expectFuncBody(&b, "app.nullary", "fn () => 2i32");
-    try expectFuncBody(&b, "app.multi", "fn (B0: i32, B1: i32) => sub.i32(%B0, %B1)");
+    try expectFuncBody(&b, "app.single", "fn (B0: i32) { add.i32(%B0, 1i32) }");
+    try expectFuncBody(&b, "app.nullary", "fn () { 2i32 }");
+    try expectFuncBody(&b, "app.multi", "fn (B0: i32, B1: i32) { sub.i32(%B0, %B1) }");
 }
 
 test "SEG: known-variant match with a wildcard / catch-all payload drops the value" {
@@ -617,8 +641,8 @@ test "SEG: known-variant match with a wildcard / catch-all payload drops the val
     defer b.deinit();
     const stats = try segAll(&b);
     try testing.expect(stats.matches >= 2);
-    try expectFuncBody(&b, "app.wild", "fn (B0: i32) => 7i32");
-    try expectFuncBody(&b, "app.catchall", "fn (B0: i32) => 7i32");
+    try expectFuncBody(&b, "app.wild", "fn (B0: i32) { 7i32 }");
+    try expectFuncBody(&b, "app.catchall", "fn (B0: i32) { 7i32 }");
 }
 
 test "SEG: a consuming or borrowed scrutinee keeps the match out of an island" {
@@ -676,11 +700,11 @@ test "SEG: struct projection folds field_get over struct_make (every index)" {
     // expression) project, so at least four folds happened.
     try testing.expect(stats.projects >= 4);
     // Each field index projects its own operand, in declaration order.
-    try expectFuncBody(&b, "app.project_first", "fn () => 10i32");
-    try expectFuncBody(&b, "app.project_second", "fn () => 20i32");
-    try expectFuncBody(&b, "app.project_third", "fn () => 30i32");
+    try expectFuncBody(&b, "app.project_first", "fn () { 10i32 }");
+    try expectFuncBody(&b, "app.project_second", "fn () { 20i32 }");
+    try expectFuncBody(&b, "app.project_third", "fn () { 30i32 }");
     // The projected operand keeps its own (non-constant) expression.
-    try expectFuncBody(&b, "app.project_expr", "fn (B0: i32) => add.i32(%B0, 1i32)");
+    try expectFuncBody(&b, "app.project_expr", "fn (B0: i32) { add.i32(%B0, 1i32) }");
 }
 
 test "SEG: a non-constructor base refuses struct projection" {
@@ -746,7 +770,7 @@ test "SEG: CSE shares a duplicate pure island operand into a let" {
     const stats = try segAll(&b);
     try testing.expect(stats.shares >= 1);
     // Two `mul(%B0, %B1)` operands become one `let`-bound evaluation.
-    try expectFuncBody(&b, "app.mul_pair", "fn (B0: i32, B1: i32) => let B2: i32 = mul.i32(%B0, %B1) in add.i32(%B2, %B2)");
+    try expectFuncBody(&b, "app.mul_pair", "fn (B0: i32, B1: i32) { let B2: i32 = mul.i32(%B0, %B1) { add.i32(%B2, %B2) } }");
     try testing.expectEqual(@as(usize, 1), try countNodes(&b, "app.mul_pair", "mul.i32"));
     // Tree, not DAG (§3.7): the two parameter reads plus the two shared-binder
     // reads are four distinct `local` nodes.
@@ -919,7 +943,7 @@ test "SEG: known-variant match splices payload lets in constructor order (one ro
     // One `let` per payload leaf, outermost = first operand, so the
     // subtraction reads the payloads in constructor order (a swap would
     // print sub.i32(%B3, %B2)).
-    try expectFuncBody(&b, "app.f", "fn (B0: i32, B1: i32) => let B2: i32 = %B0 in let B3: i32 = %B1 in sub.i32(%B2, %B3)");
+    try expectFuncBody(&b, "app.f", "fn (B0: i32, B1: i32) { let B2: i32 = %B0 { let B3: i32 = %B1 { sub.i32(%B2, %B3) } } }");
 }
 
 test "SEG: an out-of-range constructor tag refuses the reduction" {
@@ -1163,7 +1187,7 @@ test "SEG: a borrowed view keeps its subtree out of an island" {
     _ = try segAll(&b);
     // The `local` reads a `.borrow`-mode binder, so `isSegSafe` fails:
     // neither `x + 0` nor the unused binding is rewritten.
-    try expectFuncBody(&b, "app.f", "fn (B0: i32 @borrow) => let B1: i32 = add.i32(%B0, 0i32) in 7i32");
+    try expectFuncBody(&b, "app.f", "fn (B0: i32 @borrow) { let B1: i32 = add.i32(%B0, 0i32) { 7i32 } }");
 }
 
 test "SEG: optimized HIR prints and parses back to the same text" {

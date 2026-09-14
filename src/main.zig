@@ -385,7 +385,7 @@ fn renderHirBuffer(
     // Build the whole buffer before either sink writes it (the same
     // content contract as renderProgram).
     var out = std.ArrayList(u8).empty;
-    for (built.funcs.items) |f| {
+    for (built.funcs.items, 0..) |f, fi| {
         const spec = built.modules.items[f.module].specifier;
         // Function names are module-qualified already for members,
         // instances, and drop hooks (`app.add`, `app.Point.drop`), but
@@ -396,6 +396,8 @@ fn renderHirBuffer(
             f.name
         else
             try std.fmt.allocPrint(arena, "{s}.{s}", .{ spec, f.name });
+        // Blank line between function blocks (hir.md §4.10).
+        if (fi > 0) try out.append(arena, '\n');
         try out.appendSlice(arena, "// @");
         try out.appendSlice(arena, label);
         try out.append(arena, '\n');
@@ -889,12 +891,15 @@ test "run --emit-hir --output writes the canonical HIR dump to the file" {
 
     const out = try std.Io.Dir.cwd().readFileAlloc(testing.io, out_name, testing.allocator, .limited(1 << 20));
     defer testing.allocator.free(out);
-    // One label line per function, with the module-qualified name.
+    // One label line per function, with the module-qualified name; blocks
+    // are separated by a blank line (hir.md §4.10).
     try testing.expect(std.mem.indexOf(u8, out, "// @app.add\n") != null);
     try testing.expect(std.mem.indexOf(u8, out, "// @app.main\n") != null);
-    // The canonical HIR body, and a real SerCtx refs dictionary for the
-    // call target (stable key, not a numeric id).
-    try testing.expect(std.mem.indexOf(u8, out, "fn (B0: i32, B1: i32) => add.i32(%B0, %B1)") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "\n\n// @app.main\n") != null);
+    // The canonical HIR body (region-bearing `fn` breaks its body onto an
+    // indented line), and a real SerCtx refs dictionary for the call
+    // target (stable key, not a numeric id).
+    try testing.expect(std.mem.indexOf(u8, out, "fn (B0: i32, B1: i32) {\n  add.i32(%B0, %B1)\n}") != null);
     try testing.expect(std.mem.indexOf(u8, out, "#refs: F0 = app.add") != null);
     try testing.expect(std.mem.indexOf(u8, out, "call(fnref F0, 1i32, 2i32)") != null);
     // Not the AIR default mode's source decoration.

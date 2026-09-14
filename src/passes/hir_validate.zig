@@ -608,22 +608,22 @@ fn fresh(arena: std.mem.Allocator) !struct { prog: hir.Program } {
 }
 
 test "§4.7 goldens and the §8.7 fragment parse and validate" {
-    try mustAccept("fn (B0: i32) => mul.i32(%B0, 2i32)", .{});
-    try mustAccept("fn (B0: i32) => let B1: i32 = call(fn (B2: i32) => add.i32(%B2, 0i32), %B0) in mul.i32(%B1, 1i32)", .{});
+    try mustAccept("fn (B0: i32) { mul.i32(%B0, 2i32) }", .{});
+    try mustAccept("fn (B0: i32) { let B1: i32 = call(fn (B2: i32) { add.i32(%B2, 0i32) }, %B0) { mul.i32(%B1, 1i32) } }", .{});
     var fix = try optionFixture(t.allocator);
     defer fix.arena.deinit();
-    try mustAccept("fn (B0: Option[i32]) => match(%B0) { Option::Some(B1) => add.i32(%B1, 1i32), Option::None => 0i32 }", fix.ctx);
+    try mustAccept("fn (B0: Option[i32]) { match %B0 { Option::Some(B1) { add.i32(%B1, 1i32) } Option::None { 0i32 } } }", fix.ctx);
 }
 
 test "shadowing, nested lets, and if with or without else validate" {
     // Inner `B0` shadows the outer λ param: distinct binder ids, so the
     // body's `%B0` resolves to the inner let (hir.md §5.1).
-    try mustAccept("fn (B0: i32) => let B0: i32 = 1i32 in add.i32(%B0, %B0)", .{});
+    try mustAccept("fn (B0: i32) { let B0: i32 = 1i32 { add.i32(%B0, %B0) } }", .{});
     // Nested lets see enclosing binders (no function boundary crossed).
-    try mustAccept("fn (B0: i32) => let B1: i32 = %B0 in let B2: i32 = %B1 in add.i32(%B0, %B2)", .{});
-    try mustAccept("fn (B0: bool) => if %B0 then 1i32 else 2i32", .{});
-    try mustAccept("fn (B0: bool) => if %B0 then 1i32", .{});
-    try mustAccept("fn () => 5i32", .{});
+    try mustAccept("fn (B0: i32) { let B1: i32 = %B0 { let B2: i32 = %B1 { add.i32(%B0, %B2) } } }", .{});
+    try mustAccept("fn (B0: bool) { if %B0 { 1i32 } else { 2i32 } }", .{});
+    try mustAccept("fn (B0: bool) { if %B0 { 1i32 } }", .{});
+    try mustAccept("fn () { 5i32 }", .{});
 }
 
 test "fn_ref with a resolved function payload validates" {
@@ -646,7 +646,7 @@ test "nested λ capture of an outer binder parses but fails validation" {
     // The parser keeps outer declarations live across λ boundaries, so
     // this text parses; the validator's function-barrier rule rejects it
     // (hir.md §5.3 no-capture).
-    try mustReject("fn (B0: i32) => fn (B1: i32) => %B0", .{}, "not in scope");
+    try mustReject("fn (B0: i32) { fn (B1: i32) { %B0 } }", .{}, "not in scope");
 }
 
 test "sibling arm regions cannot see each other's binders" {

@@ -136,6 +136,25 @@ fn funcText(b: *Built, name: []const u8) ![]u8 {
     return error.TestUnexpectedResult;
 }
 
+/// Collapse every whitespace run to a single space, so the rule assertions
+/// compare the *term* the pass produced rather than the printer's line
+/// layout (the canonical layout is pinned by the goldens in hir_print.zig).
+fn expectFlat(expected: []const u8, actual: []const u8) !void {
+    var out = std.ArrayList(u8).empty;
+    defer out.deinit(testing.allocator);
+    var pending = false;
+    for (actual) |ch| {
+        if (std.ascii.isWhitespace(ch)) {
+            pending = out.items.len > 0;
+            continue;
+        }
+        if (pending) try out.append(testing.allocator, ' ');
+        pending = false;
+        try out.append(testing.allocator, ch);
+    }
+    try testing.expectEqualStrings(expected, out.items);
+}
+
 // ---------------------------------------------------------------------------
 // Rule coverage
 // ---------------------------------------------------------------------------
@@ -147,7 +166,7 @@ test "M2b: dead let with a discardable init is eliminated" {
     defer b.deinit();
     const stats = try simplifyAll(&b);
     try testing.expect(stats.dead_lets > 0);
-    try testing.expectEqualStrings("fn (B0: i32) => 7i32", try funcText(&b, "app.f"));
+    try expectFlat("fn (B0: i32) { 7i32 }", try funcText(&b, "app.f"));
 }
 
 test "M2b: a trapping division is kept (may-trap is not discardable)" {
@@ -157,8 +176,8 @@ test "M2b: a trapping division is kept (may-trap is not discardable)" {
     defer b.deinit();
     const stats = try simplifyAll(&b);
     try testing.expectEqual(@as(usize, 0), stats.dead_lets);
-    try testing.expectEqualStrings(
-        "fn (B0: i32) => let B1: i32 = div.i32(10i32, %B0) in 0i32",
+    try expectFlat(
+        "fn (B0: i32) { let B1: i32 = div.i32(10i32, %B0) { 0i32 } }",
         try funcText(&b, "app.f"),
     );
 }
@@ -184,7 +203,7 @@ test "M2b: an unused Unique binding with a purely-reading destructor is dropped"
     defer b.deinit();
     const stats = try simplifyAll(&b);
     try testing.expect(stats.dead_lets > 0);
-    try testing.expectEqualStrings("fn (B0: i32) => 0i32", try funcText(&b, "app.f"));
+    try expectFlat("fn (B0: i32) { 0i32 }", try funcText(&b, "app.f"));
 }
 
 test "M2b: ANF hoists the first non-floatable operand and keeps LTR" {
@@ -626,7 +645,7 @@ test "M2b: a Unique binding with a discardable destructor may be dropped" {
     defer b.deinit();
     const stats = try simplifyAll(&b);
     try testing.expect(stats.dead_lets > 0);
-    try testing.expectEqualStrings("fn (B0: i32) => 7i32", try funcText(&b, "app.f"));
+    try expectFlat("fn (B0: i32) { 7i32 }", try funcText(&b, "app.f"));
 }
 
 test "M2b: a Unique binding with an observable destructor is kept" {

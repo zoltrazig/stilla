@@ -2037,7 +2037,7 @@ test "integer algebra identities are declared, not guessed" {
 
 test "minimal-node extraction cost counts the subtree" {
     const parse_text = @import("hir_parse.zig").parseText;
-    var p = try parse_text("fn (B0: i32) => add.i32(%B0, 0i32)", .{});
+    var p = try parse_text("fn (B0: i32) { add.i32(%B0, 0i32) }", .{});
     defer p.arena.deinit();
     // lambda + add + local + const
     try testing.expectEqual(@as(usize, 4), nodeCost(&p.program, p.root, testing.allocator));

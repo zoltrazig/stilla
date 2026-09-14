@@ -202,13 +202,6 @@ pub const Parser = struct {
         _ = self.advance();
     }
 
-    fn expectArrow(self: *Parser) ParseError!void {
-        try self.skipWs();
-        if (self.peek() != '=' or self.peekAt(1) != '>') return self.fail("expected `=>`");
-        _ = self.advance();
-        _ = self.advance();
-    }
-
     fn expectArrowType(self: *Parser) ParseError!void {
         try self.skipWs();
         if (self.peek() != '-' or self.peekAt(1) != '>') return self.fail("expected `->`");
@@ -943,7 +936,7 @@ pub const Parser = struct {
         });
     }
 
-    /// `let Bk: ty = <init> in <body>` — init is an eager operand outside
+    /// `let Bk: ty = <init> { <body> }` — init is an eager operand outside
     /// the binder's region (§5.3 init exclusion: the declaration goes
     /// live only after the init is parsed).
     fn parseLet(self: *Parser) ParseError!hir.ExprId {
@@ -969,11 +962,12 @@ pub const Parser = struct {
         const decl = try self.parseBinderDecl();
         try self.expectByte('=');
         const init_expr = try self.parseExpr();
-        try self.expectWord("in");
+        try self.expectByte('{');
         try self.openRegion();
         try self.declare(decl.text_no, decl.binder);
         const body = try self.parseExpr();
         try self.closeRegion();
+        try self.expectByte('}');
         const region = try self.program.addRegion(&.{decl.binder}, body, null);
         const regions = try self.program.addRegions(&.{region});
         const operands = try self.program.addOperands(&.{init_expr});
@@ -985,7 +979,7 @@ pub const Parser = struct {
         });
     }
 
-    /// `let <pattern> = <init> in <body>` — a destructuring let. The
+    /// `let <pattern> = <init> { <body> }` — a destructuring let. The
     /// pattern needs the scrutinee type to resolve its leaves, but the
     /// text puts the pattern before the init; parse the init first
     /// (found by the top-level `=`) to learn the type, then rewind and
@@ -1017,9 +1011,10 @@ pub const Parser = struct {
         self.pos = after_init_pos;
         self.line = after_init_line;
         self.col = after_init_col;
-        try self.expectWord("in");
+        try self.expectByte('{');
         const body = try self.parseExpr();
         try self.closeRegion();
+        try self.expectByte('}');
         const region = try self.program.addRegion(params.items, body, pat_id);
         const regions = try self.program.addRegions(&.{region});
         const operands = try self.program.addOperands(&.{init_expr});
@@ -1071,19 +1066,13 @@ pub const Parser = struct {
                 i += 1;
                 continue;
             }
-            if (c == '=' and depth == 0) {
-                if (i + 1 < self.src.len and self.src[i + 1] == '>') {
-                    i += 2;
-                    continue;
-                }
-                return i;
-            }
+            if (c == '=' and depth == 0) return i;
             i += 1;
         }
         return self.fail("expected `=` in a destructuring let");
     }
 
-    /// `fn (params) => body` — a lambda value with one parameter region.
+    /// `fn (params) { body }` — a lambda value with one parameter region.
     fn parseLambda(self: *Parser) ParseError!hir.ExprId {
         try self.expectByte('(');
         var binds: std.ArrayList(BinderDecl) = .empty;
@@ -1107,7 +1096,7 @@ pub const Parser = struct {
             _ = self.advance();
             ret_ann = try self.parseType();
         }
-        try self.expectArrow();
+        try self.expectByte('{');
         try self.openRegion();
         var params: std.ArrayList(hir.BinderId) = .empty;
         var fn_params: std.ArrayList(meta.Param) = .empty;
@@ -1123,6 +1112,7 @@ pub const Parser = struct {
         }
         const body = try self.parseExpr();
         try self.closeRegion();
+        try self.expectByte('}');
         const region = try self.program.addRegion(params.items, body, null);
         const regions = try self.program.addRegions(&.{region});
         const ret_ptr = try self.arena.create(meta.Type);
@@ -1135,23 +1125,23 @@ pub const Parser = struct {
         });
     }
 
-    /// `if c then t (else e)?` — cond operand + two no-param regions. A
+    /// `if c { t } (else { e })?` — cond operand + two no-param regions. A
     /// missing else is a void branch (synthesized const void root).
-    /// `if <cond> then <body> [else <body>]` and the same-shaped
+    /// `if <cond> { <body> } [else { <body> }]` and the same-shaped
     /// `and`/`or` short-circuit rows (§5.5/§7.1: and/or carry their own
     /// rows; both branches are always present in their text).
     fn parseControl(self: *Parser, op: hir.OpId) ParseError!hir.ExprId {
         const desc = hir.registry.get(op);
         const cond = try self.parseExpr();
-        try self.expectWord("then");
+        try self.expectByte('{');
         const then_body = try self.parseExpr();
+        try self.expectByte('}');
         var else_root: hir.ExprId = undefined;
         if (try self.atWord("else")) {
-            _ = self.advance();
-            _ = self.advance();
-            _ = self.advance();
-            _ = self.advance();
+            try self.expectWord("else");
+            try self.expectByte('{');
             else_root = try self.parseExpr();
+            try self.expectByte('}');
         } else if (std.mem.eql(u8, desc.name, "if")) {
             else_root = try self.litConst(.void, .void);
         } else {
@@ -1169,7 +1159,8 @@ pub const Parser = struct {
         });
     }
 
-    /// `match s { arm, … }` — scrutinee operand + one region per arm.
+    /// `match s { arm … }` — scrutinee operand + one region per arm. Each
+    /// arm is its own brace block, so no separator is needed.
     fn parseMatch(self: *Parser) ParseError!hir.ExprId {
         const scrutinee = try self.parseExpr();
         const scrutinee_ty = self.program.node(scrutinee).ty;
@@ -1182,11 +1173,6 @@ pub const Parser = struct {
             const arm = try self.parseArm(scrutinee_ty);
             try arm_regions.append(self.arena, arm.region);
             if (first_body == null) first_body = arm.body;
-            try self.skipWs();
-            if (self.pos < self.src.len and self.peek() == ',') {
-                _ = self.advance();
-                continue;
-            }
         }
         try self.expectByte('}');
         if (arm_regions.items.len == 0) return self.fail("match needs at least one arm");
@@ -1206,66 +1192,21 @@ pub const Parser = struct {
         var params: std.ArrayList(hir.BinderId) = .empty;
         var pattern_id: ?hir.PatternId = null;
         var body: hir.ExprId = undefined;
-        if (try self.armHasPattern()) {
+        if (try self.atByte('{')) {
+            // A placeholder arm is a bare region block (no pattern).
+            _ = self.advance();
+            body = try self.parseExpr();
+            try self.expectByte('}');
+        } else {
             try self.openRegion();
             pattern_id = try self.parsePatternFor(scrutinee_ty, &params);
-            try self.expectArrow();
+            try self.expectByte('{');
             body = try self.parseExpr();
             try self.closeRegion();
-        } else {
-            body = try self.parseExpr();
+            try self.expectByte('}');
         }
         const region = try self.program.addRegion(params.items, body, pattern_id);
         return .{ .region = region, .body = body };
-    }
-
-    /// Whether the arm at the current position starts with `pattern =>`.
-    /// Scans forward (skipping comments/strings, tracking bracket depth)
-    /// for a top-level `=>` before the arm ends at `,` or `}`.
-    fn armHasPattern(self: *Parser) ParseError!bool {
-        var i = self.pos;
-        var depth: usize = 0;
-        while (i < self.src.len) {
-            const c = self.src[i];
-            if (c == '/' and i + 1 < self.src.len) {
-                if (self.src[i + 1] == '/') {
-                    while (i < self.src.len and self.src[i] != '\n') i += 1;
-                    continue;
-                }
-                if (self.src[i + 1] == '*') {
-                    i += 2;
-                    while (i + 1 < self.src.len and !(self.src[i] == '*' and self.src[i + 1] == '/')) i += 1;
-                    i += 2;
-                    continue;
-                }
-            }
-            if (c == '"') {
-                i += 1;
-                while (i < self.src.len and self.src[i] != '"') {
-                    if (self.src[i] == '\\') i += 1;
-                    i += 1;
-                }
-                i += 1;
-                continue;
-            }
-            if (c == '(' or c == '[' or c == '{') {
-                depth += 1;
-                i += 1;
-                continue;
-            }
-            if (c == ')' or c == ']' or c == '}') {
-                if (depth == 0) return false;
-                depth -= 1;
-                i += 1;
-                continue;
-            }
-            if (depth == 0) {
-                if (c == '=' and i + 1 < self.src.len and self.src[i + 1] == '>') return true;
-                if (c == ',' or c == '}') return false;
-            }
-            i += 1;
-        }
-        return false;
     }
 
     // -- patterns (hir.md §4.3, §5.4) ---------------------------------------

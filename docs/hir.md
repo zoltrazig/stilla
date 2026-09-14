@@ -328,7 +328,8 @@ full-expression 边界可见。它是**优化前 / 后、CFG 之前**的形态�
 
 ### 4.1 约定
 
-- **前缀 + 显式括号、无优先级**：歧义靠括号消除；缩进无语义，parser 忽略空白。
+- **前缀 + 显式括号、无优先级**：歧义靠括号消除；排版无语义，parser 忽略空白。
+  printer 输出规范化缩进（§4.8），布局是树结构的纯函数。
 - **名字自由**：printer 按首次引入序给 binder 连续编号 `B0, B1, …`（region
   params 先，body 内新 binder 后）。α 等价的程序文本相同。
 - **声明 vs 引用**：声明写裸 `Bk`，引用写 `%Bk`。
@@ -339,12 +340,12 @@ full-expression 边界可见。它是**优化前 / 后、CFG 之前**的形态�
 ### 4.2 词法（token）
 
 ```text
-标点     ( ) { } [ ] , : = -> => @ _ .. ::
+标点     ( ) { } [ ] , : = -> @ _ .. ::
 数字     [0-9]+ | 0x[0-9a-fA-F]+
 标识符   [A-Za-z_][A-Za-z0-9_]*（可带点段）
 Binder   Bk，引用 %Bk        FuncRef  Fk        HostRef  Hk
 ModConst Ck
-关键字   let in fn if then else and or match panic seq void true false fnref
+关键字   let fn if else and or match panic seq void true false fnref
          module box byte any hostdata never
 注释     // 到行尾   /* … */
 字符串   "…"
@@ -359,9 +360,9 @@ ModConst Ck
 ```text
 expr    := lit | ref | 'panic'
          | op ('[' member ']')? '(' (expr (',' expr)*)? ')' (':' ty)?   // 结果类型标注可省
-         | 'let' (binder | pattern) '=' expr 'in' expr
-         | 'fn' '(' binderList? ')' ('->' ty)? '=>' expr
-         | ('if' | 'and' | 'or') expr 'then' expr ('else' expr)?
+         | 'let' (binder | pattern) '=' expr block
+         | 'fn' '(' binderList? ')' ('->' ty)? block
+         | ('if' | 'and' | 'or') expr block ('else' block)?
          | 'match' expr '{' armList '}'
          | '(' expr ')'
 
@@ -376,22 +377,25 @@ pattern := '_' | Binder | lit | '(' pattern (',' pattern)* ')'
          | VariantPath ('(' pattern ')')?
          | ty Binder
 fieldPat := ident (':' pattern)?
-arm      := (pattern '=>')? expr
-armList  := arm (',' arm)*
+arm      := pattern? block               // 无 pattern 的占位 arm 只有 block
+block    := '{' expr '}'                 // 每个 region body 一个 brace block
+armList  := arm*                         // arm 之间不需要分隔符
 ```
 
 要点：
 
-- `let Bk: ty = <init> in <body>`：`<init>` 是唯一 eager operand，且在 region
+- `let Bk: ty = <init> { <body> }`：`<init>` 是唯一 eager operand，且在 region
   **之外**求值；`Bk` 只在 `<body>` 可见。
-- **解构 let**（§5.2）写作 `let <pattern> = <init> in <body>`：pattern 的叶子
+- **解构 let**（§5.2）写作 `let <pattern> = <init> { <body> }`：pattern 的叶子
   按序消费 region params，无 binder 类型标注；parser 先解析 `<init>` 得到
   scrutinee 类型，再回头解析 pattern（init 里不可见 pattern 的 binder）。
-- `fn (…) => …` 是 lambda **值**；参数 region 的 params 即括号里的 binderList。
+- `fn (…) { … }` 是 lambda **值**；参数 region 的 params 即括号里的 binderList。
   仅当声明的返回类型 ≠ body 的类型（`never` body 配非 `never` 声明）时才写
   `-> ty`，否则返回类型由 body 推出。
-- `if` 的 then/else 是两个无参 region；缺省 else 表示 void 分支。
-- `match` 每个 arm 是一个 region；无 pattern 的占位 arm 可省略 `pattern =>`。
+- `if` 的 then/else 是两个无参 region，写作 `if c { t } else { e }`；缺省 else
+  表示 void 分支。
+- `match` 每个 arm 是一个 region，arm 写成 `pattern { body }`（无 pattern 的占位
+  arm 只有 `{ body }`）；arm 之间不需要分隔符。
 - eager apply 的 operands 按书写序（LTR）求值。
 - **结果类型标注**：opcode 自身不含类型时（`num_cast`、`any_cast`、空
   `list_make`、三个 aggregate 形态等）用尾缀 `: ty`；typed opcode 的结果类型由
@@ -406,13 +410,13 @@ armList  := arm (',' arm)*
 | 原子 | `local` | `%Bk` | `%B3` |
 | 原子 | `fn_ref` | `fnref Fk` / `fnref Hk`（可接 `: ty`） | `fnref F0` `fnref H1: fn (i32) -> str` |
 | 原子 | `module_const` | `module Ck` | `module C2` |
-| binding | `let` | `let Bk: ty = e in e`；解构为 `let pattern = e in e` | `let B1: i32 = add.i32(%B0, 1i32) in %B1` |
+| binding | `let` | `let Bk: ty = e { body }`；解构为 `let pattern = e { body }` | `let B1: i32 = add.i32(%B0, 1i32) { %B1 }` |
 | sequencing | `seq` | `seq(e, e, …)` | `seq(call(%f), panic)` |
-| function | `lambda` | `fn (params) (-> ret)? => body` | `fn (B0: i32) => mul.i32(%B0, 2i32)` |
-| function | `call` | `call(callee, arg, …)` | `call(fn (B0: i32) => %B0, %x)` |
-| control | `if` | `if c then t else e` | `if %c then 1i32 else 0i32` |
-| control | `and` / `or` | 同 `if` 形状 | `and %c then %a else false` |
-| control | `match` | `match s { arm, … }` | 见 §4.7 |
+| function | `lambda` | `fn (params) (-> ret)? { body }` | `fn (B0: i32) { mul.i32(%B0, 2i32) }` |
+| function | `call` | `call(callee, arg, …)` | `call(fn (B0: i32) { %B0 }, %x)` |
+| control | `if` | `if c { t } else { e }` | `if %c { 1i32 } else { 0i32 }` |
+| control | `and` / `or` | 同 `if` 形状 | `and %c { %a } else { false }` |
+| control | `match` | `match s { arm* }` | 见 §4.7 |
 | aggregate | `struct_make` | `struct_make(e, …) : ty` | `struct_make(1i32, 2i32) : Point` |
 | aggregate | `field_get` | `field_get[member](e) : ty` | `field_get[x](%p) : i32` `field_get[1](%t) : i64` |
 | aggregate | `variant_make` | `variant_make[Variant](e, …) : ty` | `variant_make[some](%v) : Shape` |
@@ -429,7 +433,7 @@ struct 字段名或 tuple 下标（由 operand 的基类型解析），结果类
 parser 报错，绝不静默降级。
 
 带 region 的 op **没有文本形态**：printer 对 `desc.regions != .none` 且无命名
-形状的 op 报 `NotSerializable`（§4.10）。通用形 `op(args){ params => body }`
+形状的 op 报 `NotSerializable`（§4.10）。通用形 `op(args) { region }`
 是设计预留，parser 也不接受。v1 可序列化的 op 全部由上面的命名形状覆盖。
 
 ### 4.5 类型与字面量
@@ -470,28 +474,49 @@ fe[ … ]        // 显式包裹 FE root（SEG 验收输出）
 
 ```text
 // 1) double——纯算术 λ：
-fn (B0: i32) => mul.i32(%B0, 2i32)
+fn (B0: i32) {
+  mul.i32(%B0, 2i32)
+}
 
 // 2) match（borrow 视图的 Option）：arm 用 pattern 绑定 B1
-fn (B0: Option[i32]) =>
-  match(%B0) {
-    Option::Some(B1) => add.i32(%B1, 1i32),
-    Option::None => 0i32
+fn (B0: Option[i32]) {
+  match %B0 {
+    Option::Some(B1) {
+      add.i32(%B1, 1i32)
+    }
+    Option::None {
+      0i32
+    }
   }
+}
 
-// 3) λ + call + let（`// fe#k` 是设计上的 FE 标注，当前 printer 不输出）：
-fn (B0: i32) =>
-    let B1: i32 =
-        call(fn (B2: i32) => add.i32(%B2, 0i32), %B0)   // fe#0
-    in mul.i32(%B1, 1i32)                                 // fe#1
+// 3) λ + call + let：
+fn (B0: i32) {
+  let B1: i32 = call(
+    fn (B2: i32) {
+      add.i32(%B2, 0i32)
+    },
+    %B0) {
+    mul.i32(%B1, 1i32)
+  }
+}
 ```
 
 ### 4.8 打印（canonical 输出）
 
-- printer 走 ExprNode 前序：opcode / 字面量 → operands → regions（每个 region
-  先 `{`、params、`=>`、root）。输出必须落在 §4.3–§4.4 语法内。
-- 输出**单行**：除 `#refs` 字典后的一处换行外，不产生换行 / 缩进；parser 忽略
-  空白。编号与拼写全部确定性：同一 HIR 两次打印逐字相等。
+- printer 走 ExprNode 前序：opcode / 字面量 → operands → regions（region 的
+  params 写在 block 之前，body 落在 `{ … }` 内）。输出必须落在 §4.3–§4.4 语法内。
+- **brace region**：每个 region body 都是一个 `{ … }` block——`fn (params)
+  { body }`、`let B: ty = init { body }`、`if c { t } else { e }`、match arm
+  `pat { body }`。`{` / `}` 成对，region 边界可以用括号配对直接定位。
+- **规范化排版**：上述 block 总是换行并缩进（每层 2 空格）；其余节点内联打印，
+  除非某个 eager op 的 operand 跨多行，此时 operand 逐个换行缩进（闭合 `)` 跟
+  在最后一个 operand 后）。布局是树结构的纯函数（无宽度参数），parser 忽略
+  空白，故排版无语义。
+- **`{` 前的控制表达式加括号**：条件、`let` init、`match` scrutinee 若本身是带
+  region 的节点，打印时加括号（`let B = (if c { a } else { b }) { … }`），避免
+  相邻 block 视觉上连成一片。parser 视 `(e)` 为 `e`，纯排版。
+- 输出确定性：同一 HIR 两次打印逐字相等（编号、拼写与排版都由结构决定）。
 - **引用字典**：正文含 `fnref Fk` / `module Ck` / host 引用时，正文前附
   `#refs: F0 = string.concat, H0 = host.clock.now, C1 = config.x`，把打印号映射到
   **稳定语义键**（模块限定名 + 特化参数；host 为绑定名），打印号按键排序分配，
@@ -521,7 +546,8 @@ fn (B0: i32) =>
   自有套件与独立 seg 套件（§10.2）。
 - **CLI 转储（`--emit-hir`）**：把编译期构建的 HIR 按 canonical 文本打印到
   stdout（或 `--output <file>`），每个函数根表达式前加 `// @<module>.<name>`
-  注释。注释无语义，整份转储是多个根表达式的拼接，**不是**单个可解析表达式。
+  注释，函数块之间空一行。注释无语义，整份转储是多个根表达式的拼接，**不是**
+  单个可解析表达式。
 - `--emit-hir` 与 `--emit-asm` / `--emit-bin` / `--run` 互斥；与 `--output` /
   `--no-entry-fn` 可同用。
 - 未覆盖的节点使转储失败：带 `access_hops` 的模块链叶子与带 region 的非命名 op
@@ -593,9 +619,13 @@ match (x) { Option::Some(v) => v + 1, Option::None => 0 }
 ```
 
 ```text
-match(%B0) {
-    Option::Some(B1) => add.i32(%B1, 1i32),
-    Option::None => 0i32,
+match %B0 {
+  Option::Some(B1) {
+    add.i32(%B1, 1i32)
+  }
+  Option::None {
+    0i32
+  }
 }
 ```
 
@@ -1050,13 +1080,15 @@ Stilla 是 strict call-by-value，实参恰好一次、LTR。数学的
 正确形式是多参数逐参数嵌套 let：
 
 ```text
-call(fn (B0: i32) => add.i32(%B0, %B0), call(fnref F1))
-    →  let B0: i32 = call(fnref F1) in add.i32(%B0, %B0)
+call(fn (B0: i32) { add.i32(%B0, %B0) }, call(fnref F1))
+    →  let B0: i32 = call(fnref F1) { add.i32(%B0, %B0) }
 
-call(fn (B0: i32, B1: i32) => mul.i32(%B0, %B1), call(fnref Ff), call(fnref Fg))
-    →  let B0: i32 = call(fnref Ff) in
-       let B1: i32 = call(fnref Fg) in
-         mul.i32(%B0, %B1)
+call(fn (B0: i32, B1: i32) { mul.i32(%B0, %B1) }, call(fnref Ff), call(fnref Fg))
+    →  let B0: i32 = call(fnref Ff) {
+         let B1: i32 = call(fnref Fg) {
+           mul.i32(%B0, %B1)
+         }
+       }
 ```
 
 绝不许交换实参顺序。β 以**显式契约**进入：
@@ -1109,7 +1141,7 @@ beta_rule = RewriteRule {
 设计意图：
 
 ```text
-fn (B0: f32) => call(fnref abs, %B0)     →   fnref abs
+fn (B0: f32) { call(fnref abs, %B0) }     →   fnref abs
 ```
 
 前提（即 `hir_seg.tryEta` 的准入）：
@@ -1159,20 +1191,21 @@ HIR（value 为参数 B0；FE1 = init，FE2 = `result * 1`）：
 > 其 init 与 `let` 同 FE，在 FE 内继续化简。
 
 ```text
-let B1: i32 =
-    call(fn (B2: i32) => add.i32(%B2, 0i32), %B0)   // FE1
-in mul.i32(%B1, 1i32)                                 // FE2
+let B1: i32 = call(fn (B2: i32) { add.i32(%B2, 0i32) }, %B0) {   // FE1
+  mul.i32(%B1, 1i32)                                             // FE2
+}
 ```
 
-FE1 内：β → `let B2: i32 = %B0 in add.i32(%B2, 0i32)`；再 `%B2 + 0 → %B2`；
-再 `let B2 = %B0 in %B2 → %B0`。FE2 内：`%B1 * 1 → %B1`。
+FE1 内：β → `let B2: i32 = %B0 { add.i32(%B2, 0i32) }`；再 `%B2 + 0 → %B2`；
+再 `let B2 = %B0 { %B2 } → %B0`。FE2 内：`%B1 * 1 → %B1`。
 
 ```text
-let B1: i32 = %B0 in
-    %B1
+let B1: i32 = %B0 {
+  %B1
+}
 ```
 
-最外层 `let B1 = %B0 in %B1` 的折叠跨 FE1 / FE2：它是 used-once forwarding，
+最外层 `let B1 = %B0 { %B1 }` 的折叠跨 FE1 / FE2：它是 used-once forwarding，
 init（这时已是 `%B0`）是 island 成员、与本轮分析一致，故下一轮以
 `cleanup_free_subtree` 证明准入，搬移的子树重新盖上 FE2，结果就是 `%B0`。
 轮次上：FE1 内的重写（β → let 折叠）本轮先把 init 的**内容**改成 `%B0`，

@@ -10,8 +10,14 @@
 //! - **Deterministic binder numbering.** Text binder numbers are
 //!   printer-local symbols, assigned by a single pre-order traversal in
 //!   first-introduction order (region params before their bodies, so the
-//!   overall numbering is text-occurrence order). Output is single-line;
-//!   the parser ignores whitespace, so layout carries no meaning.
+//!   overall numbering is text-occurrence order).
+//! - **Canonical layout.** Region-bearing nodes (`fn`/`let`/`if`/`and`/
+//!   `or`/`match`) always break their bodies onto an indented line (2
+//!   spaces per level); every other node prints inline, except that an
+//!   eager op whose operands span more than one line wraps its operands
+//!   one per line. The layout is a pure function of the tree (no width
+//!   parameter), so printing is deterministic. The parser ignores
+//!   whitespace, so the layout is presentation only.
 //! - **Refs dictionary.** `fnref`/`module` targets print through a
 //!   `#refs:` dictionary line: print numbers are assigned per kind in
 //!   stable-key order (hir.md §4.8), so the text is independent of the
@@ -44,6 +50,8 @@ const Printer = struct {
     // Binder text numbers, assigned on declaration in print order.
     binder_no: std.AutoHashMap(hir.BinderId, u32),
     next_no: u32 = 0,
+    // Current indentation, in spaces (2 per nesting level).
+    indent: usize = 0,
 
     fn init(allocator: std.mem.Allocator, ctx: hir.SerCtx) Printer {
         return .{
@@ -74,6 +82,21 @@ const Printer = struct {
 
     fn putByte(self: *Printer, b: u8) PrintError!void {
         try self.out.append(self.alloc, b);
+    }
+
+    /// End the current line and indent the next one to the current depth.
+    fn nl(self: *Printer) PrintError!void {
+        try self.putByte('\n');
+        var i: usize = 0;
+        while (i < self.indent) : (i += 1) try self.putByte(' ');
+    }
+
+    fn pushIndent(self: *Printer) void {
+        self.indent += 2;
+    }
+
+    fn popIndent(self: *Printer) void {
+        self.indent -= 2;
     }
 
     // -- types (hir.md §4.5, short spellings) ------------------------------
@@ -432,9 +455,14 @@ fn printExpr(p: *Printer, program: *const hir.Program, id: hir.ExprId, numbers: 
             try printMode(p, b.mode);
         }
         try p.put(" = ");
-        try printExpr(p, program, ops[0], numbers, false);
-        try p.put(" in ");
+        try printBeforeBrace(p, program, ops[0], numbers);
+        try p.put(" {");
+        p.pushIndent();
+        try p.nl();
         try printExpr(p, program, r.root, numbers, false);
+        p.popIndent();
+        try p.nl();
+        try p.put("}");
         return;
     }
     if (std.mem.eql(u8, op_name, "lambda")) {
@@ -458,25 +486,40 @@ fn printExpr(p: *Printer, program: *const hir.Program, id: hir.ExprId, numbers: 
             try p.put(" -> ");
             try p.printType(n.ty.function.ret.*);
         }
-        try p.put(" => ");
+        try p.put(" {");
+        p.pushIndent();
+        try p.nl();
         try printExpr(p, program, r.root, numbers, false);
+        p.popIndent();
+        try p.nl();
+        try p.put("}");
         return;
     }
     if (std.mem.eql(u8, op_name, "if") or std.mem.eql(u8, op_name, "and") or std.mem.eql(u8, op_name, "or")) {
         const ops = program.operands(id);
         try p.put(op_name);
         try p.put(" ");
-        try printExpr(p, program, ops[0], numbers, false);
-        try p.put(" then ");
+        try printBeforeBrace(p, program, ops[0], numbers);
+        try p.put(" {");
         const regs = program.regionsOf(id);
+        p.pushIndent();
+        try p.nl();
         try printBranch(p, program, regs[0], numbers);
+        p.popIndent();
+        try p.nl();
+        try p.put("}");
         const else_r = program.region(regs[1]);
         if (elseIsVoid(program, else_r.root)) {
             // Missing else is the default void branch (if only; and/or
             // always carry a const-bool side branch).
         } else {
-            try p.put(" else ");
+            try p.put(" else {");
+            p.pushIndent();
+            try p.nl();
             try printBranch(p, program, regs[1], numbers);
+            p.popIndent();
+            try p.nl();
+            try p.put("}");
         }
         return;
     }
@@ -484,23 +527,22 @@ fn printExpr(p: *Printer, program: *const hir.Program, id: hir.ExprId, numbers: 
         const ops = program.operands(id);
         const scrutinee_ty = program.node(ops[0]).ty;
         try p.put("match ");
-        try printExpr(p, program, ops[0], numbers, false);
-        try p.put(" { ");
+        try printBeforeBrace(p, program, ops[0], numbers);
+        try p.put(" {");
         const regs = program.regionsOf(id);
-        for (regs, 0..) |rid, i| {
-            if (i > 0) try p.put(", ");
+        p.pushIndent();
+        for (regs) |rid| {
+            try p.nl();
             try printArm(p, program, rid, scrutinee_ty, numbers);
         }
-        try p.put(" }");
+        p.popIndent();
+        try p.nl();
+        try p.put("}");
         return;
     }
     if (std.mem.eql(u8, op_name, "call")) {
         try p.put("call(");
-        const ops = program.operands(id);
-        for (ops, 0..) |o, i| {
-            if (i > 0) try p.put(", ");
-            try printExpr(p, program, o, numbers, false);
-        }
+        try printOperandList(p, program, id, numbers);
         try p.put(")");
         return;
     }
@@ -508,7 +550,7 @@ fn printExpr(p: *Printer, program: *const hir.Program, id: hir.ExprId, numbers: 
         // Aggregate identity rides the result type; operands are in
         // declaration order (hir.md §4.4).
         try p.put("struct_make(");
-        try printOperands(p, program, id, numbers);
+        try printOperandList(p, program, id, numbers);
         try p.put(") : ");
         try p.printType(n.ty);
         return;
@@ -518,7 +560,7 @@ fn printExpr(p: *Printer, program: *const hir.Program, id: hir.ExprId, numbers: 
         try p.put("variant_make[");
         try printVariantName(p, n.ty, tag);
         try p.put("](");
-        try printOperands(p, program, id, numbers);
+        try printOperandList(p, program, id, numbers);
         try p.put(") : ");
         try p.printType(n.ty);
         return;
@@ -531,7 +573,7 @@ fn printExpr(p: *Printer, program: *const hir.Program, id: hir.ExprId, numbers: 
         try p.put("field_get[");
         try printMemberName(p, base, n.payload.field);
         try p.put("](");
-        try printOperands(p, program, id, numbers);
+        try printOperandList(p, program, id, numbers);
         try p.put(") : ");
         try p.printType(n.ty);
         return;
@@ -541,14 +583,10 @@ fn printExpr(p: *Printer, program: *const hir.Program, id: hir.ExprId, numbers: 
     if (desc.regions != .none) return PrintError.NotSerializable;
     try p.put(op_name);
     try p.put("(");
-    const ops = program.operands(id);
-    for (ops, 0..) |o, i| {
-        if (i > 0) try p.put(", ");
-        try printExpr(p, program, o, numbers, false);
-    }
+    try printOperandList(p, program, id, numbers);
     try p.put(")");
     // Result-type annotation for ops whose type is not self-determined.
-    if (needsAnnotation(op_name, ops.len)) {
+    if (needsAnnotation(op_name, program.operands(id).len)) {
         try p.put(": ");
         try p.printType(n.ty);
     }
@@ -576,12 +614,73 @@ fn printMode(p: *Printer, mode: hir.BinderMode) PrintError!void {
     }
 }
 
-/// The comma-separated operand list of an eager node.
-fn printOperands(p: *Printer, program: *const hir.Program, id: hir.ExprId, numbers: *const RefNumbers) PrintError!void {
-    for (program.operands(id), 0..) |o, i| {
-        if (i > 0) try p.put(", ");
-        try printExpr(p, program, o, numbers, false);
+/// An expression immediately followed by a region `{` in the text: a
+/// conditional's condition, a `let` init, or a `match` scrutinee. When the
+/// expression is itself region-bearing, its own blocks would run into the
+/// following one (`let B = if c { a } else { b } { … }`), so parenthesize
+/// it: `let B = (if c { a } else { b }) { … }`. The parser treats `(e)`
+/// as `e`, so this is presentation only.
+fn printBeforeBrace(p: *Printer, program: *const hir.Program, id: hir.ExprId, numbers: *const RefNumbers) PrintError!void {
+    if (breaksRegion(hir.registry.get(program.node(id).op).name)) {
+        try p.put("(");
+        try printExpr(p, program, id, numbers, false);
+        try p.put(")");
+    } else {
+        try printExpr(p, program, id, numbers, false);
     }
+}
+
+/// True when printing `id` yields more than one line. Every region-bearing
+/// node breaks its body, so this is exactly "the subtree contains a
+/// region-bearing node". Used to decide whether an eager node wraps its
+/// operands one per line. The HIR is a tree (§3.7) and functions are
+/// small, so the repeated subtree walk is not worth memoizing.
+fn isMultiline(program: *const hir.Program, id: hir.ExprId) bool {
+    const n = program.node(id);
+    if (breaksRegion(hir.registry.get(n.op).name)) return true;
+    for (program.operands(id)) |op| {
+        if (isMultiline(program, op)) return true;
+    }
+    for (program.regionsOf(id)) |rid| {
+        if (isMultiline(program, program.region(rid).root)) return true;
+    }
+    return false;
+}
+
+/// The region-bearing op names whose bodies the printer always puts on
+/// their own indented line (hir.md §4.8).
+fn breaksRegion(name: []const u8) bool {
+    return std.mem.eql(u8, name, "let") or std.mem.eql(u8, name, "lambda") or
+        std.mem.eql(u8, name, "if") or std.mem.eql(u8, name, "and") or
+        std.mem.eql(u8, name, "or") or std.mem.eql(u8, name, "match");
+}
+
+/// The operand list of an eager node: `op(a, b)` when every operand prints
+/// on one line, otherwise one operand per indented line with the closing
+/// paren left to the caller (hir.md §4.8).
+fn printOperandList(p: *Printer, program: *const hir.Program, id: hir.ExprId, numbers: *const RefNumbers) PrintError!void {
+    const ops = program.operands(id);
+    var wrapped = false;
+    for (ops) |o| {
+        if (isMultiline(program, o)) {
+            wrapped = true;
+            break;
+        }
+    }
+    if (!wrapped) {
+        for (ops, 0..) |o, i| {
+            if (i > 0) try p.put(", ");
+            try printExpr(p, program, o, numbers, false);
+        }
+        return;
+    }
+    p.pushIndent();
+    for (ops, 0..) |o, i| {
+        try p.nl();
+        try printExpr(p, program, o, numbers, false);
+        if (i + 1 < ops.len) try p.putByte(',');
+    }
+    p.popIndent();
 }
 
 /// `variant_make` member identity: the variant name at `tag` in the
@@ -643,9 +742,17 @@ fn printArm(p: *Printer, program: *const hir.Program, rid: hir.RegionId, scrutin
         var cursor: usize = 0;
         const binders = program.params(rid);
         try printPattern(p, program, pid, scrutinee_ty, binders, &cursor, numbers);
-        try p.put(" => ");
+        try p.put(" {");
+    } else {
+        // A placeholder arm is a bare region block.
+        try p.put("{");
     }
+    p.pushIndent();
+    try p.nl();
     try printExpr(p, program, r.root, numbers, false);
+    p.popIndent();
+    try p.nl();
+    try p.put("}");
 }
 
 /// Binder leaves consume the arm's region params in order (leaf order ==
@@ -939,9 +1046,9 @@ fn roundTripOk(text: []const u8, ctx: hir.SerCtx) !bool {
 }
 
 /// §4.7 golden examples (ctx fixtures below).
-const golden_double = "fn (B0: i32) => mul.i32(%B0, 2i32)";
-const golden_match = "fn (B0: Option[i32]) => match(%B0) { Option::Some(B1) => add.i32(%B1, 1i32), Option::None => 0i32 }";
-const golden_let_call = "fn (B0: i32) => let B1: i32 = call(fn (B2: i32) => add.i32(%B2, 0i32), %B0) in mul.i32(%B1, 1i32)";
+const golden_double = "fn (B0: i32) { mul.i32(%B0, 2i32) }";
+const golden_match = "fn (B0: Option[i32]) { match %B0 { Option::Some(B1) { add.i32(%B1, 1i32) } Option::None { 0i32 } } }";
+const golden_let_call = "fn (B0: i32) { let B1: i32 = call(fn (B2: i32) { add.i32(%B2, 0i32) }, %B0) { mul.i32(%B1, 1i32) } }";
 
 test "round trip: §4.7 goldens parse, print canonically, and re-parse α-equal" {
     try t.expect(try roundTripOk(golden_double, .{}));
@@ -955,7 +1062,7 @@ test "round trip: §4.7 goldens parse, print canonically, and re-parse α-equal"
 test "round trip: §8.7 example fragment" {
     // §8.7's HIR example (FE comments removed — derived annotations are
     // not part of canonical text).
-    const text = "fn (B0: i32) => let B1: i32 = call(fn (B2: i32) => add.i32(%B2, 0i32), %B0) in mul.i32(%B1, 1i32)";
+    const text = "fn (B0: i32) { let B1: i32 = call(fn (B2: i32) { add.i32(%B2, 0i32) }, %B0) { mul.i32(%B1, 1i32) } }";
     try t.expect(try roundTripOk(text, .{}));
 }
 
@@ -965,13 +1072,53 @@ test "print(parse(x)) is canonical and stable" {
     const a = try print(&p1.program, p1.root, p1.arena.allocator(), .{});
     const b = try print(&p1.program, p1.root, p1.arena.allocator(), .{});
     try t.expectEqualStrings(a, b);
-    // The canonical form of the example is single-line prefix text.
-    try t.expectEqualStrings("fn (B0: i32) => let B1: i32 = call(fn (B2: i32) => add.i32(%B2, 0i32), %B0) in mul.i32(%B1, 1i32)", a);
+    // The canonical form: regions are brace blocks.
+    try t.expectEqualStrings(
+        "fn (B0: i32) {\n  let B1: i32 = call(\n    fn (B2: i32) {\n      add.i32(%B2, 0i32)\n    },\n    %B0) {\n    mul.i32(%B1, 1i32)\n  }\n}",
+        a,
+    );
+}
+
+test "canonical layout: if/else and eager operand wrapping" {
+    var p = try hir_parse.parseText("fn (B0: i32) { if lt.i32(%B0, 2i32) { %B0 } else { call(fn (B1: i32) { add.i32(%B1, 1i32) }, %B0) } }", .{});
+    defer p.arena.deinit();
+    const out = try print(&p.program, p.root, p.arena.allocator(), .{});
+    try t.expectEqualStrings(
+        "fn (B0: i32) {\n  if lt.i32(%B0, 2i32) {\n    %B0\n  } else {\n    call(\n      fn (B1: i32) {\n        add.i32(%B1, 1i32)\n      },\n      %B0)\n  }\n}",
+        out,
+    );
+}
+
+test "canonical layout: match arms" {
+    var fix = try optionFixture(t.allocator);
+    defer fix.arena.deinit();
+    var p = try hir_parse.parseText("fn (B0: Option[i32]) { match %B0 { Option::Some(B1) { add.i32(%B1, 1i32) } Option::None { 0i32 } } }", fix.ctx);
+    defer p.arena.deinit();
+    const out = try print(&p.program, p.root, p.arena.allocator(), fix.ctx);
+    try t.expectEqualStrings(
+        "fn (B0: Option[i32]) {\n  match %B0 {\n    Option::Some(B1) {\n      add.i32(%B1, 1i32)\n    }\n    Option::None {\n      0i32\n    }\n  }\n}",
+        out,
+    );
+}
+
+test "canonical layout: region-bearing condition/init gets parens" {
+    const src = "fn (B0: bool) { let B1: bool = if %B0 { true } else { false } { not.bool(%B1) } }";
+    var p = try hir_parse.parseText(src, .{});
+    defer p.arena.deinit();
+    const out = try print(&p.program, p.root, p.arena.allocator(), .{});
+    try t.expectEqualStrings(
+        "fn (B0: bool) {\n  let B1: bool = (if %B0 {\n    true\n  } else {\n    false\n  }) {\n    not.bool(%B1)\n  }\n}",
+        out,
+    );
+    // The parenthesized form re-parses to the same program.
+    var p2 = try hir_parse.parseText(out, .{});
+    defer p2.arena.deinit();
+    try t.expect(alphaEq(p2.arena.allocator(), &p.program, p.root, &p2.program, p2.root));
 }
 
 test "α-equivalent texts print identically (binder renumbering)" {
-    const t1 = "fn (B0: i32) => mul.i32(%B0, 2i32)";
-    const t2 = "fn (B7: i32) => mul.i32(%B7, 2i32)";
+    const t1 = "fn (B0: i32) { mul.i32(%B0, 2i32) }";
+    const t2 = "fn (B7: i32) { mul.i32(%B7, 2i32) }";
     var p1 = try hir_parse.parseText(t1, .{});
     defer p1.arena.deinit();
     var p2 = try hir_parse.parseText(t2, .{});
@@ -982,69 +1129,69 @@ test "α-equivalent texts print identically (binder renumbering)" {
 }
 
 test "let init exclusion: init cannot reference its own binder" {
-    try t.expectError(error.Syntax, hir_parse.parseText("let B0: i32 = %B0 in %B0", .{}));
+    try t.expectError(error.Syntax, hir_parse.parseText("let B0: i32 = %B0 { %B0 }", .{}));
 }
 
 test "let binder visible only in its body" {
     // After the let's body the binder is gone: the reference is unknown.
-    try t.expectError(error.Syntax, hir_parse.parseText("seq(let B0: i32 = 1i32 in %B0, %B0)", .{}));
+    try t.expectError(error.Syntax, hir_parse.parseText("seq(let B0: i32 = 1i32 { %B0 }, %B0)", .{}));
 }
 
 test "reference to undeclared binder is rejected" {
-    try t.expectError(error.Syntax, hir_parse.parseText("fn (B0: i32) => %B1", .{}));
+    try t.expectError(error.Syntax, hir_parse.parseText("fn (B0: i32) { %B1 }", .{}));
 }
 
 test "unknown opcode and malformed literals are rejected" {
     try t.expectError(error.Syntax, hir_parse.parseText("nosuch(%B0)", .{}));
     try t.expectError(error.Syntax, hir_parse.parseText("1i33", .{}));
     try t.expectError(error.Syntax, hir_parse.parseText("1", .{}));
-    try t.expectError(error.Syntax, hir_parse.parseText("fn (B0: i32) => mul.i32(%B0)", .{}));
+    try t.expectError(error.Syntax, hir_parse.parseText("fn (B0: i32) { mul.i32(%B0) }", .{}));
 }
 
 test "round trip: aggregate member identity (hir.md §4.4)" {
     var fix = try aggFixture(t.allocator);
     defer fix.arena.deinit();
-    try t.expect(try roundTripOk("fn (B0: i32, B1: i32) => struct_make(%B0, %B1) : P", fix.ctx));
-    try t.expect(try roundTripOk("fn (B0: P) => field_get[x](%B0) : i32", fix.ctx));
-    try t.expect(try roundTripOk("fn (B0: i32) => variant_make[some](%B0) : U", fix.ctx));
-    try t.expect(try roundTripOk("fn (B0: i32) => variant_make[none]() : U", fix.ctx));
+    try t.expect(try roundTripOk("fn (B0: i32, B1: i32) { struct_make(%B0, %B1) : P }", fix.ctx));
+    try t.expect(try roundTripOk("fn (B0: P) { field_get[x](%B0) : i32 }", fix.ctx));
+    try t.expect(try roundTripOk("fn (B0: i32) { variant_make[some](%B0) : U }", fix.ctx));
+    try t.expect(try roundTripOk("fn (B0: i32) { variant_make[none]() : U }", fix.ctx));
     // Tuple fields carry a numeric member and need no nominal context.
-    try t.expect(try roundTripOk("fn (B0: (i32, i64)) => field_get[1](%B0) : i64", .{}));
+    try t.expect(try roundTripOk("fn (B0: (i32, i64)) { field_get[1](%B0) : i64 }", .{}));
 }
 
 test "aggregate member identity is validated, not guessed" {
     var fix = try aggFixture(t.allocator);
     defer fix.arena.deinit();
     // Unknown field / variant, or an arity mismatch, fails closed.
-    try t.expectError(error.Syntax, hir_parse.parseText("fn (B0: P) => field_get[z](%B0) : i32", fix.ctx));
-    try t.expectError(error.Syntax, hir_parse.parseText("fn (B0: i32) => struct_make(%B0) : P", fix.ctx));
-    try t.expectError(error.Syntax, hir_parse.parseText("fn (B0: i32) => variant_make[missing](%B0) : U", fix.ctx));
-    try t.expectError(error.Syntax, hir_parse.parseText("fn (B0: i32) => variant_make[some]() : U", fix.ctx));
+    try t.expectError(error.Syntax, hir_parse.parseText("fn (B0: P) { field_get[z](%B0) : i32 }", fix.ctx));
+    try t.expectError(error.Syntax, hir_parse.parseText("fn (B0: i32) { struct_make(%B0) : P }", fix.ctx));
+    try t.expectError(error.Syntax, hir_parse.parseText("fn (B0: i32) { variant_make[missing](%B0) : U }", fix.ctx));
+    try t.expectError(error.Syntax, hir_parse.parseText("fn (B0: i32) { variant_make[some]() : U }", fix.ctx));
     // A struct field is not a tuple index.
-    try t.expectError(error.Syntax, hir_parse.parseText("fn (B0: P) => field_get[0](%B0) : i32", fix.ctx));
+    try t.expectError(error.Syntax, hir_parse.parseText("fn (B0: P) { field_get[0](%B0) : i32 }", fix.ctx));
 }
 
 test "round trip: box types and destructuring lets (hir.md §4.5/§5.2)" {
-    try t.expect(try roundTripOk("fn (B0: box(i32)) => %B0", .{}));
-    try t.expect(try roundTripOk("fn (B0: (i32, i32)) => let (B1, B2) = %B0 in add.i32(%B1, %B2)", .{}));
+    try t.expect(try roundTripOk("fn (B0: box(i32)) { %B0 }", .{}));
+    try t.expect(try roundTripOk("fn (B0: (i32, i32)) { let (B1, B2) = %B0 { add.i32(%B1, %B2) } }", .{}));
     var fix = try aggFixture(t.allocator);
     defer fix.arena.deinit();
-    try t.expect(try roundTripOk("fn (B0: P) => let P { x: B1, y: B2 } = %B0 in add.i32(%B1, %B2)", fix.ctx));
+    try t.expect(try roundTripOk("fn (B0: P) { let P { x: B1, y: B2 } = %B0 { add.i32(%B1, %B2) } }", fix.ctx));
 }
 
 test "round trip: function-type param modes, multi-arg calls, bare pattern literals, wide unsigned, instance refs" {
-    try t.expect(try roundTripOk("fn (B0: fn(borrow i32, move i64) -> bool) => %B0", .{}));
-    try t.expect(try roundTripOk("call(fn (B0: i32, B1: i32) => %B0, 1i32, 2i32)", .{}));
-    try t.expect(try roundTripOk("fn (B0: i32) => match %B0 { 0 => 1i32, _ => 2i32 }", .{}));
-    try t.expect(try roundTripOk("fn () => 18446744073709551615u64", .{}));
+    try t.expect(try roundTripOk("fn (B0: fn(borrow i32, move i64) -> bool) { %B0 }", .{}));
+    try t.expect(try roundTripOk("call(fn (B0: i32, B1: i32) { %B0 }, 1i32, 2i32)", .{}));
+    try t.expect(try roundTripOk("fn (B0: i32) { match %B0 { 0 { 1i32 } _ { 2i32 } } }", .{}));
+    try t.expect(try roundTripOk("fn () { 18446744073709551615u64 }", .{}));
     var fix = try refFixture(t.allocator, "list.index_of_from.11");
     defer fix.arena.deinit();
-    try t.expect(try roundTripOk("#refs: F0 = list.index_of_from.11\nfn (B0: i32) => call(fnref F0, %B0)", fix.ctx));
+    try t.expect(try roundTripOk("#refs: F0 = list.index_of_from.11\nfn (B0: i32) { call(fnref F0, %B0) }", fix.ctx));
 }
 
 test "nominal types require the serialization context" {
     try t.expectError(error.Syntax, hir_parse.parseText(golden_match, .{}));
-    try t.expectError(error.Syntax, hir_parse.parseText("fn (B0: Missing) => %B0", .{}));
+    try t.expectError(error.Syntax, hir_parse.parseText("fn (B0: Missing) { %B0 }", .{}));
 }
 
 test "refs round-trip through stable keys, not numeric ids" {
@@ -1052,11 +1199,11 @@ test "refs round-trip through stable keys, not numeric ids" {
     defer fix.arena.deinit();
     // func id 0 prints as F0 by key order; ids resolve back through ctx.
     // Canonical text carries the #refs dictionary (§4.8).
-    const text = "#refs: F0 = string.concat\nfn (B0: i32) => call(fnref F0, %B0)";
+    const text = "#refs: F0 = string.concat\nfn (B0: i32) { call(fnref F0, %B0) }";
     try t.expect(try roundTripOk(text, fix.ctx));
     // A fnref with no dictionary entry is rejected (no number guessing).
-    try t.expectError(error.Syntax, hir_parse.parseText("fn (B0: i32) => call(fnref F5, %B0)", fix.ctx));
-    try t.expectError(error.Syntax, hir_parse.parseText("fn (B0: i32) => call(fnref F0, %B0)", .{}));
+    try t.expectError(error.Syntax, hir_parse.parseText("fn (B0: i32) { call(fnref F5, %B0) }", fix.ctx));
+    try t.expectError(error.Syntax, hir_parse.parseText("fn (B0: i32) { call(fnref F0, %B0) }", .{}));
 }
 
 // -- fixtures ---------------------------------------------------------------
@@ -1128,7 +1275,7 @@ test "printer determinism over constructed programs (S1 structures)" {
     const operands = try p.addOperands(&.{init});
     const let_id = try p.addExpr(.{ .op = hir.opId("let").?, .ty = meta.Type{ .primitive = .int32 }, .operands = operands, .regions = regions });
     const out = try print(&p, let_id, arena.allocator(), .{});
-    try t.expectEqualStrings("let B0: i32 = 42i32 in %B0", out);
+    try t.expectEqualStrings("let B0: i32 = 42i32 {\n  %B0\n}", out);
     // And it round-trips.
     var p2 = try hir_parse.parseText(out, .{});
     defer p2.arena.deinit();

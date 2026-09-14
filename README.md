@@ -216,9 +216,14 @@ zig-out/bin/stilla --emit-hir app.st
 
 ```text
 // @app.init
-fn () => void
+fn () {
+  void
+}
+
 // @app.main
-fn () => 42i32
+fn () {
+  42i32
+}
 ```
 
 Options: `--output <file>`, `--module <spec>`, `--entry-fn <name>` /
