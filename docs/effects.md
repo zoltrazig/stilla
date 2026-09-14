@@ -942,8 +942,21 @@ CleanupToken { id, origin_expr: ExprId, value: TempId, type: TypeId, registratio
 ```
 
 落地形状（`hir.CleanupToken`）为 `{ origin_expr, ty, full_expr,
-registration_index }`：`value: TempId` 与 token 的 `Consumed / Escaped` **状态**
+registration_index, kind }`：`kind = full_expression | scope_end` 区分两类
+销毁计划（见下）；`value: TempId` 与 token 的 `Consumed / Escaped` **状态**
 都是路径敏感的，属于 destruction planner / CFG 侧（§11.3），本层不建模。
+
+**scope-end 销毁累加与排序模型。** 除 FE 临时量外，Unique 还因**自动销毁**
+在作用域末尾逆创建序析构：非借用 Unique region 绑定（`let` / `match`
+arm 的 pattern 绑定 / λ 参数）在构建期各登记一个 `kind = scope_end`
+token，锚在**该 region 的 root 节点**上、归属**外层** FE——root 与 token
+的 `full_expr` 由此同界，`registration_index` 与 FE 临时量共用同一
+FE 内创建序计数器，两类销毁计划因此落到**同一张表、同一套排序**。锚取
+region root 而非 init：init 自成内层 FE，而析构点在外层 FE 末尾，只有
+root 节点能同时满足「origin 节点 FE == token FE」与「类型/使类型经
+binder 携带」。`cleanupEffect(expr)` 的子树归属判定对两类 token 统一为
+`origin_expr ∈ subtree(expr)`：含 `let` 的表达式其 scope-end 析构随之
+计入，init 单独求值时则不计入（值被转移、不由 init 销毁）。
 
 - `observed_effect(expr, ctx)` 拿的是 **expr 子树对清理栈的贡献**，不是整条 FE
   的清理：`foo(make_file(), pure_expr())` 中 `discardable(pure_expr())` 不得把
@@ -973,16 +986,21 @@ registration_index }`：`value: TempId` 与 token 的 `Consumed / Escaped` **状
 > - **建模与否显式区分**。`Program.cleanup_modeled` 未置位的程序，其空 token
 >   表是「未建模」：`cleanupEffect` 返回 null，查询失败关闭为 `Top`。空表
 >   绝不构成安全证明。
-> - **scope-end 清理仍未建模**。子树含非借用 Unique region 绑定时
->   `cleanupEffect` 返回 null（`regionOwnsUnique`）。`cleanupFree` 语义保持
->   字面 cleanup-free 不变，仍供 β / speculatability / reorder 使用；selective
->   ANF 合成的 Unique `let` 绑定也落入这一保守守卫（其后的派生查询回 `Top`，
->   不会因此低报）。**不因节点级 FE 标注而放开**：类型匹配的 `origin_expr`
->   只可能是产出该值的 init 节点，而它自成一个内层 FE，语义上正确的销毁点却在
->   **外层** FE 末尾——给它记 token 无法满足「origin 节点 FE == token FE」
->   （见下）；而 `registration_index` 的契约是「该 FE 内创建序中的位置」，
->   scope-end 绑定根本不由 FE 临时量的纪律产出。真正放开需要一个独立的
->   scope-end 销毁累加与排序模型，不属于节点级 FE 标注。
+> - **scope-end 清理已建模**。非借用 Unique region 绑定（`let` / `match`
+>   arm / λ 参数）在构建期登记 `kind = scope_end` token（锚在 region root、
+>   归属外层 FE、`registration_index` 与 FE 临时量同计数器），`cleanupEffect`
+>   不再对含 Unique region 绑定的子树回 `null`：锚在求值子树内的 scope-end
+>   token 与 FE 临时量按同一逆创建序折叠。destructor 可丢弃（纯）时派生查询
+>   精确通过，可观察时照旧拒绝删除 / 浮动——`discardable` / `can_float_as_tree`
+>   的答案由此精确化，不再一律保守 `Top`。**路径敏感状态不在本层**：被
+>   `move` / 转入调用的绑定其 token 仍登记为保守 may-drop，`Consumed /
+>   Escaped` 仍属 destruction planner / CFG 侧（§11.3）。`cleanupFree` 语义
+>   保持字面 cleanup-free 不变（`regionOwnsUnique` 仍在其中），仍供 β /
+>   speculatability / reorder 使用。**构建期之后**的合成绑定不登记：selective
+>   ANF 的 Unique `let` 其合法性契约已证明「父节点转移或序列中就地处弃」，
+>   β 克隆体由 `isSegSafe(body)` 保证 cleanup-free，CSE 的共享 init 是
+>   `isDuplicable` 的 Copy 值——树内出现这些绑定不产生析构，也不会低报。
+>   dead-let 删除绑定（连同其 scope-end 析构）时退役对应 token。
 > - **失败关闭**。未分类类型经 `drop_effect(T)` 升为 `Top`；dead-let 对 Unique
 >   绑定额外要求 `bindingCleanupDiscardable(bind.ty)`，避免连同绑定删掉
 >   其 scope-end 析构。
@@ -990,9 +1008,14 @@ registration_index }`：`value: TempId` 与 token 的 `Consumed / Escaped` **状
 > **边界**：节点级 full-expression **边界标注**（`ExprNode.full_expr`）已落地
 > （§5.6）：builder 的清理登记步骤把真实 FE id 写进每个节点，token 的
 > `full_expr` 按同样的语句 / let 初始化器切分，用于定义 `registration_index`
-> 的 FE 局部创建序；validator 要求每个 live token 的 origin 节点归属它的
-> `full_expr`。变换后 `registration_index` 保持不变（相对销毁序），origin 经
-> `Program.remapCleanupOrigin` 重映射（ANF hoist / dead-let / SEG clone）。
+> 的 FE 局部创建序；validator 对 `full_expression` token 要求 origin 节点类型
+> 与 token 类型一致且归属 token 的 `full_expr`，对 `scope_end` token 要求
+> anchor 归属 token 的 `full_expr`、token 类型等于绑定类型且 anchor 确为该
+> region 的 root。变换后 `registration_index` 保持不变（相对销毁序）；
+> `full_expression` token 的 origin 经 `Program.remapCleanupOrigin` 重映射
+> （ANF hoist / dead-let / SEG clone），`scope_end` token **不**remap（其锚是
+> region root，绑定身份不变）；**删除**绑定（dead-let）时经
+> `Program.retireScopeTokens` 退役其 token。
 
 优化器只问一个谓词：
 

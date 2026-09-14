@@ -241,22 +241,42 @@ pub const Scope = struct {
 /// layout; this is never an executable destruction plan.
 pub const FullExpr = struct {};
 
-/// One registered full-expression temporary (docs/effects.md §11.2): a
-/// value created inside a full expression that owns a Unique temporary
-/// destroyed at that FE's end. The builder's cleanup pass
-/// (`passes/hir_build_cleanup.zig`) fills the table; an empty table is
-/// only a proof of safety when `Program.cleanup_modeled` is set.
+/// One registered destruction (docs/effects.md §11.2): a value that must
+/// be destroyed at the end of its full expression (reverse creation
+/// order). The builder's cleanup pass (`passes/hir_build_cleanup.zig`)
+/// fills the table; an empty table is only a proof of safety when
+/// `Program.cleanup_modeled` is set.
 ///
-/// `origin_expr` is the value-producing node (it must still be a live
-/// `exprs` entry); `full_expr` is the owning FE identity; and
-/// `registration_index` is the value's position in that FE's creation
-/// order (relative destruction order is the reverse). `ty` is the
-/// destroyed value's type, the input to `drop_effect(T)`.
+/// Two kinds share one table and one FE-local `registration_index`:
+///
+/// - `full_expression`: an owned Unique temporary destroyed at its FE
+///   end. `origin_expr` is the value-producing node (it must still be a
+///   live `exprs` entry) and belongs to `full_expr`.
+/// - `scope_end`: a non-borrow Unique region binding destroyed when its
+///   scope ends (Static Semantics Destruction). `origin_expr` is the
+///   region **root** — the node whose evaluation the destruction
+///   immediately follows — so subtree membership finds it (the
+///   initializer is its own inner FE, and the destruction point is the
+///   outer FE end). `ty` is the destroyed value's type, the input to
+///   `drop_effect(T)`; for `scope_end` it is the binder's type.
+///
+/// Path-sensitive consumed/escaped state is not modelled here: a
+/// `scope_end` token stays registered even when the binding is moved on
+/// every path (conservative may-drop, docs/effects.md §11.2).
 pub const CleanupToken = struct {
     origin_expr: ExprId,
     ty: meta.Type,
     full_expr: FullExprId,
     registration_index: u32,
+    kind: Kind = .full_expression,
+
+    pub const Kind = union(enum) {
+        full_expression,
+        /// The end-of-scope destruction of `binder` (a param of
+        /// `region`). `origin_expr` must equal `region(root)`, and
+        /// `ty` the binder's type.
+        scope_end: struct { region: RegionId, binder: BinderId },
+    };
 };
 
 // ---------------------------------------------------------------------------
@@ -967,26 +987,70 @@ pub const Program = struct {
             .ty = ty,
             .full_expr = full_expr,
             .registration_index = registration_index,
+            .kind = .full_expression,
         });
         return @intCast(self.cleanup_tokens.items.len - 1);
     }
 
-    /// Rewrite every token whose origin is `from` to `to` (docs/effects.md
-    /// §11.2 "变换后的 origin 重映射"). A rewrite that copies a donor's
-    /// content into a destination maps `donor -> destination`, so the
-    /// surviving owner is never left pointing at an unreachable node.
-    /// `registration_index` is untouched: relative creation order is
-    /// preserved. A token already naming `to` makes the moved one
-    /// redundant and is retired (its origin set to a sentinel that can
-    /// never be a live subtree member). Used by the effect-driven
-    /// consumers (`hir_simplify`, `hir_seg`).
+    /// Register the scope-end destruction of `binder` (a non-borrow
+    /// Unique param of `region`) and return its dense token id. The
+    /// token's origin is the region root and its FE the root's
+    /// full expression, so subtree membership (docs/effects.md §11.2)
+    /// finds it exactly where the destruction happens.
+    pub fn addScopeEndToken(
+        self: *Program,
+        rid: RegionId,
+        bid: BinderId,
+        ty: meta.Type,
+        full_expr: FullExprId,
+        registration_index: u32,
+    ) !u32 {
+        try self.cleanup_tokens.append(self.arena, .{
+            .origin_expr = self.regions.items[rid].root,
+            .ty = ty,
+            .full_expr = full_expr,
+            .registration_index = registration_index,
+            .kind = .{ .scope_end = .{ .region = rid, .binder = bid } },
+        });
+        return @intCast(self.cleanup_tokens.items.len - 1);
+    }
+
+    /// Retire every `scope_end` token for `bid` (a removed binding's
+    /// end-of-scope destructor is gone with it). Full-expression tokens
+    /// are never touched. Call when a rewrite deletes a binding whose
+    /// destruction was modelled (dead-let).
+    pub fn retireScopeTokens(self: *Program, bid: BinderId) void {
+        for (self.cleanup_tokens.items) |*tk| {
+            switch (tk.kind) {
+                .full_expression => {},
+                .scope_end => |se| if (se.binder == bid) {
+                    tk.origin_expr = no_expr;
+                },
+            }
+        }
+    }
+
+    /// Rewrite every `full_expression` token whose origin is `from` to
+    /// `to` (docs/effects.md §11.2 "变换后的 origin 重映射"). A rewrite
+    /// that copies a donor's content into a destination maps
+    /// `donor -> destination`, so the surviving owner is never left
+    /// pointing at an unreachable node. `registration_index` is
+    /// untouched: relative creation order is preserved. A token already
+    /// naming `to` makes the moved one redundant and is retired (its
+    /// origin set to a sentinel that can never be a live subtree
+    /// member). `scope_end` tokens are never remapped — their origin is
+    /// a region root and their identity is the binding, not a relocated
+    /// value. Used by the effect-driven consumers (`hir_simplify`,
+    /// `hir_seg`).
     pub fn remapCleanupOrigin(self: *Program, from: ExprId, to: ExprId) void {
         if (from == to) return;
         var has_to = false;
         for (self.cleanup_tokens.items) |tk| {
+            if (tk.kind != .full_expression) continue;
             if (tk.origin_expr == to) has_to = true;
         }
         for (self.cleanup_tokens.items) |*tk| {
+            if (tk.kind != .full_expression) continue;
             if (tk.origin_expr != from) continue;
             tk.origin_expr = if (has_to) no_expr else to;
         }

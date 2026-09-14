@@ -80,6 +80,12 @@ The detailed probes cover the source-reachable operation/type matrix:
   it, its `let`-initializer case deletes the rest of the block, and the
   suffix after a normal-returning callee survives (`main` traps, so the
   probe is registered in `probe_corpus.panics`)
+- `scope_end_cleanup.st`: the scope-end destruction model
+  ([effects.md](effects.md) §11.2) — a source-level Unique `let` whose
+  binding is only borrowed (its printing destructor fires at the enclosing
+  block end), an owned Unique `move` parameter destroyed at normal exit,
+  and a discarded Unique statement whose destructor stays at the statement
+  when selective ANF materializes it into a synthesized `let`
 
 Every `probes/*.st` file is enumerated at test time by
 `src/probe_corpus.zig`, so a new probe automatically joins the HIR build

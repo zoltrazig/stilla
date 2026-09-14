@@ -172,13 +172,19 @@ test "M2b: a host call is kept (observable effect)" {
     try testing.expectEqual(@as(usize, 0), stats.dead_lets);
 }
 
-test "M2b: a Unique local with a drop hook is not dropped" {
-    const src = try probe_corpus.read(testing.allocator, "probes/cases", "simplify_unique_drop_hook_kept");
+test "M2b: an unused Unique binding with a purely-reading destructor is dropped" {
+    // `let unused = make(id); 0`: the binding is dead and its destructor
+    // only reads `t.id`, so the scope-end destruction is discardable and
+    // dead-let removes the binding with it (docs/effects.md §11.2 — the
+    // scope-end model admits the fold; the old conservative guard kept
+    // it). An observable destructor stays (see the negative test below).
+    const src = try probe_corpus.read(testing.allocator, "probes/cases", "simplify_unique_dead_pure");
     defer testing.allocator.free(src);
     var b = try buildText("app", &.{.{ "app", src }});
     defer b.deinit();
     const stats = try simplifyAll(&b);
-    try testing.expectEqual(@as(usize, 0), stats.dead_lets);
+    try testing.expect(stats.dead_lets > 0);
+    try testing.expectEqualStrings("fn (B0: i32) => 0i32", try funcText(&b, "app.f"));
 }
 
 test "M2b: ANF hoists the first non-floatable operand and keeps LTR" {

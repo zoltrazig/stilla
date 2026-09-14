@@ -634,14 +634,19 @@ Unique 临时量在所属 full expression 结束时销毁、反向创建序。�
 > 初始化器切分 FE 的同时，把真实 FE id 写进每个节点的 `ExprNode.full_expr`
 > （`lambda` 根用其体 FE；FE 0 只作种子默认，构造上无节点归属）。同一 FE 的每个
 > 已证明全表达式 Unique 临时量仍登记带 FE id 与 `registration_index` 的
-> `CleanupToken`（[effects.md](effects.md) §11.2）。因此：
+> `full_expression` `CleanupToken`，非借用 Unique region 绑定（`let` /
+> `match` arm / λ 参数）再登记 `scope_end` token——同一张 token 表、同一
+> FE 内创建序计数器（[effects.md](effects.md) §11.2）。因此：
 >
-> - §10.1 的结构校验检查 `full_expr` 的 **id 边界**，并要求每个清理 token 的
->   `origin_expr` 归属 token 的 `full_expr`；「不跨 FE」由 effect 分析的
->   `ownershipGate` 强制，SEG 的 island 准入因此真的拒绝跨 FE 子树（§8.1）；
+> - §10.1 的结构校验检查 `full_expr` 的 **id 边界**：`full_expression` token 的
+>   `origin_expr` 归属其 `full_expr` 且类型与节点一致；`scope_end` token 的锚
+>   （region root）归属其 `full_expr`、类型等于绑定类型、锚确为该 region 的
+>   root。「不跨 FE」由 effect 分析的 `ownershipGate` 强制，SEG 的 island 准入
+>   因此真的拒绝跨 FE 子树（§8.1）；
 > - 清理敏感查询走 token footprint（`cleanupEffect`，[effects.md](effects.md)
->   §11.2）；scope-end 绑定清理仍未建模（原因见 [effects.md](effects.md) §11.2），
->   Unique 物化等未放开（§5.7）。
+>   §11.2）；scope-end 绑定清理已建模，源级 Unique `let`、`match` 绑定与
+>   λ 参数不再落入保守 `Top`（§5.7）；构建期之后的合成绑定（ANF 的 Unique
+>   `let`、β 克隆、CSE 共享）由各自契约保证不产生新的 scope-end 析构，不登记。
 >
 > §8.7 的 FE 例子现在是校验器能强制的事实；跨 FE 的 let 折叠已落地（§8.3 / §8.7），
 > 按 boundary-rewrite 契约逐分支准入，不经 island 门。
@@ -681,7 +686,10 @@ let B0: i32 = call(fnref H0) in       // host binding：effectful → 提为 let
 > `discardValue` 在原语句处销毁合成局部量，析构点才与原匿名临时量的
 > full-expression 边界重合。`Read` / `Borrow` operand 仍留在树内。此外
 > sequence 提升后来 operand 时，其先前的 operand 必须全为 Copy：Unique 绑定的
-> 就地处弃不在 `can_float_as_tree` 的清理模型内，跨过它会推迟一个可观察析构。
+> 就地处弃仍在 `can_float_as_tree` 的清理模型之外（该析构发生在语句位置、不是
+> 绑定 token 的 scope-end 锚点），跨过它会推迟一个可观察析构。合成绑定的析构
+> 点由此与未改写逐字重合（[effects.md](effects.md) §11.2）；其绑定不登记
+> scope-end token（契约已证无 scope-end 析构）。
 
 ## 6. ownership、效果与借用
 
@@ -1277,9 +1285,9 @@ lowering。可选变换每轮原位重写后重新跑结构 + 效果校验（§2
 
 **SEG 编译时间 / 轮数基线**（第 12 项验收；`hir_seg_tests.zig` 的 `SEG budget`
 测试在 CI 每次打印，基线取 2026-09-13、macOS/arm64 的一次运行）：`probes/` +
-`examples/` 全语料 **57 个程序 / 4491 个可达节点**，SEG 接受 **2395 个
-island 成员（≈53%）**，共 **85 轮**、**94 次重写**，总编译时间 **≈86 ms**
-（单文件最慢 `examples/fold` 10 ms / 2 轮 / 163 islands）；每个程序都在
+`examples/` 全语料 **58 个程序 / 4551 个可达节点**，SEG 接受 **2404 个
+island 成员（≈53%）**，共 **86 轮**、**94 次重写**，总编译时间 **≈94 ms**
+（单文件最慢 `examples/fold` 11 ms / 2 轮 / 163 islands）；每个程序都在
 `hir_seg.Config.max_iterations` 界内收敛（`Stats.converged == true`）。测试
 断言收敛（CI 稳定），时间仅记录、不断言（CI 计时不是稳定 oracle）。
 §8.3 的跨 FE `let` 折叠把 70 轮 / 51 次重写推到 85 轮 / 94 次：它新增的

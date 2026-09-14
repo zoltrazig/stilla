@@ -1095,8 +1095,10 @@ const Rewriter = struct {
             pr.exprs.items[id] = pr.node(body);
             // The surviving reachable node is `id`; a cleanup token that
             // named the region root follows its value there
-            // (docs/effects.md §11.2 origin remap).
+            // (docs/effects.md §11.2 origin remap). The removed binding's
+            // end-of-scope destructor is gone with it: retire its token.
             pr.remapCleanupOrigin(body, id);
+            pr.retireScopeTokens(bind);
             return true;
         }
         // Forwarding / duplication substitutes the initializer's *content*
@@ -1265,11 +1267,14 @@ const Rewriter = struct {
     ///
     /// **Cleanup registration is unchanged.** `isDuplicable` forces a Copy
     /// result with the whole subtree under `ownershipGate` (every `.owned`
-    /// node Copy, no borrowed view, no `Consume` use); a non-borrow region
-    /// binding would make `cleanupEffect` `null` and `discardable` false.
-    /// `CleanupToken`s are registered only for owned Unique temporaries, so
-    /// no token can name a donor — no `remapCleanupOrigin` is needed, and
-    /// none is meaningful (an orphaned duplicate has no single owner).
+    /// node Copy, no borrowed view, no `Consume` use) and a discardable
+    /// footprint (`cleanupDiscardable`, docs/effects.md §11.2: FE
+    /// temporaries plus registered `scope_end` bindings). A non-borrow
+    /// Unique region binding fails the gate anyway (its `let` init use is
+    /// `Consume`). `CleanupToken`s are registered only for owned Unique
+    /// temporaries, so no token can name a donor — no `remapCleanupOrigin`
+    /// is needed, and none is meaningful (an orphaned duplicate has no
+    /// single owner).
     fn ruleCse(self: *Rewriter, id: hir.ExprId) Error!bool {
         const pr = self.p();
         const n = pr.node(id);

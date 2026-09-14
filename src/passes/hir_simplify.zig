@@ -357,8 +357,11 @@ const Rewriter = struct {
         pr.exprs.items[id] = pr.node(region.root);
         // The result's value now lives at the region root; move any
         // cleanup token that named the `let` node with it (docs/effects.md
-        // §11.2 origin remap). `registration_index` is untouched.
+        // §11.2 origin remap). `registration_index` is untouched. The
+        // binder's own end-of-scope destructor is gone with it: retire
+        // its `scope_end` token.
         pr.remapCleanupOrigin(id, region.root);
+        pr.retireScopeTokens(bind);
         return true;
     }
 
@@ -632,7 +635,10 @@ test "hir_simplify: ANF materializes a Unique operand the parent transfers" {
         "app",
         \\const builtin = import("builtin");
         \\struct Token { id: int32; drop(t) { builtin.print(builtin.str(t.id)); } }
-        \\fn make(id: int32) -> Token { Token { id: id } }
+        \\fn make(id: int32) -> Token {
+        \\    builtin.print("make");
+        \\    Token { id: id }
+        \\}
         \\fn take(move t: Token) -> int32 { t.id }
         \\fn f(x: int32) -> int32 {
         \\    take(make(x))
@@ -654,10 +660,18 @@ test "hir_simplify: ANF materializes a Unique operand the parent transfers" {
     try testing.expect(std.mem.eql(u8, opName(pr, inner), "call"));
     try testing.expect(std.mem.eql(u8, opName(pr, pr.operands(inner)[1]), "local"));
     // The temporary stays transferred: no cleanup token names the
-    // synthesized local or the forwarded call's argument.
+    // synthesized local or the forwarded call's argument, and the
+    // synthesized binder carries no `scope_end` token (its rewrite
+    // contract proves the parent transfers the value, docs/effects.md
+    // §11.2).
+    const synth_binder = pr.params(pr.regionsOf(body)[0])[0];
     for (pr.cleanup_tokens.items) |tk| {
         if (tk.origin_expr == hir.no_expr) continue;
         try testing.expect(!std.mem.eql(u8, opName(pr, tk.origin_expr), "local"));
+        switch (tk.kind) {
+            .full_expression => {},
+            .scope_end => |se| try testing.expect(se.binder != synth_binder),
+        }
     }
 }
 

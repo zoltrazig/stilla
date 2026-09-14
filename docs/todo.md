@@ -5,25 +5,9 @@
 「近期」内各项的先后是**建议顺序**，不是串行依赖；每项单独列出前置
 依赖。设计细节仍在两篇文档正文，本文件只记范围、依赖与验收。
 已完成的历史条目按原编号归档于「已完成」节，供跨文档交叉引用；
-「近期」从第 17 项续起，新增项一律追加到队尾。
+「近期」从第 18 项续起，新增项一律追加到队尾。
 
 ## 近期（建议顺序）
-
-- [ ] **17. scope-end 清理建模**（[effects.md](effects.md) §11.2；
-      `src/passes/hir_effects.zig:1494/1624/1634/1724`）
-  - 现状：`hir_effects.regionOwnsUnique` 在子树含非借用 Unique region 绑定时令
-    `cleanupEffect` 回 `null` → `Top`。节点级 FE 标注（第 7 项）**不**放开它：
-    类型匹配的 `origin_expr` 只可能是产出该值的 init 节点，而它自成一个内层 FE，
-    语义上正确的销毁点却在外层 FE 末尾；`registration_index` 的契约是「该 FE 内
-    创建序中的位置」，scope-end 绑定根本不由 FE 临时量的纪律产出。
-  - 范围：独立的 scope-end 销毁累加与排序模型——把 scope-end 绑定的销毁点、创建
-    序与 FE 内临时量的销毁计划统一到同一套注册 / 排序，使 `cleanupEffect` 能表达
-    「外层 FE 末尾的 scope-end 析构」。放开后 selective ANF 的 Unique region 绑定
-    与源级 Unique `let` 不再落入保守 `Top`。
-  - 依赖：无（第 3 / 7 项已落地）。
-  - 验收：复用第 4 项的字面析构点差分法——Unique 绑定物化后的析构点与未改写逐字
-    一致；正例（scope-end Unique 绑定进 `observed_effect`）+ 负例（可观察 scope-end
-    析构仍拒绝删除 / 浮动）；examples/probes on/off 解释器输出逐字相等。
 
 - [ ] **18. rewrite 契约形式化的第二批（η / `tryAnf`）**
       （[effects.md](effects.md) §10.3、[hir.md](hir.md) §8.1 / §8.5）
@@ -67,10 +51,55 @@
   - 验收：决定落地（删除则更新 `root.zig` / 引用并跑全测；保留则补 doc 注释指明
     M1b 遗留与生产路径归属），`zig build test` 通过。
 
-## 已完成（归档，原「近期」第 1–16 项）
+## 已完成（归档，原「近期」第 1–17 项）
 
 > 以下条目均已落地，按完成时的编号保留，供 [effects.md](effects.md) 等正文
-> 交叉引用；新工作从「近期」第 17 项续起。
+> 交叉引用；新工作从「近期」第 18 项续起。
+
+- [x] **17. scope-end 清理建模**（[effects.md](effects.md) §11.2）
+  - 范围：独立的 scope-end 销毁累加与排序模型——把 scope-end 绑定的销毁点、创建
+    序与 FE 内临时量的销毁计划统一到同一套注册 / 排序，使 `cleanupEffect` 能表达
+    「外层 FE 末尾的 scope-end 析构」。放开后 selective ANF 的 Unique region 绑定
+    与源级 Unique `let` 不再落入保守 `Top`。
+  - 依赖：无（第 3 / 7 项已落地）。
+  - 已完成：`hir.CleanupToken` 增加 `kind: full_expression | scope_end`（后者携带
+    region + binder）；builder 的清理登记步骤（`hir_build_cleanup.zig`）对每个
+    region 的非借用 Unique 参数登记 `scope_end` token——锚在 **region root** 上、
+    归属外层 FE、与 FE 临时量共用同一张表与同一 `registration_index` 计数器。锚取
+    region root 而非 init：init 自成内层 FE，其类型匹配也无法满足「origin 节点
+    FE == token FE」，而 root 同时满足边界与「类型经 binder 携带」两项约束。
+    `cleanupEffect` 删除 `regionOwnsUnique` 的 null 分支，两类 token 统一按
+    「origin ∈ 求值子树」折叠；`lambdaBodySummary` 改为 `effectOf(body) ;
+    cleanupEffect(body)`——owned Unique 参数的 normal-exit 析构、体局部量与体 FE
+    临时量都进函数摘要，不再对含 Unique 参数 / 局部的函数一律 `Top`。`cleanupFree`
+    保持字面（`regionOwnsUnique` 仍在其中），供 β / speculatability / reorder 使用。
+    路径敏感状态（Consumed / Escaped）仍属 CFG 侧：被 move / 转入调用的绑定其
+    token 保守登记为 may-drop。**构建期之后的合成绑定不登记**——selective ANF 的
+    Unique `let` 其契约已证明「父节点转移或序列中就地处弃」、β 克隆体
+    `isSegSafe(body)` 保证 cleanup-free、CSE 共享 init 是 `isDuplicable` 的 Copy 值——
+    由 `ruleMatch` 拼接的 `let` 复用 arm 的构建期 binding 与 token，故树内这些绑定
+    不产生未建模析构。`remapCleanupOrigin` 只 remap `full_expression` token（scope
+    token 的锚是 region root、身份是 binder，绑定不变）；dead-let（hir_simplify /
+    hir_seg 两处）经 `Program.retireScopeTokens` 退役被删绑定的 token。校验器对
+    `scope_end` token 检查「锚 == region root ∧ 锚 FE == token FE ∧ ty == binder
+    ty ∧ binder ∈ region params」。
+  - 验收：`hir_effects` 白盒——正例「scope-end Unique 绑定进 `observed_effect`」
+    （观察 `hostmod.log` 可观察析构的 binding 使 `cleanupEffect` / `observedEffect`
+    携带 destructor，不再 null → `Top`）与「纯读析构的 footprint 可丢弃」（
+    `cleanupDiscardable(let)` 由 false 转 true）、「owned Unique 参数函数摘要精确」
+    （纯析构 = `pure`、可观察析构 = total 且非 effect-free，均不再是 `Top`）、校验器
+    对 mis-anchored scope token 的拒绝；`hir_simplify` 白盒——ANF 合成绑定无
+    `scope_end` token；`hir_simplify` 迁移原保守断言至新语义：unused Unique 绑定 + 纯
+    析构可删（`simplify_unique_dead_pure`，原名
+    `simplify_unique_drop_hook_kept` 改义），`simplify_anf_unique_transfer` 改用
+    可观察 effect 的 `make` 保持「转移绑定不产生析构」的触发前提。新增
+    `probes/scope_end_cleanup.st`（源级 Unique `let` 的 scope-end 析构、owned 参数
+    normal-exit 析构、被弃 Unique 语句物化后仍在语句处析构；全部印出）进全语料
+    `--simplify` × `--seg` 四组合解释器差分、pass smoke 与 SEG budget；实测 CLI 四
+    组合输出逐字相等（`1\n1\n2\n2\n3\n4\n4\n`）。`zig build test` 全绿
+    （1234/1234）。effects.md §11.2 / hir.md §5.6–§5.7 同步改写，SEG budget 基线随
+    语料更新（58 程序 / 4551 节点 / 2404 islands / 86 轮 / 94 次重写 / ≈93 ms，仍
+    断言收敛）。
 
 - [x] **16. HIR canonical 文本的 round-trip 闭合**（[hir.md](hir.md) §4.4 / §4.5 / §4.10）
   - 现状：文本形态已知缺口（均已实测复现）——(a) `hir_print.printType` 会打印

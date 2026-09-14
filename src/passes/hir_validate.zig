@@ -177,10 +177,13 @@ const Validator = struct {
 
     /// Structural checks on the program-wide cleanup-token table
     /// (docs/effects.md §11.2): every live origin is a real expr whose
-    /// type matches the token's, and every FE id is in range with its
-    /// live `registration_index` values strictly increasing in list
-    /// (creation) order. Retired tokens (`hir.no_expr`) are ignored and
-    /// may leave gaps, so contiguity is not required. The table is
+    /// type agrees with the token's — for `full_expression` tokens the
+    /// node's own type, for `scope_end` tokens the bindings' type — and
+    /// every FE id is in range with its live `registration_index` values
+    /// strictly increasing in list (creation) order. A `scope_end`
+    /// token's origin must be the anchor region's root and its binder a
+    /// param of that region. Retired tokens (`hir.no_expr`) are ignored
+    /// and may leave gaps, so contiguity is not required. The table is
     /// shared across roots, so this runs once per `validate` call.
     fn checkCleanupTokens(self: *Validator) !?[]const u8 {
         var last = std.AutoHashMapUnmanaged(hir.FullExprId, u32).empty;
@@ -194,15 +197,50 @@ const Validator = struct {
                 return self.fail("cleanup token origin {d} out of range ({d} exprs)", .{ tk.origin_expr, self.program.exprs.items.len });
             }
             const n = self.program.exprs.items[tk.origin_expr];
-            if (!meta.Type.eql(n.ty, tk.ty)) {
-                return self.fail("cleanup token for origin expr {d} carries a type that disagrees with the node", .{tk.origin_expr});
-            }
-            // Node-level FE boundary (hir.md §5.6): a token's origin node
-            // belongs to the same full expression the token is registered
-            // on. An origin in another FE would mean the token's
-            // destruction point had drifted off its value's boundary.
-            if (n.full_expr != tk.full_expr) {
-                return self.fail("cleanup token for origin expr {d} carries full_expr {d} but the node belongs to full_expr {d}", .{ tk.origin_expr, tk.full_expr, n.full_expr });
+            switch (tk.kind) {
+                .full_expression => {
+                    // The anchor is the value-producing node: its own
+                    // type is the destroyed value's type.
+                    if (!meta.Type.eql(n.ty, tk.ty)) {
+                        return self.fail("cleanup token for origin expr {d} carries a type that disagrees with the node", .{tk.origin_expr});
+                    }
+                    // Node-level FE boundary (hir.md §5.6): a token's
+                    // origin node belongs to the same full expression the
+                    // token is registered on. An origin in another FE
+                    // would mean the token's destruction point had
+                    // drifted off its value's boundary.
+                    if (n.full_expr != tk.full_expr) {
+                        return self.fail("cleanup token for origin expr {d} carries full_expr {d} but the node belongs to full_expr {d}", .{ tk.origin_expr, tk.full_expr, n.full_expr });
+                    }
+                },
+                .scope_end => |se| {
+                    // The anchor is the region root, which belongs to the
+                    // outer FE the token is registered on (the
+                    // destruction point is that FE's end).
+                    if (n.full_expr != tk.full_expr) {
+                        return self.fail("scope-end cleanup token for region {d} carries full_expr {d} but the anchor belongs to full_expr {d}", .{ se.region, tk.full_expr, n.full_expr });
+                    }
+                    if (se.region >= self.program.regions.items.len or se.binder >= self.program.binders.items.len) {
+                        return self.fail("scope-end cleanup token carries region/binder id out of range", .{});
+                    }
+                    const r = self.program.regions.items[se.region];
+                    // The anchor must be the region root and the token
+                    // type the binder's (the destroyed value's type).
+                    if (r.root != tk.origin_expr) {
+                        return self.fail("scope-end cleanup token for binder {d} is not anchored at its region root", .{se.binder});
+                    }
+                    if (!meta.Type.eql(self.program.binders.items[se.binder].ty, tk.ty)) {
+                        return self.fail("scope-end cleanup token for binder {d} carries a type that disagrees with the binder", .{se.binder});
+                    }
+                    var in_params = false;
+                    const params = self.program.binder_buffer.items[r.params.start..][0..r.params.len];
+                    for (params) |bid| {
+                        if (bid == se.binder) in_params = true;
+                    }
+                    if (!in_params) {
+                        return self.fail("scope-end cleanup token names binder {d} not in its region's params", .{se.binder});
+                    }
+                },
             }
             const gop = try last.getOrPut(self.arena, tk.full_expr);
             if (gop.found_existing) {

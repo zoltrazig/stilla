@@ -1483,18 +1483,17 @@ pub const Analysis = struct {
 
     /// The body summary of a λ/fn node: the body's `eval_effect`
     /// sequenced with the function's normal-exit cleanup (docs/effects.md
-    /// §6.1). Owned Unique parameters/locals or an unprovable subtree
-    /// make the cleanup `Top`.
+    /// §6.1, §11.2). The cleanup is the body's registered footprint —
+    /// full-expression temporaries plus the scope-end destruction of the
+    /// function's owned Unique parameters and body locals — or `Top`
+    /// when unmodelled.
     pub fn lambdaBodySummary(self: *Analysis, root: hir.ExprId) Error!Summary {
         const pr = self.p();
         const rs = pr.regionsOf(root);
         if (rs.len == 0) return effects.top;
         const reg = pr.region(rs[0]);
         const body = try self.effectOf(reg.root);
-        const cleanup: Summary = if (try self.regionOwnsUnique(rs[0]) or !try self.cleanupFree(reg.root))
-            effects.top
-        else
-            effects.pure;
+        const cleanup: Summary = (try self.cleanupEffect(reg.root)) orelse effects.top;
         return effects.sequence(self.arena, body, cleanup);
     }
 
@@ -1629,8 +1628,12 @@ pub const Analysis = struct {
     }
 
     /// Any non-borrow region binding holds a Unique value, which is
-    /// destroyed at scope end (Static Semantics Destruction) — its
-    /// destruction plan is not modelled here.
+    /// destroyed at scope end — so the subtree is **not** literally
+    /// cleanup-free. The scope-end destruction itself is modelled by the
+    /// registered `scope_end` tokens (docs/effects.md §11.2); this
+    /// predicate is the literal `cleanupFree` gate, kept strict for β /
+    /// speculatability / reorder, which require a subtree with no
+    /// destruction at all.
     fn regionOwnsUnique(self: *Analysis, reg_id: hir.RegionId) Error!bool {
         const pr = self.p();
         for (pr.params(reg_id)) |bid| {
@@ -1695,16 +1698,14 @@ pub const Analysis = struct {
     }
 
     /// `cleanup_effect(expr)` (docs/effects.md §11.2): `drop_effect(T)`
-    /// for every registered full-expression temporary whose `origin_expr`
-    /// is in `expr`'s evaluated subtree, folded in reverse creation
-    /// order. Returns null when the cleanup is **unmodelled**:
-    ///
-    /// - the program never ran the builder cleanup pass
-    ///   (`Program.cleanup_modeled`), so an empty table is not a proof;
-    /// - the subtree owns a non-borrow region binding, whose end-of-scope
-    ///   destruction is outside this model.
-    ///
-    /// Callers must treat null as `Top`. A registered temporary with an
+    /// for every registered destruction whose origin is in `expr`'s
+    /// evaluated subtree, folded in reverse creation order. Two kinds of
+    /// token share the table: `full_expression` temporaries (origin =
+    /// the value-producing node) and `scope_end` bindings (origin = the
+    /// region root, scheduled at its outer-FE end). Returns null when
+    /// the cleanup is **unmodelled** (the program never ran the builder
+    /// cleanup pass, so an empty table is not a proof). Callers must
+    /// treat null as `Top`. A registered destruction with an
     /// unclassifiable type widens to `Top` through `drop_effect(T)` and
     /// still fails closed.
     pub fn cleanupEffect(self: *Analysis, id: hir.ExprId) Error!?Summary {
@@ -1720,10 +1721,7 @@ pub const Analysis = struct {
             const n = pr.node(cur);
             if (hir.registry.get(n.op).transfer == .lambda) continue; // deferred to the call
             for (pr.operands(cur)) |op| try work.append(self.arena, op);
-            for (pr.regionsOf(cur)) |r| {
-                if (try self.regionOwnsUnique(r)) return null;
-                try work.append(self.arena, pr.region(r).root);
-            }
+            for (pr.regionsOf(cur)) |r| try work.append(self.arena, pr.region(r).root);
         }
         // Token list is append-ordered by creation; walk it backwards so
         // destruction order (reverse creation) folds first-to-last.
@@ -3394,13 +3392,23 @@ test "hir_effects: cleanup tokens satisfy their origin/type/FE invariants" {
     for (pr.cleanup_tokens.items) |tk| {
         try testing.expect(tk.origin_expr < pr.exprs.items.len);
         try testing.expect(tk.full_expr < pr.full_exprs.items.len);
-        try testing.expect(meta.Type.eql(pr.node(tk.origin_expr).ty, tk.ty));
-        // A registered temporary is never a binder read or an explicit
-        // transfer.
-        const name = hir.registry.get(pr.node(tk.origin_expr).op).name;
-        try testing.expect(!std.mem.eql(u8, name, "local"));
-        try testing.expect(!std.mem.eql(u8, name, "move"));
-        try testing.expect(!std.mem.eql(u8, name, "drop"));
+        switch (tk.kind) {
+            .full_expression => {
+                // A registered temporary is never a binder read or an
+                // explicit transfer, and its type is the node's own.
+                try testing.expect(meta.Type.eql(pr.node(tk.origin_expr).ty, tk.ty));
+                const name = hir.registry.get(pr.node(tk.origin_expr).op).name;
+                try testing.expect(!std.mem.eql(u8, name, "local"));
+                try testing.expect(!std.mem.eql(u8, name, "move"));
+                try testing.expect(!std.mem.eql(u8, name, "drop"));
+            },
+            .scope_end => |se| {
+                // The anchor is the region root; the token's type is the
+                // destroyed binding's.
+                try testing.expect(meta.Type.eql(pr.binder(se.binder).ty, tk.ty));
+                try testing.expectEqual(pr.region(se.region).root, tk.origin_expr);
+            },
+        }
         // Registration indices within one FE are 0,1,2,… in list order.
         const gop = try next.getOrPut(a, tk.full_expr);
         if (!gop.found_existing) gop.value_ptr.* = 0;
@@ -3408,4 +3416,192 @@ test "hir_effects: cleanup tokens satisfy their origin/type/FE invariants" {
         gop.value_ptr.* += 1;
     }
     try testing.expect((try hir.validate(pr, f.built.funcs.items[f.built.funcs.items.len - 1].root, testing.allocator)) == null);
+}
+
+test "hir_effects: a scoped Unique binding's end-of-scope destructor enters observed_effect" {
+    // `let t = make(id); t.id`: `t` is a Unique local never consumed (the
+    // read is a borrow-only projection), so its scope-end destruction — a
+    // `hostmod.log` write — is part of the let's observable effect
+    // (docs/effects.md §11.2). Before the scope-end model, `cleanupEffect`
+    // returned null → `Top` for this subtree; now the destructor is
+    // registered and the derived queries see it.
+    var f = try build("app", &.{
+        .{ "hostmod", "fn log(x: int32) -> void;" },
+        .{
+            "app",
+            \\const hostmod = import("hostmod");
+            \\struct Token { id: int32; drop(t) { hostmod.log(t.id); } }
+            \\fn make(id: int32) -> Token { Token { id: id } }
+            \\fn f(id: int32) -> int32 {
+            \\    let t = make(id);
+            \\    t.id
+            \\}
+        },
+    });
+    defer f.deinit();
+    const a = f.arena.allocator();
+    const write = try effects.summaryOf(a, &.{.{ .resource = .{ .host = 1 }, .mode = .write }});
+    const entries = try a.alloc(effects.HostEffects.Entry, f.built.hosts.items.len);
+    for (f.built.hosts.items, 0..) |_, i| entries[i] = .{ .host = @intCast(i), .summary = write, .stilla_execution = .forbidden };
+    var an = try Analysis.init(a, f.built, .{ .graph = f.graph, .hosts = .{ .entries = entries } });
+    try an.analyze();
+    const pr = &f.built.program;
+
+    var let_id: ?hir.ExprId = null;
+    var bind: ?hir.BinderId = null;
+    for (pr.exprs.items, 0..) |e, i| {
+        if (!std.mem.eql(u8, hir.registry.get(e.op).name, "let")) continue;
+        const rid = pr.regionsOf(@intCast(i))[0];
+        const params = pr.params(rid);
+        if (params.len != 1) continue;
+        const b = pr.binder(params[0]);
+        if (b.mode == .borrow) continue;
+        const cap = (try an.capabilityOf(b.ty)) orelse .unique;
+        if (cap == .copy) continue;
+        let_id = @intCast(i);
+        bind = params[0];
+    }
+    const id = let_id orelse return error.TestUnexpectedResult;
+    const bd = bind.?;
+    const rid = pr.regionsOf(id)[0];
+    const root = pr.region(rid).root;
+
+    // The binding owns a registered scope-end token anchored at its
+    // region root, sharing the let's full expression.
+    var registered = false;
+    for (pr.cleanup_tokens.items) |tk| switch (tk.kind) {
+        .full_expression => {},
+        .scope_end => |se| if (se.binder == bd and se.region == rid) {
+            try testing.expectEqual(root, tk.origin_expr);
+            try testing.expectEqual(pr.node(id).full_expr, tk.full_expr);
+            registered = true;
+        },
+    };
+    try testing.expect(registered);
+
+    // `cleanupEffect` and `observedEffect` now carry exactly the
+    // destructor's write (previously null → `Top`); the observable
+    // destruction keeps discardable / float false for the whole let.
+    const ce = (try an.cleanupEffect(id)).?;
+    try testing.expect(ce.eql(write));
+    const oe = (try an.observedEffect(id)).?;
+    try testing.expect(oe.eql(write));
+    try testing.expect(!(try an.cleanupDiscardable(id)));
+    try testing.expect(!(try an.isDiscardable(id)));
+    try testing.expect(!(try an.canFloatAsTree(id)));
+    try testing.expect((try an.validate(testing.allocator)) == null);
+}
+
+test "hir_effects: a purely-reading scope-end destructor makes the footprint discardable" {
+    // The read-only destructor (`drop` only touches `t.id`) destroys
+    // nothing observable: the registered scope-end token folds to `Pure`,
+    // so `cleanupDiscardable` goes through where the old guard returned
+    // null → `Top` (docs/effects.md §11.2). (The `let` itself stays
+    // non-discardable: its init use is `Consume`, the ownership gate.)
+    var f = try build("app", &.{.{
+        "app",
+        \\struct Token { id: int32; drop(t) { let x = t.id; } }
+        \\fn make(id: int32) -> Token { Token { id: id } }
+        \\fn f(id: int32) -> int32 {
+        \\    let t = make(id);
+        \\    t.id
+        \\}
+    }});
+    defer f.deinit();
+    const a = f.arena.allocator();
+    var an = try Analysis.init(a, f.built, .{ .graph = f.graph });
+    try an.analyze();
+    const pr = &f.built.program;
+    for (pr.exprs.items, 0..) |e, i| {
+        if (!std.mem.eql(u8, hir.registry.get(e.op).name, "let")) continue;
+        const rid = pr.regionsOf(@intCast(i))[0];
+        const params = pr.params(rid);
+        if (params.len != 1) continue;
+        const b = pr.binder(params[0]);
+        if (b.mode == .borrow) continue;
+        const cap = (try an.capabilityOf(b.ty)) orelse .unique;
+        if (cap == .copy) continue; // the Unique binding, not the Copy one
+        const id: hir.ExprId = @intCast(i);
+        try testing.expect(try an.cleanupDiscardable(id));
+        try testing.expect(!(try an.isDiscardable(id))); // ownership gate
+        try testing.expect((try an.validate(testing.allocator)) == null);
+        return;
+    }
+    return error.TestUnexpectedResult;
+}
+
+test "hir_effects: a function with an owned Unique parameter models its normal-exit destructor" {
+    // `score(t: Token)` never consumes its owned parameter, so `t` is
+    // destroyed at normal exit; the scope-end model folds that destructor
+    // into the body summary (docs/effects.md §6.1). With a purely-reading
+    // destructor the summary is now exactly `pure` — the old
+    // `regionOwnsUnique` guard widened every such function to `Top`.
+    var f = try build("app", &.{.{
+        "app",
+        \\struct Token { id: int32; drop(t) { let x = t.id; } }
+        \\fn score(move t: Token) -> int32 { t.id }
+    }});
+    defer f.deinit();
+    const a = f.arena.allocator();
+    var an = try Analysis.init(a, f.built, .{ .graph = f.graph });
+    try an.analyze();
+    const fid = funcId(&f, "app.score").?;
+    const sum = try an.lambdaBodySummary(f.built.funcs.items[fid].root);
+    try testing.expect(effects.isTotal(sum));
+    try testing.expect(effects.isPure(sum));
+
+    // The observable destructor (a declared `hostmod.log` write) makes
+    // the normal-exit cleanup observable: the summary is precise instead
+    // of blanket `Top`, so it is total yet not effect-free.
+    var g = try build("app", &.{
+        .{ "hostmod", "fn log(x: int32) -> void;" },
+        .{
+            "app",
+            \\const hostmod = import("hostmod");
+            \\struct Token { id: int32; drop(t) { hostmod.log(t.id); } }
+            \\fn score(move t: Token) -> int32 { t.id }
+        },
+    });
+    defer g.deinit();
+    const a2 = g.arena.allocator();
+    const write = try effects.summaryOf(a2, &.{.{ .resource = .{ .host = 1 }, .mode = .write }});
+    const entries = try a2.alloc(effects.HostEffects.Entry, g.built.hosts.items.len);
+    for (g.built.hosts.items, 0..) |_, i| entries[i] = .{ .host = @intCast(i), .summary = write, .stilla_execution = .forbidden };
+    var an2 = try Analysis.init(a2, g.built, .{ .graph = g.graph, .hosts = .{ .entries = entries } });
+    try an2.analyze();
+    const fid2 = funcId(&g, "app.score").?;
+    const sum2 = try an2.lambdaBodySummary(g.built.funcs.items[fid2].root);
+    try testing.expect(effects.isTotal(sum2));
+    try testing.expect(!effects.isPure(sum2));
+    try testing.expect(!effects.isObservableEffectFree(sum2));
+    try testing.expect((try an2.validate(testing.allocator)) == null);
+}
+
+test "hir_effects: the validator rejects a mis-anchored scope-end token" {
+    var f = try build("app", &.{.{
+        "app",
+        \\struct Token { id: int32; drop(t) { let x = t.id; } }
+        \\fn make(id: int32) -> Token { Token { id: id } }
+        \\fn f(id: int32) -> int32 {
+        \\    let t = make(id);
+        \\    t.id
+        \\}
+    }});
+    defer f.deinit();
+    const pr = &f.built.program;
+    // Corrupt a scope-end token's full expression: a scope token must
+    // ride the anchor region root's own FE (the outer FE whose end the
+    // destruction fires at), so a foreign FE fails the boundary check.
+    var corrupted = false;
+    for (pr.cleanup_tokens.items) |*tk| switch (tk.kind) {
+        .full_expression => {},
+        .scope_end => {
+            tk.full_expr = 0; // the seeded default FE, which owns no nodes
+            corrupted = true;
+        },
+    };
+    try testing.expect(corrupted);
+    const msg = try hir.validate(pr, f.built.funcs.items[f.built.funcs.items.len - 1].root, testing.allocator);
+    defer if (msg) |m| testing.allocator.free(m);
+    try testing.expect(msg != null);
 }
