@@ -9,7 +9,8 @@
 //! Scope (hir.md §11 M2a):
 //!
 //! - **Island set** — `const / local / let / lambda / call / if / match /
-//!   struct_make / variant_make / field_get` plus every typed (numeric) opcode,
+//!   struct_make / variant_make / tuple_make / list_make / field_get` plus
+//!   every typed (numeric) opcode,
 //!   exactly the registry rows carrying `OpDescriptor.seg` (hir.md §3.5). The
 //!   real boundary is the *recursive* encodability predicate: a node is
 //!   an island member only if its own encoding is registered, it is
@@ -22,18 +23,19 @@
 //!   forwarding — also boundary rewrites, admitted by the `let_*`
 //!   contracts of §8.7 rather than by island membership, since a
 //!   source-level `let`'s initializer opens its own full expression),
-//!   struct projection (`field_get(struct_make(…), i) → vi`
-//!   for a known field index, §8.3), constant folding over the typed reps,
+//!   aggregate projection (`field_get(C(…), i) → vi` for a known index
+//!   when `C` is `struct_make` / `tuple_make` / `list_make`, §8.3),
+//!   constant folding over the typed reps,
 //!   integer algebra identities, the known-variant `match` reduction to
 //!   `let` (§8.6), and CSE-style sharing (two α-equivalent `isDuplicable`
 //!   operands of one `strict_ltr`, region-free island node materialize into
-//!   a synthesized `let`, §8.3). Not in scope: tuple / list projection
-//!   (`tuple_make` / `list_make` are hard island boundaries — `seg == null`),
+//!   a synthesized `let`, §8.3). Tuple / list projection is IR-level only
+//!   (Stilla has no element-read suffix); not in scope:
 //!   non-sibling (cross-statement / cross-branch) sharing, associativity /
 //!   commutativity search, `move` / `drop` / borrow, host calls (§8.3).
 //! - **Extraction cost and the termination contract** — v1 uses minimal
 //!   node count plus a deterministic rule order as the tie-break (hir.md
-//!   §8.2). The let / folding / algebra / struct-projection rules strictly
+//!   §8.2). The let / folding / algebra / aggregate-projection rules strictly
 //!   reduce `costOf`; β (a boundary rewrite, not an e-class extraction) is
 //!   admitted by its contract and the known-variant `match` reduction by its
 //!   coverage / arity proof. Two rules may *add* nodes: the `match` rule
@@ -866,7 +868,7 @@ const Rewriter = struct {
             }
         }
         if (std.mem.eql(u8, name, "field_get")) {
-            if (projectStruct(pr, id)) {
+            if (projectAggregate(pr, id)) {
                 self.projects += 1;
                 return true;
             }
@@ -1573,22 +1575,29 @@ const Rewriter = struct {
     }
 };
 
-/// Struct projection (hir.md §8.3): `field_get(struct_make(v0, …, vn), i)
-/// → vi` for a known field index. The `struct_make` operands are in
-/// declaration order (`hir_build_path.buildStructConstruct`) and the payload
-/// index is the declaration field index (`hir_build_expr.fieldRead`), so the
-/// operand at that index is the projected value. An out-of-range index or a
-/// non-constructor base is refused. Tuple projection stays out of scope:
-/// `tuple_make` has no SEG encoding, so a tuple base is never an island
-/// member (see docs/todo.md).
+/// Aggregate projection (hir.md §8.3): `field_get(C(v0, …, vn), i) → vi`
+/// for a known index `i`, where `C` is `struct_make`, `tuple_make`, or
+/// `list_make`. The constructor operands are in declaration order (structs;
+/// `hir_build_path.buildStructConstruct`) or positional order (tuples /
+/// lists), and the payload index is the field / element index
+/// (`hir_build_expr.fieldRead`), so the operand at that index is the
+/// projected value. An out-of-range index or a non-constructor base is
+/// refused; for a list that `idx < operands.len` guard is the bounds proof,
+/// matching the `fieldGetOwn` refinement that admits the read as trap-free.
+/// Tuple / list projection is white-box only: Stilla has no element-read
+/// suffix, so no source-level tuple / list indexing reaches `field_get`
+/// (see docs/todo.md).
 ///
 /// Pure structural rewrite kept standalone for the white-box test; the island
 /// gate is the caller's (`applyRules` runs it only when `encOf` is true).
-pub fn projectStruct(pr: *hir.Program, id: hir.ExprId) bool {
+pub fn projectAggregate(pr: *hir.Program, id: hir.ExprId) bool {
     const ops = pr.operands(id);
     if (ops.len != 1) return false;
     const base = ops[0];
-    if (!std.mem.eql(u8, hir.registry.get(pr.node(base).op).name, "struct_make")) return false;
+    const base_name = hir.registry.get(pr.node(base).op).name;
+    if (!std.mem.eql(u8, base_name, "struct_make") and
+        !std.mem.eql(u8, base_name, "tuple_make") and
+        !std.mem.eql(u8, base_name, "list_make")) return false;
     const values = pr.operands(base);
     const idx = pr.node(id).payload.field;
     if (@as(usize, idx) >= values.len) return false;
@@ -2071,7 +2080,7 @@ test "minimal-node extraction cost counts the subtree" {
     try testing.expectEqual(@as(usize, 1), nodeCost(&p.program, lhs, testing.allocator));
 }
 
-test "struct projection folds field_get over struct_make for every field index" {
+test "aggregate projection folds field_get over every constructor for each index" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     var prog = try hir.Program.init(arena.allocator());
@@ -2079,19 +2088,57 @@ test "struct projection folds field_get over struct_make for every field index" 
     const c0 = try prog.addExpr(.{ .op = hir.opId("const").?, .ty = i32ty, .payload = .{ .const_value = .{ .int = 10 } } });
     const c1 = try prog.addExpr(.{ .op = hir.opId("const").?, .ty = i32ty, .payload = .{ .const_value = .{ .int = 20 } } });
     const c2 = try prog.addExpr(.{ .op = hir.opId("const").?, .ty = i32ty, .payload = .{ .const_value = .{ .int = 30 } } });
-    const sm = try prog.addExpr(.{ .op = hir.opId("struct_make").?, .ty = i32ty, .operands = try prog.addOperands(&.{ c0, c1, c2 }) });
-    // Every declared index projects its own operand, in declaration order.
+    const tuple_ty = meta.Type{ .tuple = try arena.allocator().dupe(meta.Type, &.{ i32ty, i32ty, i32ty }) };
+    const list_inner = try arena.allocator().create(meta.Type);
+    list_inner.* = i32ty;
+    const list_ty = meta.Type{ .list = list_inner };
     const expected = [_]i64{ 10, 20, 30 };
-    for (expected, 0..) |want, i| {
-        const fg = try prog.addExpr(.{ .op = hir.opId("field_get").?, .ty = i32ty, .operands = try prog.addOperands(&.{sm}), .payload = .{ .field = @intCast(i) } });
-        try testing.expect(projectStruct(&prog, fg));
-        try testing.expectEqual(want, prog.node(fg).payload.const_value.int);
+    // struct_make (declaration order), tuple_make and list_make (positional):
+    // every index projects its own operand.
+    const ctors = [_]struct { []const u8, meta.Type }{
+        .{ "struct_make", i32ty },
+        .{ "tuple_make", tuple_ty },
+        .{ "list_make", list_ty },
+    };
+    for (ctors) |c| {
+        const ctor = try prog.addExpr(.{ .op = hir.opId(c[0]).?, .ty = c[1], .operands = try prog.addOperands(&.{ c0, c1, c2 }) });
+        for (expected, 0..) |want, i| {
+            const fg = try prog.addExpr(.{ .op = hir.opId("field_get").?, .ty = i32ty, .operands = try prog.addOperands(&.{ctor}), .payload = .{ .field = @intCast(i) } });
+            try testing.expect(projectAggregate(&prog, fg));
+            try testing.expectEqual(want, prog.node(fg).payload.const_value.int);
+        }
+        // Out of range: the operand list is shorter than the payload index.
+        const oob = try prog.addExpr(.{ .op = hir.opId("field_get").?, .ty = i32ty, .operands = try prog.addOperands(&.{ctor}), .payload = .{ .field = 3 } });
+        try testing.expect(!projectAggregate(&prog, oob));
+        try testing.expectEqualStrings("field_get", hir.registry.get(prog.node(oob).op).name);
     }
-    // Out of range: the operand list is shorter than the payload index.
-    const oob = try prog.addExpr(.{ .op = hir.opId("field_get").?, .ty = i32ty, .operands = try prog.addOperands(&.{sm}), .payload = .{ .field = 3 } });
-    try testing.expect(!projectStruct(&prog, oob));
-    try testing.expectEqualStrings("field_get", hir.registry.get(prog.node(oob).op).name);
-    // A non-constructor base is left alone.
+    // A non-constructor base is left alone (struct, tuple, and list alike).
     const not_ctor = try prog.addExpr(.{ .op = hir.opId("field_get").?, .ty = i32ty, .operands = try prog.addOperands(&.{c1}), .payload = .{ .field = 0 } });
-    try testing.expect(!projectStruct(&prog, not_ctor));
+    try testing.expect(!projectAggregate(&prog, not_ctor));
+}
+
+test "tuple projection fires end to end through island admission" {
+    // No source construct reaches a tuple `field_get` (no element-read
+    // suffix), so the program is the HIR text form: the pass must still
+    // admit the read as an island and fold it.
+    const parse_text = @import("hir_parse.zig").parseText;
+    var p = try parse_text("fn () { field_get[0](tuple_make(10i32, 20i32)) : i32 }", .{});
+    defer p.arena.deinit();
+    const a = p.arena.allocator();
+    var built = hir.BuiltProgram{ .arena = a, .program = p.program };
+    try built.funcs.append(a, .{
+        .name = "f",
+        .kind = .member,
+        .module = 0,
+        .params = try a.alloc(meta.Param, 0),
+        .ret = meta.Type{ .primitive = .int32 },
+        .root = p.root,
+    });
+    const stats = try optimize(a, &built, .{});
+    try testing.expect(stats.projects >= 1);
+    // The lambda body is now the projected constant; the tuple_make and
+    // the field_get are gone.
+    const body = built.program.region(built.program.regionsOf(p.root)[0]).root;
+    try testing.expectEqualStrings("const", hir.registry.get(built.program.node(body).op).name);
+    try testing.expectEqual(@as(i64, 10), built.program.node(body).payload.const_value.int);
 }

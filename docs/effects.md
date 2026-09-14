@@ -909,13 +909,13 @@ drop_effect(T) -> EffectSummary
 
 | 实现 | 状态 | 行为 |
 | --- | --- | --- |
-| `effects.dropEffect(capability)` | M1b 遗留：**仅定义 + 单测，无生产消费者** | 极简：Copy → `{}`，其余 / null → `Top` |
 | `hir_effects.dropEffectOf(ty)` / `dropEffectInner` | **生产路径** | 精确全链，见下 |
 
 `drop` descriptor 的 `own_effect` 是 `pure`、`transfer = .drop_effect`；
 `Analysis.compute` 的 `.drop_effect` 分支调用**精确的** `dropEffectOf(operand
 类型)`，再 `; effects(operand)`。module-const teardown 检查（§7.2）也用它。
-所以 `effects.dropEffect` 不参与生产。
+这是唯一路径：M1b 遗留的极简 `effects.dropEffect`（Copy → `{}`，其余 / null →
+`Top`）已删除（docs/todo.md 第 20 项）。
 
 `dropEffectInner` 的递归：
 

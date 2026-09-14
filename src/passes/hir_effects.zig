@@ -877,14 +877,30 @@ pub const Analysis = struct {
 
     /// `field_get` own effect. The lowering maps it to `read_field`
     /// (nominal struct) or `read_tuple` (tuple element) — both total and
-    /// effect-free (`cfg.opInfo`). Any other base type is not a valid
-    /// `field_get` (the lowering rejects it), so it is conservatively
-    /// `Top` rather than assumed pure.
+    /// effect-free (`cfg.opInfo`). A list base lowers to a bounds-checked
+    /// `read_index`: it is `Top` unless the base is a `list_make` whose
+    /// statically-known length proves the payload index in range (the
+    /// bounds proof the projection rule consumes, hir.md §8.3). Any other
+    /// base type is not a valid `field_get` (the lowering rejects it), so
+    /// it is conservatively `Top` rather than assumed pure.
     fn fieldGetOwn(self: *Analysis, id: hir.ExprId) Summary {
-        const ops = self.p().operands(id);
+        const pr = self.p();
+        const ops = pr.operands(id);
         if (ops.len == 0) return effects.top;
-        return switch (self.p().node(ops[0]).ty) {
+        return switch (pr.node(ops[0]).ty) {
             .named, .tuple => effects.pure,
+            // A list index read lowers to a bounds-checked `read_index`
+            // and may trap (docs/effects.md §14 hidden-operation audit).
+            // A `list_make` base with the payload index inside its
+            // operand list is the one shape whose length is statically
+            // known, so the read is provably in range and cannot trap —
+            // the bounds proof the projection rule consumes (hir.md
+            // §8.3). Any other list base keeps the conservative `Top`.
+            .list => blk: {
+                if (!std.mem.eql(u8, hir.registry.get(pr.node(ops[0]).op).name, "list_make")) break :blk effects.top;
+                if (@as(usize, pr.node(id).payload.field) >= pr.operands(ops[0]).len) break :blk effects.top;
+                break :blk effects.pure;
+            },
             else => effects.top,
         };
     }
@@ -3644,4 +3660,31 @@ test "hir_effects: the validator rejects a mis-anchored scope-end token" {
     const msg = try hir.validate(pr, f.built.funcs.items[f.built.funcs.items.len - 1].root, testing.allocator);
     defer if (msg) |m| testing.allocator.free(m);
     try testing.expect(msg != null);
+}
+
+test "hir_effects: a list_make index read in range is trap-free, out of range stays Top" {
+    // No source-level list indexing reaches `field_get` yet (docs/todo.md
+    // item 19), so the shape is hand-built: it guards `fieldGetOwn`'s
+    // bounds proof directly rather than through the parser.
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var built = hir.BuiltProgram{ .arena = a, .program = try hir.Program.init(a) };
+    const i32ty = meta.Type{ .primitive = .int32 };
+    const inner = try a.create(meta.Type);
+    inner.* = i32ty;
+    const list_ty = meta.Type{ .list = inner };
+    const c0 = try built.program.addExpr(.{ .op = hir.opId("const").?, .ty = i32ty, .payload = .{ .const_value = .{ .int = 10 } } });
+    const c1 = try built.program.addExpr(.{ .op = hir.opId("const").?, .ty = i32ty, .payload = .{ .const_value = .{ .int = 20 } } });
+    const lm = try built.program.addExpr(.{ .op = hir.opId("list_make").?, .ty = list_ty, .operands = try built.program.addOperands(&.{ c0, c1 }) });
+    const in_range = try built.program.addExpr(.{ .op = hir.opId("field_get").?, .ty = i32ty, .operands = try built.program.addOperands(&.{lm}), .payload = .{ .field = 1 } });
+    const oob = try built.program.addExpr(.{ .op = hir.opId("field_get").?, .ty = i32ty, .operands = try built.program.addOperands(&.{lm}), .payload = .{ .field = 2 } });
+    const not_ctor = try built.program.addExpr(.{ .op = hir.opId("field_get").?, .ty = i32ty, .operands = try built.program.addOperands(&.{c0}), .payload = .{ .field = 0 } });
+    var an = try Analysis.init(a, &built, .{});
+    // The statically-known `list_make` length proves the in-range read
+    // cannot trap (the bounds proof the projection rule consumes).
+    try testing.expect(effects.isPure(an.fieldGetOwn(in_range)));
+    // No proof in either direction: the conservative `Top` stands.
+    try testing.expect(an.fieldGetOwn(oob).may_trap);
+    try testing.expect(an.fieldGetOwn(not_ctor).may_trap);
 }

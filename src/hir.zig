@@ -464,8 +464,10 @@ pub const TransferKind = enum {
     drop_effect,
     /// `Read(ModuleConst(payload const))`.
     module_const,
-    /// `field_get`: `own_effect` (base-type dependent — a list index may
-    /// trap) `;` the base's effect.
+    /// `field_get`: `own_effect` (base-dependent — a list index may
+    /// trap, unless the base is a `list_make` and the payload index is
+    /// provably in range, the bounds proof of `hir_effects.fieldGetOwn`)
+    /// `;` the base's effect.
     field_get,
 };
 
@@ -488,7 +490,7 @@ pub const SegEncoding = enum {
     app,
     /// Conditional term (if / and / or / match).
     branch,
-    /// Aggregate construction (struct_make).
+    /// Aggregate construction (struct_make / tuple_make / list_make).
     construct,
     /// Field projection (field_get).
     project,
@@ -553,8 +555,8 @@ const core_descriptors = [_]OpDescriptor{
     .{ .name = "struct_make", .class = .aggregate, .operands = .list, .regions = .none, .policy = .strict_ltr, .uses = .operand_capability, .own_effect = effects.pure, .transfer = .strict_ltr, .seg = .construct },
     .{ .name = "field_get", .class = .aggregate, .operands = .one, .regions = .none, .policy = .strict_ltr, .uses = .all_read, .own_effect = effects.pure, .transfer = .field_get, .seg = .project },
     .{ .name = "variant_make", .class = .aggregate, .operands = .list, .regions = .none, .policy = .strict_ltr, .uses = .operand_capability, .own_effect = effects.pure, .transfer = .strict_ltr, .seg = .construct },
-    .{ .name = "tuple_make", .class = .aggregate, .operands = .list, .regions = .none, .policy = .strict_ltr, .uses = .operand_capability, .own_effect = effects.pure, .transfer = .strict_ltr },
-    .{ .name = "list_make", .class = .aggregate, .operands = .list, .regions = .none, .policy = .strict_ltr, .uses = .operand_capability, .own_effect = effects.pure, .transfer = .strict_ltr },
+    .{ .name = "tuple_make", .class = .aggregate, .operands = .list, .regions = .none, .policy = .strict_ltr, .uses = .operand_capability, .own_effect = effects.pure, .transfer = .strict_ltr, .seg = .construct },
+    .{ .name = "list_make", .class = .aggregate, .operands = .list, .regions = .none, .policy = .strict_ltr, .uses = .operand_capability, .own_effect = effects.pure, .transfer = .strict_ltr, .seg = .construct },
     .{ .name = "move", .class = .ownership, .operands = .one, .regions = .none, .policy = .strict_ltr, .uses = .static_list, .own_effect = effects.pure, .transfer = .strict_ltr, .operand_uses = &[_]OperandUse{.consume} },
     .{ .name = "borrow", .class = .ownership, .operands = .one, .regions = .none, .policy = .strict_ltr, .uses = .static_list, .own_effect = effects.pure, .transfer = .strict_ltr, .operand_uses = &[_]OperandUse{.borrow} },
     .{ .name = "drop", .class = .ownership, .operands = .one, .regions = .none, .policy = .strict_ltr, .uses = .static_list, .own_effect = effects.pure, .transfer = .drop_effect, .operand_uses = &[_]OperandUse{.consume} },
@@ -1568,8 +1570,10 @@ test "registry: typed instances carry their scalar rep" {
 
 test "registry: the M2a SEG island set carries `seg`, nothing else does" {
     // hir.md §11 M2a: `const / local / let / lambda / call / if / match /
-    // struct_make / variant_make / field_get` + numeric ops. `match` and
-    // `variant_make` join the set for the known-variant reduction (§8.6).
+    // struct_make / variant_make / tuple_make / list_make / field_get` +
+    // numeric ops. `match` and `variant_make` join the set for the
+    // known-variant reduction (§8.6); `tuple_make` / `list_make` join it
+    // for the projection rules (§8.3).
     const encoded = [_]struct { []const u8, SegEncoding }{
         .{ "const", .atom },
         .{ "local", .slot },
@@ -1580,6 +1584,8 @@ test "registry: the M2a SEG island set carries `seg`, nothing else does" {
         .{ "match", .branch },
         .{ "struct_make", .construct },
         .{ "variant_make", .construct },
+        .{ "tuple_make", .construct },
+        .{ "list_make", .construct },
         .{ "field_get", .project },
         .{ "add.i32", .numeric },
         .{ "div.i64", .numeric },
@@ -1591,7 +1597,7 @@ test "registry: the M2a SEG island set carries `seg`, nothing else does" {
         try t.expectEqual(pair[1], op.seg.?);
     }
     // Hard island boundaries (hir.md §8.2 `encode` → None).
-    for ([_][]const u8{ "fn_ref", "module_const", "seq", "tuple_make", "list_make", "move", "borrow", "drop", "any_pack", "num_cast", "panic" }) |name| {
+    for ([_][]const u8{ "fn_ref", "module_const", "seq", "move", "borrow", "drop", "any_pack", "num_cast", "panic" }) |name| {
         const op = registry.get(registry.id(name) orelse return error.TestUnexpectedResult);
         try t.expect(op.seg == null);
     }

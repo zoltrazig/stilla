@@ -69,6 +69,13 @@ The detailed probes cover the source-reachable operation/type matrix:
   projected operand as a non-constant expression, and the refused shapes: a
   non-constructor (`let`-bound) base and a constructor written out of
   declaration order (its temp `let` chain opens a full-expression boundary)
+- `tuple_list_encoding.st`: the `tuple_make` / `list_make` island encoding
+  ([hir.md](hir.md) §8.3) — landing the `construct` encoding puts both
+  aggregates in the CSE candidate set, so two α-equal duplicable elements
+  inside a tuple or list literal share one synthesized `let`, next to the
+  non-α-equal pair that stays split. The tuple / list *projection* rules are
+  IR-level only: Stilla has no element-read suffix, so elements are read by
+  destructuring patterns, never `field_get`
 - `cse.st`: CSE-style sharing ([hir.md](hir.md) §8.3) — two α-equivalent
   `isDuplicable` operands of one island node materialize into a synthesized
   `let` (identical `mul`s, identical field reads, and a shared non-trivial

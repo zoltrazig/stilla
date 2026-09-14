@@ -36,7 +36,6 @@
 //! information — see `sequence` (an alias of `join`) and the law tests.
 
 const std = @import("std");
-const meta = @import("meta.zig");
 
 /// Dense ids owned by the surrounding program; mirrored so this module
 /// stays independent of the HIR (hir.md §3.5 category 3).
@@ -989,25 +988,6 @@ fn stableReadPair(a: Summary, b: Summary, reg: ResourceRegistry) bool {
     return any;
 }
 
-// ---------------------------------------------------------------------------
-// drop_effect (docs/effects.md §11.1)
-// ---------------------------------------------------------------------------
-
-/// `drop_effect(T)` in M1b is deliberately minimal: a Copy value's
-/// destruction has no interaction (`{}`), and everything else is
-/// unmodelled (`Top`). Precise structural/hook destructor summaries are
-/// deferred (docs/effects.md §14 再后 1); the conservative Top is what
-/// makes unknown cleanup block deletion/floating/duplication/SEG
-/// admission. `capability` is `null` when the type could not be
-/// classified — also Top.
-pub fn dropEffect(capability: ?meta.Ownership) Summary {
-    const cap = capability orelse return top;
-    return switch (cap) {
-        .copy => pure,
-        .unique => top,
-    };
-}
-
 // ===========================================================================
 // Tests — lattice algebra and the §5.4 acceptance examples
 // ===========================================================================
@@ -1350,12 +1330,6 @@ test "effects: order compatibility rejects conflicting swings and trap crossings
     const disjoint = ResourceRegistry{ .disjoint = &.{.{ .a = host(3), .b = host(4) }} };
     try testing.expect(!orderCompatible(qread, try mks(a, &.{readOf(host(4))}), disjoint));
     try testing.expect(!orderCompatible(qread, pure, .{}));
-}
-
-test "effects: drop_effect is Pure for Copy and Top otherwise" {
-    try testing.expect(dropEffect(.copy).eql(pure));
-    try testing.expect(dropEffect(.unique).eql(top));
-    try testing.expect(dropEffect(null).eql(top));
 }
 
 test "effects: host_top touches every host resource but no ModuleConst" {

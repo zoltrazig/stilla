@@ -913,7 +913,8 @@ alias 在进 SEG **之前**彻底展开：SEG 中不出现 `UserId` 与 `int32` 
 
 - 模块值不能进入普通局部值流，只能存在于 module-level const。`std.math.sqrt`
   resolution 后直接是 `fn_ref(FuncId)`；host binding 解析为专用 HostBindingId
-  （HIR 层不展开，AIR/LLIR 投影为 `syscall`）；普通 `field_get` 只处理 struct 值。
+  （HIR 层不展开，AIR/LLIR 投影为 `syscall`）；普通 `field_get` 只处理聚合值
+  （struct / tuple，以及 §8.3 的 list 基）。
 - 但需按 §6.5 保留 module init 语义，不能把 `fn_ref` / `module_const` 当无初始化
   依赖的裸指针。
 - **dotted 模块值路径**：路径穿过 module-valued 成员（`lib.math.sqrt`）时逐段重放
@@ -1019,8 +1020,7 @@ extract(eclass)      -> ExprId
 | constant `if` / `and` / `or` | ✅ | 常量条件选中已求值分支（另一分支是 island 成员） |
 | η-reduction | ✅ | 值位置 `fn_ref` 重定向；λ 记录不动（§8.5） |
 | known variant `match` | ✅ | 已知 tag 的 `variant_make` scrutinee → 覆盖 arm 的 `let` 链；payload 仅 bind / wildcard 叶 |
-| struct projection | ✅ | `field_get(struct_make(v0, …, vn), i) → vi`（已知字段下标；越界 / 非构造基拒绝）。`struct_make` 的 operand 按声明序，payload `field` 是声明字段下标——即 `hir_build_expr.fieldRead` 的索引。乱序书写的构造被 builder 的临时 `let` 链隔开（§5.6），故不触发 |
-| tuple / list projection | ❌ | 无规则：`tuple_make` / `list_make` 无 SEG 编码（`seg == null`） |
+| aggregate projection | ✅ | `field_get(C(v0, …, vn), i) → vi`（`C` = `struct_make` / `tuple_make` / `list_make`；已知下标；越界 / 非构造基拒绝）。`struct_make` 的 operand 按声明序，`tuple_make` / `list_make` 按位置序，payload `field` 是字段 / 元素下标——即 `hir_build_expr.fieldRead` 的索引。乱序书写的 struct 构造被 builder 的临时 `let` 链隔开（§5.6），故不触发。list 的 `idx < operand len` 就是边界证明：只有 `list_make` 基的已知常量下标在界内时才归约，与 `hir_effects.fieldGetOwn` 的「界内不 trap」细化一致（`field_get` 的 list 基否则保守 `Top`）。**tuple / list 投影是 IR 级规则**：Stilla 没有元素读取后缀（Core Expression Binding Power Table），元素只经解构 pattern 读取，源码不产生 tuple / list 的 `field_get`；两者由白盒规则测试覆盖 |
 | α-equivalence | ✅* | 由 β 克隆时的**捕获规避** fresh-binder 重映射承担，不是 e-graph 的 α-合并 |
 | CSE-style sharing | ✅ | 同一 island 内、**同一节点的 operand 列表**中 α-相等且 `isDuplicable` 的纯子树 materialize 成一个合成 `let`，后续出现改为该绑定量的 `local` 引用（详见下） |
 | associativity / commutativity | ❌ | 搜索空间问题，未立项 |
@@ -1049,7 +1049,7 @@ extract(eclass)      -> ExprId
 **CSE sharing 的 v1 形态与准入**（`hir_seg.ruleCse`）。共享子项必须同时满足：
 
 - op 无 region 且 `EvalPolicy` 为 `strict_ltr`——typed opcode、`call`、`seq`、
-  `struct_make` / `variant_make`。`let` / `lambda` / `if` / `match` / `and` / `or`
+  `struct_make` / `variant_make` / `tuple_make` / `list_make`。`let` / `lambda` / `if` / `match` / `and` / `or`
   带 region（作用域或惰性），整节点跳过；而 `seq`、以及 callee 为 `fn_ref`
   （无 SEG 编码，§8.1）的 `call` 本身不是 island 成员，所以 v1 实际能共享的
   子项限于纯算术 / 聚合 island（imm-offset 的直接调用不触发）；
@@ -1342,14 +1342,16 @@ lowering。可选变换每轮原位重写后重新跑结构 + 效果校验（§2
 - 测试：hir_tests.zig / hir_simplify_tests.zig / hir_seg_tests.zig。
 
 **SEG 编译时间 / 轮数基线**（第 12 项验收；`hir_seg_tests.zig` 的 `SEG budget`
-测试在 CI 每次打印，基线取 2026-09-13、macOS/arm64 的一次运行）：`probes/` +
-`examples/` 全语料 **58 个程序 / 4551 个可达节点**，SEG 接受 **2404 个
-island 成员（≈53%）**，共 **86 轮**、**94 次重写**，总编译时间 **≈94 ms**
-（单文件最慢 `examples/fold` 11 ms / 2 轮 / 163 islands）；每个程序都在
+测试在 CI 每次打印，基线取 2026-09-14、macOS/arm64 的一次运行）：`probes/` +
+`examples/` 全语料 **59 个程序 / 4618 个可达节点**，SEG 接受 **2485 个
+island 成员（≈54%）**，共 **89 轮**、**99 次重写**，总编译时间 **≈99 ms**
+（单文件最慢 ≈11 ms，`examples/fold` 与 `probes/seg` 之间随计时抖动）；每个程序都在
 `hir_seg.Config.max_iterations` 界内收敛（`Stats.converged == true`）。测试
 断言收敛（CI 稳定），时间仅记录、不断言（CI 计时不是稳定 oracle）。
 §8.3 的跨 FE `let` 折叠把 70 轮 / 51 次重写推到 85 轮 / 94 次：它新增的
-重写是 let 三规则，新增的轮数是在 island 表快照之外的那一轮（§8.7）。
+重写是 let 三规则，新增的轮数是在 island 表快照之外的那一轮（§8.7）。第 19 项
+把 `tuple_make` / `list_make` 并入 island 集、新增一个探针后升到 89 轮 /
+99 次：新增重写主要来自两个字面量内的 CSE sharing（§8.3）。
 
 落地档映射（历史里程碑编号）：
 
@@ -1357,7 +1359,7 @@ island 成员（≈53%）**，共 **86 轮**、**94 次重写**，总编译时�
 | --- | --- | --- |
 | M1a | 结构 HIR：AST→HIR 构建、结构校验、HIR→CFG lowering；直降路径删除后成为唯一前端路径 | hir_build.zig / hir_validate.zig / hir_lower.zig |
 | M1b | 效果基础设施：`SemanticInfo.effect`、固定乘积格、transfer、cleanup 门、派生查询、host 语义注册表 | effects.zig / hir_effects.zig |
-| M2a | SEG v1 规则子集（β / η / let / 常折叠 / 整数代数 / struct 投影 / known-variant match / CSE sharing），可执行文件默认开、`--no-seg` 关 | hir_seg.zig |
+| M2a | SEG v1 规则子集（β / η / let / 常折叠 / 整数代数 / 聚合投影 / known-variant match / CSE sharing），可执行文件默认开、`--no-seg` 关 | hir_seg.zig |
 | M2b | 摘要化消费者：函数摘要 SCC least fixpoint、精确 `drop_effect(T)`、module-const 检查、dead-let / selective ANF / `never_returns` 后缀删除 | hir_effects.zig / hir_simplify.zig |
 
 **尚未实现**（完整清单见 [todo.md](todo.md)）：真正的 slotted e-graph /
