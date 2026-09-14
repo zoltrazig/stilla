@@ -126,6 +126,11 @@ pub fn buildCall(b: *hir_build.Builder, info: *moduleinfo.ModuleInfo, e: *const 
         } else {
             callee = try hir_build_expr.buildExpr(b, info, c.callee);
         }
+        // A callee that is a plain expression (an inline λ / a lambda
+        // value) leaves `callee_ty` unset; take it from the built node so
+        // the result type is the callee's real return, not the `void`
+        // fallback (the checker does not annotate every IIFE call).
+        if (callee_ty == null) callee_ty = b.built.program.node(callee).ty;
     }
     var ids = std.ArrayList(hir.ExprId).empty;
     try ids.append(b.arena, callee);

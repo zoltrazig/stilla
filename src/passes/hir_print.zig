@@ -21,11 +21,13 @@
 //! - **No derived annotations.** Ownership views and full-expression
 //!   membership are deliberately absent from canonical text (hir.md §4.6).
 //!
-//! S2 serialization boundaries (user-approved, PROGRESS.md):
-//! struct_make / field_get / variant_make have no §4.4 text form that
-//! carries member/tag identity — printing them errors, never silently
-//! degrades. Non-finite floats are likewise not serializable in the v1
-//! text form (numeric literals are `{d}` + type suffix).
+//! S2 serialization boundaries: aggregate identity is carried by the
+//! result type plus a member bracket (`struct_make(…) : P`,
+//! `field_get[x](e) : T`, `variant_make[Some](e) : Option[i32]`,
+//! hir.md §4.4). A value-position module access chain leaf still has no
+//! text form carrying its hop identities, so printing it errors, never
+//! silently degrades. Non-finite floats are likewise not serializable in
+//! the v1 text form (numeric literals are `{d}` + type suffix).
 
 const std = @import("std");
 const hir = @import("stilla").hir;
@@ -127,6 +129,11 @@ const Printer = struct {
                 try self.put("fn (");
                 for (ft.params, 0..) |p, i| {
                     if (i > 0) try self.put(", ");
+                    switch (p.mode) {
+                        .plain => {},
+                        .move => try self.put("move "),
+                        .borrow => try self.put("borrow "),
+                    }
                     try self.printType(p.type_);
                 }
                 try self.put(") -> ");
@@ -143,17 +150,30 @@ const Printer = struct {
             .int => |v| {
                 // The literal's suffix comes from the const node type.
                 if (ty != .primitive) return PrintError.NotSerializable;
-                try self.printFmt("{d}", .{v});
-                try self.put(primSuffix(ty.primitive) orelse return PrintError.NotSerializable);
+                const suffix = primSuffix(ty.primitive) orelse return PrintError.NotSerializable;
+                // Unsigned types carry the value bit-cast into i64, so a
+                // u64 above maxInt(i64) would print negative. Print the
+                // full unsigned magnitude; the parser stores the bit-cast
+                // back, so no declared-width range check applies (the
+                // builder itself may hold an out-of-range value for a
+                // narrow type, e.g. `4294967295` typed i32).
+                switch (ty.primitive) {
+                    .uint32, .uint64 => try self.printFmt("{d}", .{@as(u64, @bitCast(v))}),
+                    else => try self.printFmt("{d}", .{v}),
+                }
+                try self.put(suffix);
             },
             .float => |f| {
                 if (ty != .primitive) return PrintError.NotSerializable;
                 if (!std.math.isFinite(f)) return PrintError.NotSerializable;
+                // Scan only the literal just emitted for a '.': the output
+                // so far may already contain dots (refs keys, nominal
+                // types), which must not suppress the `.0`.
+                const lit_start = self.out.items.len;
                 try self.printFmt("{d}", .{f});
                 // Keep a '.' so the lexer sees a float, then the suffix.
-                const items = self.out.items;
                 var has_dot = false;
-                for (items) |ch| {
+                for (self.out.items[lit_start..]) |ch| {
                     if (ch == '.') has_dot = true;
                 }
                 if (!has_dot) try self.put(".0");
@@ -173,8 +193,9 @@ const Printer = struct {
             .int => |v| try self.printFmt("{d}", .{v}),
             .float => |f| {
                 if (!std.math.isFinite(f)) return PrintError.NotSerializable;
+                const lit_start = self.out.items.len;
                 try self.printFmt("{d}", .{f});
-                for (self.out.items) |ch| {
+                for (self.out.items[lit_start..]) |ch| {
                     if (ch == '.') return;
                 }
                 try self.put(".0");
@@ -225,10 +246,10 @@ fn collectRefs(allocator: std.mem.Allocator, program: *const hir.Program, root: 
     const n = program.node(root);
     switch (n.payload) {
         .func => |f| switch (f) {
-            .func => |id| try refs.funcs.append(allocator, id),
-            .host => |id| try refs.hosts.append(allocator, id),
+            .func => |id| if (!containsId(hir.FuncId, refs.funcs.items, id)) try refs.funcs.append(allocator, id),
+            .host => |id| if (!containsId(hir.HostBindingId, refs.hosts.items, id)) try refs.hosts.append(allocator, id),
         },
-        .module_const => |id| try refs.consts.append(allocator, id),
+        .module_const => |id| if (!containsId(hir.ConstId, refs.consts.items, id)) try refs.consts.append(allocator, id),
         else => {},
     }
     for (program.operands(root)) |op| try collectRefs(allocator, program, op, refs);
@@ -236,6 +257,13 @@ fn collectRefs(allocator: std.mem.Allocator, program: *const hir.Program, root: 
         const r = program.region(rid);
         try collectRefs(allocator, program, r.root, refs);
     }
+}
+
+/// One occurrence per stable-key entry: a repeated ref prints a single
+/// dictionary row (hir.md §4.8).
+fn containsId(comptime T: type, items: []const T, id: T) bool {
+    for (items) |x| if (x == id) return true;
+    return false;
 }
 
 /// Dedup + sort each ref kind by its stable key; returns print numbers as
@@ -354,9 +382,21 @@ fn printExpr(p: *Printer, program: *const hir.Program, id: hir.ExprId, numbers: 
         return;
     }
     if (std.mem.eql(u8, op_name, "fn_ref")) {
+        // A ref whose node type differs from its context-declared type
+        // (a generic host instantiation) carries the instantiated type as
+        // an explicit annotation; the parser otherwise derives it from
+        // `SerCtx` (hir.md §4.4).
         switch (n.payload.func) {
-            .func => |f| try p.printFmt("fnref F{d}", .{try refNo(numbers, f)}),
-            .host => |h| try p.printFmt("fnref H{d}", .{try hostNo(numbers, h)}),
+            .func => |f| {
+                try p.printFmt("fnref F{d}", .{try refNo(numbers, f)});
+                if (f >= p.ctx.funcs.len) return PrintError.NotSerializable;
+                if (!meta.Type.eql(n.ty, p.ctx.funcs[f].type_)) try printTypeAnnotation(p, n.ty);
+            },
+            .host => |h| {
+                try p.printFmt("fnref H{d}", .{try hostNo(numbers, h)});
+                if (h >= p.ctx.hosts.len) return PrintError.NotSerializable;
+                if (!meta.Type.eql(n.ty, p.ctx.hosts[h].type_)) try printTypeAnnotation(p, n.ty);
+            },
         }
         return;
     }
@@ -372,14 +412,26 @@ fn printExpr(p: *Printer, program: *const hir.Program, id: hir.ExprId, numbers: 
         const regs = program.regionsOf(id);
         const r = program.region(regs[0]);
         const binders = program.params(regs[0]);
-        const bid = binders[0];
-        const b = program.binder(bid);
-        const no = try p.num(bid);
-        try p.printFmt("let B{d}: ", .{no});
-        try p.printType(b.ty);
-        try printMode(p, b.mode);
-        try p.put(" = ");
         const ops = program.operands(id);
+        try p.put("let ");
+        if (r.pattern) |pid| {
+            // Destructuring let: pattern bind leaves consume the region
+            // params in order; the init type is the scrutinee (hir.md
+            // §5.2). The parser recovers the type by parsing the init
+            // first, so the pattern carries no type annotation itself.
+            var cursor: usize = 0;
+            try printPattern(p, program, pid, program.node(ops[0]).ty, binders, &cursor, numbers);
+        } else {
+            // A pattern-less let region carries exactly one binder.
+            if (binders.len != 1) return PrintError.NotSerializable;
+            const bid = binders[0];
+            const b = program.binder(bid);
+            const no = try p.num(bid);
+            try p.printFmt("B{d}: ", .{no});
+            try p.printType(b.ty);
+            try printMode(p, b.mode);
+        }
+        try p.put(" = ");
         try printExpr(p, program, ops[0], numbers, false);
         try p.put(" in ");
         try printExpr(p, program, r.root, numbers, false);
@@ -398,7 +450,15 @@ fn printExpr(p: *Printer, program: *const hir.Program, id: hir.ExprId, numbers: 
             try p.printType(b.ty);
             try printMode(p, b.mode);
         }
-        try p.put(") => ");
+        try p.put(")");
+        // The body fixes the return type; print it explicitly only when
+        // the lambda's declared return differs (a `never` body under a
+        // non-`never` declared return, hir.md §4.4).
+        if (n.ty == .function and !meta.Type.eql(n.ty.function.ret.*, program.node(r.root).ty)) {
+            try p.put(" -> ");
+            try p.printType(n.ty.function.ret.*);
+        }
+        try p.put(" => ");
         try printExpr(p, program, r.root, numbers, false);
         return;
     }
@@ -444,15 +504,41 @@ fn printExpr(p: *Printer, program: *const hir.Program, id: hir.ExprId, numbers: 
         try p.put(")");
         return;
     }
+    if (std.mem.eql(u8, op_name, "struct_make")) {
+        // Aggregate identity rides the result type; operands are in
+        // declaration order (hir.md §4.4).
+        try p.put("struct_make(");
+        try printOperands(p, program, id, numbers);
+        try p.put(") : ");
+        try p.printType(n.ty);
+        return;
+    }
+    if (std.mem.eql(u8, op_name, "variant_make")) {
+        const tag = n.payload.tag;
+        try p.put("variant_make[");
+        try printVariantName(p, n.ty, tag);
+        try p.put("](");
+        try printOperands(p, program, id, numbers);
+        try p.put(") : ");
+        try p.printType(n.ty);
+        return;
+    }
+    if (std.mem.eql(u8, op_name, "field_get")) {
+        // The member index is meaningless without its base, so the text
+        // resolves it from the operand's type (struct field name or
+        // tuple position); the result type stays explicit.
+        const base = program.node(program.operands(id)[0]).ty;
+        try p.put("field_get[");
+        try printMemberName(p, base, n.payload.field);
+        try p.put("](");
+        try printOperands(p, program, id, numbers);
+        try p.put(") : ");
+        try p.printType(n.ty);
+        return;
+    }
     // Generic eager op form.
     const desc = hir.registry.get(n.op);
     if (desc.regions != .none) return PrintError.NotSerializable;
-    if (std.mem.eql(u8, op_name, "struct_make") or
-        std.mem.eql(u8, op_name, "field_get") or
-        std.mem.eql(u8, op_name, "variant_make"))
-    {
-        return PrintError.NotSerializable; // member identity: no S2 text form
-    }
     try p.put(op_name);
     try p.put("(");
     const ops = program.operands(id);
@@ -475,11 +561,54 @@ fn elseIsVoid(program: *const hir.Program, root: hir.ExprId) bool {
     return n.payload.const_value == .void;
 }
 
+/// ` : ty` — the result-type annotation for a node whose type is not
+/// self-determined.
+fn printTypeAnnotation(p: *Printer, ty: meta.Type) PrintError!void {
+    try p.put(": ");
+    try p.printType(ty);
+}
+
 fn printMode(p: *Printer, mode: hir.BinderMode) PrintError!void {
     if (mode == .move) {
         try p.put(" @move");
     } else if (mode == .borrow) {
         try p.put(" @borrow");
+    }
+}
+
+/// The comma-separated operand list of an eager node.
+fn printOperands(p: *Printer, program: *const hir.Program, id: hir.ExprId, numbers: *const RefNumbers) PrintError!void {
+    for (program.operands(id), 0..) |o, i| {
+        if (i > 0) try p.put(", ");
+        try printExpr(p, program, o, numbers, false);
+    }
+}
+
+/// `variant_make` member identity: the variant name at `tag` in the
+/// annotated union decl (hir.md §4.4). A malformed type/payload pairing
+/// fails closed.
+fn printVariantName(p: *Printer, ty: meta.Type, tag: u32) PrintError!void {
+    if (ty != .named or ty.named.id >= p.ctx.types.len) return PrintError.NotSerializable;
+    const decl = p.ctx.types[ty.named.id];
+    if (decl != .union_ or tag >= decl.union_.variants.len) return PrintError.NotSerializable;
+    try p.put(decl.union_.variants[tag].name);
+}
+
+/// `field_get` member identity: a struct field name or a tuple position
+/// (hir.md §4.4). A malformed base/field pairing fails closed.
+fn printMemberName(p: *Printer, base: meta.Type, idx: u32) PrintError!void {
+    switch (base) {
+        .named => |n| {
+            if (n.id >= p.ctx.types.len) return PrintError.NotSerializable;
+            const decl = p.ctx.types[n.id];
+            if (decl != .struct_ or idx >= decl.struct_.fields.len) return PrintError.NotSerializable;
+            try p.put(decl.struct_.fields[idx].name);
+        },
+        .tuple => |elems| {
+            if (idx >= elems.len) return PrintError.NotSerializable;
+            try p.printFmt("{d}", .{idx});
+        },
+        else => return PrintError.NotSerializable,
     }
 }
 
@@ -533,6 +662,8 @@ fn printPattern(p: *Printer, program: *const hir.Program, pid: hir.PatternId, su
         },
         .literal => |c| try p.printPatternConst(c),
         .tuple => |children| {
+            if (sub_ty != .tuple) return PrintError.NotSerializable;
+            if (children.len != sub_ty.tuple.len) return PrintError.NotSerializable;
             try p.put("(");
             for (children, 0..) |c, i| {
                 if (i > 0) try p.put(", ");
@@ -541,6 +672,7 @@ fn printPattern(p: *Printer, program: *const hir.Program, pid: hir.PatternId, su
             try p.put(")");
         },
         .list => |lp| {
+            if (sub_ty != .list) return PrintError.NotSerializable;
             try p.put("[");
             const elem_ty = sub_ty.list.*;
             var first = true;
@@ -552,13 +684,15 @@ fn printPattern(p: *Printer, program: *const hir.Program, pid: hir.PatternId, su
             if (lp.rest) |c| {
                 if (!first) try p.put(", ");
                 try p.put("..");
-                try printPattern(p, program, c, elem_ty, binders, cursor, numbers);
+                // The rest binds the tail *list*, not an element.
+                try printPattern(p, program, c, sub_ty, binders, cursor, numbers);
             }
             try p.put("]");
         },
         .struct_ => |sp| {
             if (sub_ty != .named or sub_ty.named.id >= p.ctx.types.len) return PrintError.NotSerializable;
             const decl = p.ctx.types[sub_ty.named.id].struct_;
+            try p.put(decl.name);
             try p.put(" { ");
             var first = true;
             for (sp.fields) |f| {
@@ -638,7 +772,7 @@ fn constEql(a: meta.ConstValue, b: meta.ConstValue) bool {
 
 /// α-equivalence: node-by-node structural comparison over two programs,
 /// remapping binders of `a` onto `b` positionally at each region.
-fn alphaEq(allocator: std.mem.Allocator, a: *const hir.Program, aroot: hir.ExprId, b: *const hir.Program, broot: hir.ExprId) bool {
+pub fn alphaEq(allocator: std.mem.Allocator, a: *const hir.Program, aroot: hir.ExprId, b: *const hir.Program, broot: hir.ExprId) bool {
     var map = std.AutoHashMap(hir.BinderId, hir.BinderId).init(allocator);
     defer map.deinit();
     return exprEq(a, aroot, b, broot, &map);
@@ -867,18 +1001,45 @@ test "unknown opcode and malformed literals are rejected" {
     try t.expectError(error.Syntax, hir_parse.parseText("fn (B0: i32) => mul.i32(%B0)", .{}));
 }
 
-test "text forms without S2 member identity are rejected, not degraded" {
-    try t.expectError(error.Syntax, hir_parse.parseText("struct_make(%B0) : P", .{}));
-    try t.expectError(error.Syntax, hir_parse.parseText("field_get(%B0) : i32", .{}));
-    try t.expectError(error.Syntax, hir_parse.parseText("variant_make(%B0) : U", .{}));
-    // Printing a program containing them fails the same way.
-    var arena = std.heap.ArenaAllocator.init(t.allocator);
-    defer arena.deinit();
-    var prog = try hir.Program.init(arena.allocator());
-    const lit = try prog.addExpr(.{ .op = hir.opId("const").?, .ty = meta.Type{ .primitive = .int32 }, .payload = .{ .const_value = .{ .int = 1 } } });
-    const ops = try prog.addOperands(&.{lit});
-    const fg = try prog.addExpr(.{ .op = hir.opId("field_get").?, .ty = meta.Type{ .primitive = .int32 }, .operands = ops, .payload = .{ .field = 0 } });
-    try t.expectError(error.NotSerializable, print(&prog, fg, arena.allocator(), .{}));
+test "round trip: aggregate member identity (hir.md §4.4)" {
+    var fix = try aggFixture(t.allocator);
+    defer fix.arena.deinit();
+    try t.expect(try roundTripOk("fn (B0: i32, B1: i32) => struct_make(%B0, %B1) : P", fix.ctx));
+    try t.expect(try roundTripOk("fn (B0: P) => field_get[x](%B0) : i32", fix.ctx));
+    try t.expect(try roundTripOk("fn (B0: i32) => variant_make[some](%B0) : U", fix.ctx));
+    try t.expect(try roundTripOk("fn (B0: i32) => variant_make[none]() : U", fix.ctx));
+    // Tuple fields carry a numeric member and need no nominal context.
+    try t.expect(try roundTripOk("fn (B0: (i32, i64)) => field_get[1](%B0) : i64", .{}));
+}
+
+test "aggregate member identity is validated, not guessed" {
+    var fix = try aggFixture(t.allocator);
+    defer fix.arena.deinit();
+    // Unknown field / variant, or an arity mismatch, fails closed.
+    try t.expectError(error.Syntax, hir_parse.parseText("fn (B0: P) => field_get[z](%B0) : i32", fix.ctx));
+    try t.expectError(error.Syntax, hir_parse.parseText("fn (B0: i32) => struct_make(%B0) : P", fix.ctx));
+    try t.expectError(error.Syntax, hir_parse.parseText("fn (B0: i32) => variant_make[missing](%B0) : U", fix.ctx));
+    try t.expectError(error.Syntax, hir_parse.parseText("fn (B0: i32) => variant_make[some]() : U", fix.ctx));
+    // A struct field is not a tuple index.
+    try t.expectError(error.Syntax, hir_parse.parseText("fn (B0: P) => field_get[0](%B0) : i32", fix.ctx));
+}
+
+test "round trip: box types and destructuring lets (hir.md §4.5/§5.2)" {
+    try t.expect(try roundTripOk("fn (B0: box(i32)) => %B0", .{}));
+    try t.expect(try roundTripOk("fn (B0: (i32, i32)) => let (B1, B2) = %B0 in add.i32(%B1, %B2)", .{}));
+    var fix = try aggFixture(t.allocator);
+    defer fix.arena.deinit();
+    try t.expect(try roundTripOk("fn (B0: P) => let P { x: B1, y: B2 } = %B0 in add.i32(%B1, %B2)", fix.ctx));
+}
+
+test "round trip: function-type param modes, multi-arg calls, bare pattern literals, wide unsigned, instance refs" {
+    try t.expect(try roundTripOk("fn (B0: fn(borrow i32, move i64) -> bool) => %B0", .{}));
+    try t.expect(try roundTripOk("call(fn (B0: i32, B1: i32) => %B0, 1i32, 2i32)", .{}));
+    try t.expect(try roundTripOk("fn (B0: i32) => match %B0 { 0 => 1i32, _ => 2i32 }", .{}));
+    try t.expect(try roundTripOk("fn () => 18446744073709551615u64", .{}));
+    var fix = try refFixture(t.allocator, "list.index_of_from.11");
+    defer fix.arena.deinit();
+    try t.expect(try roundTripOk("#refs: F0 = list.index_of_from.11\nfn (B0: i32) => call(fnref F0, %B0)", fix.ctx));
 }
 
 test "nominal types require the serialization context" {
@@ -887,7 +1048,7 @@ test "nominal types require the serialization context" {
 }
 
 test "refs round-trip through stable keys, not numeric ids" {
-    var fix = try refFixture(t.allocator);
+    var fix = try refFixture(t.allocator, "string.concat");
     defer fix.arena.deinit();
     // func id 0 prints as F0 by key order; ids resolve back through ctx.
     // Canonical text carries the #refs dictionary (§4.8).
@@ -924,7 +1085,7 @@ fn optionFixture(allocator: std.mem.Allocator) !Fixture {
     return .{ .arena = arena, .ctx = .{ .types = decls } };
 }
 
-fn refFixture(allocator: std.mem.Allocator) !Fixture {
+fn refFixture(allocator: std.mem.Allocator, key: []const u8) !Fixture {
     var arena = std.heap.ArenaAllocator.init(allocator);
     errdefer arena.deinit();
     const a = arena.allocator();
@@ -934,8 +1095,25 @@ fn refFixture(allocator: std.mem.Allocator) !Fixture {
     const params = try a.dupe(meta.Param, &.{meta.syntheticParam(fake_span, .plain, meta.Type{ .primitive = .int32 })});
     const fn_ty = meta.Type{ .function = .{ .params = params, .ret = ret_ptr } };
     const funcs = try a.alloc(hir.SerCtx.FuncDecl, 1);
-    funcs[0] = .{ .key = "string.concat", .type_ = fn_ty };
+    funcs[0] = .{ .key = key, .type_ = fn_ty };
     return .{ .arena = arena, .ctx = .{ .funcs = funcs } };
+}
+
+fn aggFixture(allocator: std.mem.Allocator) !Fixture {
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    errdefer arena.deinit();
+    const a = arena.allocator();
+    const i32ty = meta.Type{ .primitive = .int32 };
+    const fields = try a.alloc(meta.FieldDecl, 2);
+    fields[0] = .{ .name = "x", .type_ = i32ty };
+    fields[1] = .{ .name = "y", .type_ = i32ty };
+    var variants = try a.alloc(meta.VariantDecl, 2);
+    variants[0] = .{ .name = "some", .payloads = try a.dupe(meta.Type, &.{i32ty}) };
+    variants[1] = .{ .name = "none", .payloads = &.{} };
+    const decls = try a.alloc(meta.TypeDecl, 2);
+    decls[0] = .{ .struct_ = .{ .name = "P", .module = "test", .type_params = &.{}, .ownership = .copy, .drop = null, .fields = fields } };
+    decls[1] = .{ .union_ = .{ .name = "U", .module = "test", .type_params = &.{}, .ownership = .copy, .variants = variants } };
+    return .{ .arena = arena, .ctx = .{ .types = decls } };
 }
 
 test "printer determinism over constructed programs (S1 structures)" {

@@ -403,6 +403,62 @@ test "S4: HIR corpus — examples/*.st build and validate" {
 test "S4: HIR corpus — probes/*.st build and validate" {
     try corpusList("probes");
 }
+
+// ---------------------------------------------------------------------------
+// S2 round-trip (hir.md §4.9): every built function root of the corpus
+// prints to canonical text that re-parses to an α-equivalent program
+// that passes the structural validator. Covers box types, aggregate
+// member identity, and destructuring lets (phase 16).
+// ---------------------------------------------------------------------------
+
+fn corpusRoundTrip(dir: []const u8) !void {
+    var corpus = try probe_corpus.list(testing.allocator, dir);
+    defer corpus.deinit();
+    for (corpus.names) |spec| {
+        const text = try probe_corpus.read(testing.allocator, dir, spec);
+        defer testing.allocator.free(text);
+        var b = buildText(spec, &.{.{ spec, text }}) catch |err| {
+            std.debug.print("HIR round-trip: {s}/{s} failed to build: {s}\n", .{ dir, spec, @errorName(err) });
+            return error.TestUnexpectedResult;
+        };
+        defer b.deinit();
+        const ctx = try b.built.serCtx();
+        for (b.built.funcs.items) |f| {
+            // `hir.print` allocates its ref/binder tables from the passed
+            // allocator and expects an arena owner (see `print`); use one
+            // per function so the test allocator sees no leaks.
+            var pr_arena = std.heap.ArenaAllocator.init(testing.allocator);
+            defer pr_arena.deinit();
+            const printed = hir.print(&b.built.program, f.root, pr_arena.allocator(), ctx) catch |err| {
+                std.debug.print("HIR round-trip: {s}/{s} @{s} print failed: {s}\n", .{ dir, spec, f.name, @errorName(err) });
+                return error.TestUnexpectedResult;
+            };
+            var parsed = hir.parseText(printed, ctx) catch |err| {
+                std.debug.print("HIR round-trip: {s}/{s} @{s} parse failed: {s}\n", .{ dir, spec, f.name, @errorName(err) });
+                return error.TestUnexpectedResult;
+            };
+            defer parsed.arena.deinit();
+            if (try hir.validate(&parsed.program, parsed.root, testing.allocator)) |m| {
+                defer testing.allocator.free(m);
+                std.debug.print("HIR round-trip: {s}/{s} @{s} validate failed: {s}\n", .{ dir, spec, f.name, m });
+                return error.TestUnexpectedResult;
+            }
+            if (!hir.alphaEq(testing.allocator, &b.built.program, f.root, &parsed.program, parsed.root)) {
+                const reprint = hir.print(&parsed.program, parsed.root, pr_arena.allocator(), ctx) catch "(reprint failed)";
+                std.debug.print("HIR round-trip: {s}/{s} @{s} is not alpha-equivalent\n  printed: {s}\n  reparsed: {s}\n", .{ dir, spec, f.name, printed, reprint });
+                return error.TestUnexpectedResult;
+            }
+        }
+    }
+}
+
+test "S2: HIR canonical text round-trips over examples/*.st" {
+    try corpusRoundTrip("examples");
+}
+
+test "S2: HIR canonical text round-trips over probes/*.st" {
+    try corpusRoundTrip("probes");
+}
 // ---------------------------------------------------------------------------
 // S5→S6b: canonical-AIR seam checks (hir.md §10.3/§11 M1a, PROGRESS S5/S6).
 // The S5 §10.3 differential (direct vs HIR byte-identical `cfg.print`

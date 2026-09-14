@@ -358,16 +358,18 @@ ModConst Ck
 
 ```text
 expr    := lit | ref | 'panic'
-         | op '(' (expr (',' expr)*)? ')' (':' ty)?   // 结果类型标注可省
-         | 'let' binder '=' expr 'in' expr
-         | 'fn' '(' binderList? ')' '=>' expr
+         | op ('[' member ']')? '(' (expr (',' expr)*)? ')' (':' ty)?   // 结果类型标注可省
+         | 'let' (binder | pattern) '=' expr 'in' expr
+         | 'fn' '(' binderList? ')' ('->' ty)? '=>' expr
          | ('if' | 'and' | 'or') expr 'then' expr ('else' expr)?
          | 'match' expr '{' armList '}'
          | '(' expr ')'
 
 lit     := 'void' | 'true' | 'false' | IntLit | FloatLit | StringLit
 op      := 点段标识符（核心或 typed opcode）
+member  := ident | digits                 // 字段 / variant 名或 tuple 下标
 binder  := BinderId ':' ty ('@' mode)?   // 默认 value；打印为 '@move' / '@borrow'
+ref     := '%' BinderId | 'fnref' (Fk | Hk) (':' ty)? | 'module' Ck
 pattern := '_' | Binder | lit | '(' pattern (',' pattern)* ')'
          | '[' pattern (',' pattern)* ('..' pattern)? ']'
          | NomPath '{' (fieldPat (',' fieldPat)*)? '}'
@@ -382,12 +384,19 @@ armList  := arm (',' arm)*
 
 - `let Bk: ty = <init> in <body>`：`<init>` 是唯一 eager operand，且在 region
   **之外**求值；`Bk` 只在 `<body>` 可见。
+- **解构 let**（§5.2）写作 `let <pattern> = <init> in <body>`：pattern 的叶子
+  按序消费 region params，无 binder 类型标注；parser 先解析 `<init>` 得到
+  scrutinee 类型，再回头解析 pattern（init 里不可见 pattern 的 binder）。
 - `fn (…) => …` 是 lambda **值**；参数 region 的 params 即括号里的 binderList。
+  仅当声明的返回类型 ≠ body 的类型（`never` body 配非 `never` 声明）时才写
+  `-> ty`，否则返回类型由 body 推出。
 - `if` 的 then/else 是两个无参 region；缺省 else 表示 void 分支。
 - `match` 每个 arm 是一个 region；无 pattern 的占位 arm 可省略 `pattern =>`。
 - eager apply 的 operands 按书写序（LTR）求值。
 - **结果类型标注**：opcode 自身不含类型时（`num_cast`、`any_cast`、空
-  `list_make` 等）用尾缀 `: ty`；typed opcode 的结果类型由符号确定，可省。
+  `list_make`、三个 aggregate 形态等）用尾缀 `: ty`；typed opcode 的结果类型由
+  符号确定，可省。`fnref Fk`／`fnref Hk` 也只在节点类型 ≠ SerCtx 声明类型时
+  才写 `: ty`（泛型 host 实例化），否则由引用字典的声明类型推出。
 
 ### 4.4 op → 文本形态
 
@@ -395,26 +404,29 @@ armList  := arm (',' arm)*
 | --- | --- | --- | --- |
 | 原子 | `const` | 类型化字面量 | `1i32` `1.5f64` `"hi"` `true` |
 | 原子 | `local` | `%Bk` | `%B3` |
-| 原子 | `fn_ref` | `fnref Fk` / `fnref Hk` | `fnref F0` |
+| 原子 | `fn_ref` | `fnref Fk` / `fnref Hk`（可接 `: ty`） | `fnref F0` `fnref H1: fn (i32) -> str` |
 | 原子 | `module_const` | `module Ck` | `module C2` |
-| binding | `let` | `let Bk: ty = e in e` | `let B1: i32 = add.i32(%B0, 1i32) in %B1` |
+| binding | `let` | `let Bk: ty = e in e`；解构为 `let pattern = e in e` | `let B1: i32 = add.i32(%B0, 1i32) in %B1` |
 | sequencing | `seq` | `seq(e, e, …)` | `seq(call(%f), panic)` |
-| function | `lambda` | `fn (params) => body` | `fn (B0: i32) => mul.i32(%B0, 2i32)` |
+| function | `lambda` | `fn (params) (-> ret)? => body` | `fn (B0: i32) => mul.i32(%B0, 2i32)` |
 | function | `call` | `call(callee, arg, …)` | `call(fn (B0: i32) => %B0, %x)` |
 | control | `if` | `if c then t else e` | `if %c then 1i32 else 0i32` |
 | control | `and` / `or` | 同 `if` 形状 | `and %c then %a else false` |
 | control | `match` | `match s { arm, … }` | 见 §4.7 |
-| aggregate | `struct_make` | `struct_make(e, …) : ty` † | — |
-| aggregate | `field_get` | `field_get(e) : ty` † | — |
-| aggregate | `variant_make` | `variant_make(e) : ty` † | — |
+| aggregate | `struct_make` | `struct_make(e, …) : ty` | `struct_make(1i32, 2i32) : Point` |
+| aggregate | `field_get` | `field_get[member](e) : ty` | `field_get[x](%p) : i32` `field_get[1](%t) : i64` |
+| aggregate | `variant_make` | `variant_make[Variant](e, …) : ty` | `variant_make[some](%v) : Shape` |
 | aggregate | `tuple_make` / `list_make` | `tuple_make(e, …)` / `list_make(e, …)` | `tuple_make(%a, %b)` |
 | ownership | `move` / `borrow` / `drop` | 一元前缀 | `move(%f)` `borrow(%f)` `drop(%f)` |
 | dynamic | `any_pack` / `any_cast` | 一元前缀 | `any_pack(%x)` `any_cast(%a)` |
 | conversion | `num_cast` | `num_cast(e) : ty` | `num_cast(%b) : i64` |
 | runtime | `panic` | `panic` | — |
 
-† `struct_make` / `field_get` / `variant_make` 的文本形态**尚无成员身份表达**，
-printer 当前报 `NotSerializable`（§4.10）。表中形态是规范预留。
+`struct_make` 的成员身份由结果类型 + operand 的声明序给定；`variant_make` 额外
+在 `[…]` 写 variant 名（tag 由 union 声明解析）；`field_get` 在 `[…]` 写
+struct 字段名或 tuple 下标（由 operand 的基类型解析），结果类型始终显式。
+三者的 operand 数必须与声明的字段 / payload 数一致，成员不存在或数目不符时
+parser 报错，绝不静默降级。
 
 带 region 的 op **没有文本形态**：printer 对 `desc.regions != .none` 且无命名
 形状的 op 报 `NotSerializable`（§4.10）。通用形 `op(args){ params => body }`
@@ -428,17 +440,16 @@ ty := 'i32'|'i64'|'u32'|'u64'|'f32'|'f64'|'bool'|'byte'|'str'|'void'|'never'|'an
     | '[' ty ']'                      // list[T]
     | 'box' '(' ty ')'                // box[T]
     | NomPath                         // std.option.Option[i32]
-    | 'fn' '(' (ty (',' ty)*)? ')' '->' ty
+    | 'fn' '(' (('move' | 'borrow')? ty (',' ('move' | 'borrow')? ty)*)? ')' '->' ty
 ```
 
 字面量带类型后缀：`5i32`、`-7i64`、`0x1Fu32`、`1.5f32`、`2.0f64`、`true`、
 `"text"`、`void`。短名 ↔ `meta.Type` 映射：`int32→i32`、`int64→i64`、
 `uint32→u32`、`uint64→u64`、`float32→f32`、`float64→f64`。整份文本二选一，
-混用视为错误。
-
-**已知的 printer / parser 不对称**：printer 会输出 `box(T)`，但 `hir_parse.parseType`
-没有 `box` 分支——含 `box` 类型的 HIR 可打印、不可解析，文本 round-trip（§4.9）
-在 box 上会失败。修复前不要把 `box` 列为可靠的 round-trip 形态。
+混用视为错误。函数类型的参数模式（`move`／`borrow`）是类型的一部分
+（`meta.Type.eql` 比较它），故显式打印与解析；整数的声明宽度不做范围校验——
+builder 可能在一个窄类型下保留超范围的字面量 bits（`buildInt` 存源字面量的
+bits），printer 逐字打印该 payload，parser 逐字还原。
 
 ### 4.6 派生标注与 full-expression 边界
 
@@ -484,8 +495,13 @@ fn (B0: i32) =>
 - **引用字典**：正文含 `fnref Fk` / `module Ck` / host 引用时，正文前附
   `#refs: F0 = string.concat, H0 = host.clock.now, C1 = config.x`，把打印号映射到
   **稳定语义键**（模块限定名 + 特化参数；host 为绑定名），打印号按键排序分配，
-  打印顺序为 F 组、H 组、C 组。
+  打印顺序为 F 组、H 组、C 组。同一引用（同一 FuncId / ConstId / HostBindingId）
+  只登记一行；实例化键的末段是数字（`list.index_of_from.11`），键词法因此允许
+  数字开头的点段。
   同一源码在不同 invocation / 加载序下正文逐字相等。
+- 泛型 host 的同一绑定（如 `builtin.unbox`）不同实例化共享一个引用号，实例化
+  类型由每个 `fnref` 节点自己的 `: ty` 标注携带（§4.4），否则由字典的声明类型
+  推出。
 - 输出不含 side table 的 source span / 原始名字（除注释诊断模式与引用字典）。
 
 ### 4.9 解析与重建（round-trip）
@@ -508,12 +524,10 @@ fn (B0: i32) =>
   注释。注释无语义，整份转储是多个根表达式的拼接，**不是**单个可解析表达式。
 - `--emit-hir` 与 `--emit-asm` / `--emit-bin` / `--run` 互斥；与 `--output` /
   `--no-entry-fn` 可同用。
-- 未覆盖的节点使转储失败：`struct_make` / `field_get` / `variant_make`、带
-  `access_hops` 的模块链叶子、以及带 region 的非命名 op 报 `NotSerializable`，
-  CLI 输出函数名与错误并以退出码 1 结束。
-- **已知缺口**：解构 `let`（`Region.pattern != null`）的 printer 只打印
-  `params[0]`、忽略 pattern，会输出引用未声明 binder 的非法文本且**不报错**——
-  这条路径是静默损坏，不是失败关闭。
+- 未覆盖的节点使转储失败：带 `access_hops` 的模块链叶子与带 region 的非命名 op
+  报 `NotSerializable`，CLI 输出函数名与错误并以退出码 1 结束。（第 16 项后，
+  aggregate 成员身份与解构 let 已可序列化；这两类保留缺口是设计边界，不是
+  待修项。）
 
 ## 5. 绑定、作用域与控制流语义
 

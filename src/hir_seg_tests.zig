@@ -566,9 +566,9 @@ test "SEG: float algebra is not applied (only integer identities + folding)" {
     var b = try buildText("app", &.{.{ "app", src }});
     defer b.deinit();
     _ = try segAll(&b);
-    try expectFuncBody(&b, "app.fadd", "fn (B0: f32) => add.f32(%B0, 0f32)");
-    try expectFuncBody(&b, "app.fmul", "fn (B0: f32) => mul.f32(%B0, 1f32)");
-    try expectFuncBody(&b, "app.fzero", "fn (B0: f32) => mul.f32(%B0, 0f32)");
+    try expectFuncBody(&b, "app.fadd", "fn (B0: f32) => add.f32(%B0, 0.0f32)");
+    try expectFuncBody(&b, "app.fmul", "fn (B0: f32) => mul.f32(%B0, 1.0f32)");
+    try expectFuncBody(&b, "app.fzero", "fn (B0: f32) => mul.f32(%B0, 0.0f32)");
 }
 
 test "SEG: constant if / and / or select the taken island branch" {

@@ -372,10 +372,9 @@ fn renderProgram(
 /// inspection surface, not one parseable HIR expression. Pure: it writes
 /// no sink, so a failure leaves every destination untouched.
 /// `hir.print`'s S2 boundary rejects the nodes whose text cannot carry
-/// member identity (`struct_make` / `field_get` / `variant_make`, module
-/// access chains): on that error `failed_label` names the offending
-/// function and the whole dump is abandoned — never a silently degraded
-/// or partial output.
+/// member identity (a value-position module access chain): on that error
+/// `failed_label` names the offending function and the whole dump is
+/// abandoned — never a silently degraded or partial output.
 fn renderHirBuffer(
     arena: std.mem.Allocator,
     compilation: stilla.frontend.Compilation,
@@ -902,11 +901,9 @@ test "run --emit-hir --output writes the canonical HIR dump to the file" {
     try testing.expect(std.mem.indexOf(u8, out, "=== source: module") == null);
 }
 
-test "renderHirBuffer rejects an unserializable function and names it" {
-    // field_get has no S2 text form (hir.md §4.10). Rendering is pure, so
-    // this runs in-process without touching the test-runner's fd-1
-    // `--listen` protocol pipe; the CLI maps the same null/error into
-    // exit 1 *before* either sink writes (main.run's `orelse return 1`).
+test "renderHirBuffer renders aggregate member identity and destructuring lets" {
+    // Phase 16 (hir.md §4.4): struct_make / field_get / variant_make carry
+    // their member identity in the text form, so a struct program dumps.
     var sources = stilla.moduleinfo.Sources{};
     var smap = std.StringHashMapUnmanaged([]const u8).empty;
     defer smap.deinit(testing.allocator);
@@ -916,6 +913,32 @@ test "renderHirBuffer rejects an unserializable function and names it" {
         \\    let p = P { x: 1 };
         \\    p.x
         \\}
+    );
+    sources.source = smap;
+    var compilation = try stilla.frontend.compile(testing.allocator, .{ .entry = "app", .sources = sources, .entry_fn = "main", .optimize = true });
+    defer compilation.deinit();
+
+    var failed_label: ?[]const u8 = null;
+    const out = try renderHirBuffer(compilation.arena.allocator(), compilation, &failed_label);
+    try testing.expect(failed_label == null);
+    try testing.expect(std.mem.indexOf(u8, out, "struct_make(1i32) : P") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "field_get[x](%B0) : i32") != null);
+}
+
+test "renderHirBuffer rejects an unserializable function and names it" {
+    // A value-position module access chain (`lists.builtin.print`) carries
+    // hop identities with no canonical text form (hir.md §4.4/§4.10).
+    // Rendering is pure, so this runs in-process without touching the
+    // test-runner's fd-1 `--listen` protocol pipe; the CLI maps the same
+    // null/error into exit 1 *before* either sink writes (main.run's
+    // `orelse return 1`).
+    var sources = stilla.moduleinfo.Sources{};
+    var smap = std.StringHashMapUnmanaged([]const u8).empty;
+    defer smap.deinit(testing.allocator);
+    try smap.put(testing.allocator, "app",
+        \\const lists = import("list");
+        \\fn take(f: fn(str) -> void) -> void { f("hi") }
+        \\fn main() -> void { take(lists.builtin.print) }
     );
     sources.source = smap;
     var compilation = try stilla.frontend.compile(testing.allocator, .{ .entry = "app", .sources = sources, .entry_fn = "main", .optimize = true });

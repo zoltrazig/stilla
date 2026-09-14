@@ -1259,6 +1259,7 @@ pub const Parser = @import("passes/hir_parse.zig").Parser;
 pub const parseText = @import("passes/hir_parse.zig").parseText;
 // pi-lens-ignore: zls:unknown
 pub const print = @import("passes/hir_print.zig").print;
+pub const alphaEq = @import("passes/hir_print.zig").alphaEq;
 // pi-lens-ignore: zls:unknown
 pub const validate = @import("passes/hir_validate.zig").validate;
 

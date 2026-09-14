@@ -5,37 +5,9 @@
 「近期」内各项的先后是**建议顺序**，不是串行依赖；每项单独列出前置
 依赖。设计细节仍在两篇文档正文，本文件只记范围、依赖与验收。
 已完成的历史条目按原编号归档于「已完成」节，供跨文档交叉引用；
-「近期」从第 16 项续起，新增项一律追加到队尾。
+「近期」从第 17 项续起，新增项一律追加到队尾。
 
 ## 近期（建议顺序）
-
-- [ ] **16. HIR canonical 文本的 round-trip 闭合**（[hir.md](hir.md) §4.4 / §4.5 / §4.10）
-  - 现状：文本形态已知缺口（均已实测复现）——(a) `hir_print.printType` 会打印
-    `box(T)`，但 `hir_parse.parseType` 没有 `box` 分支，含 box 类型的 HIR 可打印、
-    不可解析（§4.5）；(b) `struct_make` / `field_get` / `variant_make` 无成员身份
-    的文本形态，printer 直接报 `NotSerializable`，任何 struct / union 程序都无法
-    `--emit-hir`；(c) 解构 `let`（`Region.pattern != null`）的 printer 只打印
-    `params[0]`、忽略 pattern，输出引用未声明 binder 的非法文本且**不报错**——
-    静默损坏；(d) 值位置模块链叶（`access_hops` 非空）报 `NotSerializable`
-    （刻意，`hir_print.zig` 的链叶守卫）；(e) 带 region 且无命名形状的 op 报
-    `NotSerializable`，通用形 `op(args){ params => body }` 是设计预留、parser 也
-    不接受（§4.4）。
-  - 可选子项（无消费者）：§4.6 的派生标注（`// { view / eff / fe }`）与 `fe[ … ]`
-    显式 FE 包裹——printer / parser 均无代码，仅为 SEG 验收输出预留。
-  - 不在范围：pattern 字面量在 arena 里无类型（`hir.Pattern.literal` 只有
-    `meta.ConstValue`），printer 打裸字面量、parser 按默认 rep 解析是**构造上
-    无损**的 HIR round-trip。
-  - 范围：解构 let 的**最低**修复是失败关闭（返回 `NotSerializable`，仿
-    `access_hops` 的「报错，绝不静默丢弃」先例），完整修复是按 §4.3 打印 pattern；
-    为 `struct_make` / `field_get` / `variant_make` 定义成员身份文本形态（§4.4 表
-    中 † 的规范预留）；补 `hir_parse.parseType` 的 `box` 分支；可选做 §4.6 标注。
-  - 依赖：无。
-  - 验收：`probes/box.st` / `probes/aggregates.st` / `probes/patterns.st` 是三个
-    已知报红用例（现均 `NotSerializable`）；修复后 `--emit-hir` 覆盖完整
-    `probes/` + `examples/` 语料库，`parse(print(hir))` 逐节点 α 等价并过
-    `hir_validate`，解构 let 与 box 类型至少各一个 round-trip 正例；同步删除
-    [hir.md](hir.md) §4.5 的「已知 printer / parser 不对称」说明与 §4.10 的已知
-    缺口（AGENTS.md：文档随代码更新）。
 
 - [ ] **17. scope-end 清理建模**（[effects.md](effects.md) §11.2；
       `src/passes/hir_effects.zig:1494/1624/1634/1724`）
@@ -95,10 +67,49 @@
   - 验收：决定落地（删除则更新 `root.zig` / 引用并跑全测；保留则补 doc 注释指明
     M1b 遗留与生产路径归属），`zig build test` 通过。
 
-## 已完成（归档，原「近期」第 1–15 项）
+## 已完成（归档，原「近期」第 1–16 项）
 
 > 以下条目均已落地，按完成时的编号保留，供 [effects.md](effects.md) 等正文
-> 交叉引用；新工作从「近期」第 16 项续起。
+> 交叉引用；新工作从「近期」第 17 项续起。
+
+- [x] **16. HIR canonical 文本的 round-trip 闭合**（[hir.md](hir.md) §4.4 / §4.5 / §4.10）
+  - 现状：文本形态已知缺口（均已实测复现）——(a) `hir_print.printType` 会打印
+    `box(T)`，但 `hir_parse.parseType` 没有 `box` 分支；(b) `struct_make` /
+    `field_get` / `variant_make` 无成员身份的文本形态，printer 直接报
+    `NotSerializable`；(c) 解构 `let`（`Region.pattern != null`）的 printer 只打印
+    `params[0]`、忽略 pattern，**静默损坏**；(d) 值位置模块链叶（`access_hops`
+    非空）报 `NotSerializable`（刻意）；(e) 带 region 且无命名形状的 op 报
+    `NotSerializable`（设计预留）。
+  - 已完成：为三个 aggregate op 定义成员身份文本形态——`struct_make(e, …) : ty`、
+    `field_get[member](e) : ty`（struct 字段名或 tuple 下标，由基类型解析）、
+    `variant_make[Variant](e, …) : ty`；printer 与 parser 双向实现，成员不存在 /
+    数目不符即报错（绝不静默降级）。结果类型始终显式，故 `ExprNode.ty` 逐字
+    保留。解构 `let` 按 §4.3 打印 pattern（`let <pattern> = <init> in <body>`），
+    parser 先解析 init 得其 scrutinee 类型、再回头解析 pattern（init 排除；
+    pattern 无 binder 类型标注）；`printPattern` 补上 struct 名、list rest 取
+    list 类型而非元素类型。补 `parseType` 的 `box(T)` 分支与函数类型的参数模式
+    （`move` / `borrow`）。一并修正语料 round-trip 暴露的既有不对称：
+    `parseNumeric` 裸 pattern 字面量的早退、整数声宽范围校验（builder 可在窄
+    类型下保留超范围 bits）、浮点字面量只在刚发射的字面量里找 `.`、泛型 host
+    实例化的 `fnref : ty`（节点类型≠ SerCtx 声明类型时才写）、lambda 仅当声明
+    返回 ≠ body 类型时补 `-> ret`、`call` / 空 operand 列表的 `)` 与多实参
+    comma 循环、typed 比较行的结果类型（`bool` 而非 operand rep）、`and`/`or`/
+    `if` 的 `unifyJoin` 结果类型、`#refs` 键的数字段（`list.index_of_from.11`）、
+    opaque 泛型的 arity、`drop` 结果类型、引用字典去重。顺带修正 IIFE 调用的
+    结果类型（callee 为 lambda 表达式时 callee_ty 缺失回退到 `void`；改从建好的
+    callee 节点取类型），使 `and %c then call(never) else false` 等 shape 的
+    node 类型 round-trip 一致。§4.6 派生标注仍为设计预留（无消费者，未做）。
+  - 依赖：无。
+  - 验收：新增 `hir_tests.corpusRoundTrip`——`probes/` + `examples/` 每个 built
+    函数根逐个 `print`→`parseText`→`hir_validate`→`alphaEq`→canonical reprint，
+    全部通过；白盒新增 aggregate 成员身份 / box / 解构 let / 函数类型模式 /
+    多实参 call / 裸 pattern 字面量 / 宽无符号 / 实例引用键的 round-trip 正例与
+    aggregate 成员校验负例。CLI `--emit-hir` 覆盖完整 `probes/` + `examples/`
+    语料（实测 0 失败），`build.zig` 的失败探针改指仍不可序列化的模块链叶
+    （`probes/cases/intrinsic_load_member_compacted_index.st`），`main.zig` 的
+    render 测试改为「aggregate 可打印」+「模块链叶失败并具名」。`zig build test`
+    全绿（1230/1230）。[hir.md](hir.md) §4.3–§4.5 / §4.10 同步更新并删除旧缺口
+    说明。
 
 - [x] **15. 跨 FE 的 let 折叠（契约准入）**（[hir.md](hir.md) §8.3 / §8.7）
   - 范围：按 β 的 boundary-rewrite 契约模式（而非 island 成员资格）为

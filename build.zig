@@ -159,16 +159,24 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&asm_probe.step);
 
     // `--emit-hir` probes: the fd-1 sink of the canonical HIR dump (the
-    // `--output` file sink is covered in `src/main.zig`), and the exit-1
-    // path for a function whose text carries no member identity yet
-    // (hir.md §4.10 — `field_get` in probes/aggregates.st).
+    // `--output` file sink is covered in `src/main.zig`). Aggregate member
+    // identity and destructuring lets now dump (hir.md §4.4, phase 16), and
+    // the exit-1 path covers what deliberately stays unserializable — a
+    // value-position module access chain, which carries hop identities with
+    // no canonical text form (`lists.builtin.print` in
+    // probes/cases/intrinsic_load_member_compacted_index.st, hir.md §4.10).
     const hir_probe = b.addRunArtifact(exe);
     hir_probe.addArgs(&.{ "--emit-hir", "probes/numeric.st" });
     hir_probe.expectStdOutMatch("// @numeric.i32_ops\n");
     test_step.dependOn(&hir_probe.step);
 
+    const hir_aggregate_probe = b.addRunArtifact(exe);
+    hir_aggregate_probe.addArgs(&.{ "--emit-hir", "probes/aggregates.st" });
+    hir_aggregate_probe.expectStdOutMatch("field_get[x](%B0) : i32");
+    test_step.dependOn(&hir_aggregate_probe.step);
+
     const hir_fail_probe = b.addRunArtifact(exe);
-    hir_fail_probe.addArgs(&.{ "--emit-hir", "probes/aggregates.st" });
+    hir_fail_probe.addArgs(&.{ "--emit-hir", "probes/cases/intrinsic_load_member_compacted_index.st" });
     hir_fail_probe.expectExitCode(1);
     hir_fail_probe.expectStdOutEqual("");
     hir_fail_probe.expectStdErrMatch("NotSerializable");

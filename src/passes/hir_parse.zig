@@ -20,10 +20,12 @@
 //! through the `#refs:` dictionary line plus `hir.SerCtx` stable keys
 //! (hir.md §4.8) — never by guessing numbers.
 //!
-//! S2 serialization boundaries (user-approved, PROGRESS.md): nominal
-//! types resolve through the fixture `SerCtx` (S4 wires the module
-//! tables); struct/field/variant ops whose §4.4 text form cannot carry
-//! member/tag identity are *rejected here*, never silently degraded.
+//! Aggregate identity (`struct_make` / `field_get` / `variant_make`) is
+//! resolved through the bracket member + annotated type against the
+//! fixture `SerCtx` decls (hir.md §4.4); a member that does not resolve
+//! is rejected here, never silently degraded. The S2 boundary that
+//! remains is a value-position module access chain leaf, whose hop
+//! identities have no text form.
 
 const std = @import("std");
 const hir = @import("stilla").hir;
@@ -166,6 +168,23 @@ pub const Parser = struct {
         return self.src[start..self.pos];
     }
 
+    /// A `#refs` stable key: `[A-Za-z0-9_]+(\.[A-Za-z0-9_]+)*`. Unlike
+    /// `wordToken`, later segments may start with a digit — specialization
+    /// keys end in an instance number (`list.index_of_from.11`, §4.8).
+    fn refKeyToken(self: *Parser) ?[]const u8 {
+        const start = self.pos;
+        if (self.pos >= self.src.len) return null;
+        if (!std.ascii.isAlphanumeric(self.peek()) and self.peek() != '_') return null;
+        while (self.pos < self.src.len and (std.ascii.isAlphanumeric(self.peek()) or self.peek() == '_')) _ = self.advance();
+        while (self.pos < self.src.len and self.peek() == '.' and
+            (std.ascii.isAlphanumeric(self.peekAt(1)) or self.peekAt(1) == '_'))
+        {
+            _ = self.advance();
+            while (self.pos < self.src.len and (std.ascii.isAlphanumeric(self.peek()) or self.peek() == '_')) _ = self.advance();
+        }
+        return self.src[start..self.pos];
+    }
+
     /// A single word token (no dots).
     fn simpleWord(self: *Parser) ?[]const u8 {
         const start = self.pos;
@@ -188,6 +207,25 @@ pub const Parser = struct {
         if (self.peek() != '=' or self.peekAt(1) != '>') return self.fail("expected `=>`");
         _ = self.advance();
         _ = self.advance();
+    }
+
+    fn expectArrowType(self: *Parser) ParseError!void {
+        try self.skipWs();
+        if (self.peek() != '-' or self.peekAt(1) != '>') return self.fail("expected `->`");
+        _ = self.advance();
+        _ = self.advance();
+    }
+
+    /// An optional `move` / `borrow` prefix before a function-type
+    /// parameter (hir.md §4.5); `.plain` when absent.
+    fn parseParamMode(self: *Parser) ParseError!meta.ParamMode {
+        try self.skipWs();
+        const save = self.pos;
+        const w = self.simpleWord() orelse return .plain;
+        if (std.mem.eql(u8, w, "move")) return .move;
+        if (std.mem.eql(u8, w, "borrow")) return .borrow;
+        self.pos = save;
+        return .plain;
     }
 
     fn expectColonColon(self: *Parser) ParseError!void {
@@ -317,7 +355,7 @@ pub const Parser = struct {
             const no = try self.digitsValue();
             try self.expectByte('=');
             try self.skipInlineWs();
-            const key = self.wordToken() orelse return self.fail("bad #refs key");
+            const key = self.refKeyToken() orelse return self.fail("bad #refs key");
             const list: *std.ArrayListUnmanaged(RefEntry) = switch (kind) {
                 'F' => &self.refs_f,
                 'H' => &self.refs_h,
@@ -441,7 +479,7 @@ pub const Parser = struct {
         const sfx_start = self.pos;
         while (std.ascii.isAlphanumeric(self.peek())) _ = self.advance();
         const suffix = self.src[sfx_start..self.pos];
-        if (suffix.len == 0) return self.fail("numeric literal missing type suffix");
+        if (suffix.len == 0 and !allow_bare) return self.fail("numeric literal missing type suffix");
         const core = self.src[core_start..core_end];
         if (is_float) {
             const f: f64 = std.fmt.parseFloat(f64, core) catch return self.fail("bad float literal");
@@ -485,25 +523,18 @@ pub const Parser = struct {
                 if (magnitude > @as(u64, @bitCast(@as(i64, std.math.minInt(i64))))) {
                     return self.fail("integer literal out of range");
                 }
-                const v: i64 = -@as(i64, @intCast(magnitude));
-                if (suffix[1] == '3' and (v < std.math.minInt(i32) or v > std.math.maxInt(i32))) {
-                    return self.fail("integer literal out of range");
-                }
-                return .{ .value = .{ .int = v }, .ty = meta.Type{ .primitive = kind } };
+                return .{ .value = .{ .int = -@as(i64, @intCast(magnitude)) }, .ty = meta.Type{ .primitive = kind } };
             }
-            if (suffix[1] == '6') {
-                if (magnitude > std.math.maxInt(i64)) return self.fail("integer literal out of range");
-                return .{ .value = .{ .int = @intCast(magnitude) }, .ty = meta.Type{ .primitive = kind } };
-            }
-            if (magnitude > std.math.maxInt(i32)) return self.fail("integer literal out of range");
+            // No declared-width range check: the printer emits the stored
+            // i64 payload verbatim, and a narrow type may legitimately
+            // hold an out-of-range value (hir_build_expr.buildInt keeps
+            // the source literal's bits under the default i32 width).
+            if (magnitude > std.math.maxInt(i64)) return self.fail("integer literal out of range");
             return .{ .value = .{ .int = @intCast(magnitude) }, .ty = meta.Type{ .primitive = kind } };
         }
-        // unsigned
         if (neg) return self.fail("negative unsigned literal");
-        if (suffix[1] == '3') {
-            if (magnitude > std.math.maxInt(u32)) return self.fail("integer literal out of range");
-            return .{ .value = .{ .int = @intCast(magnitude) }, .ty = meta.Type{ .primitive = kind } };
-        }
+        // The bit-cast round-trips the stored payload exactly, including
+        // values above the declared width's range.
         return .{ .value = .{ .int = @bitCast(magnitude) }, .ty = meta.Type{ .primitive = kind } };
     }
 
@@ -545,8 +576,9 @@ pub const Parser = struct {
             var params: std.ArrayList(meta.Param) = .empty;
             if (!(try self.atByte(')'))) {
                 while (true) {
+                    const mode = try self.parseParamMode();
                     const pt = try self.parseType();
-                    try params.append(self.arena, meta.syntheticParam(fake_span, .plain, pt));
+                    try params.append(self.arena, meta.syntheticParam(fake_span, mode, pt));
                     if (try self.atByte(',')) {
                         _ = self.advance();
                         continue;
@@ -555,11 +587,19 @@ pub const Parser = struct {
                 }
             }
             try self.expectByte(')');
-            try self.expectWord("->");
+            try self.expectArrowType();
             const ret = try self.parseType();
             const ret_ptr = try self.arena.create(meta.Type);
             ret_ptr.* = ret;
             return .{ .function = .{ .params = try params.toOwnedSlice(self.arena), .ret = ret_ptr } };
+        }
+        if (std.mem.eql(u8, w, "box")) {
+            try self.expectByte('(');
+            const inner = try self.parseType();
+            try self.expectByte(')');
+            const ptr = try self.arena.create(meta.Type);
+            ptr.* = inner;
+            return .{ .box = ptr };
         }
         if (primByWord(w)) |k| return meta.Type{ .primitive = k };
         // Nominal type: resolve the dotted name through the SerCtx decls.
@@ -567,14 +607,19 @@ pub const Parser = struct {
         const path = self.wordToken() orelse return self.fail("expected nominal type");
         var id: usize = self.ctx.types.len;
         var type_params: []const []const u8 = &.{};
+        // An opaque decl records no type-parameter list (meta.OpaqueDecl),
+        // so its instantiation's arity cannot be validated here — accept
+        // the printed args as written.
+        var check_arity = true;
         for (self.ctx.types, 0..) |d, i| {
             if (std.mem.eql(u8, d.name(), path)) {
                 id = i;
-                type_params = switch (d) {
-                    .struct_ => |sd| sd.type_params,
-                    .union_ => |u| u.type_params,
-                    .opaque_, .unknown => &.{},
-                };
+                switch (d) {
+                    .struct_ => |sd| type_params = sd.type_params,
+                    .union_ => |u| type_params = u.type_params,
+                    .opaque_ => check_arity = false,
+                    .unknown => check_arity = false,
+                }
                 break;
             }
         }
@@ -594,7 +639,7 @@ pub const Parser = struct {
                 }
             }
         }
-        if (args.items.len != type_params.len) return self.fail("wrong number of type arguments");
+        if (check_arity and args.items.len != type_params.len) return self.fail("wrong number of type arguments");
         return .{ .named = .{ .id = @intCast(id), .args = try args.toOwnedSlice(self.arena) } };
     }
 
@@ -681,6 +726,15 @@ pub const Parser = struct {
     fn parseOpForm(self: *Parser, op: hir.OpId) ParseError!hir.ExprId {
         const desc = hir.registry.get(op);
         if (desc.regions != .none) return self.fail("region op without a named text form");
+        const name = desc.name;
+        // Aggregate member identity rides a bracket before the operand
+        // list (hir.md §4.4): `field_get[x](…)` / `variant_make[Some](…)`.
+        var member: ?[]const u8 = null;
+        if (try self.atByte('[')) {
+            _ = self.advance();
+            member = try self.parseMemberToken();
+            try self.expectByte(']');
+        }
         var ops: std.ArrayList(hir.ExprId) = .empty;
         try self.expectByte('(');
         if (!(try self.atByte(')'))) {
@@ -693,8 +747,9 @@ pub const Parser = struct {
                 try self.expectByte(')');
                 break;
             }
+        } else {
+            _ = self.advance(); // the empty operand list's `)`
         }
-        const name = desc.name;
         // Arity check per descriptor.
         switch (desc.operands) {
             .none => if (ops.items.len != 0) return self.fail("op takes no operands"),
@@ -702,14 +757,15 @@ pub const Parser = struct {
             .two => if (ops.items.len != 2) return self.fail("op takes two operands"),
             .callee_and_args, .list => {},
         }
-        // Deferred text forms: the §4.4 shorthand loses member/tag
-        // identity, so these are rejected, never silently degraded.
+        // Aggregate member identity: the annotated type plus the member
+        // name resolve the field index / variant tag (hir.md §4.4).
         if (std.mem.eql(u8, name, "struct_make") or
             std.mem.eql(u8, name, "field_get") or
             std.mem.eql(u8, name, "variant_make"))
         {
-            return self.fail("op text form deferred (member identity not serializable in S2)");
+            return self.finishAggregate(op, name, member, ops.items);
         }
+        if (member != null) return self.fail("member identity on a non-aggregate op");
         const annotated = std.mem.eql(u8, name, "num_cast") or
             std.mem.eql(u8, name, "any_cast") or
             (std.mem.eql(u8, name, "list_make") and ops.items.len == 0);
@@ -724,16 +780,87 @@ pub const Parser = struct {
         return self.program.addExpr(.{ .op = op, .ty = ty, .operands = operands });
     }
 
+    /// A member name (field / variant) or a numeric tuple position.
+    fn parseMemberToken(self: *Parser) ParseError![]const u8 {
+        try self.skipWs();
+        const c = self.peek();
+        if (std.ascii.isDigit(c)) {
+            const start = self.pos;
+            while (std.ascii.isDigit(self.peek())) _ = self.advance();
+            return self.src[start..self.pos];
+        }
+        return self.simpleWord() orelse self.fail("expected member name");
+    }
+
+    /// `struct_make(e, …) : ty` / `field_get[member](e) : ty` /
+    /// `variant_make[Variant](e, …) : ty` (hir.md §4.4): resolve the
+    /// member identity against the serialization-context decls and check
+    /// operand arity. The result type stays explicit, so the node's
+    /// `ExprNode.ty` round-trips exactly.
+    fn finishAggregate(self: *Parser, op: hir.OpId, name: []const u8, member: ?[]const u8, ops: []const hir.ExprId) ParseError!hir.ExprId {
+        try self.expectByte(':');
+        const ann = try self.parseType();
+        if (std.mem.eql(u8, name, "struct_make")) {
+            if (member != null) return self.fail("struct_make carries no member identity");
+            if (ann != .named) return self.fail("struct_make needs a nominal result type");
+            const decl = self.ctxDecl(ann.named.id) orelse return self.fail("struct type outside serialization context");
+            if (decl != .struct_) return self.fail("struct_make result type is not a struct");
+            if (ops.len != decl.struct_.fields.len) return self.fail("struct_make operand count does not match the struct fields");
+            return self.program.addExpr(.{ .op = op, .ty = ann, .operands = try self.program.addOperands(ops) });
+        }
+        if (std.mem.eql(u8, name, "variant_make")) {
+            const vname = member orelse return self.fail("variant_make needs a variant name");
+            if (ann != .named) return self.fail("variant_make needs a nominal result type");
+            const decl = self.ctxDecl(ann.named.id) orelse return self.fail("union type outside serialization context");
+            if (decl != .union_) return self.fail("variant_make result type is not a union");
+            var tag: ?u32 = null;
+            for (decl.union_.variants, 0..) |v, i| {
+                if (std.mem.eql(u8, v.name, vname)) tag = @intCast(i);
+            }
+            const tg = tag orelse return self.fail("unknown variant name");
+            if (ops.len != decl.union_.variants[tg].payloads.len) return self.fail("variant_make operand count does not match the variant payload");
+            return self.program.addExpr(.{ .op = op, .ty = ann, .operands = try self.program.addOperands(ops), .payload = .{ .tag = tg } });
+        }
+        // field_get: the member resolves against the operand's base type.
+        const mname = member orelse return self.fail("field_get needs a member name");
+        const base = self.program.node(ops[0]).ty;
+        var field: u32 = 0;
+        switch (base) {
+            .named => |bn| {
+                const decl = self.ctxDecl(bn.id) orelse return self.fail("struct type outside serialization context");
+                if (decl != .struct_) return self.fail("field_get base is not a struct");
+                var found: ?u32 = null;
+                for (decl.struct_.fields, 0..) |f, i| {
+                    if (std.mem.eql(u8, f.name, mname)) found = @intCast(i);
+                }
+                field = found orelse return self.fail("unknown struct field");
+            },
+            .tuple => |elems| {
+                const idx = std.fmt.parseInt(u32, mname, 10) catch return self.fail("tuple field must be an index");
+                if (idx >= elems.len) return self.fail("tuple index out of range");
+                field = idx;
+            },
+            else => return self.fail("field_get base is not a struct or tuple"),
+        }
+        return self.program.addExpr(.{ .op = op, .ty = ann, .operands = try self.program.addOperands(ops), .payload = .{ .field = field } });
+    }
+
     /// Result type derived from opcode + operands (used when the node is
     /// not type-annotated in text).
     fn opResultType(self: *Parser, name: []const u8, desc: hir.OpDescriptor, ops: []const hir.ExprId) ParseError!meta.Type {
         const p = &self.program;
-        if (desc.typed) return desc.rep.?.toCfgType();
+        if (desc.typed) {
+            // Comparison rows carry the operand rep but yield `bool`
+            // (mirrors the builder's binary-op typing).
+            if (isComparisonOp(name)) return meta.Type{ .primitive = .bool };
+            return desc.rep.?.toCfgType();
+        }
         if (std.mem.eql(u8, name, "seq")) {
             if (ops.len == 0) return self.fail("seq needs at least one operand");
             return p.node(ops[ops.len - 1]).ty;
         }
-        if (std.mem.eql(u8, name, "move") or std.mem.eql(u8, name, "borrow") or std.mem.eql(u8, name, "drop")) {
+        if (std.mem.eql(u8, name, "drop")) return meta.Type{ .primitive = .void };
+        if (std.mem.eql(u8, name, "move") or std.mem.eql(u8, name, "borrow")) {
             return p.node(ops[0]).ty;
         }
         if (std.mem.eql(u8, name, "any_pack")) return meta.Type{ .primitive = .any };
@@ -766,7 +893,7 @@ pub const Parser = struct {
             if (id == self.ctx.funcs.len) return self.fail("unknown function key");
             return self.program.addExpr(.{
                 .op = try self.opId("fn_ref"),
-                .ty = self.ctx.funcs[id].type_,
+                .ty = try self.optionalTypeAnnotation(self.ctx.funcs[id].type_),
                 .payload = .{ .func = .{ .func = @intCast(id) } },
             });
         }
@@ -779,9 +906,22 @@ pub const Parser = struct {
         if (id == self.ctx.hosts.len) return self.fail("unknown host key");
         return self.program.addExpr(.{
             .op = try self.opId("fn_ref"),
-            .ty = self.ctx.hosts[id].type_,
+            .ty = try self.optionalTypeAnnotation(self.ctx.hosts[id].type_),
             .payload = .{ .func = .{ .host = @intCast(id) } },
         });
+    }
+
+    /// An optional ` : ty` after a ref leaf. The printer emits it only
+    /// when a node's instantiated type differs from its context-declared
+    /// type (a generic host instantiation); otherwise the context type is
+    /// the node type (hir.md §4.4).
+    fn optionalTypeAnnotation(self: *Parser, default_ty: meta.Type) ParseError!meta.Type {
+        try self.skipWs();
+        if (self.peek() == ':' and self.peekAt(1) != ':') {
+            _ = self.advance();
+            return self.parseType();
+        }
+        return default_ty;
     }
 
     fn parseModuleConst(self: *Parser) ParseError!hir.ExprId {
@@ -807,6 +947,25 @@ pub const Parser = struct {
     /// the binder's region (§5.3 init exclusion: the declaration goes
     /// live only after the init is parsed).
     fn parseLet(self: *Parser) ParseError!hir.ExprId {
+        // The simple form is `let Bk: ty = …` (`B<digits>` then `:`).
+        // Every other shape is a destructuring pattern (a lone bind leaf
+        // is the simple form, per hir.md §5.2).
+        const save_pos = self.pos;
+        const save_line = self.line;
+        const save_col = self.col;
+        const is_simple = blk: {
+            if ((try self.binderNoAt()) == null) break :blk false;
+            try self.skipWs();
+            break :blk self.peek() == ':';
+        };
+        self.pos = save_pos;
+        self.line = save_line;
+        self.col = save_col;
+        if (is_simple) return self.parseSimpleLet();
+        return self.parsePatternLet();
+    }
+
+    fn parseSimpleLet(self: *Parser) ParseError!hir.ExprId {
         const decl = try self.parseBinderDecl();
         try self.expectByte('=');
         const init_expr = try self.parseExpr();
@@ -826,6 +985,104 @@ pub const Parser = struct {
         });
     }
 
+    /// `let <pattern> = <init> in <body>` — a destructuring let. The
+    /// pattern needs the scrutinee type to resolve its leaves, but the
+    /// text puts the pattern before the init; parse the init first
+    /// (found by the top-level `=`) to learn the type, then rewind and
+    /// parse the pattern with it. The binders are declared only after
+    /// the init is parsed, so an init cannot reference them (§5.3 init
+    /// exclusion).
+    fn parsePatternLet(self: *Parser) ParseError!hir.ExprId {
+        const pat_start = self.pos;
+        const pat_line = self.line;
+        const pat_col = self.col;
+        const eq = try self.findTopLevelEq();
+        // Move to the init start via `advance` so line/column tracking
+        // stays correct for diagnostics.
+        while (self.pos <= eq) _ = self.advance();
+        const init_expr = try self.parseExpr();
+        const after_init_pos = self.pos;
+        const after_init_line = self.line;
+        const after_init_col = self.col;
+        const init_ty = self.program.node(init_expr).ty;
+        // Rewind: parse the pattern now that the scrutinee type is known.
+        self.pos = pat_start;
+        self.line = pat_line;
+        self.col = pat_col;
+        try self.openRegion();
+        var params: std.ArrayList(hir.BinderId) = .empty;
+        const pat_id = try self.parsePatternFor(init_ty, &params);
+        try self.expectByte('=');
+        // The init is already parsed; resume after it.
+        self.pos = after_init_pos;
+        self.line = after_init_line;
+        self.col = after_init_col;
+        try self.expectWord("in");
+        const body = try self.parseExpr();
+        try self.closeRegion();
+        const region = try self.program.addRegion(params.items, body, pat_id);
+        const regions = try self.program.addRegions(&.{region});
+        const operands = try self.program.addOperands(&.{init_expr});
+        return self.program.addExpr(.{
+            .op = try self.opId("let"),
+            .ty = self.program.node(body).ty,
+            .operands = operands,
+            .regions = regions,
+        });
+    }
+
+    /// Offset of the first top-level `=` (not `=>`) at bracket depth 0,
+    /// skipping strings and comments. A destructuring pattern contains
+    /// no `=`, so this is the pattern/init separator.
+    fn findTopLevelEq(self: *Parser) ParseError!usize {
+        var i = self.pos;
+        var depth: usize = 0;
+        while (i < self.src.len) {
+            const c = self.src[i];
+            if (c == '"') {
+                i += 1;
+                while (i < self.src.len and self.src[i] != '"') {
+                    if (self.src[i] == '\\') i += 1;
+                    i += 1;
+                }
+                i += 1;
+                continue;
+            }
+            if (c == '/' and i + 1 < self.src.len) {
+                if (self.src[i + 1] == '/') {
+                    while (i < self.src.len and self.src[i] != '\n') i += 1;
+                    continue;
+                }
+                if (self.src[i + 1] == '*') {
+                    i += 2;
+                    while (i + 1 < self.src.len and !(self.src[i] == '*' and self.src[i + 1] == '/')) i += 1;
+                    i += 2;
+                    continue;
+                }
+            }
+            if (c == '(' or c == '[' or c == '{') {
+                depth += 1;
+                i += 1;
+                continue;
+            }
+            if (c == ')' or c == ']' or c == '}') {
+                if (depth == 0) return self.fail("unterminated destructuring pattern");
+                depth -= 1;
+                i += 1;
+                continue;
+            }
+            if (c == '=' and depth == 0) {
+                if (i + 1 < self.src.len and self.src[i + 1] == '>') {
+                    i += 2;
+                    continue;
+                }
+                return i;
+            }
+            i += 1;
+        }
+        return self.fail("expected `=` in a destructuring let");
+    }
+
     /// `fn (params) => body` — a lambda value with one parameter region.
     fn parseLambda(self: *Parser) ParseError!hir.ExprId {
         try self.expectByte('(');
@@ -841,6 +1098,15 @@ pub const Parser = struct {
             }
         }
         try self.expectByte(')');
+        // An explicit `-> ret` appears only when the body's type differs
+        // from the lambda's declared return (hir.md §4.4).
+        var ret_ann: ?meta.Type = null;
+        try self.skipWs();
+        if (self.peek() == '-' and self.peekAt(1) == '>') {
+            _ = self.advance();
+            _ = self.advance();
+            ret_ann = try self.parseType();
+        }
         try self.expectArrow();
         try self.openRegion();
         var params: std.ArrayList(hir.BinderId) = .empty;
@@ -860,7 +1126,7 @@ pub const Parser = struct {
         const region = try self.program.addRegion(params.items, body, null);
         const regions = try self.program.addRegions(&.{region});
         const ret_ptr = try self.arena.create(meta.Type);
-        ret_ptr.* = self.program.node(body).ty;
+        ret_ptr.* = ret_ann orelse self.program.node(body).ty;
         const fn_ty = meta.Type{ .function = .{ .params = try fn_params.toOwnedSlice(self.arena), .ret = ret_ptr } };
         return self.program.addExpr(.{
             .op = try self.opId("lambda"),
@@ -897,7 +1163,7 @@ pub const Parser = struct {
         const operands = try self.program.addOperands(&.{cond});
         return self.program.addExpr(.{
             .op = op,
-            .ty = self.program.node(then_body).ty,
+            .ty = unifyJoin(self.program.node(then_body).ty, self.program.node(else_root).ty),
             .operands = operands,
             .regions = regions,
         });
@@ -1061,10 +1327,12 @@ pub const Parser = struct {
             var rest: ?hir.PatternId = null;
             if (!(try self.atByte(']'))) {
                 while (true) {
+                    try self.skipWs();
                     if (self.peek() == '.' and self.peekAt(1) == '.') {
                         _ = self.advance();
                         _ = self.advance();
-                        rest = try self.parsePatternFor(elem_ty, params);
+                        // The rest binds the tail *list*, not an element.
+                        rest = try self.parsePatternFor(sub_ty, params);
                         break;
                     }
                     try children.append(self.arena, try self.parsePatternFor(elem_ty, params));
@@ -1087,6 +1355,9 @@ pub const Parser = struct {
         if (std.mem.eql(u8, w, "true")) return self.program.addPattern(.{ .literal = .{ .bool = true } });
         if (std.mem.eql(u8, w, "false")) return self.program.addPattern(.{ .literal = .{ .bool = false } });
         if (std.mem.eql(u8, w, "void")) return self.program.addPattern(.{ .literal = .void });
+        // The canonical printer separates the nominal name from `{` with
+        // a space, so look past it before the shape tests.
+        try self.skipWs();
         // Variant path `Nom::Var`?
         if (self.peek() == ':' and self.peekAt(1) == ':') {
             if (sub_ty != .named) return self.fail("variant pattern on a non-nominal scrutinee");
@@ -1159,6 +1430,7 @@ pub const Parser = struct {
         var fields: std.ArrayList(hir.Pattern.FieldPattern) = .empty;
         if (!(try self.atByte('}'))) {
             while (true) {
+                try self.skipWs();
                 const fname = self.simpleWord() orelse return self.fail("expected field name");
                 var index: ?usize = null;
                 for (decl.fields, 0..) |f, i| {
@@ -1196,13 +1468,13 @@ pub const Parser = struct {
             while (true) {
                 try self.expectByte(',');
                 try args.append(self.arena, try self.parseExpr());
-                if (try self.atByte(',')) {
-                    _ = self.advance();
-                    continue;
+                if (!(try self.atByte(','))) {
+                    try self.expectByte(')');
+                    break;
                 }
-                try self.expectByte(')');
-                break;
             }
+        } else {
+            _ = self.advance(); // the empty argument list's `)`
         }
         var all: std.ArrayList(hir.ExprId) = .empty;
         try all.append(self.arena, callee);
@@ -1217,6 +1489,27 @@ pub const Parser = struct {
         });
     }
 };
+
+/// The join of two branch values (mirrors the builder's `unifyJoin`):
+/// `never` contributes nothing, equal types join to themselves, and a
+/// mixed pair joins as `any`. An `if`/`and`/`or` node's type is this
+/// join, not the then-branch's type outright.
+fn unifyJoin(a: meta.Type, b: meta.Type) meta.Type {
+    if (a == .primitive and a.primitive == .never) return b;
+    if (b == .primitive and b.primitive == .never) return a;
+    if (meta.Type.eql(a, b)) return a;
+    return meta.Type{ .primitive = .any };
+}
+
+/// True for the typed comparison rows (`eq.i32`, `lt.f64`, …): their
+/// result type is `bool`, not the operand rep.
+fn isComparisonOp(name: []const u8) bool {
+    const dot = std.mem.indexOfScalar(u8, name, '.') orelse return false;
+    const base = name[0..dot];
+    return std.mem.eql(u8, base, "eq") or std.mem.eql(u8, base, "ne") or
+        std.mem.eql(u8, base, "lt") or std.mem.eql(u8, base, "le") or
+        std.mem.eql(u8, base, "gt") or std.mem.eql(u8, base, "ge");
+}
 
 /// Parse canonical text into a fresh arena-owned program. The caller owns
 /// the arena. `ctx` supplies nominal decls and ref stable keys (§4.8);
