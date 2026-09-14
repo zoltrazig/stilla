@@ -5,19 +5,9 @@
 「近期」内各项的先后是**建议顺序**，不是串行依赖；每项单独列出前置
 依赖。设计细节仍在两篇文档正文，本文件只记范围、依赖与验收。
 已完成的历史条目按原编号归档于「已完成」节，供跨文档交叉引用；
-「近期」从第 14 项续起，新增项一律追加到队尾。
+「近期」从第 15 项续起，新增项一律追加到队尾。
 
 ## 近期（建议顺序）
-
-- [ ] **14. `never_returns` must 事实与后缀删除**（[effects.md](effects.md) §10.1）
-  - 现状：`never_returns(f)` 设计为**独立于摘要的 must 事实**（签名 `-> never`
-    或结构推导），代码中**不存在**；由它驱动的后缀不可达删除也未实现。摘要代数
-    不变，`;` 合并仍保守并入后缀位。
-  - 范围：推导 `never_returns`（取不到即 false，递归 SCC 用 greatest-fixpoint
-    语义）；调用点后同一直行区域的后缀不可达，可整段删除（含该区域的 FE 清理）。
-  - 依赖：删后缀时的 FE 清理归属依赖第 7 项（节点级 FE 边界标注，已落地）。
-  - 验收：`-> never` callee 后的语句与清理被删除；有正常返回路径的 callee 不
-    删；递归 SCC 的 greatest-fixpoint 用例；on/off 解释器差分。
 
 - [ ] **15. 跨 FE 的 let 折叠（契约准入）**（[hir.md](hir.md) §8.3 / §8.7）
   - 现状：节点级 FE 标注落地后（第 7 项），源级 `let` 的 init 自成 FE，故不是
@@ -34,10 +24,44 @@
   - 验收：契约正例（源级纯 init 的 dead / forward / 原子复制）+ 负例
     （Borrowed view / Unique / 可观察 init）；on/off 解释器差分。
 
-## 已完成（归档，原「近期」第 1–12 项）
+## 已完成（归档，原「近期」第 1–14 项）
 
 > 以下条目均已落地，按完成时的编号保留，供 [effects.md](effects.md) 等正文
-> 交叉引用；新工作从「近期」第 14 项续起。
+> 交叉引用；新工作从「近期」第 15 项续起。
+
+- [x] **14. `never_returns` must 事实与后缀删除**（[effects.md](effects.md) §10.1、
+      §12.4；hir_effects.zig / hir_simplify.zig / hir_lower_expr.zig）
+  - 范围：推导 `never_returns`（取不到即 false，递归 SCC 用 greatest-fixpoint
+    语义）；调用点后同一直线区域的后缀不可达，可整段删除（含该区域的 FE 清理）。
+  - 已完成：`hir_effects.Analysis` 新增 must 事实 `never_returns[]` + 结构谓词
+    `exprNever` 与查询 `neverReturns`。后者是调用图上从「全 true」出发、每轮
+    Jacobi 同时更新、单调下降的 **greatest fixpoint**（coinductive：
+    `fn f() -> void { f() }` 真的不返回，least fixpoint 会漏掉），至多
+    `#funcs + 1` 轮收敛；惰性求值（首次 `neverReturns` / `exprNever` 触发）。
+    `exprNever` 是迭代后序（显式栈，无递归）的 must 谓词：`ty == never`、
+    `call` 的可解析目标集全为 never（inline λ 用其体、host 用签名 ret）、
+    `if`/`and`/`or`/`match` 的头或全臂、其余 strict op 的任一 operand/region
+    都判；未证明一律 false。memo 按轮清空，越界（本轮新 append 的节点）视为
+    false。`hir_simplify.zig` 新增第三条消费者 `neverSuffix`（先于 dead-let /
+    ANF 运行）：`seq` 在首个 never-normalizing operand 处截断，`let` 的 init
+    never 时用 init 内容替换整节点（body 死），并把这些节点与「类型特化为
+    `never`」的节点的清理 token 退役（`Retire` 集合，轮末统一置 `no_expr`）——
+    被删节点不可达，`cleanupEffect` 本就不计入，退役是 token 表卫生 +
+    `cleanupOriginsReachable` 不变量。`Stats.suffix_deletions` 计数。
+    `hir_lower_expr.expr` 新增结构规则：任何 `ty == never` 的节点求值后终止块并
+    发射 `trap`（置于 `dropCreatedRange` 之前）；对既有 never 节点是 no-op
+    （直接 call 走 `emitCall` 的 ret、value/host 走签名 ret、`panic` / 全臂
+    `if` 直接 trap），故无 golden churn。
+  - 依赖：**第 7 项**（已落地：删后缀时的 FE 清理归属依赖节点级 FE 标注）。
+  - 验收：`hir_effects.zig` 白盒（签名 / 结构 never、正常返回路径、recursive
+    SCC greatest-fixpoint 真 / 假、`let`-init / 全臂分支 / 未解析 callee 的
+    `exprNever`）；`hir_simplify.zig` 白盒正例（`seq` 后缀删除、`let` init 删除）
+    与负例（正常返回 callee 不删）；`hir_simplify_tests.zig` 断言 pre-optimizer
+    AIR on/off 不同并各自 round-trip；新增 `probes/never_suffix.st`（`void` 的
+    structural-never callee、let-init 情形、正常返回 callee 保留；注册进
+    `probe_corpus.panics`）进全语料 `--simplify` on/off 解释器差分与 pass smoke。
+    SEG budget 基线随语料更新（57 程序 / 4372 节点 / 2360 islands / 70 轮 /
+    ≈71 ms，仍断言收敛）。
 
 - [x] **13. rewrite 契约形式化**（[effects.md](effects.md) §10.3–§10.4）
   - 范围：把 §10.3 的 applicability / legality 两层与 §10.4 的 `RewriteContract`

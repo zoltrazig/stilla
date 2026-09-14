@@ -50,6 +50,7 @@
 
 const std = @import("std");
 const cfg = @import("stilla").cfg;
+const meta = @import("stilla").meta;
 const hir = @import("stilla").hir;
 const moduleinfo = @import("stilla").moduleinfo;
 const hir_effects = @import("hir_effects.zig");
@@ -57,6 +58,14 @@ const rewrite_contract = @import("rewrite_contract.zig");
 const effects = @import("stilla").effects;
 
 pub const Error = std.mem.Allocator.Error;
+
+/// `never` primitive test — the bottom type (Core §13.2).
+fn isNeverTy(t: meta.Type) bool {
+    return switch (t) {
+        .primitive => |k| k == .never,
+        else => false,
+    };
+}
 
 /// dead-let's declared rule (docs/effects.md §10.3–§10.4). The *match*
 /// layer stays inline in `tryDeadLet` — the `let` / single non-pattern param
@@ -83,6 +92,11 @@ pub const Stats = struct {
     dead_lets: usize = 0,
     /// Operands materialized into `let`s.
     hoists: usize = 0,
+    /// Unreachable straight-line suffix segments removed after a
+    /// never-normalizing head (`never_returns` must fact, docs/effects.md
+    /// §10.1): a `seq` suffix operand, or a `let` body after a
+    /// never-normalizing initializer.
+    suffix_deletions: usize = 0,
 };
 
 pub const Config = struct {
@@ -118,6 +132,7 @@ pub fn optimize(arena: std.mem.Allocator, built: *hir.BuiltProgram, config: Conf
         stats.iterations += 1;
         stats.dead_lets += rw.dead_lets;
         stats.hoists += rw.hoists;
+        stats.suffix_deletions += rw.suffix_deletions;
         if (!changed) break;
     }
     return stats;
@@ -130,6 +145,13 @@ const Rewriter = struct {
     changed: bool = false,
     dead_lets: usize = 0,
     hoists: usize = 0,
+    suffix_deletions: usize = 0,
+    /// Expressions whose cleanup tokens this round must retire: the
+    /// deleted subtrees (unreachable) and every node whose result type
+    /// the `never` rule specialized to the bottom type (its registered
+    /// temporary can no longer be a live value, and the cleanup-token
+    /// validator requires the token's `ty` to agree with its node).
+    retire: std.AutoHashMapUnmanaged(hir.ExprId, void) = .empty,
 
     fn p(self: *Rewriter) *hir.Program {
         return &self.built.program;
@@ -142,6 +164,7 @@ const Rewriter = struct {
         for (self.built.consts.items) |c| {
             if (c.init) |root| try self.rewrite(root);
         }
+        self.retireTokens();
         return self.changed;
     }
 
@@ -174,6 +197,15 @@ const Rewriter = struct {
     /// using the current round's analysis; a rewrite replaces the node's
     /// content in place, so parent slots need no update.
     fn rewrite(self: *Rewriter, id: hir.ExprId) Error!void {
+        // The `never` rule owns a node on the never-normalizing spine:
+        // its result is the bottom type, part of its operand list may be
+        // gone, and the value-producing rules (dead-let / ANF) do not
+        // apply to a value that never materializes. Recurse into the
+        // post-rewrite children only.
+        if (try self.neverSuffix(id)) {
+            try self.recurse(id);
+            return;
+        }
         // Try the rules first, while `id`'s operand annotations are still
         // the ones the analysis derived this round.
         if (try self.tryDeadLet(id)) {
@@ -186,10 +218,114 @@ const Rewriter = struct {
             self.hoists += 1;
             return;
         }
+        try self.recurse(id);
+    }
+
+    /// Descend into a node's current operands and region roots (read
+    /// after any in-place rewrite, so a truncated `seq` or a `let`
+    /// replaced by its initializer visits only the surviving children).
+    fn recurse(self: *Rewriter, id: hir.ExprId) Error!void {
         const ops = try self.dupOperands(id);
         for (ops) |op| try self.rewrite(op);
         const regs = try self.dupRegions(id);
         for (regs) |r| try self.rewrite(self.p().region(r).root);
+    }
+
+    // -----------------------------------------------------------------
+    // `never_returns` suffix deletion (docs/effects.md §10.1)
+    // -----------------------------------------------------------------
+
+    /// The `never_returns` suffix rule. An expression that never completes
+    /// normally has no value, so its result type is the bottom type and
+    /// the straight-line suffix *after* the failing head is unreachable.
+    ///
+    /// Returns true when `id` is on the never-normalizing spine, having
+    /// specialized its result type to `never` and, where the spine is a
+    /// straight-line region, deleted the dead suffix:
+    ///
+    /// - `seq(o0 … oi …)`: truncate at the first operand `oi` that never
+    ///   normalizes (`never_returns`); `oi+1 ..` never run. Operands
+    ///   before `oi` still execute and are kept.
+    /// - `let B = init in body` with a never-normalizing `init`: the body
+    ///   is dead; the node takes the initializer's content.
+    ///
+    /// Deleting a straight-line suffix can never change behavior — the
+    /// head never returns, so the suffix never executes — and the deleted
+    /// region's full-expression cleanup is retired with it. Retiring a
+    /// token whose node type just became `never` is required hygiene: the
+    /// value can no longer own a live temporary, and the cleanup-token
+    /// validator requires the token's `ty` to agree with its node.
+    fn neverSuffix(self: *Rewriter, id: hir.ExprId) Error!bool {
+        if (!try self.analysis.exprNever(id)) return false;
+        const pr = self.p();
+        const name = hir.registry.get(pr.node(id).op).name;
+        if (std.mem.eql(u8, name, "seq")) {
+            const ops = try self.dupOperands(id);
+            var first: ?usize = null;
+            for (ops, 0..) |op, i| {
+                if (try self.analysis.exprNever(op)) {
+                    first = i;
+                    break;
+                }
+            }
+            if (first) |i| {
+                if (i + 1 < ops.len) {
+                    for (ops[i + 1 ..]) |dead| {
+                        try self.markRetireTree(dead);
+                        self.suffix_deletions += 1;
+                    }
+                    pr.exprs.items[id].operands = try pr.addOperands(ops[0 .. i + 1]);
+                    self.changed = true;
+                }
+            }
+        } else if (std.mem.eql(u8, name, "let")) {
+            const ops = try self.dupOperands(id);
+            const regs = try self.dupRegions(id);
+            if (ops.len == 1 and regs.len == 1 and try self.analysis.exprNever(ops[0])) {
+                // The initializer never returns: the body (and the
+                // binder's destructor) is unreachable. Move the
+                // initializer's content into this node; the initializer
+                // node is orphaned and its tokens retired.
+                try self.markRetireTree(pr.region(regs[0]).root);
+                try self.markRetire(ops[0]);
+                self.suffix_deletions += 1;
+                pr.exprs.items[id] = pr.node(ops[0]);
+                self.changed = true;
+            }
+        }
+        if (!isNeverTy(pr.node(id).ty)) {
+            pr.exprs.items[id].ty = .{ .primitive = .never };
+            self.changed = true;
+        }
+        try self.markRetire(id);
+        return true;
+    }
+
+    fn markRetire(self: *Rewriter, id: hir.ExprId) Error!void {
+        try self.retire.put(self.arena, id, {});
+    }
+
+    /// Mark a whole deleted subtree for token retirement.
+    fn markRetireTree(self: *Rewriter, root: hir.ExprId) Error!void {
+        var work = std.ArrayListUnmanaged(hir.ExprId).empty;
+        defer work.deinit(self.arena);
+        try work.append(self.arena, root);
+        while (work.pop()) |id| {
+            if (self.retire.contains(id)) continue;
+            try self.retire.put(self.arena, id, {});
+            const pr = self.p();
+            for (pr.operands(id)) |op| try work.append(self.arena, op);
+            for (pr.regionsOf(id)) |r| try work.append(self.arena, pr.region(r).root);
+        }
+    }
+
+    /// Retire the round's marked cleanup tokens (docs/effects.md §11.2).
+    fn retireTokens(self: *Rewriter) void {
+        if (self.retire.count() == 0) return;
+        for (self.p().cleanup_tokens.items) |*tk| {
+            if (tk.origin_expr == hir.no_expr) continue;
+            if (self.retire.contains(tk.origin_expr)) tk.origin_expr = hir.no_expr;
+        }
     }
 
     // -----------------------------------------------------------------
@@ -573,4 +709,104 @@ test "hir_simplify: ANF materializes a discarded Unique statement in place" {
     const inner = pr.region(pr.regionsOf(body)[0]).root;
     try testing.expect(std.mem.eql(u8, opName(pr, inner), "seq"));
     try testing.expect(std.mem.eql(u8, opName(pr, pr.operands(inner)[0]), "local"));
+}
+
+/// Count the nodes with op `want` in the subtree rooted at `root`.
+fn countOp(p: *hir.Program, root: hir.ExprId, want: []const u8) usize {
+    var count: usize = 0;
+    var work = std.ArrayListUnmanaged(hir.ExprId).empty;
+    defer work.deinit(testing.allocator);
+    work.append(testing.allocator, root) catch return count;
+    while (work.pop()) |id| {
+        if (std.mem.eql(u8, hir.registry.get(p.node(id).op).name, want)) count += 1;
+        for (p.operands(id)) |op| work.append(testing.allocator, op) catch return count;
+        for (p.regionsOf(id)) |r| work.append(testing.allocator, p.region(r).root) catch return count;
+    }
+    return count;
+}
+
+test "hir_simplify: a structurally-never call deletes its straight-line suffix" {
+    // `boom` is declared `void`, so the builder keeps the suffix after the
+    // call (`isNever` never fires); the `never_returns` must fact deletes
+    // `print("dead"); x + 1`, keeping the earlier statement.
+    var f = try build("app", &.{.{
+        "app",
+        \\const builtin = import("builtin");
+        \\fn boom() -> void { builtin.panic("x") }
+        \\fn f(x: int32) -> int32 {
+        \\    builtin.print("before");
+        \\    boom();
+        \\    builtin.print("dead");
+        \\    x + 1
+        \\}
+    }});
+    defer f.deinit();
+    const stats = try optimize(f.arena.allocator(), f.built, .{ .graph = f.graph });
+    try testing.expect(stats.suffix_deletions >= 1);
+    try expectRewrittenValid(&f);
+    const body = funcBody(&f, "app.f").?;
+    const pr = &f.built.program;
+    // The dead arithmetic and the dead print call are gone; the earlier
+    // statement and the never call survive.
+    try testing.expectEqual(@as(usize, 0), countOp(pr, body, "add.i32"));
+    // The earlier `print("before")` and the `boom()` call survive; the
+    // deleted `print("dead")` does not.
+    try testing.expectEqual(@as(usize, 2), countOp(pr, body, "call"));
+    try testing.expect(neverTy(pr, body));
+}
+
+test "hir_simplify: a never-normalizing let initializer deletes the body" {
+    // The builder's statement shortcut does not look at a `let`
+    // initializer: `let x = boom()` keeps the rest of the block. The
+    // never rule replaces the `let` with its initializer and drops the
+    // body.
+    var f = try build("app", &.{.{
+        "app",
+        \\const builtin = import("builtin");
+        \\fn boom() -> void { builtin.panic("x") }
+        \\fn f(x: int32) -> int32 {
+        \\    let y = boom();
+        \\    builtin.print("dead");
+        \\    x + 1
+        \\}
+    }});
+    defer f.deinit();
+    const stats = try optimize(f.arena.allocator(), f.built, .{ .graph = f.graph });
+    try testing.expect(stats.suffix_deletions >= 1);
+    try expectRewrittenValid(&f);
+    const body = funcBody(&f, "app.f").?;
+    const pr = &f.built.program;
+    // The `let` collapsed to the call, and the body is gone.
+    try testing.expect(std.mem.eql(u8, opName(pr, body), "call"));
+    try testing.expectEqual(@as(usize, 0), countOp(pr, body, "add.i32"));
+    try testing.expect(neverTy(pr, body));
+}
+
+test "hir_simplify: a normal-returning callee keeps its suffix" {
+    var f = try build("app", &.{.{
+        "app",
+        \\const builtin = import("builtin");
+        \\fn ok() -> void { builtin.print("ok"); }
+        \\fn f() -> int32 {
+        \\    ok();
+        \\    builtin.print("kept");
+        \\    7
+        \\}
+    }});
+    defer f.deinit();
+    const stats = try optimize(f.arena.allocator(), f.built, .{ .graph = f.graph });
+    // No straight-line suffix is ever deleted: `ok` has a normal return
+    // path, so nothing after it is unreachable.
+    try testing.expectEqual(@as(usize, 0), stats.suffix_deletions);
+    try expectRewrittenValid(&f);
+    // Both prints survive (the `f` body prints twice, `ok` prints once).
+    const body = funcBody(&f, "app.f").?;
+    try testing.expectEqual(@as(usize, 2), countOp(&f.built.program, body, "call"));
+}
+
+fn neverTy(p: *hir.Program, id: hir.ExprId) bool {
+    return switch (p.node(id).ty) {
+        .primitive => |k| k == .never,
+        else => false,
+    };
 }

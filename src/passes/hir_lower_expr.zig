@@ -44,6 +44,20 @@ pub fn expr(c: *Ctx, fs: *FuncState, id: hir.ExprId) LowerError!?*cfg.Value {
     const start = fs.created.items.len;
     const result = try exprInner(c, fs, id);
     const name = c.opName(id);
+    // A `never`-typed HIR node produces no value (Core §13.2): after its
+    // own lowering the block is terminated, so no full-expression cleanup
+    // runs and no value escapes. Every existing never-typed node already
+    // traps inside its lowering (a direct call via `emitCall`'s ret,
+    // a value/host call via its signature ret, `panic` and the
+    // all-`never` `if` directly), so this only makes the rule structural:
+    // a consumer may specialize a structurally-never call's result type
+    // to `never` (docs/effects.md §10.1, docs/hir.md §9). Checked before
+    // `dropCreatedRange` so the trap lands right after the call, exactly
+    // as the direct never-call emission does.
+    if (cfg_lower_emit.isNever(c.node(id).ty)) {
+        try cfg_lower_emit.setTerminator(c.self, fs, .{ .trap = {} });
+        return null;
+    }
     if (!is(name, "let") and !is(name, "seq")) {
         try cfg_lower_emit.dropCreatedRange(c.self, fs, start, result);
     }

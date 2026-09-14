@@ -64,6 +64,15 @@ const seq_op = hir.opId("seq").?;
 const move_op = hir.opId("move").?;
 const borrow_op = hir.opId("borrow").?;
 
+/// `never` primitive test — the bottom type (Core §13.2). `hir_build` owns
+/// the same predicate but imports this module, so it is inlined here.
+fn isNeverType(t: meta.Type) bool {
+    return switch (t) {
+        .primitive => |k| k == .never,
+        else => false,
+    };
+}
+
 /// Recursion bound for the `drop_effect` type walk (docs/effects.md
 /// §11.1). Named-type recursion is cut by identity; this cap is the
 /// safety net for an uninhabited non-regular instantiation chain, whose
@@ -205,6 +214,14 @@ pub const Analysis = struct {
     /// parameter, a match-arm or destructuring binding — where
     /// `resolveTargets` stops and the call site falls back to `Top`.
     binder_init: []hir.ExprId,
+    /// The must fact `never_returns(f)` (docs/effects.md §10.1), derived
+    /// by `computeNeverReturns`. Read only through `neverReturns` /
+    /// `exprNever`, which compute it lazily.
+    never_returns: []bool,
+    /// Per-node memo for `exprNeverTree`, valid under one fixed
+    /// `never_returns` approximation (the gfp clears it per round).
+    never_memo: []?bool,
+    never_computed: bool = false,
 
     pub fn init(arena: std.mem.Allocator, built: *hir.BuiltProgram, config: Config) Error!Analysis {
         const memo = try arena.alloc(?Summary, built.program.exprs.items.len);
@@ -257,6 +274,16 @@ pub const Analysis = struct {
             .solving = null,
             .cur = cur,
             .binder_init = binder_init,
+            .never_returns = blk: {
+                const nr = try arena.alloc(bool, built.funcs.items.len);
+                @memset(nr, false);
+                break :blk nr;
+            },
+            .never_memo = blk: {
+                const nm = try arena.alloc(?bool, built.program.exprs.items.len);
+                @memset(nm, null);
+                break :blk nm;
+            },
         };
     }
 
@@ -1272,6 +1299,188 @@ pub const Analysis = struct {
         return false;
     }
 
+    // -----------------------------------------------------------------
+    // `never_returns` must fact (docs/effects.md §10.1)
+    // -----------------------------------------------------------------
+
+    /// The function-level must fact `never_returns(f)` (docs/effects.md
+    /// §10.1): `f` has no normal return path — its declared return type
+    /// is `never`, or its body never normalizes. Solved as the **greatest
+    /// fixpoint** over the call graph: `never returns` is a coinductive
+    /// property, so `fn f() -> void { f() }` really never returns, and a
+    /// least fixpoint seeded `false` would miss it. Iteration starts from
+    /// "every function never returns" and decreases monotonically (the
+    /// transfer is monotone), stabilizing within `#funcs + 1` rounds. An
+    /// out-of-range id is `false`.
+    pub fn neverReturns(self: *Analysis, fid: hir.FuncId) Error!bool {
+        try self.ensureNeverComputed();
+        if (fid >= self.never_returns.len) return false;
+        return self.never_returns[fid];
+    }
+
+    /// The structural `never` predicate on an expression subtree:
+    /// evaluating `id` never completes normally. A `never`-typed node
+    /// returns no value (Core §13.2); a strictly-evaluated operand that
+    /// never normalizes makes its parent never as well; an exhaustive
+    /// branch never normalizes only when every arm does; a `call` never
+    /// normalizes when every resolvable target does. Anything unproven is
+    /// `false` — the predicate is a must fact (取不到即 false).
+    ///
+    /// Iterative post-order over the tree (no recursion: a deep `let`
+    /// chain is bounded by the heap, not the stack), memoized in
+    /// `never_memo` under one fixed `never_returns` approximation.
+    pub fn exprNever(self: *Analysis, id: hir.ExprId) Error!bool {
+        try self.ensureNeverComputed();
+        return self.exprNeverTree(id);
+    }
+
+    fn ensureNeverComputed(self: *Analysis) Error!void {
+        if (self.never_computed) return;
+        try self.computeNeverReturns();
+    }
+
+    fn computeNeverReturns(self: *Analysis) Error!void {
+        const n = self.built.funcs.items.len;
+        @memset(self.never_returns, true);
+        if (n == 0) {
+            self.never_computed = true;
+            return;
+        }
+        const next = try self.arena.alloc(bool, n);
+        var rounds: usize = 0;
+        while (rounds <= n) : (rounds += 1) {
+            // One Jacobi round: every body is evaluated against the same
+            // approximation (`never_returns` is untouched until the
+            // simultaneous assignment below).
+            @memset(self.never_memo, null);
+            for (0..n) |i| {
+                const rec = self.built.funcs.items[i];
+                var v = isNeverType(rec.ret);
+                if (!v) {
+                    const regs = self.p().regionsOf(rec.root);
+                    if (regs.len > 0) v = try self.exprNeverTree(self.p().region(regs[0]).root);
+                }
+                next[i] = v;
+            }
+            var changed = false;
+            for (0..n) |i| {
+                if (next[i] != self.never_returns[i]) {
+                    self.never_returns[i] = next[i];
+                    changed = true;
+                }
+            }
+            if (!changed) break;
+        }
+        // The fact is final now; drop the round-local memo so the public
+        // queries memoize against it.
+        @memset(self.never_memo, null);
+        self.never_computed = true;
+    }
+
+    const NeverVisit = struct { id: hir.ExprId, expand: bool };
+
+    /// Memoized `exprNever` for `id`, filling the memo for its whole
+    /// subtree (children before parents).
+    fn exprNeverTree(self: *Analysis, root: hir.ExprId) Error!bool {
+        const pr = self.p();
+        if (root >= self.never_memo.len) return false;
+        var stack = std.ArrayListUnmanaged(NeverVisit).empty;
+        defer stack.deinit(self.arena);
+        try stack.append(self.arena, .{ .id = root, .expand = false });
+        while (stack.pop()) |it| {
+            if (self.never_memo[it.id] != null) continue;
+            if (it.expand) {
+                self.never_memo[it.id] = try self.exprNeverOfNode(it.id);
+                continue;
+            }
+            try stack.append(self.arena, .{ .id = it.id, .expand = true });
+            for (pr.operands(it.id)) |op| if (op < self.never_memo.len) try stack.append(self.arena, .{ .id = op, .expand = false });
+            for (pr.regionsOf(it.id)) |r| {
+                const child = pr.region(r).root;
+                if (child < self.never_memo.len) try stack.append(self.arena, .{ .id = child, .expand = false });
+            }
+        }
+        return self.never_memo[root].?;
+    }
+
+    /// A node's memoized `exprNever`, `false` for a node appended after
+    /// this analysis was built (no entry yet — a later round re-analyzes).
+    fn neverMemoAt(self: *Analysis, id: hir.ExprId) bool {
+        if (id >= self.never_memo.len) return false;
+        return self.never_memo[id] orelse false;
+    }
+
+    fn exprNeverOfNode(self: *Analysis, id: hir.ExprId) Error!bool {
+        const pr = self.p();
+        const n = pr.node(id);
+        if (isNeverType(n.ty)) return true;
+        const name = hir.registry.get(n.op).name;
+        // A λ value's creation runs no body: it is a normal value.
+        if (std.mem.eql(u8, name, "lambda")) return false;
+        const ops = pr.operands(id);
+        const regs = pr.regionsOf(id);
+        if (std.mem.eql(u8, name, "call")) {
+            for (ops) |op| if (self.neverMemoAt(op)) return true;
+            return self.callTargetsNever(id);
+        }
+        switch (hir.registry.get(n.op).policy) {
+            // `if` / `and` / `or` / `match`: the head is strict, at most
+            // one arm runs, so the node is never only when the head is
+            // never or every arm independently never normalizes. (For
+            // the short-circuit rows the constant arm always returns, so
+            // this reduces to the head — sound and conservative.)
+            .branch, .short_circuit, .match => {
+                if (ops.len > 0 and self.neverMemoAt(ops[0])) return true;
+                if (regs.len == 0) return false;
+                for (regs) |r| if (!self.neverMemoAt(pr.region(r).root)) return false;
+                return true;
+            },
+            // Every other op (including `let`) evaluates every operand
+            // and region root eagerly, so any one never normalizing makes
+            // the parent never normalizing.
+            else => {
+                for (ops) |op| if (self.neverMemoAt(op)) return true;
+                for (regs) |r| if (self.neverMemoAt(pr.region(r).root)) return true;
+                return false;
+            },
+        }
+    }
+
+    /// Whether every resolvable target of the call at `id` has the
+    /// `never_returns` fact. An unresolved callee, an empty target set,
+    /// or a target that may return is `false`.
+    fn callTargetsNever(self: *Analysis, id: hir.ExprId) Error!bool {
+        const pr = self.p();
+        const ops = pr.operands(id);
+        if (ops.len == 0) return false;
+        // An inline λ callee has no function record; its body is the fact.
+        if (pr.node(ops[0]).op == lambda_op) {
+            const regs = pr.regionsOf(ops[0]);
+            if (regs.len == 0) return false;
+            return self.neverMemoAt(pr.region(regs[0]).root);
+        }
+        var targets = std.ArrayListUnmanaged(ResolvedTarget).empty;
+        defer targets.deinit(self.arena);
+        if (!(try self.resolveTargets(ops[0], &targets))) return false;
+        if (targets.items.len == 0) return false;
+        for (targets.items) |t| {
+            const nr = switch (t) {
+                .func => |fid| if (fid < self.never_returns.len) self.never_returns[fid] else false,
+                .host => |hb| self.hostNeverReturns(hb),
+            };
+            if (!nr) return false;
+        }
+        return true;
+    }
+
+    fn hostNeverReturns(self: *Analysis, hb: hir.HostBindingId) bool {
+        if (hb >= self.built.hosts.items.len) return false;
+        return switch (self.built.hosts.items[hb].signature) {
+            .function => |f| isNeverType(f.ret.*),
+            else => false,
+        };
+    }
+
     /// The body summary of a λ/fn node: the body's `eval_effect`
     /// sequenced with the function's normal-exit cleanup (docs/effects.md
     /// §6.1). Owned Unique parameters/locals or an unprovable subtree
@@ -1794,6 +2003,66 @@ test "hir_effects: recursion gets the SCC least fixpoint, seeded may_diverge" {
     // The divergence propagates to callers through the fixpoint.
     try testing.expect((try an.functionSummary(funcId(&f, "app.callit").?)).eql(effects.may_diverge));
     try testing.expect((try an.validate(testing.allocator)) == null);
+}
+
+test "hir_effects: never_returns from the signature and structurally" {
+    var f = try build("app", &.{.{
+        "app",
+        \\const builtin = import("builtin");
+        \\fn die() -> never { builtin.panic("x") }
+        \\fn boom() -> void { builtin.panic("x") }
+        \\fn ok() -> void { }
+        \\fn val() -> int32 { 1 }
+    }});
+    defer f.deinit();
+    var an = try Analysis.init(f.arena.allocator(), f.built, .{ .graph = f.graph });
+    try an.analyze();
+    // Declared `-> never` and the structurally-never `void` body are both
+    // the must fact; a normal return path is not.
+    try testing.expect(try an.neverReturns(funcId(&f, "app.die").?));
+    try testing.expect(try an.neverReturns(funcId(&f, "app.boom").?));
+    try testing.expect(!try an.neverReturns(funcId(&f, "app.ok").?));
+    try testing.expect(!try an.neverReturns(funcId(&f, "app.val").?));
+}
+
+test "hir_effects: never_returns is the call-graph greatest fixpoint" {
+    var f = try build("app", &.{.{
+        "app",
+        \\fn f() -> void { g() }
+        \\fn g() -> void { f() }
+        \\fn h(c: bool) -> int32 { if (c) { 1 } else { k() } }
+        \\fn k() -> int32 { h(false) }
+    }});
+    defer f.deinit();
+    var an = try Analysis.init(f.arena.allocator(), f.built, .{ .graph = f.graph });
+    try an.analyze();
+    // Coinductive: the `f ↔ g` cycle really never returns, so the
+    // greatest fixpoint holds it (a least fixpoint seeded `false` would
+    // drop both). One member of `h ↔ k` has a return path, so the whole
+    // cycle falls out.
+    try testing.expect(try an.neverReturns(funcId(&f, "app.f").?));
+    try testing.expect(try an.neverReturns(funcId(&f, "app.g").?));
+    try testing.expect(!try an.neverReturns(funcId(&f, "app.h").?));
+    try testing.expect(!try an.neverReturns(funcId(&f, "app.k").?));
+}
+
+test "hir_effects: exprNever sees let-init, all-arm branches, and unresolved callees" {
+    var f = try build("app", &.{.{
+        "app",
+        \\const builtin = import("builtin");
+        \\fn boom() -> void { builtin.panic("x") }
+        \\fn in_let() -> int32 { let x = boom(); 7 }
+        \\fn both(c: bool) -> void { if (c) { boom() } else { boom() } }
+        \\fn one(c: bool) -> void { if (c) { boom() } else { } }
+    }});
+    defer f.deinit();
+    var an = try Analysis.init(f.arena.allocator(), f.built, .{ .graph = f.graph });
+    try an.analyze();
+    const pr = &f.built.program;
+    try testing.expect(try an.exprNever(bodyOf(pr, f.built.funcs.items[funcId(&f, "app.in_let").?].root)));
+    try testing.expect(try an.exprNever(bodyOf(pr, f.built.funcs.items[funcId(&f, "app.both").?].root)));
+    // One arm returns normally: the branch may complete.
+    try testing.expect(!try an.exprNever(bodyOf(pr, f.built.funcs.items[funcId(&f, "app.one").?].root)));
 }
 
 test "hir_effects: mutual recursion keeps real reads and still diverges" {

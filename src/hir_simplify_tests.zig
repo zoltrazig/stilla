@@ -313,6 +313,25 @@ test "M2b: off by default; enabling rewrites the AIR; both round-trip" {
     }
 }
 
+test "M2b: the never-suffix rule rewrites the AIR of probes/never_suffix.st" {
+    // The CLI enables the CFG optimizer, whose inlining + dead-code
+    // removal masks this rule; the pre-optimizer AIR proves the pass
+    // actually fires (docs/effects.md §10.1).
+    const src = try probe_corpus.read(testing.allocator, "probes", "never_suffix");
+    defer testing.allocator.free(src);
+    const off = try compileAir("app", src, false);
+    defer testing.allocator.free(off);
+    const on = try compileAir("app", src, true);
+    defer testing.allocator.free(on);
+    try testing.expect(!std.mem.eql(u8, off, on));
+    for ([_][]const u8{ off, on }) |air| {
+        var p = cfg.Parser.init(testing.allocator);
+        defer p.deinit();
+        const prog = try p.parse(air);
+        try testing.expect(prog.funcs.len > 0);
+    }
+}
+
 fn capture(text: []const u8, simplify: bool) ![]u8 {
     var state = CaptureAdapter{};
     var l = try support.loadOpts(text, false, false, simplify);

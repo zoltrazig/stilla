@@ -103,9 +103,11 @@ pub const Options = struct {
     /// Run the effect-driven HIR consumers (hir.md §11 M2b): dead-let
     /// elimination and selective A-Normal Form, both admitted solely by
     /// the derived `isDiscardable` / `canFloatAsTree` queries
-    /// (effects.md §12). Default off, like `seg` — the pass has its own
-    /// compile-time budget and no CLI-visible semantic oracle beyond the
-    /// interpreter differential.
+    /// (effects.md §12), plus `never_returns` suffix deletion — the
+    /// straight-line suffix after a call that never returns is
+    /// unreachable and is dropped (effects.md §10.1 / §12.4). Default
+    /// off, like `seg` — the pass has its own compile-time budget and no
+    /// CLI-visible semantic oracle beyond the interpreter differential.
     simplify: bool = false,
     /// Run the mid-level optimizer (Passes 7–8) over the lowered CFG
     /// before returning (optimizer.md): tail call elimination, constant

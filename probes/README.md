@@ -70,6 +70,12 @@ The detailed probes cover the source-reachable operation/type matrix:
   `let` (identical `mul`s, identical field reads, and a shared non-trivial
   pure subtree), next to the refusal: a Unique `Token` constructor pair is
   consumed by its aggregate, so neither is an island member / duplicable
+- `never_suffix.st`: the `never_returns` must fact's suffix deletion
+  ([effects.md](effects.md) §10.1) — a structurally-never callee
+  (`builtin.panic` behind a `void` signature) deletes the statements after
+  it, its `let`-initializer case deletes the rest of the block, and the
+  suffix after a normal-returning callee survives (`main` traps, so the
+  probe is registered in `probe_corpus.panics`)
 
 Every `probes/*.st` file is enumerated at test time by
 `src/probe_corpus.zig`, so a new probe automatically joins the HIR build

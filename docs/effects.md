@@ -1,6 +1,6 @@
 # Stilla Effects System — 语义交互摘要模型
 
-> **Status：效果模型与三个消费者已实现。**
+> **Status：效果模型与消费者已实现。**
 >
 > - **已实现**：固定乘积格与派生查询、函数摘要 SCC least fixpoint、精确
 >   `drop_effect(T)` 全链、module-const 检查、`StillaExecution` 三态与符号键
@@ -8,9 +8,9 @@
 >   实参（§10.4，契约下放开求值次数 / 序 / scope / FE / cleanup）、
 >   `RewriteRule` / `Requirement` 与 `RewriteContract` 类型（§10.3–§10.4，
 >   `passes/rewrite_contract.zig`；首批实例 β 与 dead-let）。
-> - **消费者**：dead-let + selective ANF（`--simplify`，默认关）、SEG v1
->   （可执行文件默认开、`--no-seg` 关；库默认关、`Options.seg` 开启）。
-> - **设计已定但未实现**（§14、[todo.md](todo.md)）：`never_returns` must 事实。
+> - **消费者**：dead-let + selective ANF + `never_returns` 后缀删除
+>   （`--simplify`，默认关）、SEG v1（可执行文件默认开、`--no-seg` 关；库默认关、
+>   `Options.seg` 开启）。
 >
 > 配套文档：使用该模型的 IR 见 [hir.md](hir.md)。本文自含效果模型所需的全部
 > 定义；两者重叠的概念（求值序、值使用、效果）在本文给出权威定义，[hir.md](hir.md) 保留
@@ -274,7 +274,8 @@ Top  = (All, true,  true,  true)    // 所有资源、控制与非确定性均�
 - **摘要不跟踪 `may_return_normally`。** 正常返回是默认假设；`Bottom` 与
   `Pure` 同值，「推导下界 ≠ 已证明纯」的区分由 §8.2 的 `Pending` /
   `Ready(summary)` 状态机承担（不在格内）。后缀 DCE 的合法性由独立 must 事实
-  `never_returns` 恢复——**该 must 事实设计已定，尚未实现**（§10.1）；当前
+  `never_returns` 恢复——该 must 事实已落地（§10.1，hir_effects.zig 的
+  greatest fixpoint），后缀删除在 M2b 消费者（hir_simplify.zig，`--simplify`）；
   摘要代数不变，`;` 合并仍保守并入后缀位。
 
 **顺序组合与候选 join：语义角色不同，may-公式同式。**
@@ -639,7 +640,7 @@ host 函数的摘要来自 embedding metadata（§13）；缺失一律 TOP。
 | `reorderable(a,b)` | **位置上下文**：由 `canSwapOperands` / `canMove`（父 EvalPolicy + operand 位 + 路径屏障，§10.5）判定 |
 | `seg_safe` | `Copy(type)` + `total` + `observable_effect_free` + 无 Q + cleanup 安全证明 + 递归子树与 region 同判 + ownership / lifetime 门（§12.3） |
 | `can_float_as_tree` | selective ANF 准入：`total` + `observable_effect_free` + 清理上下文 |
-| `never_returns(f)` | **must 事实、独立于摘要**——**尚未实现**（见下） |
+| `never_returns(f)` | **must 事实、独立于摘要**：签名 `-> never` 或结构推导；递归 SCC 取 greatest fixpoint（见下） |
 
 **强约束**：`move.effects == {}` **不**使 move 变得 discardable / duplicable /
 speculatable——每个公开查询都要组合 effect、operand uses、结果 capability/view、
@@ -655,11 +656,16 @@ ownership 可用性与 lifetime 栅栏，**缺一不可**。
 `drop_is_observable` 这类额外查询。没有「facts table」缓存——查询按需从
 `readySummary` 计算。
 
-- **`never_returns`（未实现）**：设计上 f 无正常返回路径（签名 `-> never`，或
-  结构推导），调用点后同一直行区域的后缀不可达，可整段删除（含该区域 FE 清理）。
-  推导保守（取不到即 false）；递归 SCC 成员的推导需 greatest-fixpoint 语义。
-  **当前代码中不存在该事实**，由它驱动的后缀删除也未实现；CFG 侧另有基于
-  schema 位的 dead-instr 移除（§15）。摘要代数不变，`;` 合并仍保守并入后缀位。
+- **`never_returns(f)`（已实现）**：f 无正常返回路径——签名 `-> never`，或结构
+  推导（`hir_effects.exprNever`：`never` 型节点、严格求值子项、全臂分支、可解析
+  callee 集）。推导保守（取不到即 false）；递归 SCC 取 **greatest fixpoint**
+  （coinductive：`fn f() -> void { f() }` 真的不返回，least fixpoint 会漏掉）。
+  调用点后同一直行区域的后缀不可达，M2b 消费者（`hir_simplify.zig`，
+  `--simplify`）整段删除（§12.4）并退役该区域的 FE 清理 token。被删节点不可达，
+  故 `cleanupEffect` 的 `in_subtree` 本就不再计入，退役是 token 表卫生 +
+  `cleanupOriginsReachable` 不变量。结果类型特化为 `never` 后由 `hir_lower_expr`
+  的「`never` 型节点终止块」规则落地为 `trap`。摘要代数不变，`;` 合并仍保守并入
+  后缀位。
 - **结果不稳定（Q）与可观察交互分离。** `nondeterministic` 只描述「同式两次
   求值结果可不同」——它需要**结果**参与的判定（duplicable、CSE、speculate /
   move 前移）才要求 `!Q`；它本身**不构成可观察交互**：
@@ -992,8 +998,9 @@ planner / CFG 层生成。effect 系统保证 DCE 不会误删带重要 destruct
 ## 12. 效果驱动的前端变换
 
 三个首要消费者，共同点是**合法性全部来自派生查询，任何一个都没有 `switch(op)`
-特判**。dead-let 与 selective ANF 在 hir_simplify.zig（`--simplify`，默认关），
-SEG 准入在 hir_seg.zig（可执行文件默认开、`--no-seg` 关；库默认关）。
+特判**。dead-let 与 selective ANF、`never_returns` 后缀删除在 hir_simplify.zig
+（`--simplify`，默认关），SEG 准入在 hir_seg.zig（可执行文件默认开、`--no-seg`
+关；库默认关）。
 
 ### 12.1 Selective A-Normal Form
 
@@ -1066,6 +1073,16 @@ drop / move Unique             ❌
 **本谓词只管普通 island**：boundary rewrite（β，[hir.md](hir.md) §8.4）的 callee 是
 `fn_ref`（无 SEG 编码），call 节点不进 island，因此绕过 encoding / 成员资格；
 但 β 仍**调用** `isSegSafe`（对 call 节点与 λ 体），再叠加 §10.4 的契约条件。
+
+### 12.4 `never_returns` 后缀删除
+
+独立于摘要的 **must 事实** `never_returns(f)`（§10.1）驱动：调用点后同一直行
+区域的后缀不可达，整段删除（`seq` 在首个 never-normalizing operand 处截断；
+`let` 的 init never-normalizing 时用 init 替换整个 `let`）。删除的子树其 FE
+清理 token 一并退役（`cleanupOriginsReachable` 不变量）。被删除节点不可达，故
+`cleanupEffect` 的 `in_subtree` 早已不计入——退役是 token 表卫生，不是正确性依赖。
+结果类型特化为 `never` 后由 lowering 的「`never` 型节点终止块」规则落地为 `trap`。
+合法性不需要任何效果查询：head 永不返回，后缀永不执行，删除不改变可观察行为。
 
 ## 13. Host 接口 metadata（embedding ABI）
 

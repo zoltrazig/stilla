@@ -68,5 +68,6 @@ pub fn read(allocator: std.mem.Allocator, dir: []const u8, spec: []const u8) ![]
 /// the panic instead of treating it as coverage. A new intentionally
 /// trapping probe must be added here, or its differential fails loudly.
 pub fn panics(spec: []const u8) bool {
-    return std.mem.eql(u8, spec, "cli_panic") or std.mem.eql(u8, spec, "control_flow");
+    return std.mem.eql(u8, spec, "cli_panic") or std.mem.eql(u8, spec, "control_flow") or
+        std.mem.eql(u8, spec, "never_suffix");
 }

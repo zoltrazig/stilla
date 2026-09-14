@@ -8,12 +8,11 @@
 >   （hir_validate.zig）；效果分析（hir_effects.zig，模型见 effects.zig）；
 >   HIR→CFG lowering（hir_lower.zig 与 hir_lower_expr / `_control` / `_call` /
 >   `_pattern`）；module-const 依赖检查。
-> - **消费者**：dead-let + selective A-Normal Form（hir_simplify.zig，
->   `--simplify`，默认关）；SEG v1（hir_seg.zig，可执行文件默认开、
->   `--no-seg` 关闭；库默认关、`Options.seg` 开启）。
-> - **设计已定但未实现**（§11、[todo.md](todo.md)）：节点级 full-expression
->   边界标注、真正的 slotted e-graph、HIRTypeId canonical 表、
->   source span side table。
+> - **消费者**：dead-let + selective A-Normal Form + `never_returns` 后缀删除
+>   （hir_simplify.zig，`--simplify`，默认关）；SEG v1（hir_seg.zig，可执行文件
+>   默认开、`--no-seg` 关闭；库默认关、`Options.seg` 开启）。
+> - **设计已定但未实现**（§11、[todo.md](todo.md)）：真正的 slotted e-graph、
+>   HIRTypeId canonical 表、source span side table。
 > - **阅读约定**：数据结构以 hir.zig 的落地形态为准；标 **Target** 的段落是
 >   设计意图，不是现状。
 
@@ -707,7 +706,7 @@ EffectSummary {
 
 - **effect 层中 panic = trap**：都置 `may_trap = true`，运行时都跳过销毁。
 - **不跟踪 `may_return_normally`**：正常返回是默认假设；后缀 DCE 由独立 must
-  事实恢复（该 must 事实设计已定，**尚未实现**，见 [effects.md](effects.md) §10.1）。
+  事实 `never_returns` 恢复（已落地，见 [effects.md](effects.md) §10.1 / §12.4）。
 - **may-摘要遗忘顺序**：`E ; F` 与 `E ⊔ F` 当前公式同式（`;` 与 `⊔` 同式、
   摘要层可交换）。这只说明摘要不携带顺序信息；程序级交换仍只由 `reorderable`
   放行。
@@ -1148,6 +1147,7 @@ let B1: i32 = %B0 in
 | `if` / `match` 的惰性 region | 条件分支；join 处 phi / 控制汇合；pattern binders → 解构序列（`unpack`、`read_tag` + switch） |
 | 作用域出口的普通销毁 | normal-path cleanup：scope-end drop 与 join 处 maybe-unique 边 drop |
 | `panic` / trap 路径 | **不做清理**（现有 `trap` terminator 无 drop） |
+| `ty == never` 的节点 | 求值后发射 `trap`（Core §13.2 底类型无值）——直接/value/host call 本已按 callee 的 ret 发 trap，该结构规则让 `never_returns` 消费者可把结构推导的 never 调用结果类型特化为 `never`（[effects.md](effects.md) §10.1 / §12.4） |
 | `move` / `borrow` / `drop` | 直接映射现有 AIR ownership op，不优化掉 |
 | `access_hops`（§7.4） | 逐段重放 `module_ref` + `load_member`，module_of 记到每个结果 |
 
@@ -1233,16 +1233,16 @@ lowering。可选变换每轮原位重写后重新跑结构 + 效果校验（§2
 - 结构校验 hir_validate.zig（§10.1 第一级）；
 - 效果模型 effects.zig；HIR 集成 / 派生查询 / 函数摘要 SCC fixpoint / 精确
   `drop_effect(T)` / module-const 检查 hir_effects.zig；
-- 消费者：hir_simplify.zig（`--simplify`，默认关）、hir_seg.zig（可执行文件默认
-  开、`--no-seg` 关；库默认关）；
+- 消费者：hir_simplify.zig（`--simplify`，默认关；dead-let / selective ANF /
+  `never_returns` 后缀删除）、hir_seg.zig（可执行文件默认开、`--no-seg` 关；库默认关）；
 - lowering hir_lower.zig（+ hir_lower_expr / `_control` / `_call` / `_pattern`），
   复用 lower.zig / cfg_lower_* 发射机制；
 - 测试：hir_tests.zig / hir_simplify_tests.zig / hir_seg_tests.zig。
 
 **SEG 编译时间 / 轮数基线**（第 12 项验收；`hir_seg_tests.zig` 的 `SEG budget`
 测试在 CI 每次打印，基线取 2026-09-13、macOS/arm64 的一次运行）：`probes/` +
-`examples/` 全语料 **56 个程序 / 4306 个可达节点**，SEG 接受 **2347 个
-island 成员（≈54%）**，共 **69 轮**、**51 次重写**，总编译时间 **≈70 ms**
+`examples/` 全语料 **57 个程序 / 4372 个可达节点**，SEG 接受 **2360 个
+island 成员（≈54%）**，共 **70 轮**、**51 次重写**，总编译时间 **≈71 ms**
 （单文件最慢 `examples/fold` 10 ms / 2 轮 / 163 islands）；每个程序都在
 `hir_seg.Config.max_iterations` 界内收敛（`Stats.converged == true`）。测试
 断言收敛（CI 稳定），时间仅记录、不断言（CI 计时不是稳定 oracle）。
@@ -1254,12 +1254,10 @@ island 成员（≈54%）**，共 **69 轮**、**51 次重写**，总编译时�
 | M1a | 结构 HIR：AST→HIR 构建、结构校验、HIR→CFG lowering；直降路径删除后成为唯一前端路径 | hir_build.zig / hir_validate.zig / hir_lower.zig |
 | M1b | 效果基础设施：`SemanticInfo.effect`、固定乘积格、transfer、cleanup 门、派生查询、host 语义注册表 | effects.zig / hir_effects.zig |
 | M2a | SEG v1 规则子集（β / η / let / 常折叠 / 整数代数 / struct 投影 / known-variant match / CSE sharing），可执行文件默认开、`--no-seg` 关 | hir_seg.zig |
-| M2b | 摘要化消费者：函数摘要 SCC least fixpoint、精确 `drop_effect(T)`、module-const 检查、dead-let / selective ANF | hir_effects.zig / hir_simplify.zig |
+| M2b | 摘要化消费者：函数摘要 SCC least fixpoint、精确 `drop_effect(T)`、module-const 检查、dead-let / selective ANF / `never_returns` 后缀删除 | hir_effects.zig / hir_simplify.zig |
 
-**尚未实现**（完整清单见 [todo.md](todo.md)）：**节点级**
-full-expression 边界标注（清理 token 登记已落地，见 [effects.md](effects.md)
-§11.2）；真正的 slotted e-graph / extraction；
-HIRTypeId canonical 表。
+**尚未实现**（完整清单见 [todo.md](todo.md)）：真正的 slotted e-graph /
+extraction；HIRTypeId canonical 表。
 
 ## 12. 开放问题
 
