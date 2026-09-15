@@ -5,77 +5,79 @@
 「近期」内各项的先后是**建议顺序**，不是串行依赖；每项单独列出前置
 依赖。设计细节仍在两篇文档正文，本文件只记范围、依赖与验收。
 已完成的历史条目按原编号归档于「已完成」节，供跨文档交叉引用；
-「近期」从第 20 项续起，新增项一律追加到队尾。
+「近期」从第 22 项续起，新增项一律追加到队尾。
 
 ## 近期（建议顺序）
 
-- [ ] **21. Slotted E-Graph 本体**（hir.md 的 SEG 桥与 Target 形态；`hir_seg.zig`）
-  - 现状：v1 是**原位树重写器，不是 e-graph**——`hir_seg.zig` 的
-    `computeIslands` 只标 island 成员资格，`Rewriter` 逐节点改写
-    `ExprNode` 字段，`optimize` 在轮界内迭代；没有 e-class、union-find、
-    saturation、SLOT 编号，也没有 `encode_hir` / `extract`。hir.md 把
-    Slotted E-Graph 记为 **Target**，v1 是其前身；其中「HIR 是树、禁止
-    DAG」与 `BinderId → Slot` 是编码契约。
-  - 范围：新增一个 pass（`hir_egraph.zig`，与 `hir_seg.zig`
-    同为一行一 pass）承载 SEG arena：e-class 表 + union-find（canonical
-    id）、SLOT 编号（`BinderId → Slot`；`local` → `var(slot)`，`let` /
-    `lambda` → binder term）、递归 `encode_hir(e, scope) -> SEGTerm?`
-    （边界仍由注册的 `.seg` 编码 + `isSegSafe` + operand / region 递归
-    成员资格界定，**不 switch op**），以及 saturation 主循环：把 v1 规则从
-    「逐节点原位改写」改为 e-graph 规则（pattern 匹配 → union → rebuild），
-    在 `Config.max_iterations` 轮界下迭代到 union 表安静。β / η / `let`
-    三族的 **boundary rewrite** 语义不变：它们仍按 `rewrite_contract` 的
-    契约在编码边界之外处理，不强行入图；island 之外的子树保持原样。
-  - 依赖：无（v1 的 island 谓词与规则集是现成输入）。与「长期探索」的
-    `HIRTypeId` canonical 表方向相关——完整 e-graph 的 e-node 哈希与 O(1)
-    类型相等受益于该表，但它不是本项硬前置（可先用 `meta.Type` 结构哈希）。
-  - 验收：`encode` → union → `extract` 往返在 `probes/` + `examples/`
-    全语料通过；SEG-on / SEG-off 的四组合解释器差分逐字不变；
-    `hir_seg_tests.zig` 新增白盒（e-class 合并、SLOT 重用、递归编码
-    边界拒绝）与黑盒；`Stats` 报告 saturation 轮数与退出方式（见第 23
-    项）。按约定为本项新增一个真正触发 e-graph 路径的 `probes/*.st`。
-
 - [ ] **22. Cost model 与 Extraction**（hir.md 的 cost model / extraction 条目）
-  - 现状：唯一的 cost 是 `nodeCost` / `costOf`（`hir_seg.zig`）
-    ——**子树节点计数**，无 per-opcode 权重、无候选间择优；tie-break 是规则的
-    确定顺序（`applyRules` 每个节点单候选）。没有 `extract(eclass)` 回 HIR
-    的路径。
-  - 范围：把 `nodeCost` 升级为 extraction 用的 **per-opcode cost model**
-    ——cost 是优化器事实、**不进 op descriptor**（hir.md 已定），按 op 类给
-    权重（构造 / 投影 / 调用 / 字面量……），缺省回退到节点计数；
-    `extract(eclass) -> ExprId` 自底向上取最小 cost 项，确定性 tie-break
-    （规则顺序 → 稳定的 op / operand 序）。extraction 回 HIR 的契约：分配
-    fresh `BinderId`、island 外原 binder 不得混淆、**共享子项必须
-     materialize 成显式 `let`**（HIR 是树、禁止 DAG）。抽取完成后按现状重跑
-     结构 + 效果重校验（hir.md）。
-  - 依赖：**第 21 项**（e-graph 与 `extract` 骨架）。
+  - 现状：**extraction 已落地但只有单一 cost**。第 21 项实现了
+    `hir_egraph.zig` 的 `extract`：每个 e-class 跟一个 preferred e-node
+    （`preferred_prio` 0 = encode 原貌、1 = 规则选中的项，同类多个提案按最低
+    e-node 索引定序），这就是全部 cost——没有 per-opcode 权重、没有候选间最小
+    cost 求解。白盒测试已固定 extraction 的往返契约（identity 写回零新节点 /
+    重定向后深拷贝 / 共享类 materialize 成 `let` / fresh `BinderId`）。
+  - 范围：把「优先级 + 最低索引」升级为 **per-opcode cost model**——cost 是
+    优化器事实、**不进 op descriptor**（hir.md 已定），按 op 类给权重（构造 /
+    投影 / 调用 / 字面量……），缺省回退到节点计数；extraction 自底向上取最小
+    cost 项，确定性 tie-break（优先规则顺序 → 稳定的 op / operand 序）。
+    extraction 回 HIR 的契约（fresh `BinderId`、island 外原 binder 不得混淆、
+    共享子项 materialize 成显式 `let`）已由第 21 项实现，本项只需把它从
+    preferred 选择解耦为 cost 求解；抽取完成后按现状重跑结构 + 效果重校验。
+  - 依赖：**第 21 项**（已落地：e-graph 与 `extract` 骨架）。
   - 验收：白盒 cost model（权重、tie-break 稳定性、缺省回退）与 extraction
     正例（两候选取低 cost、共享子项 materialize 成 `let`、fresh binder）；
-    全语料 SEG-on / SEG-off 差分逐字不变；现有 `costOf` 白盒测试迁移或补
-    对账；`Stats` 报告抽取总 cost（见第 23 项）。
+    全语料 SEG-on / SEG-off 差分逐字不变；`Stats` 报告抽取选中项的总 cost
+    （见第 23 项）。
 
 - [ ] **23. 覆盖 e-graph 的 SEG 统计与预算**（`hir_seg.zig` 的
       `Stats`；`hir_seg_tests.zig` 的 `SEG budget`）
-  - 现状：`hir_seg.Stats` 只报 v1 树重写器的事实——`iterations` /
-    `converged` / `islands` 与逐规则计数（`beta` / `etas` / `folds` /
-    `algebra` / `lets` / `conds` / `matches` / `projects` / `shares`）；
-    `hir_seg_tests.zig` 的 `SEG budget` 汇总全语料并断言 `converged`，基线
-    记于 hir.md 的「验收与落地现状」。这些字段都不描述 e-graph。
-  - 范围：把 `Stats` 扩成同时覆盖两种引擎的「SEG 做了什么」报告：e-class
-    数、e-node 数、union / merge 次数、saturation 轮数与退出方式（复用
-    `converged` 语义）、extraction 选中的总 cost、按规则的匹配 / 应用计数；
-    v1 计数保留（读旧字段的测试随命名迁移）。`SEG budget` 同步汇总 e-graph
-    维度，并在 hir.md 的「验收与落地现状」重录一条 e-graph 语料基线（文件 /
-    可达节点 / island 覆盖 / e-class / 轮数 / 重写 / 抽取 cost / 时间）。
-  - 依赖：**第 21 / 22 项**（没有 e-graph 就没有可统计的对象）。
+  - 现状：第 21 项已落 arena 一半——`hir_egraph.Stats`（`rounds` / `converged`
+    / `eclasses` / `enodes` / `merges` / `unions` / 按规则计数 / `materialized`
+    / `copied` / `written`）与 `hir_seg.Stats.egraph_*`，`SEG budget` 同步汇总
+    e-graph 维度并断言 `egraph_converged`，基线已重录进 hir.md 的「验收与
+    落地现状」。**尚缺**：`Stats` 各字段的 doc 注释（`hir_seg.zig` 侧只标了
+    `egraph_*` 的聚合语义）、按规则的匹配 / 应用计数（现在只有应用后成功的
+    计数）、以及 extraction 选中的总 cost（依赖第 22 项）。
+  - 范围：补齐上述三项；v1 计数保留（读旧字段的测试随命名迁移）。
+  - 依赖：第 21 项（已落地）；cost 部分依赖第 22 项。
   - 验收：`SEG budget` 对全语料断言 e-graph 引擎也在轮界内收敛且计数非零
     （非空跑）；`Stats` 各字段语义在 `hir_seg.zig` 的 doc 注释说明；新基线
     记入 hir.md。
 
-## 已完成（归档，原「近期」第 1–20 项）
+## 已完成（归档，原「近期」第 1–21 项）
 
 > 以下条目均已落地，按完成时的编号保留，供 [effects.md](effects.md) 等正文
-> 交叉引用；新工作从「近期」第 21 项续起。
+> 交叉引用；新工作从「近期」第 22 项续起。
+
+- [x] **21. Slotted E-Graph 本体**（hir.md §8.1–§8.2；`hir_egraph.zig`）
+  - 范围：新增一个 pass 承载 SEG arena：e-class 表 + union-find、SLOT 编号、
+    递归 `encode`、saturation 主循环（把 union 规则从逐节点原位改写改为
+    e-graph 规则），β / η / `let` 三族与 known-variant `match` 保持编码边界
+    之外的 boundary rewrite。
+  - 已完成：新增 `hir_egraph.zig`（e-class 表 + union-find、`BinderId → Slot`
+    编号、`encode` / `saturate` / `rebuild` / `extract`）并把常折叠、整数代数、
+    常量条件与聚合投影四条 union 规则搬进 arena；`hir_seg.zig` 保留 island
+    准入（`computeIslands` / `markIslandRoots`）、β / η / `let` 折叠与
+    known-variant `match`，新增 `saturateIsland`（每 island 一个 scratch
+    arena，聚合 arena `Stats`，把写回站点记 dirty）并在每个 island 根上先于
+    局部走查调用；α-相等 / CSE sharing 由 hash-consing + `rebuild` 同余合并
+    自然涌现，extraction 的 materialize 准入与旧 `ruleCse` 一致（`strict_ltr`
+    无 region 父节点 + `isDuplicable` + 非 trivial atom）。`Stats` 新增
+    `egraph_islands` / `egraph_rounds` / `egraph_converged` / `egraph_merges`
+    / `egraph_unions` / `egraph_copies`，`SEG budget` 一并汇总并在 hir.md §11
+    重录基线；arena 的 `Stats` 落在 `hir_egraph.zig`（§8.2 正文）。
+  - 验收：白盒——`hir_egraph.zig` 的 e-class 合并 / α-CSE、SLOT 重用与
+    free-binder 身份（island 外 binder 经 slot 表原样写回）、递归编码边界拒绝
+    （未注册 `.seg` 的 op、非 `isSegSafe` 子树、越界下标与非构造基）、
+    extraction 的 identity（零写回）与重定向 / materialize，以及从 `hir_seg`
+    迁入的折叠 / 代数单测；黑盒——`hir_seg_tests.zig` 断言 `probes/egraph.st`
+    的 arena 计数非零（islands / rounds / merges / unions / copies / shares，
+    且 `egraph_converged`）与其投影规则在 AIR 中可见（`--seg` 开时
+    `read_field` 消失）；全语料四组合（`--simplify` × `--seg`）解释器差分
+    逐字不变（`probes/egraph.st` 自动进入语料）。`zig build -fincremental test`
+    全绿（1208/1208）；SEG budget 基线随新探针更新（60 程序 / 4732 节点 /
+    2558 islands / 91 轮 / 109 次重写 / 2061 arena 轮 / 41 union / 322 merge /
+    82 copy / ≈112 ms，断言两层收敛）。
 
 - [x] **20. `effects.dropEffect` 的处置**（[effects.md](effects.md) §11.1）
   - 现状：`effects.dropEffect` 是 M1b 的极简版（Copy → `{}`，其余 / null →

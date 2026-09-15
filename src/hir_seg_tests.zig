@@ -1497,6 +1497,56 @@ test "SEG corpus — probes/*.st compile+round-trip and every simplify×seg comb
 }
 
 // ---------------------------------------------------------------------------
+// SEG arena (hir.md §8.2): the per-island e-class table and union-find
+// ---------------------------------------------------------------------------
+
+/// The arena is a per-island engine, not a tree walk: it only ever runs
+/// over a program it successfully `encode`d, so these counters are the
+/// non-vacuity evidence that encode → saturation → extraction ran (and
+/// that a union rule, not just hash-consing, fired).
+fn egraphStatsOf(spec: []const u8) !hir_seg.Stats {
+    const text = try probe_corpus.read(testing.allocator, "probes", spec);
+    defer testing.allocator.free(text);
+    var b = try buildText("app", &.{.{ "app", text }});
+    defer b.deinit();
+    return segAll(&b);
+}
+
+test "SEG arena — probes/egraph.st reaches encode, saturation and extraction" {
+    const stats = try egraphStatsOf("egraph");
+    // Islands were encoded and saturated, and saturation terminated by
+    // reaching a fixpoint rather than by the `max_iterations` bound.
+    try testing.expect(stats.egraph_islands > 0);
+    try testing.expect(stats.egraph_rounds > 0);
+    try testing.expect(stats.egraph_converged);
+    // The classes came from the union rules, not from hash-consing alone:
+    // `x * 1 → x` / `x + 0 → x` (algebra) plus the aggregate projection.
+    try testing.expect(stats.algebra > 0);
+    try testing.expect(stats.projects > 0);
+    try testing.expect(stats.egraph_unions > 0);
+    try testing.expect(stats.egraph_merges > 0);
+    // A rule-created duplicate is then shared or duplicated by extraction,
+    // which writes fresh nodes back into the tree.
+    try testing.expect(stats.egraph_copies > 0);
+    try testing.expect(stats.shares > 0);
+}
+
+test "SEG arena — the arena's projection rule is observable in the AIR" {
+    const text = try probe_corpus.read(testing.allocator, "probes", "egraph");
+    defer testing.allocator.free(text);
+    const off = try compileAir("app", text, false);
+    defer testing.allocator.free(off);
+    const on = try compileAir("app", text, true);
+    defer testing.allocator.free(on);
+    // `field_get(struct_make(…), 0)` is an in-graph union: the read's class
+    // becomes the projected operand's class, so the constructor and the
+    // read disappear only when the pass runs.
+    try testing.expect(!std.mem.eql(u8, off, on));
+    try testing.expect(std.mem.indexOf(u8, off, "read_field") != null);
+    try testing.expect(std.mem.indexOf(u8, on, "read_field") == null);
+}
+
+// ---------------------------------------------------------------------------
 // Corpus budget: the recorded SEG compile-time / rounds / island baseline
 // ---------------------------------------------------------------------------
 
@@ -1517,6 +1567,10 @@ test "SEG budget — every corpus program converges inside the round bound" {
     var total_ns: u64 = 0;
     var total_iters: u64 = 0;
     var total_rewrites: u64 = 0;
+    var total_egraph_rounds: u64 = 0;
+    var total_unions: u64 = 0;
+    var total_merges: u64 = 0;
+    var total_copies: u64 = 0;
     var total_islands: usize = 0;
     var total_nodes: usize = 0;
     var covered: usize = 0;
@@ -1549,9 +1603,20 @@ test "SEG budget — every corpus program converges inside the round bound" {
                 std.debug.print("SEG budget: {s}/{s} hit the round bound without converging ({d} rounds)\n", .{ dir, spec, stats.iterations });
                 return error.TestUnexpectedResult;
             }
+            // The per-island half of the same contract: an island whose
+            // saturation stops at the bound has an unmerged class, so the
+            // extraction below it is not the saturated form.
+            if (!stats.egraph_converged) {
+                std.debug.print("SEG budget: {s}/{s} island saturation hit the round bound ({d} e-graph rounds)\n", .{ dir, spec, stats.egraph_rounds });
+                return error.TestUnexpectedResult;
+            }
             files += 1;
             total_ns += ns;
             total_iters += stats.iterations;
+            total_egraph_rounds += stats.egraph_rounds;
+            total_unions += stats.egraph_unions;
+            total_merges += stats.egraph_merges;
+            total_copies += stats.egraph_copies;
             total_rewrites += stats.beta + stats.etas + stats.folds + stats.algebra + stats.lets + stats.conds + stats.matches + stats.projects + stats.shares;
             total_islands += stats.islands;
             total_nodes += nodes;
@@ -1565,9 +1630,11 @@ test "SEG budget — every corpus program converges inside the round bound" {
         }
     }
     std.debug.print(
-        "SEG budget baseline: {d} files, {d} islands / {d} reachable nodes ({d} files with islands), {d} rounds, {d} rewrites, {d} ms total; slowest {s} {d} ms ({d} rounds, {d} islands)\n",
-        .{ files, total_islands, total_nodes, covered, total_iters, total_rewrites, total_ns / std.time.ns_per_ms, slow, slow_ns / std.time.ns_per_ms, slow_iters, slow_islands },
+        "SEG budget baseline: {d} files, {d} islands / {d} reachable nodes ({d} files with islands), {d} rounds, {d} rewrites, {d} e-graph rounds, {d} unions / {d} merges / {d} copies, {d} ms total; slowest {s} {d} ms ({d} rounds, {d} islands)\n",
+        .{ files, total_islands, total_nodes, covered, total_iters, total_rewrites, total_egraph_rounds, total_unions, total_merges, total_copies, total_ns / std.time.ns_per_ms, slow, slow_ns / std.time.ns_per_ms, slow_iters, slow_islands },
     );
     try testing.expect(files > 0);
     try testing.expect(covered > 0);
+    try testing.expect(total_unions > 0);
+    try testing.expect(total_copies > 0);
 }

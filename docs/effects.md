@@ -10,8 +10,8 @@
 >   `passes/rewrite_contract.zig`；首批实例 β 与 dead-let，随后是 `ruleLet` 的
 >   `let_dead` / `let_forward` / `let_atom` 三分支，以及 η 与 selective ANF）。
 > - **消费者**：dead-let + selective ANF + `never_returns` 后缀删除
->   （`--simplify`，默认关）、SEG v1（可执行文件默认开、`--no-seg` 关；库默认关、
->   `Options.seg` 开启）。
+>   （`--simplify`，默认关）、SEG（hir_seg.zig 驱动 + hir_egraph.zig
+>   arena；可执行文件默认开、`--no-seg` 关；库默认关、`Options.seg` 开启）。
 >
 > 配套文档：使用该模型的 IR 见 [hir.md](hir.md)。本文自含效果模型所需的全部
 > 定义；两者重叠的概念（求值序、值使用、效果）在本文给出权威定义，[hir.md](hir.md) 保留
@@ -488,7 +488,7 @@ host binding 调用（call → syscall）  TOP 或 host metadata
   与「可能读任意较晚常量」同义。
 - **`module_const(ConstId)` 仍非字面量**：读它依赖 module init 已按 schedule
   执行。只有求值已被 constant folding 具体化且无可观察初始化依赖时才允许折叠；
-  v1 的 SEG 不碰 `module_const`。
+  SEG 不碰 `module_const`。
 
 ## 8. 函数摘要与调用
 
@@ -1125,7 +1125,7 @@ host binding 调用（syscall 目标） ❌
 drop / move Unique             ❌
 ```
 
-职责分离：v1 的 SEG 由 HIR→SEG bridge 的 legality 查询负责准入——检查的是
+职责分离：SEG 由 HIR→SEG bridge 的 legality 查询负责准入——检查的是
 **递归属性**（region body 与 ownership 依赖都纳入），而非只看根节点。
 
 **本谓词只管普通 island**：boundary rewrite（β，[hir.md](hir.md) §8.4；η，§8.5；

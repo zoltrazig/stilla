@@ -61,9 +61,10 @@ Detail: [checker.md](checker.md).
 Order: checker → AST→HIR construction → structural validation →
 effect analysis + annotation validation → module-const dependency check →
 *[optional]* effect consumers (`hir_simplify.zig`) → *[optional]* SEG
-(`hir_seg.zig`) → HIR→CFG lowering (into today's block/value/drop
-machinery). Each optional transform re-runs structural validation and a
-fresh effect analysis before lowering (hir.md §2.4).
+(`hir_seg.zig` driver + `hir_egraph.zig` arena) → HIR→CFG lowering (into
+today's block/value/drop machinery). Each optional transform re-runs
+structural validation and a fresh effect analysis before lowering
+(hir.md §2.4).
 
 | Pass | File | Job |
 | --- | --- | --- |
@@ -71,7 +72,7 @@ fresh effect analysis before lowering (hir.md §2.4).
 | validate | `hir_validate.zig` | structural HIR invariants only: scope, no capture, tree shape (no DAG), no duplicate BinderId, full-expression fence (hir.md §10.1 first level) |
 | effects | `hir_effects.zig` (model: `effects.zig`) | `effect_transfer` per descriptor (`own_effect` + `TransferKind`); function summaries by the SCC least fixpoint (recursive SCC seeded `Diverge`, `drop` hooks in the call graph; indirect/missing/unknown → `Top`); precise `drop_effect(T)` (struct hook + Unique fields reverse-order, union/tuple/list/box, opaque release); `OperandUse` resolution; full-expression cleanup footprint (`cleanupEffect`) plus the literal cleanup-free proof; derived legality queries; the summary-driven module-const init/teardown check (`checkModuleDependencies`); publishes interned `ready` summaries and validates them against a fresh derivation (`derived ≤ stored`) |
 | consumers | `hir_simplify.zig` | dead-let (`B ∉ FV(body)` ∧ `isDiscardable(init)`) and selective A-Normal Form (first `!canFloatAsTree` operand of a `StrictLTR` parent hoisted to a `let`, Copy only); legality is the derived query alone — no `switch(op)`; opt-in (`--simplify`) |
-| seg | `hir_seg.zig` | β→let / η (value-position `fn_ref` redirect) / let simplification (dead / used-once / trivial-atom, boundary rewrites over the cross-full-expression `let`) / constant folding / integer algebra / known-variant `match`→let / CSE sharing (α-equal `isDuplicable` operands of one `strict_ltr`, region-free island node → synthesized `let`) over recursively-admitted `isSegSafe` islands, with the boundary rewrites (β / η / `let`) admitted by their declared `rewrite_contract` contracts instead; default on in the executable (`--no-seg` opts out), library `Options.seg` off unless set |
+| seg | `hir_seg.zig` + `hir_egraph.zig` | β→let / η (value-position `fn_ref` redirect) / let simplification (dead / used-once / trivial-atom, boundary rewrites over the cross-full-expression `let`) / known-variant `match`→let in the driver; constant folding / integer algebra / constant `if` / aggregate projection / α-equivalence and CSE sharing as e-graph union rules in `hir_egraph.zig` (slotted e-graph: e-class table + union-find, `encode` → bounded saturation → extraction, a shared operand class of one `strict_ltr` region-free island node materializes into a synthesized `let`) over recursively-admitted `isSegSafe` islands, with the boundary rewrites (β / η / `let`) admitted by their declared `rewrite_contract` contracts instead; default on in the executable (`--no-seg` opts out), library `Options.seg` off unless set |
 | lower | `hir_lower.zig` | HIR → CFG AIR, reusing the existing `lower.zig` / `cfg_lower_emit.zig` block, value, and drop mechanisms; replaced the direct AST → CFG expression lowering |
 
 The canonical text form (`hir_print.zig` / `hir_parse.zig`, re-exported

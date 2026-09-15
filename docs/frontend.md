@@ -57,7 +57,7 @@ annotated HIR
     │
     │  [optional] effect consumers  dead-let + selective A-Normal Form
     │              (derived `isDiscardable` / `canFloatAsTree`; `--simplify`)
-    │  SEG v1                    pure-Copy island rewrites (default on;
+    │  SEG (e-graph arena)       pure-Copy island rewrites (default on;
     │              `--no-seg` opts out, library `Options.seg` opts in)
     │              each re-runs structural + effect validation (hir.md §2.4)
     ▼

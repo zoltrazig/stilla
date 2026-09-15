@@ -90,7 +90,7 @@ pub const Options = struct {
     /// Member tables and all phase-2/3 side tables are still re-derived
     /// every compile. Null = today's fresh-compile behavior.
     cache: ?*frontend_cache.FrontendCache = null,
-    /// Run the SEG v1 pass (hir.md §11 M2a) between effect analysis and
+    /// Run the SEG pass (hir.md §11 M2a) between effect analysis and
     /// HIR→CFG lowering: rewrite admissible pure-Copy islands (β, let
     /// simplification, constant folding, integer algebra), then
     /// re-validate structure and effects (§2.4). The pass obeys the

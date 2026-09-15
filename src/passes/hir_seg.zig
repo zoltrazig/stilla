@@ -1,10 +1,21 @@
-//! Pass: SEG v1 — the Slotted E-Graph consumer for the M2a rule subset
-//! (docs/hir.md §8, §11 M2a; docs/effects.md §12.3). In: a built HIR
-//! program whose every reachable node carries a *validated* `ready`
-//! effect summary (`hir_effects.Analysis`). Out: the same program with
-//! its admissible pure-Copy islands rewritten by the v1 rules, iterated
-//! to a bounded fixpoint, with every root still structurally valid and
-//! its annotations re-derivable.
+//! Pass: SEG (M2a rule subset): the island driver, plus the arena-based
+//! union rules (docs/hir.md §8, §11 M2a; docs/effects.md §12.3). In: a
+//! built HIR program whose every reachable node carries a *validated*
+//! `ready` effect summary (`hir_effects.Analysis`). Out: the same program
+//! with its admissible pure-Copy islands rewritten, iterated to a bounded
+//! fixpoint, with every root still structurally valid and its annotations
+//! re-derivable.
+//!
+//! **Two engines.** The *union* rules (constant folding, integer algebra,
+//! constant `if` / `and` / `or`, aggregate projection, and the
+//! α-equivalence / CSE sharing that falls out of them) run in the slotted
+//! e-graph arena of `hir_egraph.zig`: this file admits each island, calls
+//! `hir_egraph.optimizeIsland` at its root, aggregates the arena's `Stats`
+//! and marks the sites it overwrote dirty. The *boundary* rewrites
+//! (β-reduction → `let`, η-reduction, the three `let` folds) and the
+//! known-variant `match` reduction stay here as in-place tree rewrites,
+//! because they rewrite across an island boundary rather than to an
+//! equivalent term.
 //!
 //! Scope (hir.md §11 M2a):
 //!
@@ -17,42 +28,48 @@
 //!   semantically `isSegSafe`, and every operand subtree / region body is
 //!   itself an island member (hir.md §8.1–§8.2). Anything else keeps its
 //!   original shape.
-//! - **Rules** — β-reduction (→ let, the v1 boundary rewrite with the
+//! - **Rules** — β-reduction (→ let, the boundary rewrite with the
 //!   §8.4 contract), η-reduction (a `fn_ref` value redirect, §8.5), let
 //!   simplification (dead let, used-once forwarding, trivial-atom
 //!   forwarding — also boundary rewrites, admitted by the `let_*`
 //!   contracts of §8.7 rather than by island membership, since a
 //!   source-level `let`'s initializer opens its own full expression),
-//!   aggregate projection (`field_get(C(…), i) → vi` for a known index
-//!   when `C` is `struct_make` / `tuple_make` / `list_make`, §8.3),
-//!   constant folding over the typed reps,
-//!   integer algebra identities, the known-variant `match` reduction to
-//!   `let` (§8.6), and CSE-style sharing (two α-equivalent `isDuplicable`
-//!   operands of one `strict_ltr`, region-free island node materialize into
-//!   a synthesized `let`, §8.3). Tuple / list projection is IR-level only
-//!   (Stilla has no element-read suffix); not in scope:
-//!   non-sibling (cross-statement / cross-branch) sharing, associativity /
-//!   commutativity search, `move` / `drop` / borrow, host calls (§8.3).
-//! - **Extraction cost and the termination contract** — v1 uses minimal
-//!   node count plus a deterministic rule order as the tie-break (hir.md
-//!   §8.2). The let / folding / algebra / aggregate-projection rules strictly
-//!   reduce `costOf`; β (a boundary rewrite, not an e-class extraction) is
-//!   admitted by its contract and the known-variant `match` reduction by its
-//!   coverage / arity proof. Two rules may *add* nodes: the `match` rule
-//!   splices one `let` per bound payload and CSE sharing materializes a
-//!   shared subterm, so a wide constructor / a shared subtree can grow the
-//!   tree. v1 therefore offers a **bounded-round contract, not a decreasing-
-//!   measure one**: `optimize` runs at most `Config.max_iterations`
-//!   analysis→rewrite rounds and then stops. `Stats.converged` reports which
-//!   exit was taken — `true` for a quiet round (a fixpoint of the current
-//!   rule set), `false` for a bound hit. Stopping early is always safe: every
-//!   admitted rewrite preserves semantics, so any round prefix is a correct
-//!   program and a bound hit only forfeits further rewrites. The per-rule
-//!   guards that keep the default bound sufficient in practice: each λ is
-//!   inlined at most once (`beta_done`, so β fires at most once per λ
-//!   record), each `match` node is consumed once, each CSE binding has at
-//!   least two uses and a non-trivial init (no let rule can undo it), and
-//!   every other rule strictly reduces `costOf`.
+//!   the known-variant `match` reduction to `let` (§8.6) — all in this
+//!   driver — and, in the arena (`hir_egraph.zig`): aggregate projection
+//!   (`field_get(C(…), i) → vi` for a known index when `C` is
+//!   `struct_make` / `tuple_make` / `list_make`, §8.3), constant folding
+//!   over the typed reps, integer algebra identities, and CSE-style
+//!   sharing (an operand class used at least twice by one `strict_ltr`,
+//!   region-free island node materializes into a synthesized `let` when its
+//!   preferred e-node is not a trivial atom, and duplicates otherwise,
+//!   §8.3). Tuple / list projection is IR-level only (Stilla has no
+//!   element-read suffix); not in scope: non-sibling (cross-statement /
+//!   cross-branch) sharing, associativity / commutativity search, `move` /
+//!   `drop` / borrow, host calls (§8.3).
+//! - **Extraction cost and the termination contract** — the arena's cost is
+//!   the preferred e-node (0 = the class's `encode` original, 1 = a rule's
+//!   choice) with the lowest e-node index as the deterministic tie-break
+//!   (hir.md §8.2); no per-opcode weights yet. The folding / algebra /
+//!   aggregate-projection rules strictly reduce it; β (a boundary rewrite,
+//!   not an e-class extraction) is admitted by its contract and the
+//!   known-variant `match` reduction by its coverage / arity proof. Two
+//!   rules may *add* nodes: the `match` rule splices one `let` per bound
+//!   payload and CSE sharing materializes a shared subterm, so a wide
+//!   constructor / a shared subtree can grow the tree. SEG therefore offers
+//!   a **bounded-round contract, not a decreasing-measure one**: `optimize`
+//!   runs at most `Config.max_iterations` analysis→rewrite rounds, and the
+//!   same bound caps one island's e-graph saturation. `Stats.converged` and
+//!   `Stats.egraph_converged` report which exit each engine took — `true`
+//!   for a quiet round (a fixpoint of the current rule set), `false` for a
+//!   bound hit. Stopping early is always safe: every admitted rewrite
+//!   preserves semantics, so any round prefix is a correct program and a
+//!   bound hit only forfeits further rewrites. The per-rule guards that keep
+//!   the default bound sufficient in practice: each λ is inlined at most
+//!   once (`beta_done`, so β fires at most once per λ record), each `match`
+//!   node is consumed once, each CSE binding has at least two uses and a
+//!   non-trivial init (no let rule can undo it), an arena union rule always
+//!   moves a class or its preferred node (else it is the fixpoint), and
+//!   every other rule strictly reduces the extraction cost.
 //! - **Re-verification** — each iteration re-derives the effect analysis
 //!   from scratch before rewriting; the caller re-validates structurally
 //!   and by effects after the pass. No transform is allowed to rely on
@@ -63,12 +80,14 @@
 //!   keep explicit control. The compile-time / round budget that justifies
 //!   the default is recorded in docs/hir.md §11.
 //!
-//! The rewriter is deliberately in-place: HIR is an append-only arena and
-//! every node has exactly one parent (§3.7), so mutating a node's fields
-//! (or copying a rewritten child's fields into it) is a local, tree-legal
-//! rewrite. A rule never *moves* a node it will keep referencing; β and
-//! let-forwarding copy the surviving operand's fields into the node being
-//! rewritten and leave the donor node unreachable.
+//! The boundary rewrites stay deliberately in-place: HIR is an append-only
+//! arena and every node has exactly one parent (§3.7), so mutating a node's
+//! fields (or copying a rewritten child's fields into it) is a local,
+//! tree-legal rewrite. A rule never *moves* a node it will keep
+//! referencing; β and let-forwarding copy the surviving operand's fields
+//! into the node being rewritten and leave the donor node unreachable. The
+//! arena's extraction obeys the same discipline: it either walks the site
+//! unchanged (identity) or writes a freshly materialized subtree into it.
 
 const std = @import("std");
 const meta = @import("stilla").meta;
@@ -76,6 +95,7 @@ const hir = @import("stilla").hir;
 const moduleinfo = @import("stilla").moduleinfo;
 const effects = @import("stilla").effects;
 const hir_effects = @import("hir_effects.zig");
+const hir_egraph = @import("hir_egraph.zig");
 const rewrite_contract = @import("rewrite_contract.zig");
 
 pub const Error = std.mem.Allocator.Error;
@@ -178,71 +198,6 @@ const eta_rule = rewrite_contract.RewriteRule{
     },
 };
 
-/// Positional binder remapping for structural (α-)comparison in CSE
-/// sharing. Binders are globally unique to their defining region, so a map
-/// entry is stable across the whole comparison; an unmapped binder is a
-/// free variable and is compared by raw id.
-const BinderMap = std.AutoHashMapUnmanaged(hir.BinderId, hir.BinderId);
-
-/// Payload comparison for CSE's structural (α-)equivalence. A `binder`
-/// payload that `map` has seen is compared through the map; an unmapped one
-/// is a free variable and compared by raw id. `FuncRef` is two dense ids,
-/// so `std.meta.eql` is exact.
-fn payloadAlphaEq(a: hir.Payload, b: hir.Payload, map: *BinderMap) bool {
-    return switch (a) {
-        .none => b == .none,
-        .const_value => |ca| switch (b) {
-            .const_value => |cb| constEql(ca, cb),
-            else => false,
-        },
-        .binder => |ba| switch (b) {
-            .binder => |bb| if (map.get(ba)) |m| m == bb else ba == bb,
-            else => false,
-        },
-        .func => |fa| switch (b) {
-            .func => |fb| std.meta.eql(fa, fb),
-            else => false,
-        },
-        .module_const => |ca| switch (b) {
-            .module_const => |cb| ca == cb,
-            else => false,
-        },
-        .field => |fa| switch (b) {
-            .field => |fb| fa == fb,
-            else => false,
-        },
-        .tag => |ta| switch (b) {
-            .tag => |tb| ta == tb,
-            else => false,
-        },
-    };
-}
-
-/// Conservative `ConstValue` equality for CSE: strings compare by contents;
-/// floats by `==` (a NaN pair compares unequal — a missed merge, never a
-/// wrong one).
-fn constEql(a: meta.ConstValue, b: meta.ConstValue) bool {
-    return switch (a) {
-        .int => |ia| switch (b) {
-            .int => |ib| ia == ib,
-            else => false,
-        },
-        .float => |fa| switch (b) {
-            .float => |fb| fa == fb,
-            else => false,
-        },
-        .bool => |ba| switch (b) {
-            .bool => |bb| ba == bb,
-            else => false,
-        },
-        .string => |sa| switch (b) {
-            .string => |sb| std.mem.eql(u8, sa, sb),
-            else => false,
-        },
-        .void => b == .void,
-    };
-}
-
 /// What one `optimize` call did — for tests and the compile-time budget.
 pub const Stats = struct {
     iterations: u32 = 0,
@@ -262,6 +217,23 @@ pub const Stats = struct {
     matches: usize = 0,
     projects: usize = 0,
     shares: usize = 0,
+
+    // --- the SEG arena's own facts (docs/todo.md 21 / 23) ---
+    /// Islands that actually went through the e-graph engine (encode
+    /// succeeded): an island whose root failed admission keeps its shape.
+    egraph_islands: usize = 0,
+    /// Saturation rounds summed over those islands.
+    egraph_rounds: u64 = 0,
+    /// Whether every island's saturation reached a quiet round inside the
+    /// bound.
+    egraph_converged: bool = true,
+    /// Class merges from congruence / encode-time hash-consing (CSE).
+    egraph_merges: usize = 0,
+    /// Rule-driven class merges (folds / algebra / const-if / projection).
+    egraph_unions: usize = 0,
+    /// Fresh subtrees the extractor wrote (a redirected class or a site
+    /// that is not a member of its class).
+    egraph_copies: usize = 0,
 };
 
 pub const Config = struct {
@@ -277,14 +249,18 @@ pub const Config = struct {
     /// environment.
     resources: effects.ResourceRegistry = .{},
     /// Bound on analysis→rewrite rounds (each round re-derives effects).
+    /// The same bound caps one island's e-graph saturation rounds.
     max_iterations: u32 = 8,
 };
 
 /// Rewrite every function body and constant initializer in place to the
-/// SEG v1 normal form, iterating analysis/rewrite to a bounded fixpoint.
-/// The caller owns `built` and the arena; on return every root is
-/// rewritten but not yet re-validated (the caller runs
-/// `hir.validate` + a fresh `Analysis.analyze`/`.validate`).
+/// SEG normal form, iterating analysis/rewrite to a bounded fixpoint. The
+/// union rules run in the e-graph arena (`hir_egraph.zig`) at each island
+/// root; the boundary rewrites (β / η / the `let` folds) and the
+/// known-variant `match` reduction stay in this driver. The caller owns
+/// `built` and the arena; on return every root is rewritten but not yet
+/// re-validated (the caller runs `hir.validate` + a fresh
+/// `Analysis.analyze`/`.validate`).
 pub fn optimize(arena: std.mem.Allocator, built: *hir.BuiltProgram, config: Config) Error!Stats {
     var stats = Stats{};
     // A λ record is inlined at most once per compile: this bounds β
@@ -300,6 +276,7 @@ pub fn optimize(arena: std.mem.Allocator, built: *hir.BuiltProgram, config: Conf
             .built = built,
             .analysis = &analysis,
             .beta_done = &beta_done,
+            .max_egraph_rounds = config.max_iterations,
         };
         const changed = try rw.run();
         stats.iterations += 1;
@@ -313,6 +290,12 @@ pub fn optimize(arena: std.mem.Allocator, built: *hir.BuiltProgram, config: Conf
         stats.matches += rw.matches;
         stats.projects += rw.projects;
         stats.shares += rw.shares;
+        stats.egraph_islands += rw.egraph_islands;
+        stats.egraph_rounds += rw.egraph_rounds;
+        stats.egraph_converged = stats.egraph_converged and rw.egraph_converged;
+        stats.egraph_merges += rw.egraph_merges;
+        stats.egraph_unions += rw.egraph_unions;
+        stats.egraph_copies += rw.egraph_copies;
         if (!changed) {
             stats.converged = true;
             break;
@@ -336,6 +319,11 @@ const Rewriter = struct {
     /// construction and are not in this slice — `encOf` answers `true`
     /// for them.
     enc: []bool = &.{},
+    /// The *maximal* island roots among `enc` members: a member whose
+    /// parent is not a member (or which is a program root). Exactly these
+    /// go through the e-graph; the rest of an island is reached by the
+    /// extractor and then by the ordinary local walk.
+    island_root: []bool = &.{},
     island_count: usize = 0,
 
     changed: bool = false,
@@ -348,6 +336,14 @@ const Rewriter = struct {
     matches: usize = 0,
     projects: usize = 0,
     shares: usize = 0,
+
+    // SEG arena facts, accumulated from `hir_egraph` per island.
+    egraph_islands: usize = 0,
+    egraph_rounds: u64 = 0,
+    egraph_converged: bool = true,
+    egraph_merges: usize = 0,
+    egraph_unions: usize = 0,
+    egraph_copies: usize = 0,
 
     /// Node ids whose content this round has already overwritten in place.
     /// An island-membership or analysis verdict about such a node describes
@@ -364,6 +360,10 @@ const Rewriter = struct {
     /// into its destination full expression.
     clone_fe: hir.FullExprId = 0,
 
+    /// Saturation-round bound handed to the e-graph arena (mirrors
+    /// `Config.max_iterations`).
+    max_egraph_rounds: u32 = 8,
+
     fn p(self: *Rewriter) *hir.Program {
         return &self.built.program;
     }
@@ -372,11 +372,29 @@ const Rewriter = struct {
         self.enc = try self.arena.alloc(bool, self.p().exprs.items.len);
         @memset(self.enc, false);
         try self.computeIslands();
+        self.island_root = try self.arena.alloc(bool, self.enc.len);
+        @memset(self.island_root, false);
+        for (self.built.funcs.items) |rec| try self.markIslandRoots(rec.root);
+        for (self.built.consts.items) |c| {
+            if (c.init) |root| try self.markIslandRoots(root);
+        }
         for (self.built.funcs.items) |rec| try self.rewrite(rec.root);
         for (self.built.consts.items) |c| {
             if (c.init) |root| try self.rewrite(root);
         }
         return self.changed;
+    }
+
+    /// Top-down: a member whose parent is not a member starts an island;
+    /// everything below a member is a member, so the walk stops there.
+    fn markIslandRoots(self: *Rewriter, id: hir.ExprId) Error!void {
+        if (id < self.enc.len and self.enc[id]) {
+            self.island_root[id] = true;
+            return;
+        }
+        const pr = self.p();
+        for (pr.operands(id)) |op| try self.markIslandRoots(op);
+        for (pr.regionsOf(id)) |r| try self.markIslandRoots(pr.region(r).root);
     }
 
     /// `true` when `id` is inside an island. For nodes appended by this
@@ -388,16 +406,16 @@ const Rewriter = struct {
     }
 
     /// Record that `id`'s content was overwritten in place this round. Its
-    /// cached island/effect verdict now describes a dead shape; `ruleCse`
-    /// refuses any operand so marked and rewrites it only next round, off a
-    /// fresh `Analysis`.
+    /// cached island/effect verdict now describes a dead shape: `ruleLet`
+    /// refuses a `let` whose initializer is so marked, and the next
+    /// round's fresh `Analysis` re-derives everything else.
     fn markDirty(self: *Rewriter, id: hir.ExprId) Error!void {
         try self.dirty.put(self.arena, id, {});
     }
 
     /// A node's analysis annotation is only meaningful while the pass has
     /// not rewritten its *content*. `tryBeta` runs before any rewrite at
-    /// that id (from `rewrite`); `ruleCse` guards each operand with the
+    /// that id (from `rewrite`); `ruleLet` guards its initializer with the
     /// dirty set instead.
     fn analysisValid(self: *Rewriter, id: hir.ExprId) bool {
         return id < self.enc.len;
@@ -450,6 +468,48 @@ const Rewriter = struct {
     }
 
     // -----------------------------------------------------------------
+    // The SEG arena
+    // -----------------------------------------------------------------
+
+    /// Encode, saturate and extract the island rooted at `id` (hir.md
+    /// §8.1–§8.2), writing the saturated form back into the tree. Run
+    /// *before* the local walk over the island's interior, so encode sees
+    /// the un-rewritten island and every `isSegSafe` verdict it consumes
+    /// still describes the node it is looking at (the pass header's "no
+    /// transform may rely on the pre-rewrite static conclusions" applies
+    /// to nodes this round has already touched).
+    ///
+    /// The scratch arena is dropped on return: the arena's internal
+    /// tables are per-island garbage, and only the sites it overwrote
+    /// survive. They are reported back so the driver can mark them dirty.
+    fn saturateIsland(self: *Rewriter, id: hir.ExprId) Error!void {
+        var scratch = std.heap.ArenaAllocator.init(self.arena);
+        defer scratch.deinit();
+        const result = try hir_egraph.optimizeIsland(
+            scratch.allocator(),
+            self.p(),
+            self.analysis,
+            id,
+            .{ .max_rounds = self.max_egraph_rounds },
+        );
+        if (result.stats.enodes == 0) return; // encode rejected the island
+        self.egraph_islands += 1;
+        self.egraph_rounds += result.stats.rounds;
+        self.egraph_converged = self.egraph_converged and result.stats.converged;
+        self.egraph_merges += result.stats.merges;
+        self.egraph_unions += result.stats.unions;
+        self.egraph_copies += result.stats.copied;
+        self.folds += result.stats.folds;
+        self.algebra += result.stats.algebra;
+        self.conds += result.stats.conds;
+        self.projects += result.stats.projects;
+        self.shares += result.stats.materialized;
+        if (!result.changed) return;
+        self.changed = true;
+        for (result.written) |site| try self.markDirty(site);
+    }
+
+    // -----------------------------------------------------------------
     // Driver
     // -----------------------------------------------------------------
 
@@ -481,6 +541,16 @@ const Rewriter = struct {
                 self.etas += 1;
                 try self.markDirty(id);
             }
+        }
+        // A maximal island goes through the e-graph *before* the local walk
+        // below: encode must see the island in its round-start shape, so
+        // every `isSegSafe` verdict it consumes still describes the node it
+        // is looking at. The local walk then runs over the extracted tree
+        // (so a `match` whose scrutinee the arena just folded reduces in
+        // the same round), and the interior of an island is reached there
+        // rather than here (only maximal roots take this branch).
+        if (id < self.enc.len and self.island_root[id]) {
+            try self.saturateIsland(id);
         }
         try self.rewriteChildren(id);
         if (try self.applyRules(id, self.encOf(id))) self.changed = true;
@@ -826,82 +896,30 @@ const Rewriter = struct {
     }
 
     // -----------------------------------------------------------------
-    // Ordinary island rules
+    // Ordinary local rules
     // -----------------------------------------------------------------
 
-    /// Try every ordinary island rule at `id` (one rule per visit). A rule
-    /// that fires overwrote the node's content in place, so `id` joins the
-    /// dirty set: any later operand query about it would read a dead shape.
-    ///
-    /// `let` folding is also a **boundary rewrite** (hir.md §8.3 / §8.7): a
-    /// source-level `let`'s initializer opens its own full expression, so
-    /// the `let` node is not an island member and the island gate would
-    /// hide the rule. When `allowed` is false the `let` rules are still
-    /// tried, admitted by their `let_*` contracts (see `ruleLet`).
+    /// Try the two *tree* rules left at `id` (one per visit): the `let`
+    /// family and the known-variant `match` reduction. The union rules
+    /// (constant folding, integer algebra, constant conditions, aggregate
+    /// projection, CSE sharing) now live in the SEG arena
+    /// (`hir_egraph.zig`) and run at the island root; `allowed` is the
+    /// island gate, which only `match` needs (its arms must be island
+    /// members).
     fn applyRules(self: *Rewriter, id: hir.ExprId, allowed: bool) Error!bool {
-        const changed = if (allowed) try self.applyRulesInner(id) else try self.tryLet(id);
-        if (changed) try self.markDirty(id);
-        return changed;
-    }
-
-    /// `ruleLet` plus its rewrite count (both drivers go through here).
-    fn tryLet(self: *Rewriter, id: hir.ExprId) Error!bool {
-        if (!try self.ruleLet(id)) return false;
-        self.lets += 1;
-        return true;
-    }
-
-    fn applyRulesInner(self: *Rewriter, id: hir.ExprId) Error!bool {
-        const pr = self.p();
-        const name = hir.registry.get(pr.node(id).op).name;
-        if (std.mem.eql(u8, name, "if") or std.mem.eql(u8, name, "and") or std.mem.eql(u8, name, "or")) {
-            if (self.ruleConstCond(id)) {
-                self.conds += 1;
-                return true;
-            }
-        }
-        if (try self.tryLet(id)) return true;
-        if (std.mem.eql(u8, name, "match")) {
-            if (try self.ruleMatch(id)) {
-                self.matches += 1;
-                return true;
-            }
-        }
-        if (std.mem.eql(u8, name, "field_get")) {
-            if (projectAggregate(pr, id)) {
-                self.projects += 1;
-                return true;
-            }
-        }
-        if (hir.registry.get(pr.node(id).op).typed) {
-            if (try self.ruleNumeric(id)) return true;
-        }
-        // Lowest priority: only merge operands the other rules left alone.
-        if (try self.ruleCse(id)) {
-            self.shares += 1;
+        if (try self.ruleLet(id)) {
+            self.lets += 1;
+            try self.markDirty(id);
             return true;
         }
+        if (allowed and std.mem.eql(u8, hir.registry.get(self.p().node(id).op).name, "match")) {
+            if (try self.ruleMatch(id)) {
+                self.matches += 1;
+                try self.markDirty(id);
+                return true;
+            }
+        }
         return false;
-    }
-
-    /// `if c then A else B` (also `and`/`or`) with a constant condition
-    /// selects the taken branch. Both regions are island members, so the
-    /// untaken one is pure and had no observable evaluation to lose.
-    fn ruleConstCond(self: *Rewriter, id: hir.ExprId) bool {
-        const pr = self.p();
-        const ops = pr.operands(id);
-        if (ops.len != 1) return false;
-        const cond = pr.node(ops[0]);
-        if (!std.mem.eql(u8, hir.registry.get(cond.op).name, "const")) return false;
-        const taken: usize = switch (cond.payload.const_value) {
-            .bool => |b| if (b) 0 else 1,
-            else => return false,
-        };
-        const regs = pr.regionsOf(id);
-        if (taken >= regs.len) return false;
-        const branch = pr.region(regs[taken]).root;
-        pr.exprs.items[id] = pr.node(branch);
-        return true;
     }
 
     /// Known-variant `match` → `let` (hir.md §8.6). When the scrutinee is a
@@ -1058,7 +1076,7 @@ const Rewriter = struct {
 
     /// Plain `let` simplification (hir.md §8.3 / §8.7): dead let,
     /// used-once forwarding, and trivial-atom forwarding. All three
-    /// strictly reduce `costOf`.
+    /// strictly reduce the tree's node count.
     ///
     /// This is a **boundary rewrite** like β / η: a source-level `let`'s
     /// initializer opens its own full expression (hir.md §5.6), so the
@@ -1259,749 +1277,11 @@ const Rewriter = struct {
             for (pr.regionsOf(id)) |r| try work.append(self.arena, pr.region(r).root);
         }
     }
-
-    // -----------------------------------------------------------------
-    // CSE-style sharing (hir.md §8.3; docs/todo.md 10)
-    // -----------------------------------------------------------------
-
-    /// Two α-equivalent, `isDuplicable` operands of one island node are
-    /// computed once and read from a synthesized `let` binder. In short:
-    ///
-    /// - **operand list only** — the parent must have no region and be
-    ///   `strict_ltr`, so every operand is evaluated exactly once, in order
-    ///   (typed opcodes, `call`, `seq`, the aggregate makers). A `let` /
-    ///   `lambda` / `if` / `match` / `and` / `or` parent owns regions and is
-    ///   skipped; non-sibling sharing is PRE and belongs to the CFG
-    ///   optimizer;
-    /// - **same full expression** — every candidate shares the parent's FE,
-    ///   so the synthesized `let` never crosses a boundary (`seq`'s statement
-    ///   operand and a source-level `let` init both carry their own FE);
-    /// - **`encOf` + `isDuplicable`** — island member, Copy, total, no
-    ///   observable effect, all operand uses `Read`, no `Q`. Hoisting the
-    ///   first occurrence to the let initializer therefore reorders only a
-    ///   pure, total, deterministic computation: no effect, trap, divergence
-    ///   or `Q` can be observed to move;
-    /// - **not dirty** — an operand rewritten earlier this round has a dead
-    ///   shape behind its cached verdict; deferred to a fresh analysis next
-    ///   round;
-    /// - **not a trivial atom** — a `const` / `local` / `fn_ref` operand is
-    ///   not worth a binder, and `ruleLet`'s trivial-atom forwarding would
-    ///   immediately undo the `let` (oscillation). Otherwise `ruleLet`
-    ///   cannot undo the result: a CSE binding has ≥2 uses (kills dead-let /
-    ///   used-once forwarding) and a non-trivial init (kills forwarding).
-    ///
-    /// **Cleanup registration is unchanged.** `isDuplicable` forces a Copy
-    /// result with the whole subtree under `ownershipGate` (every `.owned`
-    /// node Copy, no borrowed view, no `Consume` use) and a discardable
-    /// footprint (`cleanupDiscardable`, docs/effects.md §11.2: FE
-    /// temporaries plus registered `scope_end` bindings). A non-borrow
-    /// Unique region binding fails the gate anyway (its `let` init use is
-    /// `Consume`). `CleanupToken`s are registered only for owned Unique
-    /// temporaries, so no token can name a donor — no `remapCleanupOrigin`
-    /// is needed, and none is meaningful (an orphaned duplicate has no
-    /// single owner).
-    fn ruleCse(self: *Rewriter, id: hir.ExprId) Error!bool {
-        const pr = self.p();
-        const n = pr.node(id);
-        const d = hir.registry.get(n.op);
-        if (d.regions != .none) return false;
-        if (d.policy != .strict_ltr) return false;
-        const ops = try self.dupOperands(id);
-        if (ops.len < 2) return false;
-        var i: usize = 0;
-        while (i < ops.len) : (i += 1) {
-            if (!try self.cseCandidate(ops[i], n.full_expr)) continue;
-            var j = i + 1;
-            while (j < ops.len) : (j += 1) {
-                if (!try self.cseCandidate(ops[j], n.full_expr)) continue;
-                if (!try self.alphaEq(ops[i], ops[j])) continue;
-                try self.spliceShare(id, ops, i);
-                return true;
-            }
-        }
-        return false;
-    }
-
-    /// One legal sharing occurrence: island member, unrewritten this round,
-    /// in the parent's full expression, non-trivial, and `isDuplicable`.
-    fn cseCandidate(self: *Rewriter, op: hir.ExprId, fe: hir.FullExprId) Error!bool {
-        if (self.dirty.contains(op)) return false;
-        if (!self.encOf(op)) return false;
-        const pr = self.p();
-        if (pr.node(op).full_expr != fe) return false;
-        if (isTrivialAtom(pr, op)) return false;
-        return self.analysis.isDuplicable(op);
-    }
-
-    /// Overwrite `id` with `let B = ops[first] in <id with every
-    /// α-equivalent operand reading %B>`. Each replacement is a *fresh*
-    /// `local` node: HIR is a tree (§3.7), so one binder reference cannot
-    /// be a shared id. The donors stay in the arena, unreachable.
-    fn spliceShare(self: *Rewriter, id: hir.ExprId, ops: []const hir.ExprId, first: usize) Error!void {
-        const pr = self.p();
-        const n = pr.node(id);
-        const fe = n.full_expr;
-        const init = ops[first];
-        const init_ty = pr.node(init).ty;
-        const binder = try pr.addBinder(init_ty, .value);
-        const new_ops = try self.arena.alloc(hir.ExprId, ops.len);
-        @memcpy(new_ops, ops);
-        var k: usize = first;
-        while (k < ops.len) : (k += 1) {
-            // Replace only donors that pass the same gate as the pair
-            // finder (`ruleCse`): an α-equal but dirty / non-island /
-            // non-duplicable operand must not be redirected on a verdict
-            // the pass refuses to trust elsewhere.
-            if (k == first) {
-                new_ops[k] = try self.addLocal(binder, init_ty, fe);
-                continue;
-            }
-            if (!try self.cseCandidate(ops[k], fe)) continue;
-            if (!try self.alphaEq(init, ops[k])) continue;
-            new_ops[k] = try self.addLocal(binder, init_ty, fe);
-        }
-        var body = n;
-        body.operands = try pr.addOperands(new_ops);
-        const body_id = try pr.addExpr(body);
-        const rid = try pr.addRegion(&.{binder}, body_id, null);
-        const regs = try pr.addRegions(&.{rid});
-        const opr = try pr.addOperands(&.{init});
-        const let_id = try pr.addExpr(.{
-            .op = hir.opId("let").?,
-            .ty = n.ty,
-            .operands = opr,
-            .regions = regs,
-            .full_expr = fe,
-            .sema = try pr.internSema(.owned, .pending),
-        });
-        pr.exprs.items[id] = pr.node(let_id);
-    }
-
-    fn addLocal(self: *Rewriter, binder: hir.BinderId, ty: meta.Type, fe: hir.FullExprId) Error!hir.ExprId {
-        const pr = self.p();
-        return pr.addExpr(.{
-            .op = hir.opId("local").?,
-            .ty = ty,
-            .payload = .{ .binder = binder },
-            .full_expr = fe,
-            .sema = try pr.internSema(.owned, .pending),
-        });
-    }
-
-    /// Structural (α-)equivalence of two subtrees of *this* program. Region
-    /// params map positionally; a `local` binder that no compared region
-    /// binds is compared by raw id — sibling occurrences share their
-    /// enclosing scope, so a shared free binder has the same id, and two
-    /// different ids are genuinely different variables. `access_hops` is
-    /// deliberately not compared: every op carrying it (`fn_ref` /
-    /// `module_const` / `const`) is excluded by the island-member or
-    /// trivial-atom gate before `alphaEq` runs.
-    fn alphaEq(self: *Rewriter, a: hir.ExprId, b: hir.ExprId) Error!bool {
-        var map = BinderMap.empty;
-        defer map.deinit(self.arena);
-        return self.alphaEqExpr(a, b, &map);
-    }
-
-    fn alphaEqExpr(self: *Rewriter, a: hir.ExprId, b: hir.ExprId, map: *BinderMap) Error!bool {
-        const pr = self.p();
-        const na = pr.node(a);
-        const nb = pr.node(b);
-        if (na.op != nb.op) return false;
-        if (!meta.Type.eql(na.ty, nb.ty)) return false;
-        if (!payloadAlphaEq(na.payload, nb.payload, map)) return false;
-        const ao = pr.operands(a);
-        const bo = pr.operands(b);
-        if (ao.len != bo.len) return false;
-        for (ao, bo) |x, y| {
-            if (!try self.alphaEqExpr(x, y, map)) return false;
-        }
-        const ar = pr.regionsOf(a);
-        const br = pr.regionsOf(b);
-        if (ar.len != br.len) return false;
-        for (ar, br) |ra, rb| {
-            const pa = pr.params(ra);
-            const pb = pr.params(rb);
-            if (pa.len != pb.len) return false;
-            for (pa, pb) |x, y| {
-                if (!self.mapBinder(map, x, y)) return false;
-            }
-            const rga = pr.region(ra);
-            const rgb = pr.region(rb);
-            if (!try self.alphaEqExpr(rga.root, rgb.root, map)) return false;
-            if ((rga.pattern == null) != (rgb.pattern == null)) return false;
-            if (rga.pattern) |pid| {
-                if (!try self.alphaEqPattern(pid, rgb.pattern.?, map)) return false;
-            }
-        }
-        return true;
-    }
-
-    fn mapBinder(self: *Rewriter, map: *BinderMap, a: hir.BinderId, b: hir.BinderId) bool {
-        if (map.get(a)) |already| return already == b;
-        map.put(self.arena, a, b) catch return false;
-        return true;
-    }
-
-    fn alphaEqPattern(self: *Rewriter, pa: hir.PatternId, pb: hir.PatternId, map: *BinderMap) Error!bool {
-        const pr = self.p();
-        const x = pr.pattern(pa);
-        const y = pr.pattern(pb);
-        return switch (x) {
-            .wildcard => y == .wildcard,
-            .bind => |ba| switch (y) {
-                .bind => |bb| if (map.get(ba)) |m| m == bb else ba == bb,
-                else => false,
-            },
-            .literal => |ca| switch (y) {
-                .literal => |cb| constEql(ca, cb),
-                else => false,
-            },
-            .tuple => |xa| switch (y) {
-                .tuple => |xb| blk: {
-                    if (xa.len != xb.len) break :blk false;
-                    for (xa, xb) |c1, c2| {
-                        if (!try self.alphaEqPattern(c1, c2, map)) break :blk false;
-                    }
-                    break :blk true;
-                },
-                else => false,
-            },
-            .list => |la| switch (y) {
-                .list => |lb| blk: {
-                    if (la.elems.len != lb.elems.len) break :blk false;
-                    for (la.elems, lb.elems) |c1, c2| {
-                        if (!try self.alphaEqPattern(c1, c2, map)) break :blk false;
-                    }
-                    if ((la.rest == null) != (lb.rest == null)) break :blk false;
-                    if (la.rest) |r1| {
-                        if (!try self.alphaEqPattern(r1, lb.rest.?, map)) break :blk false;
-                    }
-                    break :blk true;
-                },
-                else => false,
-            },
-            .struct_ => |sa| switch (y) {
-                .struct_ => |sb| blk: {
-                    if (sa.fields.len != sb.fields.len) break :blk false;
-                    for (sa.fields, sb.fields) |f1, f2| {
-                        if (f1.field != f2.field) break :blk false;
-                        if (!try self.alphaEqPattern(f1.pat, f2.pat, map)) break :blk false;
-                    }
-                    break :blk true;
-                },
-                else => false,
-            },
-            .variant => |va| switch (y) {
-                .variant => |vb| blk: {
-                    if (va.tag != vb.tag) break :blk false;
-                    if ((va.payload == null) != (vb.payload == null)) break :blk false;
-                    if (va.payload) |p1| {
-                        if (!try self.alphaEqPattern(p1, vb.payload.?, map)) break :blk false;
-                    }
-                    break :blk true;
-                },
-                else => false,
-            },
-            .type_test => |ta| switch (y) {
-                .type_test => |tb| meta.Type.eql(ta.ty, tb.ty) and
-                    (map.get(ta.bind) orelse ta.bind) == tb.bind,
-                else => false,
-            },
-        };
-    }
-
-    // -----------------------------------------------------------------
-    // Constant folding + integer algebra
-    // -----------------------------------------------------------------
-
-    fn ruleNumeric(self: *Rewriter, id: hir.ExprId) Error!bool {
-        const pr = self.p();
-        const d = hir.registry.get(pr.node(id).op);
-        const base = baseName(d.name);
-        const rep = d.rep orelse return false;
-        const ops = pr.operands(id);
-
-        // Constant folding: every operand a compile-time literal.
-        var all_const = true;
-        for (ops) |op| {
-            if (!std.mem.eql(u8, hir.registry.get(pr.node(op).op).name, "const")) {
-                all_const = false;
-                break;
-            }
-        }
-        if (all_const and ops.len >= 1 and ops.len <= 2) {
-            if (foldNumeric(base, rep, pr, ops)) |value| {
-                const ty = pr.node(id).ty;
-                pr.exprs.items[id] = .{
-                    .op = hir.opId("const").?,
-                    .ty = ty,
-                    .payload = .{ .const_value = value },
-                    .full_expr = pr.node(id).full_expr,
-                    .sema = try pr.internSema(.owned, .pending),
-                };
-                self.folds += 1;
-                return true;
-            }
-        }
-
-        // Integer algebra identities (wrapping reps only).
-        if (ops.len == 2 and isIntegerRep(rep)) {
-            if (integerAlgebra(base, rep, pr, ops[0], ops[1])) |result| {
-                switch (result) {
-                    .keep => |idx| pr.exprs.items[id] = pr.node(ops[idx]),
-                    .value => |v| pr.exprs.items[id] = .{
-                        .op = hir.opId("const").?,
-                        .ty = pr.node(id).ty,
-                        .payload = .{ .const_value = v },
-                        .full_expr = pr.node(id).full_expr,
-                        .sema = try pr.internSema(.owned, .pending),
-                    },
-                }
-                self.algebra += 1;
-                return true;
-            }
-        }
-        return false;
-    }
-
-    /// Minimal-node-count cost (hir.md §8.2's extraction cost): number of
-    /// expression nodes in the subtree. The let / folding / algebra rules
-    /// strictly reduce it, and the deterministic tie-break is the rule
-    /// order in `applyRules` (the v1 rule set has a single candidate per
-    /// node); β and the multi-payload `match` reduction are admitted by
-    /// their contracts instead (pass header).
-    pub fn costOf(self: *Rewriter, root: hir.ExprId) usize {
-        return nodeCost(self.p(), root, self.arena);
-    }
 };
-
-/// Aggregate projection (hir.md §8.3): `field_get(C(v0, …, vn), i) → vi`
-/// for a known index `i`, where `C` is `struct_make`, `tuple_make`, or
-/// `list_make`. The constructor operands are in declaration order (structs;
-/// `hir_build_path.buildStructConstruct`) or positional order (tuples /
-/// lists), and the payload index is the field / element index
-/// (`hir_build_expr.fieldRead`), so the operand at that index is the
-/// projected value. An out-of-range index or a non-constructor base is
-/// refused; for a list that `idx < operands.len` guard is the bounds proof,
-/// matching the `fieldGetOwn` refinement that admits the read as trap-free.
-/// Tuple / list projection is white-box only: Stilla has no element-read
-/// suffix, so no source-level tuple / list indexing reaches `field_get`
-/// (see docs/todo.md).
-///
-/// Pure structural rewrite kept standalone for the white-box test; the island
-/// gate is the caller's (`applyRules` runs it only when `encOf` is true).
-pub fn projectAggregate(pr: *hir.Program, id: hir.ExprId) bool {
-    const ops = pr.operands(id);
-    if (ops.len != 1) return false;
-    const base = ops[0];
-    const base_name = hir.registry.get(pr.node(base).op).name;
-    if (!std.mem.eql(u8, base_name, "struct_make") and
-        !std.mem.eql(u8, base_name, "tuple_make") and
-        !std.mem.eql(u8, base_name, "list_make")) return false;
-    const values = pr.operands(base);
-    const idx = pr.node(id).payload.field;
-    if (@as(usize, idx) >= values.len) return false;
-    pr.exprs.items[id] = pr.node(values[idx]);
-    return true;
-}
-
-/// Minimal-node-count cost of one subtree (hir.md §8.2). The caller's
-/// scratch allocator backs the traversal worklist; the count is
-/// returned regardless of allocation failure (the traversal stops).
-pub fn nodeCost(program: *hir.Program, root: hir.ExprId, scratch: std.mem.Allocator) usize {
-    var count: usize = 0;
-    var work = std.ArrayListUnmanaged(hir.ExprId).empty;
-    defer work.deinit(scratch);
-    work.append(scratch, root) catch return count;
-    while (work.pop()) |id| {
-        count += 1;
-        for (program.operands(id)) |op| work.append(scratch, op) catch return count;
-        for (program.regionsOf(id)) |r| work.append(scratch, program.region(r).root) catch return count;
-    }
-    return count;
-}
-
-fn baseName(name: []const u8) []const u8 {
-    if (std.mem.indexOfScalar(u8, name, '.')) |dot| return name[0..dot];
-    return name;
-}
 
 fn isTrivialAtom(pr: *hir.Program, id: hir.ExprId) bool {
     const name = hir.registry.get(pr.node(id).op).name;
     return std.mem.eql(u8, name, "const") or std.mem.eql(u8, name, "local") or std.mem.eql(u8, name, "fn_ref");
-}
-
-fn isIntegerRep(rep: hir.ScalarRep) bool {
-    return switch (rep) {
-        .i32, .i64, .u32, .u64 => true,
-        else => false,
-    };
-}
-
-// ---------------------------------------------------------------------------
-// Constant folding (mirrors cfg_lower_emit's runtime semantics, extended to
-// the 64-bit and float reps the HIR registers). A fold that could trap is
-// refused: the runtime owns the trap.
-// ---------------------------------------------------------------------------
-
-fn constVal(pr: *hir.Program, id: hir.ExprId) meta.ConstValue {
-    return pr.node(id).payload.const_value;
-}
-
-fn foldNumeric(base: []const u8, rep: hir.ScalarRep, pr: *hir.Program, ops: []const hir.ExprId) ?meta.ConstValue {
-    const a = constVal(pr, ops[0]);
-    if (ops.len == 1) return foldUnary(base, rep, a);
-    const b = constVal(pr, ops[1]);
-    return foldBinary(base, rep, a, b);
-}
-
-fn foldUnary(base: []const u8, rep: hir.ScalarRep, a: meta.ConstValue) ?meta.ConstValue {
-    if (std.mem.eql(u8, base, "neg")) {
-        return switch (rep) {
-            .i32 => intCV(i32, -%(asInt(i32, a) orelse return null)),
-            .i64 => intCV(i64, -%(asInt(i64, a) orelse return null)),
-            .u32 => intCV(u32, 0 -% (asInt(u32, a) orelse return null)),
-            .u64 => intCV(u64, 0 -% (asInt(u64, a) orelse return null)),
-            .f32 => floatCV(f32, -@as(f32, @floatCast(asF64(a) orelse return null))),
-            .f64 => floatCV(f64, -(asF64(a) orelse return null)),
-            else => null,
-        };
-    }
-    if (std.mem.eql(u8, base, "abs")) {
-        return switch (rep) {
-            .i32 => blk: {
-                const x = asInt(i32, a) orelse return null;
-                break :blk intCV(i32, if (x < 0) -%x else x);
-            },
-            .i64 => blk: {
-                const x = asInt(i64, a) orelse return null;
-                break :blk intCV(i64, if (x < 0) -%x else x);
-            },
-            .f32 => floatCV(f32, @abs(@as(f32, @floatCast(asF64(a) orelse return null)))),
-            .f64 => floatCV(f64, @abs(asF64(a) orelse return null)),
-            else => null, // no unsigned abs (CFG leaves it unfolded too)
-        };
-    }
-    if (std.mem.eql(u8, base, "not")) {
-        return switch (a) {
-            .bool => |v| .{ .bool = !v },
-            else => null,
-        };
-    }
-    if (std.mem.eql(u8, base, "clz")) {
-        return switch (rep) {
-            .i32 => .{ .int = @clz(@as(u32, @bitCast(asInt(i32, a) orelse return null))) },
-            .u32 => .{ .int = @clz(asInt(u32, a) orelse return null) },
-            else => null,
-        };
-    }
-    if (std.mem.eql(u8, base, "popcount")) {
-        return switch (rep) {
-            .i32 => .{ .int = @popCount(@as(u32, @bitCast(asInt(i32, a) orelse return null))) },
-            .u32 => .{ .int = @popCount(asInt(u32, a) orelse return null) },
-            else => null,
-        };
-    }
-    return null;
-}
-
-fn foldBinary(base: []const u8, rep: hir.ScalarRep, a: meta.ConstValue, b: meta.ConstValue) ?meta.ConstValue {
-    if (std.mem.eql(u8, base, "add") or std.mem.eql(u8, base, "sub") or
-        std.mem.eql(u8, base, "mul") or std.mem.eql(u8, base, "div") or std.mem.eql(u8, base, "rem"))
-    {
-        return switch (rep) {
-            .i32 => intArith(i32, base, a, b),
-            .i64 => intArith(i64, base, a, b),
-            .u32 => intArith(u32, base, a, b),
-            .u64 => intArith(u64, base, a, b),
-            .f32 => floatArith(f32, base, a, b),
-            .f64 => floatArith(f64, base, a, b),
-            else => null,
-        };
-    }
-    if (std.mem.eql(u8, base, "min") or std.mem.eql(u8, base, "max")) {
-        const is_min = std.mem.eql(u8, base, "min");
-        return switch (rep) {
-            .i32 => blk: {
-                const x = asInt(i32, a) orelse return null;
-                const y = asInt(i32, b) orelse return null;
-                break :blk intCV(i32, if (is_min) @min(x, y) else @max(x, y));
-            },
-            .u32 => blk: {
-                const x = asInt(u32, a) orelse return null;
-                const y = asInt(u32, b) orelse return null;
-                break :blk intCV(u32, if (is_min) @min(x, y) else @max(x, y));
-            },
-            .f32 => blk: {
-                const x: f32 = @floatCast(asF64(a) orelse return null);
-                const y: f32 = @floatCast(asF64(b) orelse return null);
-                break :blk floatCV(f32, if (is_min) fminIeee(f32, x, y) else fmaxIeee(f32, x, y));
-            },
-            .f64 => blk: {
-                const x = asF64(a) orelse return null;
-                const y = asF64(b) orelse return null;
-                break :blk floatCV(f64, if (is_min) fminIeee(f64, x, y) else fmaxIeee(f64, x, y));
-            },
-            else => null,
-        };
-    }
-    if (std.mem.eql(u8, base, "shl") or std.mem.eql(u8, base, "shr")) {
-        const is_shl = std.mem.eql(u8, base, "shl");
-        return switch (rep) {
-            .i32 => intShift(i32, is_shl, a, b),
-            .i64 => intShift(i64, is_shl, a, b),
-            .u32 => intShift(u32, is_shl, a, b),
-            .u64 => intShift(u64, is_shl, a, b),
-            else => null,
-        };
-    }
-    if (std.mem.eql(u8, base, "band") or std.mem.eql(u8, base, "bor") or std.mem.eql(u8, base, "bxor")) {
-        return switch (rep) {
-            .i32 => intBit(i32, base, a, b),
-            .i64 => intBit(i64, base, a, b),
-            .u32 => intBit(u32, base, a, b),
-            .u64 => intBit(u64, base, a, b),
-            else => null,
-        };
-    }
-    if (std.mem.eql(u8, base, "eq") or std.mem.eql(u8, base, "ne") or
-        std.mem.eql(u8, base, "lt") or std.mem.eql(u8, base, "le") or
-        std.mem.eql(u8, base, "gt") or std.mem.eql(u8, base, "ge"))
-    {
-        return cmpResult(base, rep, a, b);
-    }
-    return null;
-}
-
-fn cmpResult(base: []const u8, rep: hir.ScalarRep, a: meta.ConstValue, b: meta.ConstValue) ?meta.ConstValue {
-    const eq = std.mem.eql(u8, base, "eq");
-    const ne = std.mem.eql(u8, base, "ne");
-    const eq_style = eq or ne;
-    const r: bool = switch (rep) {
-        .i32 => cmpInt(i32, base, a, b) orelse return null,
-        .i64 => cmpInt(i64, base, a, b) orelse return null,
-        .u32 => cmpInt(u32, base, a, b) orelse return null,
-        .u64 => cmpInt(u64, base, a, b) orelse return null,
-        .f32, .f64 => cmpFloat(base, a, b) orelse return null,
-        .bool => blk: {
-            if (!eq_style) return null;
-            const x = asBool(a) orelse return null;
-            const y = asBool(b) orelse return null;
-            break :blk if (eq) x == y else x != y;
-        },
-        .str => blk: {
-            if (!eq_style) return null;
-            const x = asStr(a) orelse return null;
-            const y = asStr(b) orelse return null;
-            break :blk if (eq) std.mem.eql(u8, x, y) else !std.mem.eql(u8, x, y);
-        },
-        // `byte` comparisons lower through the u32 family (hir.md §7.2
-        // M1a note); the value occupies one host cell, compared unsigned.
-        .byte => blk: {
-            const x = asInt(u8, a) orelse return null;
-            const y = asInt(u8, b) orelse return null;
-            if (eq) break :blk x == y;
-            if (ne) break :blk x != y;
-            if (std.mem.eql(u8, base, "lt")) break :blk x < y;
-            if (std.mem.eql(u8, base, "le")) break :blk x <= y;
-            if (std.mem.eql(u8, base, "gt")) break :blk x > y;
-            break :blk x >= y;
-        },
-    };
-    return .{ .bool = r };
-}
-
-fn cmpInt(comptime T: type, base: []const u8, a: meta.ConstValue, b: meta.ConstValue) ?bool {
-    const x = asInt(T, a) orelse return null;
-    const y = asInt(T, b) orelse return null;
-    if (std.mem.eql(u8, base, "eq")) return x == y;
-    if (std.mem.eql(u8, base, "ne")) return x != y;
-    if (std.mem.eql(u8, base, "lt")) return x < y;
-    if (std.mem.eql(u8, base, "le")) return x <= y;
-    if (std.mem.eql(u8, base, "gt")) return x > y;
-    if (std.mem.eql(u8, base, "ge")) return x >= y;
-    return null;
-}
-
-fn cmpFloat(base: []const u8, a: meta.ConstValue, b: meta.ConstValue) ?bool {
-    const x = asF64(a) orelse return null;
-    const y = asF64(b) orelse return null;
-    if (std.mem.eql(u8, base, "eq")) return x == y;
-    if (std.mem.eql(u8, base, "ne")) return x != y;
-    if (std.mem.eql(u8, base, "lt")) return x < y;
-    if (std.mem.eql(u8, base, "le")) return x <= y;
-    if (std.mem.eql(u8, base, "gt")) return x > y;
-    if (std.mem.eql(u8, base, "ge")) return x >= y;
-    return null;
-}
-
-fn intArith(comptime T: type, base: []const u8, a: meta.ConstValue, b: meta.ConstValue) ?meta.ConstValue {
-    const x = asInt(T, a) orelse return null;
-    const y = asInt(T, b) orelse return null;
-    if (std.mem.eql(u8, base, "add")) return intCV(T, x +% y);
-    if (std.mem.eql(u8, base, "sub")) return intCV(T, x -% y);
-    if (std.mem.eql(u8, base, "mul")) return intCV(T, x *% y);
-    if (y == 0) return null; // division/remainder by zero traps — leave it
-    if (comptime @typeInfo(T).int.signedness == .signed) {
-        if (x == std.math.minInt(T) and y == -1) {
-            // `min / -1` traps for `div`; `min % -1` is exactly 0.
-            if (std.mem.eql(u8, base, "div")) return null;
-            return intCV(T, 0);
-        }
-    }
-    if (std.mem.eql(u8, base, "div")) return intCV(T, @divTrunc(x, y));
-    return intCV(T, @rem(x, y));
-}
-
-fn intShift(comptime T: type, is_shl: bool, a: meta.ConstValue, b: meta.ConstValue) ?meta.ConstValue {
-    const bits = @typeInfo(T).int.bits;
-    const U = std.meta.Int(.unsigned, bits);
-    const x = asInt(T, a) orelse return null;
-    const y = asInt(T, b) orelse return null;
-    const s: std.math.Log2Int(T) = @intCast(@as(U, @bitCast(y)) & (bits - 1));
-    if (is_shl) return intCV(T, @bitCast(@as(U, @bitCast(x)) << s));
-    return intCV(T, x >> s);
-}
-
-fn intBit(comptime T: type, base: []const u8, a: meta.ConstValue, b: meta.ConstValue) ?meta.ConstValue {
-    const x = asInt(T, a) orelse return null;
-    const y = asInt(T, b) orelse return null;
-    if (std.mem.eql(u8, base, "band")) return intCV(T, x & y);
-    if (std.mem.eql(u8, base, "bor")) return intCV(T, x | y);
-    return intCV(T, x ^ y);
-}
-
-fn floatArith(comptime T: type, base: []const u8, a: meta.ConstValue, b: meta.ConstValue) ?meta.ConstValue {
-    const x = asF64(a) orelse return null;
-    const y = asF64(b) orelse return null;
-    if (std.mem.eql(u8, base, "add")) return floatCV(T, @as(T, @floatCast(x)) + @as(T, @floatCast(y)));
-    if (std.mem.eql(u8, base, "sub")) return floatCV(T, @as(T, @floatCast(x)) - @as(T, @floatCast(y)));
-    if (std.mem.eql(u8, base, "mul")) return floatCV(T, @as(T, @floatCast(x)) * @as(T, @floatCast(y)));
-    if (std.mem.eql(u8, base, "div")) return floatCV(T, @as(T, @floatCast(x)) / @as(T, @floatCast(y)));
-    // Zig `@rem` on floats is the truncated remainder (fmod).
-    return floatCV(T, @rem(@as(T, @floatCast(x)), @as(T, @floatCast(y))));
-}
-
-// --- constant-value helpers (meta.ConstValue keeps integers as i64 bit
-// patterns) ---------------------------------------------------------------
-
-fn asInt(comptime T: type, c: meta.ConstValue) ?T {
-    const U = std.meta.Int(.unsigned, @typeInfo(T).int.bits);
-    return switch (c) {
-        .int => |i| @bitCast(@as(U, @truncate(@as(u64, @bitCast(i))))),
-        else => null,
-    };
-}
-
-fn asF64(c: meta.ConstValue) ?f64 {
-    return switch (c) {
-        .float => |f| f,
-        else => null,
-    };
-}
-
-fn asBool(c: meta.ConstValue) ?bool {
-    return switch (c) {
-        .bool => |b| b,
-        else => null,
-    };
-}
-
-fn asStr(c: meta.ConstValue) ?[]const u8 {
-    return switch (c) {
-        .string => |s| s,
-        else => null,
-    };
-}
-
-fn intCV(comptime T: type, v: T) meta.ConstValue {
-    if (comptime @typeInfo(T).int.signedness == .signed) {
-        return .{ .int = v };
-    } else {
-        return .{ .int = @bitCast(@as(u64, v)) };
-    }
-}
-
-fn floatCV(comptime T: type, v: T) meta.ConstValue {
-    return .{ .float = @floatCast(v) };
-}
-
-/// IEEE 754 `fmin`: NaN propagates, `fmin(-0, +0) = -0` (mirrors
-/// cfg_lower_emit).
-fn fminIeee(comptime T: type, a: T, b: T) T {
-    if (std.math.isNan(a) or std.math.isNan(b)) return std.math.nan(T);
-    if (a == 0.0 and b == 0.0) return if (std.math.signbit(a)) a else b;
-    return if (a < b) a else b;
-}
-
-fn fmaxIeee(comptime T: type, a: T, b: T) T {
-    if (std.math.isNan(a) or std.math.isNan(b)) return std.math.nan(T);
-    if (a == 0.0 and b == 0.0) return if (std.math.signbit(b)) a else b;
-    return if (a > b) a else b;
-}
-
-// ---------------------------------------------------------------------------
-// Integer algebra identities
-// ---------------------------------------------------------------------------
-
-const AlgebraResult = union(enum) {
-    /// Keep operand `keep` (0 or 1) as the result.
-    keep: usize,
-    /// The result is this constant (drops both operands).
-    value: meta.ConstValue,
-};
-
-fn integerAlgebra(base: []const u8, rep: hir.ScalarRep, pr: *hir.Program, l: hir.ExprId, r: hir.ExprId) ?AlgebraResult {
-    if (!isIntegerRep(rep)) return null;
-    const lc = maybeConst(pr, l);
-    const rc = maybeConst(pr, r);
-    return switch (rep) {
-        .i32 => intAlgebraT(i32, base, lc, rc),
-        .i64 => intAlgebraT(i64, base, lc, rc),
-        .u32 => intAlgebraT(u32, base, lc, rc),
-        .u64 => intAlgebraT(u64, base, lc, rc),
-        else => null,
-    };
-}
-
-fn maybeConst(pr: *hir.Program, id: hir.ExprId) ?meta.ConstValue {
-    if (!std.mem.eql(u8, hir.registry.get(pr.node(id).op).name, "const")) return null;
-    return pr.node(id).payload.const_value;
-}
-
-fn intAlgebraT(comptime T: type, base: []const u8, lc: ?meta.ConstValue, rc: ?meta.ConstValue) ?AlgebraResult {
-    const lz = if (lc) |c| (asInt(T, c) orelse return null) == 0 else false;
-    const rz = if (rc) |c| (asInt(T, c) orelse return null) == 0 else false;
-    const lo = if (lc) |c| (asInt(T, c) orelse return null) == 1 else false;
-    const ro = if (rc) |c| (asInt(T, c) orelse return null) == 1 else false;
-    const lall = if (lc) |c| (asInt(T, c) orelse return null) == ~@as(T, 0) else false;
-    const rall = if (rc) |c| (asInt(T, c) orelse return null) == ~@as(T, 0) else false;
-
-    if (std.mem.eql(u8, base, "add")) {
-        if (lz) return .{ .keep = 1 };
-        if (rz) return .{ .keep = 0 };
-    } else if (std.mem.eql(u8, base, "sub")) {
-        if (rz) return .{ .keep = 0 };
-    } else if (std.mem.eql(u8, base, "mul")) {
-        if (lo) return .{ .keep = 1 };
-        if (ro) return .{ .keep = 0 };
-        if (lz or rz) return .{ .value = intCV(T, 0) };
-    } else if (std.mem.eql(u8, base, "band")) {
-        if (lall) return .{ .keep = 1 };
-        if (rall) return .{ .keep = 0 };
-        if (lz or rz) return .{ .value = intCV(T, 0) };
-    } else if (std.mem.eql(u8, base, "bor")) {
-        if (lz) return .{ .keep = 1 };
-        if (rz) return .{ .keep = 0 };
-        if (lall) return .{ .value = intCV(T, ~@as(T, 0)) };
-        if (rall) return .{ .value = intCV(T, ~@as(T, 0)) };
-    } else if (std.mem.eql(u8, base, "bxor")) {
-        if (lz) return .{ .keep = 1 };
-        if (rz) return .{ .keep = 0 };
-    } else if (std.mem.eql(u8, base, "shl") or std.mem.eql(u8, base, "shr")) {
-        if (rz) return .{ .keep = 0 };
-    }
-    return null;
 }
 
 // ---------------------------------------------------------------------------
@@ -2010,113 +1290,6 @@ fn intAlgebraT(comptime T: type, base: []const u8, lc: ?meta.ConstValue, rc: ?me
 
 const testing = std.testing;
 
-test "constant folding covers the 32/64-bit and float reps" {
-    try testing.expectEqual(@as(i64, 3), foldBinary("add", .i32, .{ .int = 1 }, .{ .int = 2 }).?.int);
-    try testing.expectEqual(@as(i64, 5), foldBinary("add", .i64, .{ .int = 4 }, .{ .int = 1 }).?.int);
-    try testing.expectEqual(@as(i64, 6), foldBinary("mul", .u32, .{ .int = 3 }, .{ .int = 2 }).?.int);
-    // Integer arithmetic wraps (never traps).
-    const wrapped = foldBinary("add", .i32, .{ .int = std.math.maxInt(i32) }, .{ .int = 1 }).?;
-    try testing.expectEqual(@as(i64, std.math.minInt(i32)), wrapped.int);
-    // Division by zero and signed `min / -1` are left to the runtime.
-    try testing.expect(foldBinary("div", .i32, .{ .int = 1 }, .{ .int = 0 }) == null);
-    try testing.expect(foldBinary("div", .i64, .{ .int = std.math.minInt(i64) }, .{ .int = -1 }) == null);
-    try testing.expectEqual(@as(i64, 0), foldBinary("rem", .i64, .{ .int = std.math.minInt(i64) }, .{ .int = -1 }).?.int);
-    // Float division folds (IEEE, never traps).
-    const inf = foldBinary("div", .f32, .{ .float = 1.0 }, .{ .float = 0.0 }).?;
-    try testing.expect(std.math.isInf(inf.float));
-    // Comparisons produce bools.
-    try testing.expect(foldBinary("lt", .i32, .{ .int = 1 }, .{ .int = 2 }).?.bool);
-    try testing.expect(foldBinary("eq", .str, .{ .string = "a" }, .{ .string = "a" }).?.bool);
-    // `byte` has no arithmetic but its comparisons fold unsigned.
-    try testing.expect(foldBinary("lt", .byte, .{ .int = 1 }, .{ .int = 2 }).?.bool);
-    try testing.expect(!foldBinary("gt", .byte, .{ .int = 1 }, .{ .int = 2 }).?.bool);
-    try testing.expect(foldBinary("eq", .byte, .{ .int = 2 }, .{ .int = 2 }).?.bool);
-    // A non-comparison byte op has no fold.
-    try testing.expect(foldBinary("add", .byte, .{ .int = 1 }, .{ .int = 2 }) == null);
-    // Shifts mask the count.
-    try testing.expectEqual(@as(i64, std.math.minInt(i32)), foldBinary("shl", .i32, .{ .int = 1 }, .{ .int = 31 }).?.int);
-    try testing.expectEqual(@as(i64, 1), foldBinary("shl", .i32, .{ .int = 1 }, .{ .int = 32 }).?.int);
-}
-
-test "unary folding: neg wraps, abs clears the sign, not/clz/popcount" {
-    try testing.expectEqual(@as(i64, std.math.minInt(i32)), foldUnary("neg", .i32, .{ .int = std.math.minInt(i32) }).?.int);
-    try testing.expectEqual(@as(i64, std.math.minInt(i32)), foldUnary("abs", .i32, .{ .int = std.math.minInt(i32) }).?.int);
-    try testing.expectEqual(@as(f64, 2.0), foldUnary("abs", .f64, .{ .float = -2.0 }).?.float);
-    try testing.expect(foldUnary("not", .bool, .{ .bool = true }).?.bool == false);
-    try testing.expectEqual(@as(i64, 32), foldUnary("clz", .u32, .{ .int = 0 }).?.int);
-    try testing.expectEqual(@as(i64, 3), foldUnary("popcount", .u32, .{ .int = 0b1011 }).?.int);
-    // No unsigned abs (the CFG leaves it unfolded too).
-    try testing.expect(foldUnary("abs", .u32, .{ .int = 3 }) == null);
-}
-
-test "integer algebra identities are declared, not guessed" {
-    const z = meta.ConstValue{ .int = 0 };
-    const one = meta.ConstValue{ .int = 1 };
-    const allones_i32 = meta.ConstValue{ .int = -1 };
-    try testing.expectEqual(@as(usize, 1), intAlgebraT(i32, "add", z, null).?.keep);
-    try testing.expectEqual(@as(usize, 0), intAlgebraT(i32, "add", null, z).?.keep);
-    try testing.expectEqual(@as(usize, 0), intAlgebraT(i32, "sub", null, z).?.keep);
-    try testing.expectEqual(@as(usize, 1), intAlgebraT(i32, "mul", one, null).?.keep);
-    try testing.expectEqual(@as(usize, 0), intAlgebraT(i32, "mul", null, one).?.keep);
-    try testing.expectEqual(@as(i64, 0), intAlgebraT(i32, "mul", z, null).?.value.int);
-    try testing.expectEqual(@as(usize, 1), intAlgebraT(i32, "band", allones_i32, null).?.keep);
-    try testing.expectEqual(@as(i64, 0), intAlgebraT(i32, "band", z, null).?.value.int);
-    try testing.expectEqual(@as(usize, 1), intAlgebraT(u32, "bor", z, null).?.keep);
-    try testing.expectEqual(@as(usize, 0), intAlgebraT(i32, "shl", null, z).?.keep);
-    // Float reps take no integer identity.
-    try testing.expect(integerAlgebra("add", .f32, undefined, undefined, undefined) == null);
-}
-
-test "minimal-node extraction cost counts the subtree" {
-    const parse_text = @import("hir_parse.zig").parseText;
-    var p = try parse_text("fn (B0: i32) { add.i32(%B0, 0i32) }", .{});
-    defer p.arena.deinit();
-    // lambda + add + local + const
-    try testing.expectEqual(@as(usize, 4), nodeCost(&p.program, p.root, testing.allocator));
-    // The `add(x, 0) → x` result has strictly smaller cost (the local).
-    const add = p.program.region(p.program.regionsOf(p.root)[0]).root;
-    try testing.expectEqual(@as(usize, 3), nodeCost(&p.program, add, testing.allocator));
-    const lhs = p.program.operands(add)[0];
-    try testing.expectEqual(@as(usize, 1), nodeCost(&p.program, lhs, testing.allocator));
-}
-
-test "aggregate projection folds field_get over every constructor for each index" {
-    var arena = std.heap.ArenaAllocator.init(testing.allocator);
-    defer arena.deinit();
-    var prog = try hir.Program.init(arena.allocator());
-    const i32ty = meta.Type{ .primitive = .int32 };
-    const c0 = try prog.addExpr(.{ .op = hir.opId("const").?, .ty = i32ty, .payload = .{ .const_value = .{ .int = 10 } } });
-    const c1 = try prog.addExpr(.{ .op = hir.opId("const").?, .ty = i32ty, .payload = .{ .const_value = .{ .int = 20 } } });
-    const c2 = try prog.addExpr(.{ .op = hir.opId("const").?, .ty = i32ty, .payload = .{ .const_value = .{ .int = 30 } } });
-    const tuple_ty = meta.Type{ .tuple = try arena.allocator().dupe(meta.Type, &.{ i32ty, i32ty, i32ty }) };
-    const list_inner = try arena.allocator().create(meta.Type);
-    list_inner.* = i32ty;
-    const list_ty = meta.Type{ .list = list_inner };
-    const expected = [_]i64{ 10, 20, 30 };
-    // struct_make (declaration order), tuple_make and list_make (positional):
-    // every index projects its own operand.
-    const ctors = [_]struct { []const u8, meta.Type }{
-        .{ "struct_make", i32ty },
-        .{ "tuple_make", tuple_ty },
-        .{ "list_make", list_ty },
-    };
-    for (ctors) |c| {
-        const ctor = try prog.addExpr(.{ .op = hir.opId(c[0]).?, .ty = c[1], .operands = try prog.addOperands(&.{ c0, c1, c2 }) });
-        for (expected, 0..) |want, i| {
-            const fg = try prog.addExpr(.{ .op = hir.opId("field_get").?, .ty = i32ty, .operands = try prog.addOperands(&.{ctor}), .payload = .{ .field = @intCast(i) } });
-            try testing.expect(projectAggregate(&prog, fg));
-            try testing.expectEqual(want, prog.node(fg).payload.const_value.int);
-        }
-        // Out of range: the operand list is shorter than the payload index.
-        const oob = try prog.addExpr(.{ .op = hir.opId("field_get").?, .ty = i32ty, .operands = try prog.addOperands(&.{ctor}), .payload = .{ .field = 3 } });
-        try testing.expect(!projectAggregate(&prog, oob));
-        try testing.expectEqualStrings("field_get", hir.registry.get(prog.node(oob).op).name);
-    }
-    // A non-constructor base is left alone (struct, tuple, and list alike).
-    const not_ctor = try prog.addExpr(.{ .op = hir.opId("field_get").?, .ty = i32ty, .operands = try prog.addOperands(&.{c1}), .payload = .{ .field = 0 } });
-    try testing.expect(!projectAggregate(&prog, not_ctor));
-}
-
 test "tuple projection fires end to end through island admission" {
     // No source construct reaches a tuple `field_get` (no element-read
     // suffix), so the program is the HIR text form: the pass must still
@@ -2124,6 +1297,9 @@ test "tuple projection fires end to end through island admission" {
     const parse_text = @import("hir_parse.zig").parseText;
     var p = try parse_text("fn () { field_get[0](tuple_make(10i32, 20i32)) : i32 }", .{});
     defer p.arena.deinit();
+    // `parseText` returns its arena by value; re-seat the program's
+    // allocator at the live copy before an appending transform touches it.
+    p.program.arena = p.arena.allocator();
     const a = p.arena.allocator();
     var built = hir.BuiltProgram{ .arena = a, .program = p.program };
     try built.funcs.append(a, .{

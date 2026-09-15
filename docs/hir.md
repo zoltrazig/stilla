@@ -9,10 +9,11 @@
 >   HIR→CFG lowering（hir_lower.zig 与 hir_lower_expr / `_control` / `_call` /
 >   `_pattern`）；module-const 依赖检查。
 > - **消费者**：dead-let + selective A-Normal Form + `never_returns` 后缀删除
->   （hir_simplify.zig，`--simplify`，默认关）；SEG v1（hir_seg.zig，可执行文件
->   默认开、`--no-seg` 关闭；库默认关、`Options.seg` 开启）。
-> - **设计已定但未实现**（§11、[todo.md](todo.md)）：真正的 slotted e-graph、
->   HIRTypeId canonical 表、source span side table。
+>   （hir_simplify.zig，`--simplify`，默认关）；SEG（hir_seg.zig 的 island 驱动
+>   与 hir_egraph.zig 的 slotted e-graph arena，可执行文件默认开、`--no-seg`
+>   关闭；库默认关、`Options.seg` 开启）。
+> - **设计已定但未实现**（§11、[todo.md](todo.md)）：HIRTypeId canonical 表、
+>   source span side table。
 > - **阅读约定**：数据结构以 hir.zig 的落地形态为准；标 **Target** 的段落是
 >   设计意图，不是现状。
 
@@ -49,7 +50,7 @@ monomorphic AST 直接生成 CFG AIR。该直降路径**已删除**；以下是 
    pattern 绑定统一为 region 的 params；没有独立 statement IR 或 pattern 作用域。
 3. **Op 用 registry 扩展。** `ExprNode` 极小，op 语义（验证、效果、SEG 编码、
    lowering）挂在 `OpDescriptor` 上，不膨胀成递归 `union ExprKind`。
-4. **SEG 只优化安全的纯 island，不接管整个 HIR。** v1 只接受 Copy、total、
+4. **SEG 只优化安全的纯 island，不接管整个 HIR。** 只接受 Copy、total、
    无 Unique 子值、无借用的子树。
 
 ### 1.4 非目标
@@ -82,7 +83,7 @@ flowchart TD
     SIMPQ -->|是| ANF[dead-let / selective ANF] --> RV1[revalidateHir]
     SIMPQ -->|否| SEGQ{--no-seg?}
     RV1 --> SEGQ
-    SEGQ -->|否| SEG[SEG v1 island 重写] --> RV2[revalidateHir]
+    SEGQ -->|否| SEG[SEG island 重写（e-graph arena）] --> RV2[revalidateHir]
     SEGQ -->|是| LOWER[HIR→CFG lowering]
     RV2 --> LOWER
     LOWER --> AIRC[CFG AIR]
@@ -926,15 +927,18 @@ alias 在进 SEG **之前**彻底展开：SEG 中不出现 `UserId` 与 `int32` 
 
 ## 8. SEG 桥与重写合法性
 
-> **现状：v1 是原位树重写器，不是 e-graph。** 实现（hir_seg.zig）在结构 admissible
-> 的 island 上做定点、确定性的局部重写：`computeIslands` 标出 island，`applyRules`
-> 逐节点改写，每轮重导效果分析。**没有** e-class、union-find、saturation、SLOT
-> 编号或 extraction。下文 §8.1–§8.2 的 Slotted E-Graph / 投影-抽取是 **Target**
-> 形态，读作设计意图；§8.3 表按现状标注。
+> **现状：union 规则跑在 slotted e-graph arena 里。** `hir_egraph.zig` 是
+> e-class 表 + union-find：`encode` 把 island 编成 e-node（binder 进 `.slot`，
+> region 记成 binder term），`saturate` 有界地跑 union 规则（常折叠 / 整数代数 /
+> 常量条件 / 聚合投影）并在每轮后 `rebuild` 做同余合并，`extract` 按每类的
+> preferred e-node 把饱和形态写回 HIR。`hir_seg.zig` 仍是驱动：`computeIslands`
+> 标 island，boundary rewrite（β / η / `let` 三族）与 known-variant `match`
+> 保持原位树重写并绕过 island 门，每个 island 根上调用 arena，每轮重导效果
+> 分析。§8.2 的 Slotted E-Graph / 投影-抽取已是现状；§8.3 表按现状标注。
 
 ### 8.1 Island 模型与准入谓词
 
-不把整个 HIR 塞进同一个 e-graph。v1 的 island 由两个条件递归定义（不 switch op）：
+不把整个 HIR 塞进同一个 e-graph。island 由两个条件递归定义（不 switch op）：
 
 ```text
 op(e).seg_encoding 已注册        // has_seg_encoding
@@ -959,7 +963,7 @@ full-expression 边界现在是节点级真值（§5.6）：`isSegSafe` 的 owne
 真的会拒绝跨 FE 子树，源级 `let`（init 自成 FE）因此不是 island 成员（§8.3）。
 
 > **两类重写**：普通 SEG 重写必须 full-expression-preserving；**boundary
-> rewrite**（v1 有 β、η 与 `let` 三族）绕过 island 的编码 / 成员资格。β 把 λ 体搬进调用
+> rewrite**（β、η 与 `let` 三族）绕过 island 的编码 / 成员资格。β 把 λ 体搬进调用
 > 点：callee 是 `fn_ref`（无 SEG 编码），call 节点本就不是 island 成员，语义安全
 > 仍要过 `isSegSafe` 的残余部分——`tryBeta` 对 call 节点只要求 Copy 结果、
 > cleanup-free 求值子树与 ownership gate（**不要求实参 total / 无可观察效果**），
@@ -972,9 +976,7 @@ full-expression 边界现在是节点级真值（§5.6）：`isSegSafe` 的 owne
 > `checkCleanupProof` 消费）；η 与 selective ANF 的契约同样已落地
 > （`eta_rule` / `anf_rule`，§8.5 / §5.7）。
 
-### 8.2 投影与抽取（Target）
-
-> 以下记录目标是 Slotted E-Graph 形态；v1 实现无此机制。
+### 8.2 投影与抽取
 
 ```text
 BinderId        -> Slot
@@ -989,27 +991,54 @@ extract(eclass)      -> ExprId
 - 不支持的 op `encode` 返回 `None`，自然形成边界。
 - extraction 回 HIR 时：分配 fresh BinderId；island 外原 binder 不得混淆；共享
   子项必须 materialize 成显式 `let`（§3.7）。
-- **cost model**：v1 用最小节点数 + 确定性 tie-break（规则的确定顺序），不用
-  per-opcode 权重。cost 是优化器事实，不进 op descriptor。let / 折叠 / 代数规则
-  严格减小节点数；β 按 §8.4 契约准入，known-variant `match` 按覆盖 / arity 证明
-  准入，CSE sharing（§8.3）按 `isDuplicable` 与同 FE 准入——多 payload 的
-  `match`（每个绑定叶合成一个 `let`）与 CSE（materialize 共享子项）节点数可能
-  不降。
-- **终止契约：有界轮数，非严格递减度量。** v1 **不**给出全局递减度量：`match`
+
+已落地的形态（`hir_egraph.zig` 的白盒测试逐条固定）：
+
+- **SLOT 编号**按 `encode` 的递归序发号：region 参数先号，随后是体内遇到的
+  自由 binder（`Local` 的 payload 换成 `.slot`）；同一 binder 的两处引用共享一个
+  号，因此同形子树自然同余合并。slot → 原 `BinderId` 的表随 island 保存，
+  extraction 在 island 外重新读到的 binder 原样写回原 id（free-binder 身份）。
+- **preferred e-node 就是 cost**：0 = 该类的 encode 原貌，1 = 规则选中的 e-node；
+  同类多个提案按最低 e-node 索引定序（确定性）。没有 per-opcode 权重，故
+  extraction 不撤销「节点数不降」的规则（β 的 `let` 链、多 payload `match` 的
+  绑定叶、materialize 出的合成 `let`）——它们不在 arena 里，由驱动按各自契约
+  准入。
+- **identity extraction**：类的 preferred 优先级为 0、且该类里仍有一个
+  `origin == 站点` 的成员、元数匹配时，直接递归回站点自己的 operand / region，
+  一个节点都不新建（`Stats.written == 0`）；否则深拷贝：region 重建成新的
+  binder（overlay 映射，退出时恢复），island 外 binder 由 slot 表还原。
+- **materialize 的准入**：某个 operand 类被同一 `strict_ltr`、无 region 的父
+  节点引用 ≥2 次，且 preferred e-node 不是 trivial atom（const / local / fn_ref）
+  时，合成 `let` 挂在父节点处（§8.3）；trivial atom 直接复制到两个使用点——
+  否则「合并后用一次求值」与「复制原子」会互相改写而不动点。
+- **`Stats` 报告退出方式**：`rounds` / `converged`（saturation 的不动点，撞界
+  则 `converged == false`）与 `eclasses` / `enodes` / `merges` / `unions` /
+  `folds` / `algebra` / `conds` / `projects` / `materialized` / `copied` /
+  `written`；驱动聚合成 `hir_seg.Stats.egraph_*`（§11 的基线逐项打印）。
+- **cost model**：preferred e-node 的优先级 + 最低 e-node 索引 tie-break，不用
+  per-opcode 权重（per-opcode 权重属 cost model 立项，见 [todo.md](todo.md)）。
+  cost 是优化器事实，不进 op descriptor。let / 折叠 / 代数规则严格减小节点数；
+  β 按 §8.4 契约准入，known-variant `match` 按覆盖 / arity 证明准入，
+  CSE sharing（§8.3）按 `isDuplicable` 与同 FE 准入——多 payload 的 `match`
+  （每个绑定叶合成一个 `let`）与 CSE（materialize 共享子项）节点数可能不降。
+- **终止契约：有界轮数，非严格递减度量。** SEG **不**给出全局递减度量：`match`
   与 CSE 可增节点，要对含 β 克隆在内的整个规则集证明一个严格递减的势函数既
-  不可行又有正确性风险。契约是**有界轮数**——`hir_seg.optimize` 至多跑
-  `Config.max_iterations`（默认 8）轮「重导效果分析 → 原位重写」后停止；
-  `hir_seg.Stats.converged` 报告退出方式（安静轮 = 当前规则集的不动点；否则是
-  撞到轮界）。撞轮界**永远安全**：每条准入重写都保语义，故任一「分析 → 重写」
-  轮前缀仍是正确程序，提前停止只是放弃后续重写，是错过优化的上界而非正确性
-  上界。默认界在实践中的充分性来自各规则自身的消耗性守卫：每个 λ 至多内联一次
-  （`beta_done`，β 按 λ 记录有界）、每个 `match` 节点只被消费一次、CSE 合成的
-  绑定至少两处使用且 init 非平凡（`ruleLet` 无法撤销），其余规则严格减小
-  `costOf`。编译时间预算（[todo.md](todo.md) 第 12 项）即建立在该界之上。
+  不可行又有正确性风险。契约是**两层的同一个界**——驱动 `hir_seg.optimize`
+  至多跑 `Config.max_iterations`（默认 8）轮「重导效果分析 → 重写」，每个
+  island 的 saturation 也以同一个界封顶（`Config.max_rounds`），撞界的
+  saturation 取当前已饱和的形态。`hir_seg.Stats.converged` / `Stats.egraph_converged`
+  分别报告两层退出方式（安静轮 = 当前规则集的不动点；否则是撞到轮界）。撞界
+  **永远安全**：每条准入重写都保语义，故任一「分析 → 重写」轮前缀仍是正确
+  程序，提前停止只是放弃后续重写，是错过优化的上界而非正确性上界。默认界在实践
+  中的充分性来自各规则自身的消耗性守卫：每个 λ 至多内联一次（`beta_done`，β
+  按 λ 记录有界）、每个 `match` 节点只被消费一次、CSE 合成的绑定至少两处使用
+  且 init 非平凡（`ruleLet` 无法撤销），arena 的 union 规则严格减小 preferred
+  节点数，其余规则严格减小节点数。编译时间预算（[todo.md](todo.md) 第 12 项）
+  即建立在该界之上。
 
-### 8.3 v1 重写规则集
+### 8.3 重写规则集
 
-| 优化 | v1 | 备注 |
+| 优化 | 现状 | 备注 |
 | --- | --- | --- |
 | β-reduction → `let` | ✅ | boundary rewrite，契约见 §8.4；实参限 Copy，call 子树 cleanup-free / ownership gate（可 effectful） |
 | dead let | ✅ | `x ∉ FV(body)` 且 init `isDiscardable`（含其全表达式清理面）+ binder 析构可丢弃；boundary rewrite，跨 FE |
@@ -1021,13 +1050,13 @@ extract(eclass)      -> ExprId
 | η-reduction | ✅ | 值位置 `fn_ref` 重定向；λ 记录不动（§8.5） |
 | known variant `match` | ✅ | 已知 tag 的 `variant_make` scrutinee → 覆盖 arm 的 `let` 链；payload 仅 bind / wildcard 叶 |
 | aggregate projection | ✅ | `field_get(C(v0, …, vn), i) → vi`（`C` = `struct_make` / `tuple_make` / `list_make`；已知下标；越界 / 非构造基拒绝）。`struct_make` 的 operand 按声明序，`tuple_make` / `list_make` 按位置序，payload `field` 是字段 / 元素下标——即 `hir_build_expr.fieldRead` 的索引。乱序书写的 struct 构造被 builder 的临时 `let` 链隔开（§5.6），故不触发。list 的 `idx < operand len` 就是边界证明：只有 `list_make` 基的已知常量下标在界内时才归约，与 `hir_effects.fieldGetOwn` 的「界内不 trap」细化一致（`field_get` 的 list 基否则保守 `Top`）。**tuple / list 投影是 IR 级规则**：Stilla 没有元素读取后缀（Core Expression Binding Power Table），元素只经解构 pattern 读取，源码不产生 tuple / list 的 `field_get`；两者由白盒规则测试覆盖 |
-| α-equivalence | ✅* | 由 β 克隆时的**捕获规避** fresh-binder 重映射承担，不是 e-graph 的 α-合并 |
-| CSE-style sharing | ✅ | 同一 island 内、**同一节点的 operand 列表**中 α-相等且 `isDuplicable` 的纯子树 materialize 成一个合成 `let`，后续出现改为该绑定量的 `local` 引用（详见下） |
+| α-equivalence | ✅* | island 内由 arena 的 hash-consing + `rebuild` 同余合并承担（α-相等子树自然同类）；β 克隆时的**捕获规避** fresh-binder 重映射仍由驱动做 |
+| CSE-style sharing | ✅ | 同一 island 内、同一 `strict_ltr` 无 region 节点的 operand 列表里，两个**同类**且 `isDuplicable` 的纯子树由 extraction materialize 成一个合成 `let`，非平凡原子才 materialize、trivial atom 直接复制（详见下） |
 | associativity / commutativity | ❌ | 搜索空间问题，未立项 |
 | Unique rewrite | ❌ | 需线性等式系统 |
 | host calls / `drop` / consuming match / panic 重排 | ❌ | — |
 
-> v1 的 let 规则也是 **boundary rewrite（§8.7）**：源级 `let` 的 init 自成 FE
+> 源级 `let` 的 init 自成 FE
 > （§5.6），所以 `let` 不是 island 成员，规则由各分支的契约准入（`hir_seg.zig`
 > 的 `let_dead_rule` / `let_forward_rule` / `let_atom_rule`），并只在 pass
 > 驱动层对非 island 节点单独尝试：
@@ -1038,7 +1067,8 @@ extract(eclass)      -> ExprId
 >   过 ownership gate）且本轮未被改写，再经 `cleanup_free_subtree` 证明；搬移的
 >   子树重新盖上使用点的 FE。
 > - **trivial-atom forwarding**：原子 init 需 `isDuplicable`（借用的 view 过不了
->   ownership gate，`Q` 读过不了 no-`Q` 子句）——v1 缺的准入证明。
+>   ownership gate，`Q` 读过不了 no-`Q` 子句）——缺了这条准入证明就会把借用视图
+>   或 `Q` 读复制到多个使用点。
 >
 > 匹配层另外拒两种形状：binder 被 `move` / `drop` 作为 operand 读取（它们从
 > operand 节点自身的 binder payload 下降，只有 `local` init 可搬入该槽），以及
@@ -1046,29 +1076,31 @@ extract(eclass)      -> ExprId
 > 替换会抹掉它）。源级 dead-let 在 `hir_simplify.tryDeadLet` 侧另有一条
 > 不经 island 门的消费者路径。
 
-**CSE sharing 的 v1 形态与准入**（`hir_seg.ruleCse`）。共享子项必须同时满足：
+**CSE sharing 的形态与准入**（`hir_egraph` 的同余合并 + extraction 的
+materialize）。共享子项必须同时满足：
 
-- op 无 region 且 `EvalPolicy` 为 `strict_ltr`——typed opcode、`call`、`seq`、
+- 父节点无 region 且 `EvalPolicy` 为 `strict_ltr`——typed opcode、`call`、`seq`、
   `struct_make` / `variant_make` / `tuple_make` / `list_make`。`let` / `lambda` / `if` / `match` / `and` / `or`
   带 region（作用域或惰性），整节点跳过；而 `seq`、以及 callee 为 `fn_ref`
-  （无 SEG 编码，§8.1）的 `call` 本身不是 island 成员，所以 v1 实际能共享的
+  （无 SEG 编码，§8.1）的 `call` 本身不是 island 成员，所以实际能共享的
   子项限于纯算术 / 聚合 island（imm-offset 的直接调用不触发）；
-- 候选 operand 是 island 成员（`encOf`）、与父节点**同一 full-expression**、
-  非 trivial atom（const / local / fn_ref）、且 `isDuplicable`——结果 Copy、total、
-  无可观察效果、operand 全 `Read`、无 `Q`；
-- 两个候选 α-相等（`alphaEq`：region param 按位置映射，未映射的自由 binder
-  按原始 id 比较，故引用同一外层绑定的两处同形可合并）；
-- 该 operand 本轮尚未被原位改写（`Rewriter.dirty`）：改写后的节点其
-  `encOf` / 效果结论描述的是已不存在的形状，一律拒绝，留待下一轮由重跑的
-  效果分析重新判定。
+- 候选 operand 类是 island 成员（encode 成功）、与父节点**同一 full-expression**、
+  且 `isDuplicable`——结果 Copy、total、无可观察效果、operand 全 `Read`、无 `Q`；
+- 两个候选落在**同一个 e-class**。这比语法 α-相等更强：hash-consing 把同形
+  子树并类，`rebuild` 的同余规则再把「operand 已同类」的父节点并类，所以
+  `(a * b) + ((a * b) * 1)` 里两条路径都归到 `a * b` 的类，也共享一次求值；
+  region 参数按位置映射，自由 binder 按 slot（同一外层绑定 = 同一 slot）。
 
 `strict_ltr` 保证每个 operand 恰好求值一次、LTR；候选是 duplicable 的纯、
-total、确定性子项，故把首次出现提到合成 `let` 的 init、后续出现读绑定量，
+total、确定性子项，故把一个求值提到合成 `let` 的 init、其余使用读绑定量，
 求值次数与顺序的可观察行为不变。合成 `let` 与所有候选共享父节点的 FE，故不
 跨 FE；`isDuplicable` 强制 Copy 结果与整棵子树的 `ownershipGate`（每个 `.owned`
 节点 Copy、无 borrowed view、无 `Consume`），而 `CleanupToken` 只为 owned
 Unique 临时量登记——故合成 `let` 不改变清理注册，donor 也没有需要重映射的
-token。非 sibling 的共享（跨语句 / 分支的同形，即 PRE）不在 v1：两个源级
+token。arena 在每个 island 根上**先于**本轮局部走查运行，所以 encode 看到的
+是未被本轮改写过的树（§8.1 的「不得依赖改写前的静态结论」对 arena 自动成立）；
+每处被写回的站点由驱动记 dirty，下一轮由重跑的效果分析重新判定。
+非 sibling 的共享（跨语句 / 分支的同形，即 PRE）不在此列：两个源级
 `let`-init 各自在自己的 FE 里，本身不是同一节点的 operand，天然不触发；
 （let 折叠把它们搬进同一节点后就是 sibling，CSE 即可合法共享——`seg_cse_refused` 的
 `cross_fe` 因 binder 被两次读取而保留 `let`，两棵 `mul` 因此仍分居两 FE。）
@@ -1126,7 +1158,7 @@ beta_rule = RewriteRule {
 - `preserves_eval_count` / `preserves_order`：逐参数嵌套、LTR，不复制不重排；
 - `maps_scope`：λ 参数与体内 binder 全部映射为 fresh binder（不捕获使映射无
   闭包逃逸）；
-- `maps_full_expr`：v1 只对 cleanup-free 的单表达式 λ 体做 β，其唯一 FE 并入
+- `maps_full_expr`：只对 cleanup-free 的单表达式 λ 体做 β，其唯一 FE 并入
   调用点 FE；
 - `preserves_cleanup`：契约声明 `cleanup_free_subtree`，`tryBeta` 经
   `checkCleanupProof` 用派生查询出证：call 被求值的子树 cleanup-free、过
@@ -1156,7 +1188,7 @@ fn (B0: f32) { call(fnref abs, %B0) }     →   fnref abs
 - `x` 在 callee 中不自由（不捕获天然满足）；
 - callee 求值 total（无效果、无 trap）。
 
-v1 只允许 `callee = fn_ref`：不捕获 ≠ 参数必然缺席，更一般的 callee 表达式在 η
+只允许 `callee = fn_ref`：不捕获 ≠ 参数必然缺席，更一般的 callee 表达式在 η
 展开后可能改变求值行为。第二条由「body 恰好是 `call(fn_ref, %B0, …)`，实参是
 自己的参数、按序各恰好一次」结构保证（`fn_ref` 不闭包任何 binder）；第三条读
 body call 的摘要（`isTotal ∧ observable_effect_free`；`callBound` 与实参无关，
@@ -1309,8 +1341,10 @@ init（这时已是 `%B0`）是 island 成员、与本轮分析一致，故下�
   hir_effects.zig 放 transfer / 函数摘要 / 派生查询的定向用例；语料级效果发布
   与校验放 hir_tests.zig；
 - 不要长在 frontend_tests.zig 里；
-- SEG 测试放独立套件（hir_seg_tests.zig 黑盒 + hir_seg.zig 白盒），每规则一个
-  定向用例 + 不变量断言（fresh binder、无 effect 重复求值、无 borrow 进 island）。
+- SEG 测试放独立套件（hir_seg_tests.zig 黑盒 + hir_seg.zig / hir_egraph.zig
+  白盒），每规则一个定向用例 + 不变量断言（fresh binder、无 effect 重复求值、
+  无 borrow 进 island；arena 侧另有 e-class 合并 / SLOT 重用 / 递归编码边界
+  拒绝 / extraction identity 的白盒）。
 
 ### 10.3 语义等价回归
 
@@ -1336,22 +1370,30 @@ lowering。可选变换每轮原位重写后重新跑结构 + 效果校验（§2
 - 效果模型 effects.zig；HIR 集成 / 派生查询 / 函数摘要 SCC fixpoint / 精确
   `drop_effect(T)` / module-const 检查 hir_effects.zig；
 - 消费者：hir_simplify.zig（`--simplify`，默认关；dead-let / selective ANF /
-  `never_returns` 后缀删除）、hir_seg.zig（可执行文件默认开、`--no-seg` 关；库默认关）；
+  `never_returns` 后缀删除）、hir_seg.zig（island 准入 / boundary rewrite / 轮循环；
+  可执行文件默认开、`--no-seg` 关；库默认关）+ hir_egraph.zig（slotted e-graph
+  arena：e-class 表 / union-find / encode / 有界 saturation / extraction）；
 - lowering hir_lower.zig（+ hir_lower_expr / `_control` / `_call` / `_pattern`），
   复用 lower.zig / cfg_lower_* 发射机制；
 - 测试：hir_tests.zig / hir_simplify_tests.zig / hir_seg_tests.zig。
 
 **SEG 编译时间 / 轮数基线**（第 12 项验收；`hir_seg_tests.zig` 的 `SEG budget`
 测试在 CI 每次打印，基线取 2026-09-14、macOS/arm64 的一次运行）：`probes/` +
-`examples/` 全语料 **59 个程序 / 4618 个可达节点**，SEG 接受 **2485 个
-island 成员（≈54%）**，共 **89 轮**、**99 次重写**，总编译时间 **≈99 ms**
-（单文件最慢 ≈11 ms，`examples/fold` 与 `probes/seg` 之间随计时抖动）；每个程序都在
-`hir_seg.Config.max_iterations` 界内收敛（`Stats.converged == true`）。测试
-断言收敛（CI 稳定），时间仅记录、不断言（CI 计时不是稳定 oracle）。
+`examples/` 全语料 **60 个程序 / 4732 个可达节点**，SEG 接受 **2558 个
+island 成员（≈54%）**，共 **91 轮**、**109 次重写**，外层 arena 跑 **2061 轮
+saturation**（**41 次 union / 322 次同余 merges / 82 个写回拷贝**），总编译时间
+**≈112 ms**（单文件最慢 ≈12 ms，`examples/fold` 与 `probes/seg` 之间随计时抖动）；
+每个程序都在 `hir_seg.Config.max_iterations` 界内收敛（`Stats.converged == true`），
+每个 island 的 saturation 也在同一个界内到达不动点（`Stats.egraph_converged == true`）。
+测试断言两层收敛（CI 稳定），时间仅记录、不断言（CI 计时不是稳定 oracle）。
 §8.3 的跨 FE `let` 折叠把 70 轮 / 51 次重写推到 85 轮 / 94 次：它新增的
 重写是 let 三规则，新增的轮数是在 island 表快照之外的那一轮（§8.7）。第 19 项
 把 `tuple_make` / `list_make` 并入 island 集、新增一个探针后升到 89 轮 /
-99 次：新增重写主要来自两个字面量内的 CSE sharing（§8.3）。
+99 次：新增重写主要来自两个字面量内的 CSE sharing（§8.3）。第 21 项把 union
+规则从原位树重写换成 arena（同上 `rounds` / `unions` / `merges` / `copies`
+四项新计数）、并新增 `probes/egraph.st`（60 个程序）：写回内容不变，只是
+“同一类的两个站点”现在先真并类再按 preferred e-node 抽取，计数里多出了
+同余合并与 saturation 轮数。
 
 落地档映射（历史里程碑编号）：
 
@@ -1359,11 +1401,11 @@ island 成员（≈54%）**，共 **89 轮**、**99 次重写**，总编译时�
 | --- | --- | --- |
 | M1a | 结构 HIR：AST→HIR 构建、结构校验、HIR→CFG lowering；直降路径删除后成为唯一前端路径 | hir_build.zig / hir_validate.zig / hir_lower.zig |
 | M1b | 效果基础设施：`SemanticInfo.effect`、固定乘积格、transfer、cleanup 门、派生查询、host 语义注册表 | effects.zig / hir_effects.zig |
-| M2a | SEG v1 规则子集（β / η / let / 常折叠 / 整数代数 / 聚合投影 / known-variant match / CSE sharing），可执行文件默认开、`--no-seg` 关 | hir_seg.zig |
+| M2a | SEG 规则子集（β / η / let / 常折叠 / 整数代数 / 聚合投影 / known-variant match / CSE sharing）；union 规则在 slotted e-graph arena 里走 encode → 有界 saturation → extraction，β / η / let / match 是驱动层的 boundary rewrite；可执行文件默认开、`--no-seg` 关 | hir_seg.zig / hir_egraph.zig |
 | M2b | 摘要化消费者：函数摘要 SCC least fixpoint、精确 `drop_effect(T)`、module-const 检查、dead-let / selective ANF / `never_returns` 后缀删除 | hir_effects.zig / hir_simplify.zig |
 
-**尚未实现**（完整清单见 [todo.md](todo.md)）：真正的 slotted e-graph /
-extraction；HIRTypeId canonical 表。
+**尚未实现**（完整清单见 [todo.md](todo.md)）：per-opcode 权重形式的 cost model、
+PRE（跨语句 / 分支的共享）；HIRTypeId canonical 表。
 
 ## 12. 开放问题
 

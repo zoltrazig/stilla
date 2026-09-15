@@ -81,6 +81,17 @@ The detailed probes cover the source-reachable operation/type matrix:
   `let` (identical `mul`s, identical field reads, and a shared non-trivial
   pure subtree), next to the refusal: a Unique `Token` constructor pair is
   consumed by its aggregate, so neither is an island member / duplicable
+- `egraph.st`: the slotted e-graph arena itself ([hir.md](hir.md) §8.2) — the
+  union rules are an e-class table plus union-find, so they share what the
+  *rules* made equal, not just what the source wrote twice:
+  `(a * b) + ((a * b) * 1)` merges the two products once `x * 1 → x` has run
+  and materializes one evaluation, `((a*b)*c) + (((a*b)+0)*c)` reaches one
+  class through two levels, a struct projection unions the read's class with
+  a rule-rewritten operand (so the AIR keeps nothing where the constructor
+  and the read were), and a trivial-atom class inside a `let`-body island is
+  duplicated to both operands — the emitted binder reads stay copies of the
+  island-external `let` binder. The refusal sits here too: a may-trap
+  initializer is no island member, so its α-equal products never merge
 - `never_suffix.st`: the `never_returns` must fact's suffix deletion
   ([effects.md](effects.md) §10.1) — a structurally-never callee
   (`builtin.panic` behind a `void` signature) deletes the statements after
