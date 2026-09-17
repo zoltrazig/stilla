@@ -51,24 +51,27 @@
 //!   preserves semantics, so any round prefix is a correct program and a
 //!   bound hit only forfeits further unions. `Stats.converged` reports
 //!   which exit was taken.
+//! - **select** — the cost model (item 22). After saturation, every
+//!   e-class is given the member extraction must emit: the one with the
+//!   least total cost under `CostModel`, computed bottom-up over the
+//!   class DAG (a class is paid for once, so a shared class is worth
+//!   materializing). Cost is an *optimizer* fact and never enters an op
+//!   descriptor; a tie prefers the class's existing `preferred` member
+//!   (the encode-time original, or a rule's proposal) and then the lower
+//!   e-node index, so the choice is independent of union order.
 //! - **extract** — writes the saturated class back into the HIR tree.
 //!   The tree is recovered by recursion over classes, not by a hash
-//!   table: a class whose preferred e-node is still an original member
-//!   (`preferred_prio == 0`) and whose site is one of its members keeps
-//!   that site and recurses into the site's own operands / regions —
-//!   exact identity, which is what makes a saturated island a fixpoint
-//!   instead of fresh churn every round. A redirected class (or a site
-//!   that is not a member) gets a *fresh* copy of the preferred e-node,
-//!   deep-copied with fresh binders per rebuilt region, so the result is
-//!   always a tree (§3.7). A class referenced twice among one
-//!   `strict_ltr`, region-free parent's operands materializes into a
-//!   synthesized `let` (§8.3's CSE shape); every other repeated
-//!   reference is copied, which is exactly the sharing v1's sibling-only
-//!   `ruleCse` had.
-//!
-//! The cost model is deliberately still v1's: a class's preferred e-node,
-//! with the lowest e-node index as the deterministic tie-break, and no
-//! per-opcode weight until item 22.
+//!   table: a class no rule touched (`preferred_prio == 0`) whose site is
+//!   one of its members keeps that site and recurses into the site's own
+//!   operands / regions — exact identity, which is what makes a saturated
+//!   island a fixpoint instead of fresh churn every round. A redirected
+//!   class (or a site that is not a member) gets a *fresh* copy of the
+//!   selected e-node, deep-copied with fresh binders per rebuilt region,
+//!   so the result is always a tree (§3.7). A class referenced twice among
+//!   one `strict_ltr`, region-free parent's operands materializes into a
+//!   synthesized `let` (§8.3's CSE shape); every other repeated reference
+//!   is copied, which is exactly the sharing v1's sibling-only `ruleCse`
+//!   had.
 
 const std = @import("std");
 const meta = @import("stilla").meta;
@@ -117,6 +120,45 @@ pub const Stats = struct {
     copied: usize = 0,
     /// Sites whose content was overwritten in place.
     written: usize = 0,
+    /// Total cost of the form extraction selected for this island, in the
+    /// cost model's units (item 22): the DAG cost of the island's root
+    /// class, with every class paid for once.
+    extract_cost: u64 = 0,
+};
+
+/// The extraction cost model (docs/hir.md §8.1; item 22).
+///
+/// Cost is an *optimizer* fact — it never enters an op descriptor — so
+/// the ladder lives next to the extractor. The weights are a heuristic in
+/// "roughly lowered instructions", not a measurement; what matters is
+/// that they are deterministic, because extraction takes the least-cost
+/// member of each e-class bottom-up over the class DAG.
+pub const CostModel = struct {
+    /// The fallback weight: an op the ladder does not name costs one node,
+    /// so a new opcode is priced as node count until someone measures it.
+    pub const default_weight: u32 = 1;
+
+    /// One op's weight, keyed on the op's registry class with the two
+    /// overrides a class alone cannot express.
+    pub fn weight(op: hir.OpId) u32 {
+        const d = hir.registry.get(op);
+        // A projection shares the `.aggregate` class with a construction
+        // but lowers to a single read (`field_get` → `read_field` /
+        // `read_tuple` / `read_index`).
+        if (std.mem.eql(u8, d.name, "field_get")) return 1;
+        return switch (d.class) {
+            // Literals, locals, fn_refs, arithmetic, casts, sequencing:
+            // one node, one instruction.
+            .atom, .binding, .seq, .numeric, .conversion => 1,
+            // Construction and control: several instructions behind one
+            // node.
+            .aggregate, .control => 2,
+            // A call is the expensive shape; preferring a non-call
+            // candidate is exactly what a cost model is for.
+            .function => 4,
+            else => default_weight,
+        };
+    }
 };
 
 pub const Config = struct {
@@ -175,8 +217,10 @@ const EClass = struct {
     parent: Ref,
     rank: u32 = 0,
     preferred: NodeId,
-    /// 0 = the encode-time original; 1 = a rule chose this member, so
-    /// extraction must emit it rather than keep a member site's shape.
+    /// 0 = the encode-time original; 1 = a rule proposed a member. Two
+    /// jobs: extraction keeps a site's own shape only while this is 0
+    /// (nothing to rewrite), and the cost model's tie-break prefers this
+    /// member over an equal-cost alternative.
     preferred_prio: u8 = 0,
     members: std.ArrayList(NodeId) = .empty,
 };
@@ -202,6 +246,12 @@ pub const Island = struct {
     /// (`ownershipGate` proves the island does not cross a boundary, so
     /// there is exactly one). Rule-synthesized nodes carry it.
     island_fe: hir.FullExprId = 0,
+
+    /// The cost model's per-class choice (item 22), filled by `select`
+    /// after saturation: the member extraction must emit, and that
+    /// member's total cost. Empty until `select` runs.
+    choice_node: []NodeId = &.{},
+    choice_cost: []u64 = &.{},
 
     stats: Stats = .{},
     written: std.ArrayList(hir.ExprId) = .empty,
@@ -590,6 +640,9 @@ pub const Island = struct {
         } else {
             self.stats.converged = false;
         }
+        // The class set is final here, so the cost model runs once at the
+        // end of saturation rather than per round.
+        try self.select();
     }
 
     /// Congruence closure: re-canonicalize every e-node's class references
@@ -758,6 +811,115 @@ pub const Island = struct {
     }
 
     // -----------------------------------------------------------------
+    // cost model (item 22)
+    // -----------------------------------------------------------------
+
+    /// Give every e-class the member extraction must emit: the least-cost
+    /// member under `CostModel`, relaxed bottom-up over the class DAG
+    /// until no class improves. A member whose operand classes have no
+    /// finite cost yet — reachable only through a cycle some rule created
+    /// — waits for a later round, and a class that never becomes finite
+    /// keeps its `preferred`, so selection degrades to the pre-cost
+    /// behaviour instead of looping.
+    fn select(self: *Island) Error!void {
+        const n = self.classes.items.len;
+        const cost = try self.arena.alloc(u64, n);
+        const best = try self.arena.alloc(NodeId, n);
+        for (0..n) |i| {
+            cost[i] = std.math.maxInt(u64);
+            best[i] = self.classes.items[i].preferred;
+        }
+        var changed = true;
+        var rounds: usize = 0;
+        while (changed and rounds <= n) : (rounds += 1) {
+            changed = false;
+            for (self.nodes.items, 0..) |nd, ni| {
+                const node: NodeId = @intCast(ni);
+                const cls = self.find(nd.cls);
+                var total: u64 = CostModel.weight(nd.op);
+                var finite = true;
+                // Each class is paid for *once*: a class referenced twice
+                // is the shape extraction materializes into a `let` (one
+                // evaluation, two cheap reads), so charging it twice would
+                // make the cost model blind to exactly the sharing it is
+                // meant to reward.
+                for (nd.operands, 0..) |c, k| {
+                    const rc = self.find(c);
+                    var seen = false;
+                    for (nd.operands[0..k]) |prev| {
+                        if (self.find(prev) == rc) {
+                            seen = true;
+                            break;
+                        }
+                    }
+                    if (seen) continue;
+                    const cc = cost[rc];
+                    if (cc == std.math.maxInt(u64)) {
+                        finite = false;
+                        break;
+                    }
+                    total +|= cc;
+                }
+                if (finite) {
+                    for (nd.regions, 0..) |rt, j| {
+                        const rb = self.find(rt.body);
+                        var seen = false;
+                        for (nd.regions[0..j]) |prev| {
+                            if (self.find(prev.body) == rb) {
+                                seen = true;
+                                break;
+                            }
+                        }
+                        if (seen) continue;
+                        const cc = cost[rb];
+                        if (cc == std.math.maxInt(u64)) {
+                            finite = false;
+                            break;
+                        }
+                        total +|= cc;
+                    }
+                }
+                if (!finite) continue;
+                if (!self.improvesChoice(cls, node, total, cost, best)) continue;
+                cost[cls] = total;
+                best[cls] = node;
+                changed = true;
+            }
+        }
+        self.choice_cost = cost;
+        self.choice_node = best;
+    }
+
+    /// The cost tie-break (item 22): strictly lower cost wins; on a tie
+    /// the class's existing `preferred` member wins; otherwise the lower
+    /// e-node index (creation order: encode before any rule).
+    fn improvesChoice(self: *Island, cls: Ref, node: NodeId, total: u64, cost: []const u64, best: []const NodeId) bool {
+        if (total < cost[cls]) return true;
+        if (total != cost[cls]) return false;
+        const pref = self.classes.items[cls].preferred;
+        if (node == pref) return best[cls] != pref;
+        if (best[cls] == pref) return false;
+        return node < best[cls];
+    }
+
+    /// The member extraction emits for `cls` (item 22). `saturate` runs
+    /// `select`, so this is final for any island that saturated; a
+    /// caller that skipped saturation falls back to the rule bookkeeping
+    /// (`preferred`), which is the pre-cost behaviour.
+    fn chosen(self: *Island, cls: Ref) NodeId {
+        const root = self.find(cls);
+        if (self.choice_node.len == 0) return self.classes.items[root].preferred;
+        return self.choice_node[root];
+    }
+
+    /// The cost-model total of the form extraction emits for `cls`, or 0
+    /// when `select` has not run.
+    fn chosenCost(self: *Island, cls: Ref) u64 {
+        if (self.choice_cost.len == 0) return 0;
+        return self.choice_cost[self.find(cls)];
+    }
+
+    // -----------------------------------------------------------------
     // extraction
     // -----------------------------------------------------------------
 
@@ -771,7 +933,7 @@ pub const Island = struct {
     /// what materializes a shared operand class into a `let`.
     fn normalize(self: *Island, cls: Ref, site: hir.ExprId) Error!void {
         const root = self.find(cls);
-        const n = self.nodes.items[self.classes.items[root].preferred];
+        const n = self.nodes.items[self.chosen(root)];
         const plan = try self.materialization(n);
         const site_ops = try self.arena.dupe(hir.ExprId, self.pr.operands(site));
         const site_regs = try self.arena.dupe(hir.RegionId, self.pr.regionsOf(site));
@@ -831,7 +993,7 @@ pub const Island = struct {
                 if (self.find(other) == rc) count += 1;
             }
             if (count < 2) continue;
-            const pnode = self.nodes.items[self.classes.items[rc].preferred];
+            const pnode = self.nodes.items[self.chosen(rc)];
             if (isTrivialAtomNode(pnode.op)) continue;
             try list.append(self.arena, c);
             for (n.operands, 0..) |other, k2| {
@@ -855,7 +1017,7 @@ pub const Island = struct {
             binders = try self.arena.alloc(hir.BinderId, p.classes.len);
             init_ty = try self.arena.alloc(meta.Type, p.classes.len);
             for (p.classes, 0..) |c, t| {
-                const pnode = self.nodes.items[self.classes.items[self.find(c)].preferred];
+                const pnode = self.nodes.items[self.chosen(c)];
                 init_ty[t] = pnode.ty;
                 init_ids[t] = try self.copyClass(c, overlay);
                 binders[t] = try self.pr.addBinder(pnode.ty, .value);
@@ -889,8 +1051,7 @@ pub const Island = struct {
     }
 
     fn copyClass(self: *Island, cls: Ref, overlay: *std.AutoHashMapUnmanaged(Slot, hir.BinderId)) Error!hir.ExprId {
-        const root = self.find(cls);
-        const n = self.nodes.items[self.classes.items[root].preferred];
+        const n = self.nodes.items[self.chosen(cls)];
         return self.copyNodeContent(n, overlay);
     }
 
@@ -1048,6 +1209,7 @@ pub fn optimizeIsland(
         .written = &.{},
     };
     try island.saturate();
+    island.stats.extract_cost = island.chosenCost(root);
     try island.normalize(root, site);
     island.stats.eclasses = island.liveClasses();
     island.stats.enodes = island.nodes.items.len;
@@ -1942,4 +2104,139 @@ test "integer algebra identities are declared, not guessed" {
     try testing.expectEqual(@as(usize, 0), intAlgebraT(i32, "shl", null, z).?.keep);
     // Float reps take no integer identity.
     try testing.expect(integerAlgebra("add", .f32, null, null) == null);
+}
+
+// ---------------------------------------------------------------------------
+// White-box tests: the extraction cost model (item 22)
+// ---------------------------------------------------------------------------
+
+test "cost model: the weight ladder is per op class with a node-count fallback" {
+    // Atoms, arithmetic, projections and casts are one instruction.
+    try testing.expectEqual(@as(u32, 1), CostModel.weight(hir.opId("const").?));
+    try testing.expectEqual(@as(u32, 1), CostModel.weight(hir.opId("local").?));
+    try testing.expectEqual(@as(u32, 1), CostModel.weight(hir.opId("add.i32").?));
+    try testing.expectEqual(@as(u32, 1), CostModel.weight(hir.opId("field_get").?));
+    try testing.expectEqual(@as(u32, 1), CostModel.weight(hir.opId("num_cast").?));
+    // Construction and control: several instructions behind one node.
+    try testing.expectEqual(@as(u32, 2), CostModel.weight(hir.opId("struct_make").?));
+    try testing.expectEqual(@as(u32, 2), CostModel.weight(hir.opId("tuple_make").?));
+    try testing.expectEqual(@as(u32, 2), CostModel.weight(hir.opId("if").?));
+    try testing.expectEqual(@as(u32, 2), CostModel.weight(hir.opId("match").?));
+    // A call is the expensive shape.
+    try testing.expectEqual(@as(u32, 4), CostModel.weight(hir.opId("call").?));
+    // A projection is priced as a read, not as a construction, even though
+    // it shares the `.aggregate` class.
+    try testing.expect(CostModel.weight(hir.opId("field_get").?) < CostModel.weight(hir.opId("struct_make").?));
+    // The fallback: a class the ladder does not name costs one node.
+    try testing.expectEqual(@as(u32, 1), CostModel.default_weight);
+    try testing.expectEqual(CostModel.default_weight, CostModel.weight(hir.opId("move").?));
+}
+
+test "cost model: the reported cost is the selected form's DAG cost" {
+    {
+        // `add.i32(local, const)`: one node each → 3. The island is the
+        // λ body (the λ itself opens the island boundary, and pricing the
+        // enclosing λ would add its own weight).
+        var f = try fixture(i32ty, "fn (B0: i32) { add.i32(%B0, 1i32) }");
+        defer f.deinit();
+        const body = f.pr().region(f.pr().regionsOf(f.root())[0]).root;
+        const result = try optimizeIsland(f.arena.allocator(), f.pr(), f.analysis, body, .{});
+        try testing.expectEqual(@as(u64, 3), result.stats.extract_cost);
+    }
+    {
+        // `add(mul(a, b), mul(a, b))`: congruence puts both `mul`s (and
+        // both reads of each binder) into one class, and a class is paid
+        // for once — 1 add + 1 mul + 1 local + 1 local = 4, not 7. This is
+        // the sharing the materialized `let` makes explicit.
+        var f = try fixture(i32ty, "fn (B0: i32, B1: i32) { add.i32(mul.i32(%B0, %B1), mul.i32(%B0, %B1)) }");
+        defer f.deinit();
+        const body = f.pr().region(f.pr().regionsOf(f.root())[0]).root;
+        const result = try optimizeIsland(f.arena.allocator(), f.pr(), f.analysis, body, .{});
+        try testing.expectEqual(@as(u64, 4), result.stats.extract_cost);
+        try testing.expectEqual(@as(usize, 1), result.stats.materialized);
+    }
+}
+
+test "cost model: a strictly cheaper member wins over the class's preferred one" {
+    // The tie-break is a pure decision over (cost, best, preferred), so it
+    // can be pinned directly: `preferred` is `nodes[0]`, a rival is
+    // `nodes[1]`.
+    var f = try fixture(i32ty, "fn (B0: i32) { add.i32(%B0, 1i32) }");
+    defer f.deinit();
+    var it = f.island();
+    _ = (try it.encode(f.root())).?;
+    const cls: Ref = 0;
+    const pref = it.classes.items[cls].preferred;
+    const rival: NodeId = 1;
+    try testing.expect(pref != rival);
+
+    const pref_wins = [_]NodeId{pref};
+    const rival_wins = [_]NodeId{rival};
+    const ten = [_]u64{10};
+
+    // Strictly cheaper always wins, whatever the class prefers.
+    try testing.expect(it.improvesChoice(cls, rival, 5, &ten, &pref_wins));
+    try testing.expect(!it.improvesChoice(cls, pref, 11, &ten, &pref_wins));
+    // A tie goes to the class's existing preferred member, in both
+    // directions.
+    try testing.expect(!it.improvesChoice(cls, rival, 10, &ten, &pref_wins));
+    try testing.expect(it.improvesChoice(cls, pref, 10, &ten, &rival_wins));
+    try testing.expect(!it.improvesChoice(cls, pref, 10, &ten, &pref_wins));
+    // With neither side preferred, the lower e-node index wins.
+    try testing.expect(it.improvesChoice(cls, rival, 10, &ten, &rival_wins) == false);
+    const higher = [_]NodeId{rival + 1};
+    try testing.expect(it.improvesChoice(cls, rival, 10, &ten, &higher));
+    try testing.expect(!it.improvesChoice(cls, higher[0], 10, &ten, &rival_wins));
+}
+
+test "cost model: selection is deterministic and prefers the lower member index on a tie" {
+    var f = try fixture(i32ty, "fn (B0: i32, B1: i32) { add.i32(mul.i32(%B0, %B1), mul.i32(%B0, %B1)) }");
+    defer f.deinit();
+    const pr = f.pr();
+    const root = f.root();
+    const body = pr.region(pr.regionsOf(root)[0]).root;
+    const m0 = pr.operands(body)[0];
+
+    var it = f.island();
+    _ = (try it.encode(root)).?;
+    // Before saturation the cost model has not run: `chosen` falls back to
+    // the rule bookkeeping, which is the pre-cost behaviour.
+    try testing.expectEqual(it.classes.items[0].preferred, it.chosen(0));
+    try testing.expectEqual(@as(u64, 0), it.chosenCost(0));
+
+    try it.saturate();
+    const cls = it.classOfOrigin(m0).?;
+    const members = it.classes.items[cls].members.items;
+    try testing.expectEqual(@as(usize, 2), members.len);
+    // Both members are α-equal, so the tie resolves to the lower index —
+    // and it does so identically on a second island over the same tree.
+    const chosen = it.chosen(cls);
+    try testing.expectEqual(@as(NodeId, @min(members[0], members[1])), chosen);
+    // `mul(local, local)`: the shared class costs one node per operand plus
+    // itself.
+    try testing.expectEqual(@as(u64, 3), it.chosenCost(cls));
+
+    var it2 = f.island();
+    _ = (try it2.encode(root)).?;
+    try it2.saturate();
+    try testing.expectEqual(chosen, it2.chosen(it2.classOfOrigin(m0).?));
+    try testing.expectEqual(it.chosenCost(cls), it2.chosenCost(it2.classOfOrigin(m0).?));
+}
+
+test "cost model: end to end, the least-cost candidate is what extraction emits" {
+    // `add.i32(local, 0)` has two candidates in one class: the `add` node
+    // (3: itself plus two operands) and the left operand (1). The add-zero
+    // rule unions them, and the cost model — not the rule's say-so — is
+    // what picks the cheaper one.
+    var f = try fixture(i32ty, "fn (B0: i32) { add.i32(%B0, 0i32) }");
+    defer f.deinit();
+    const pr = f.pr();
+    const body = pr.region(pr.regionsOf(f.root())[0]).root;
+    try testing.expectEqualStrings("add.i32", hir.registry.get(pr.node(body).op).name);
+
+    const result = try optimizeIsland(f.arena.allocator(), pr, f.analysis, body, .{});
+    try testing.expect(result.stats.unions > 0);
+    try testing.expectEqual(@as(u64, 1), result.stats.extract_cost);
+    try testing.expectEqualStrings("local", hir.registry.get(pr.node(body).op).name);
+    try testing.expectEqual(@as(usize, 0), countNodes(pr, body, "add.i32"));
 }

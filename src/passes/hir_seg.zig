@@ -234,6 +234,10 @@ pub const Stats = struct {
     /// Fresh subtrees the extractor wrote (a redirected class or a site
     /// that is not a member of its class).
     egraph_copies: usize = 0,
+    /// Total cost of the forms extraction selected across all islands, in
+    /// the `hir_egraph.CostModel` units (item 22): each island's root
+    /// class cost, summed.
+    egraph_extract_cost: u64 = 0,
 };
 
 pub const Config = struct {
@@ -296,6 +300,7 @@ pub fn optimize(arena: std.mem.Allocator, built: *hir.BuiltProgram, config: Conf
         stats.egraph_merges += rw.egraph_merges;
         stats.egraph_unions += rw.egraph_unions;
         stats.egraph_copies += rw.egraph_copies;
+        stats.egraph_extract_cost += rw.egraph_extract_cost;
         if (!changed) {
             stats.converged = true;
             break;
@@ -344,6 +349,10 @@ const Rewriter = struct {
     egraph_merges: usize = 0,
     egraph_unions: usize = 0,
     egraph_copies: usize = 0,
+    /// Total cost of the forms extraction selected across all islands, in
+    /// the `hir_egraph.CostModel` units (item 22): each island's root
+    /// class cost, summed.
+    egraph_extract_cost: u64 = 0,
 
     /// Node ids whose content this round has already overwritten in place.
     /// An island-membership or analysis verdict about such a node describes
@@ -499,6 +508,7 @@ const Rewriter = struct {
         self.egraph_merges += result.stats.merges;
         self.egraph_unions += result.stats.unions;
         self.egraph_copies += result.stats.copied;
+        self.egraph_extract_cost += result.stats.extract_cost;
         self.folds += result.stats.folds;
         self.algebra += result.stats.algebra;
         self.conds += result.stats.conds;

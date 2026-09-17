@@ -58,8 +58,8 @@ monomorphic AST 直接生成 CFG AIR。该直降路径**已删除**；以下是 
 - 不做传统递归 `enum Expr` AST。
 - 不把 SEG 当主 IR：ownership、drop、求值顺序、trap 不能被等式饱和弄乱。
 - 不处理 runtime polymorphism：泛型在 monomorphization 时已消解。
-- 不做带 cost model 的通用 term 重写引擎：HIR 侧是固定小规则集 + 受限
-  SEG island。
+- 不做通用 term 重写引擎：cost model（§8.2）只在一个 island 的 arena 内比较
+  候选形态，规则集仍是固定小集 + 受限 SEG island。
 
 ## 2. 方案概览
 
@@ -988,6 +988,10 @@ encode_hir(e, scope) -> SEGTerm?
 extract(eclass)      -> ExprId
 ```
 
+抽取的选点由 **per-opcode cost model** 给出（第 22 项，`hir_egraph.CostModel`）：
+每个 e-class 取最小 cost 成员，cost 沿类 DAG 自底向上松弛，权重按 op 的 registry
+class 给、缺省回退到节点计数（§8.2 末的落地清单）。
+
 - 不支持的 op `encode` 返回 `None`，自然形成边界。
 - extraction 回 HIR 时：分配 fresh BinderId；island 外原 binder 不得混淆；共享
   子项必须 materialize 成显式 `let`（§3.7）。
@@ -998,11 +1002,20 @@ extract(eclass)      -> ExprId
   自由 binder（`Local` 的 payload 换成 `.slot`）；同一 binder 的两处引用共享一个
   号，因此同形子树自然同余合并。slot → 原 `BinderId` 的表随 island 保存，
   extraction 在 island 外重新读到的 binder 原样写回原 id（free-binder 身份）。
-- **preferred e-node 就是 cost**：0 = 该类的 encode 原貌，1 = 规则选中的 e-node；
-  同类多个提案按最低 e-node 索引定序（确定性）。没有 per-opcode 权重，故
-  extraction 不撤销「节点数不降」的规则（β 的 `let` 链、多 payload `match` 的
-  绑定叶、materialize 出的合成 `let`）——它们不在 arena 里，由驱动按各自契约
-  准入。
+- **cost model（第 22 项）**：saturation 结束后对每个 e-class 求**最小 cost
+  成员**（`hir_egraph.CostModel`），自底向上在类 DAG 上松弛到不动点（每个类只付
+  一次，所以共享类值得 materialize）。权重按 op 的 registry class 给（
+  `.atom` / `.binding` / `.seq` / `.numeric` / `.conversion` = 1；构造与控制在
+  `.aggregate` / `.control` = 2；`.function` = 4；`field_get` 虽是 `.aggregate`
+  但投影为单条读，单独记 1；缺省回退 = `default_weight` = 1，即节点计数）。
+  cost 是优化器事实，**不进 op descriptor**。tie-break 确定性且与 union 顺序
+  无关：cost 低者胜 → 该类已有的 `preferred` 成员（encode 原貌或规则提案）→
+  最低 e-node 索引（创建序）。`preferred` / `preferred_prio` 因此降级为规则
+  记账：`preferred_prio == 0` 表示没有规则动过这个类，extraction 才走 identity
+  路径；被规则动过的类按 cost 求解。互不相等的候选之间才可能出现差异，故
+  默认权重下全语料的抽取结果与「priority + 最低索引」逐字相同（§11 基线不变）。
+  规则外的形态（β 的 `let` 链、多 payload `match` 的绑定叶、materialize 出的
+  合成 `let`）不在 arena 里，由驱动按各自契约准入。
 - **identity extraction**：类的 preferred 优先级为 0、且该类里仍有一个
   `origin == 站点` 的成员、元数匹配时，直接递归回站点自己的 operand / region，
   一个节点都不新建（`Stats.written == 0`）；否则深拷贝：region 重建成新的
@@ -1011,16 +1024,17 @@ extract(eclass)      -> ExprId
   节点引用 ≥2 次，且 preferred e-node 不是 trivial atom（const / local / fn_ref）
   时，合成 `let` 挂在父节点处（§8.3）；trivial atom 直接复制到两个使用点——
   否则「合并后用一次求值」与「复制原子」会互相改写而不动点。
-- **`Stats` 报告退出方式**：`rounds` / `converged`（saturation 的不动点，撞界
-  则 `converged == false`）与 `eclasses` / `enodes` / `merges` / `unions` /
+- **`Stats` 报告退出方式与代价**：`rounds` / `converged`（saturation 的不动点，
+  撞界则 `converged == false`）与 `eclasses` / `enodes` / `merges` / `unions` /
   `folds` / `algebra` / `conds` / `projects` / `materialized` / `copied` /
-  `written`；驱动聚合成 `hir_seg.Stats.egraph_*`（§11 的基线逐项打印）。
-- **cost model**：preferred e-node 的优先级 + 最低 e-node 索引 tie-break，不用
-  per-opcode 权重（per-opcode 权重属 cost model 立项，见 [todo.md](todo.md)）。
-  cost 是优化器事实，不进 op descriptor。let / 折叠 / 代数规则严格减小节点数；
-  β 按 §8.4 契约准入，known-variant `match` 按覆盖 / arity 证明准入，
-  CSE sharing（§8.3）按 `isDuplicable` 与同 FE 准入——多 payload 的 `match`
-  （每个绑定叶合成一个 `let`）与 CSE（materialize 共享子项）节点数可能不降。
+  `written`，外加 `extract_cost`（抽取选中形态的 DAG 总 cost，第 22 项）；驱动
+  聚合成 `hir_seg.Stats.egraph_*` 与 `egraph_extract_cost`（§11 的基线逐项
+  打印）。
+- **cost 与实际重写的分工**：cost 只在 arena 内部比较候选形态；`let` / 折叠 /
+  代数规则严格减小节点数，β 按 §8.4 契约准入，known-variant `match` 按覆盖 /
+  arity 证明准入，CSE sharing（§8.3）按 `isDuplicable` 与同 FE 准入——多 payload
+  的 `match`（每个绑定叶合成一个 `let`）与 CSE（materialize 共享子项）节点数
+  可能不降，它们不在 arena 里竞争。
 - **终止契约：有界轮数，非严格递减度量。** SEG **不**给出全局递减度量：`match`
   与 CSE 可增节点，要对含 β 克隆在内的整个规则集证明一个严格递减的势函数既
   不可行又有正确性风险。契约是**两层的同一个界**——驱动 `hir_seg.optimize`
@@ -1381,8 +1395,9 @@ lowering。可选变换每轮原位重写后重新跑结构 + 效果校验（§2
 测试在 CI 每次打印，基线取 2026-09-14、macOS/arm64 的一次运行）：`probes/` +
 `examples/` 全语料 **60 个程序 / 4732 个可达节点**，SEG 接受 **2558 个
 island 成员（≈54%）**，共 **91 轮**、**109 次重写**，外层 arena 跑 **2061 轮
-saturation**（**41 次 union / 322 次同余 merges / 82 个写回拷贝**），总编译时间
-**≈112 ms**（单文件最慢 ≈12 ms，`examples/fold` 与 `probes/seg` 之间随计时抖动）；
+saturation**（**41 次 union / 322 次同余 merges / 82 个写回拷贝**），抽取选中项
+的总 cost **5089**（第 22 项的 `Stats.egraph_extract_cost`，单位是 `CostModel`
+的权重，不是时间），总编译时间 **≈112 ms**（单文件最慢 ≈12 ms，`examples/fold` 与 `probes/seg` 之间随计时抖动）；
 每个程序都在 `hir_seg.Config.max_iterations` 界内收敛（`Stats.converged == true`），
 每个 island 的 saturation 也在同一个界内到达不动点（`Stats.egraph_converged == true`）。
 测试断言两层收敛（CI 稳定），时间仅记录、不断言（CI 计时不是稳定 oracle）。
@@ -1393,7 +1408,10 @@ saturation**（**41 次 union / 322 次同余 merges / 82 个写回拷贝**）�
 规则从原位树重写换成 arena（同上 `rounds` / `unions` / `merges` / `copies`
 四项新计数）、并新增 `probes/egraph.st`（60 个程序）：写回内容不变，只是
 “同一类的两个站点”现在先真并类再按 preferred e-node 抽取，计数里多出了
-同余合并与 saturation 轮数。
+同余合并与 saturation 轮数。第 22 项把选点从「优先级 + 最低索引」换成 per-opcode
+cost model（§8.2）：全语料 `rounds` / `unions` / `merges` / `copies` 四项与
+写回内容逐项不变（默认权重下最小 cost 与旧优先级选点一致），只多出
+`egraph_extract_cost` 一项聚合。
 
 落地档映射（历史里程碑编号）：
 
@@ -1404,12 +1422,12 @@ saturation**（**41 次 union / 322 次同余 merges / 82 个写回拷贝**）�
 | M2a | SEG 规则子集（β / η / let / 常折叠 / 整数代数 / 聚合投影 / known-variant match / CSE sharing）；union 规则在 slotted e-graph arena 里走 encode → 有界 saturation → extraction，β / η / let / match 是驱动层的 boundary rewrite；可执行文件默认开、`--no-seg` 关 | hir_seg.zig / hir_egraph.zig |
 | M2b | 摘要化消费者：函数摘要 SCC least fixpoint、精确 `drop_effect(T)`、module-const 检查、dead-let / selective ANF / `never_returns` 后缀删除 | hir_effects.zig / hir_simplify.zig |
 
-**尚未实现**（完整清单见 [todo.md](todo.md)）：per-opcode 权重形式的 cost model、
+**尚未实现**（完整清单见 [todo.md](todo.md)）：
 PRE（跨语句 / 分支的共享）；HIRTypeId canonical 表。
 
 ## 12. 开放问题
 
-- §3.7 树形禁止 DAG、§8.2 cost 用最小节点数 + 确定性 tie-break、§3.8 复用
-  `meta.Type`——取舍已成正文规范。
+- §3.7 树形禁止 DAG、§8.2 的 per-opcode cost model（权重阶梯 + 确定性
+  tie-break，第 22 项落地）、§3.8 复用 `meta.Type`——取舍已成正文规范。
 - 效果模型的开放问题在 [effects.md](effects.md) 定稿。
 - 其余本文级开放点随实现推进（HIR→CFG 的等价门禁暴露表述缺口时）按需补充。

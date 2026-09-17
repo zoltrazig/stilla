@@ -9,7 +9,30 @@
 
 ## 近期（建议顺序）
 
-- [ ] **22. Cost model 与 Extraction**（hir.md 的 cost model / extraction 条目）
+- [ ] **23. 覆盖 e-graph 的 SEG 统计与预算**（`hir_seg.zig` 的
+      `Stats`；`hir_seg_tests.zig` 的 `SEG budget`）
+  - 现状：第 21 项已落 arena 一半——`hir_egraph.Stats`（`rounds` / `converged`
+    / `eclasses` / `enodes` / `merges` / `unions` / 按规则计数 / `materialized`
+    / `copied` / `written`）与 `hir_seg.Stats.egraph_*`，`SEG budget` 同步汇总
+    e-graph 维度并断言 `egraph_converged`，基线已重录进 hir.md 的「验收与
+    落地现状」。**尚缺**：`Stats` 各字段的 doc 注释（`hir_seg.zig` 侧只标了
+    `egraph_*` 的聚合语义）、按规则的匹配 / 应用计数（现在只有应用后成功的
+    计数）、以及 extraction 选中的总 cost 已随第 22 项落地
+    （`hir_egraph.Stats.extract_cost` / `hir_seg.Stats.egraph_extract_cost`，
+    已进 `SEG budget` 基线行），本项只需在本范围里保留它。
+  - 范围：补齐上述三项；v1 计数保留（读旧字段的测试随命名迁移）。
+  - 依赖：第 21 项（已落地）；cost 部分依赖第 22 项。
+  - 验收：`SEG budget` 对全语料断言 e-graph 引擎也在轮界内收敛且计数非零
+    （非空跑）；`Stats` 各字段语义在 `hir_seg.zig` 的 doc 注释说明；新基线
+    记入 hir.md。
+
+## 已完成（归档，原「近期」第 1–22 项）
+
+> 以下条目均已落地，按完成时的编号保留，供 [effects.md](effects.md) 等正文
+> 交叉引用；新工作从「近期」第 23 项续起（第 22 项不依赖 23，故先行落地）。
+
+- [x] **22. Cost model 与 Extraction**（[hir.md](hir.md) §8.2 的
+      cost model / extraction 条目）
   - 现状：**extraction 已落地但只有单一 cost**。第 21 项实现了
     `hir_egraph.zig` 的 `extract`：每个 e-class 跟一个 preferred e-node
     （`preferred_prio` 0 = encode 原貌、1 = 规则选中的项，同类多个提案按最低
@@ -24,30 +47,40 @@
     共享子项 materialize 成显式 `let`）已由第 21 项实现，本项只需把它从
     preferred 选择解耦为 cost 求解；抽取完成后按现状重跑结构 + 效果重校验。
   - 依赖：**第 21 项**（已落地：e-graph 与 `extract` 骨架）。
-  - 验收：白盒 cost model（权重、tie-break 稳定性、缺省回退）与 extraction
-    正例（两候选取低 cost、共享子项 materialize 成 `let`、fresh binder）；
-    全语料 SEG-on / SEG-off 差分逐字不变；`Stats` 报告抽取选中项的总 cost
-    （见第 23 项）。
-
-- [ ] **23. 覆盖 e-graph 的 SEG 统计与预算**（`hir_seg.zig` 的
-      `Stats`；`hir_seg_tests.zig` 的 `SEG budget`）
-  - 现状：第 21 项已落 arena 一半——`hir_egraph.Stats`（`rounds` / `converged`
-    / `eclasses` / `enodes` / `merges` / `unions` / 按规则计数 / `materialized`
-    / `copied` / `written`）与 `hir_seg.Stats.egraph_*`，`SEG budget` 同步汇总
-    e-graph 维度并断言 `egraph_converged`，基线已重录进 hir.md 的「验收与
-    落地现状」。**尚缺**：`Stats` 各字段的 doc 注释（`hir_seg.zig` 侧只标了
-    `egraph_*` 的聚合语义）、按规则的匹配 / 应用计数（现在只有应用后成功的
-    计数）、以及 extraction 选中的总 cost（依赖第 22 项）。
-  - 范围：补齐上述三项；v1 计数保留（读旧字段的测试随命名迁移）。
-  - 依赖：第 21 项（已落地）；cost 部分依赖第 22 项。
-  - 验收：`SEG budget` 对全语料断言 e-graph 引擎也在轮界内收敛且计数非零
-    （非空跑）；`Stats` 各字段语义在 `hir_seg.zig` 的 doc 注释说明；新基线
-    记入 hir.md。
-
-## 已完成（归档，原「近期」第 1–21 项）
-
-> 以下条目均已落地，按完成时的编号保留，供 [effects.md](effects.md) 等正文
-> 交叉引用；新工作从「近期」第 22 项续起。
+  - 已完成：`hir_egraph.zig` 新增 `CostModel`（`weight(op)` 取 op 的 registry
+    class：`.atom` / `.binding` / `.seq` / `.numeric` / `.conversion` = 1，
+    `.aggregate` / `.control` = 2，`.function` = 4；`field_get` 虽是
+    `.aggregate` 但投影为单条读，单独记 1；其余回退 `default_weight` = 1，即
+    节点计数）与 `Island.select()`——saturation 结束时在类 DAG 上自底向上松弛到
+    不动点，每个 e-class 取**最小 cost 成员**，**每个类只付一次**（被引用两次的
+    类正是 extraction materialize 成 `let` 的形态，按两次计价会让 cost model
+    看不见它要奖励的共享）。返回 `null` cost 的成员（只能经规则造出的环到达）
+    留到下一轮；永不为有限的类保留 `preferred`，退化为旧的优先级行为而不死
+    循环。tie-break 确定性且与 union 顺序无关：cost 低者胜 → 该类已有的
+    `preferred` 成员 → 最低 e-node 索引（创建序：encode 先于规则）。
+    `preferred` / `preferred_prio` 降级为规则记账：`preferred_prio == 0` 表示
+    没有规则动过这个类，extraction 才走 identity 路径（站点自己的 operand /
+    region 直接递归，零新节点）；被规则动过的类按 `chosen()` 求解。抽取点的
+    4 处 `classes[root].preferred` 读改写为 `chosen(cls)`；`normalize` /
+    `copyClass` / `materialization` 全部走 cost 选点。`Stats` 新增
+    `extract_cost`（该 island 根类的 DAG cost），`hir_seg.Stats` 聚合成
+    `egraph_extract_cost`，`SEG budget` 基线行随之多打印一项（5089）；
+    `hir.md` §8.2 增补 cost model 落地清单、§11 基线记录新项、§12 开放问题
+    改写。
+  - 验收：白盒五项新测试——`the weight ladder is per op class with a
+    node-count fallback`（各级权重 + `field_get` < `struct_make` + 未列出的
+    `move` 回退到 `default_weight`）；`the reported cost is the selected form's
+    DAG cost`（`add(local, const)` = 3；CSE 共享的 `add(mul,mul)` = 4 而非 7，
+    证明共享只付一次）；`a strictly cheaper member wins over the class's
+    preferred one`（直接钉住 tie-break 的五种走向）；`end to end, the
+    least-cost candidate is what extraction emits`（`add.i32(%B0, 0i32)` 的两个
+    候选中选 cost 1 的 `local`，`extract_cost == 1`、树里没有 `add.i32`）；
+    `selection is deterministic and prefers the lower member index on a tie`
+    （未 saturation 时 `chosen` 退回 `preferred`；同源两次建岛选点与 cost
+    一致）。回归：`zig build -fincremental test` 全绿（1226/1226）；全语料
+    SEG-on / SEG-off 差分与 `rounds` / `unions` / `merges` / `copies` 四项计数
+    逐项不变（默认权重下最小 cost 与旧优先级选点一致），只多出
+    `egraph_extract_cost` 一项聚合。
 
 - [x] **21. Slotted E-Graph 本体**（hir.md §8.1–§8.2；`hir_egraph.zig`）
   - 范围：新增一个 pass 承载 SEG arena：e-class 表 + union-find、SLOT 编号、

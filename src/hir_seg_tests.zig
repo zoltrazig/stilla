@@ -1571,6 +1571,7 @@ test "SEG budget — every corpus program converges inside the round bound" {
     var total_unions: u64 = 0;
     var total_merges: u64 = 0;
     var total_copies: u64 = 0;
+    var total_extract_cost: u64 = 0;
     var total_islands: usize = 0;
     var total_nodes: usize = 0;
     var covered: usize = 0;
@@ -1617,6 +1618,7 @@ test "SEG budget — every corpus program converges inside the round bound" {
             total_unions += stats.egraph_unions;
             total_merges += stats.egraph_merges;
             total_copies += stats.egraph_copies;
+            total_extract_cost += stats.egraph_extract_cost;
             total_rewrites += stats.beta + stats.etas + stats.folds + stats.algebra + stats.lets + stats.conds + stats.matches + stats.projects + stats.shares;
             total_islands += stats.islands;
             total_nodes += nodes;
@@ -1630,8 +1632,8 @@ test "SEG budget — every corpus program converges inside the round bound" {
         }
     }
     std.debug.print(
-        "SEG budget baseline: {d} files, {d} islands / {d} reachable nodes ({d} files with islands), {d} rounds, {d} rewrites, {d} e-graph rounds, {d} unions / {d} merges / {d} copies, {d} ms total; slowest {s} {d} ms ({d} rounds, {d} islands)\n",
-        .{ files, total_islands, total_nodes, covered, total_iters, total_rewrites, total_egraph_rounds, total_unions, total_merges, total_copies, total_ns / std.time.ns_per_ms, slow, slow_ns / std.time.ns_per_ms, slow_iters, slow_islands },
+        "SEG budget baseline: {d} files, {d} islands / {d} reachable nodes ({d} files with islands), {d} rounds, {d} rewrites, {d} e-graph rounds, {d} unions / {d} merges / {d} copies, {d} extract cost, {d} ms total; slowest {s} {d} ms ({d} rounds, {d} islands)\n",
+        .{ files, total_islands, total_nodes, covered, total_iters, total_rewrites, total_egraph_rounds, total_unions, total_merges, total_copies, total_extract_cost, total_ns / std.time.ns_per_ms, slow, slow_ns / std.time.ns_per_ms, slow_iters, slow_islands },
     );
     try testing.expect(files > 0);
     try testing.expect(covered > 0);
