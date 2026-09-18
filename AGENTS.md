@@ -14,7 +14,7 @@ Zig implementation of the Stilla v1.3 runtime and Stilla-to-CFG-AIR compiler. Us
 
 ## Conventions
 
-- Use `std.ArrayList`, never `std.ArrayListUnmanaged`: in Zig 0.16 the latter is deprecated (`/// Deprecated; use ArrayList.` in `std/std.zig`) and `std.ArrayList` is the unmanaged-style container that takes the allocator per call. A few call sites (`effects.zig`, `hir.zig`, `passes/hir_effects.zig`) still use the old name; migrate new code to `std.ArrayList` and don't grow that surface.
+- Use `std.ArrayList`, never `std.ArrayListUnmanaged`: in Zig 0.16 the latter is deprecated (`/// Deprecated; use ArrayList.` in `std/std.zig`) and `std.ArrayList` is the unmanaged-style container that takes the allocator per call. `effects.zig` is fully migrated; the HIR side (`hir.zig`, `passes/hir_build.zig`, `passes/hir_effects.zig`, `passes/hir_parse.zig`, `passes/hir_print.zig`, `passes/hir_seg.zig`, `passes/hir_simplify.zig`, `passes/hir_validate.zig`, `hir_seg_tests.zig`) still uses the old name; migrate new code to `std.ArrayList` and don't grow that surface.
 
 ## Testing
 

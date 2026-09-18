@@ -1595,6 +1595,12 @@ test "SEG arena — probes/egraph.st reaches encode, saturation and extraction" 
     try testing.expect(stats.projects > 0);
     try testing.expect(stats.egraph_unions > 0);
     try testing.expect(stats.egraph_merges > 0);
+    // The match half of the same rules: the arena recognized a redex for
+    // each rule family it applied (matched ≥ applied).
+    try testing.expect(stats.egraph_algebra_matched >= stats.algebra);
+    try testing.expect(stats.egraph_projects_matched >= stats.projects);
+    try testing.expect(stats.egraph_algebra_matched > 0);
+    try testing.expect(stats.egraph_projects_matched > 0);
     // A rule-created duplicate is then shared or duplicated by extraction,
     // which writes fresh nodes back into the tree.
     try testing.expect(stats.egraph_copies > 0);
@@ -1642,6 +1648,8 @@ test "SEG budget — every corpus program converges inside the round bound" {
     var total_merges: u64 = 0;
     var total_copies: u64 = 0;
     var total_extract_cost: u64 = 0;
+    var total_matches: u64 = 0;
+    var total_rule_applies: u64 = 0;
     var total_islands: usize = 0;
     var total_nodes: usize = 0;
     var covered: usize = 0;
@@ -1689,6 +1697,12 @@ test "SEG budget — every corpus program converges inside the round bound" {
             total_merges += stats.egraph_merges;
             total_copies += stats.egraph_copies;
             total_extract_cost += stats.egraph_extract_cost;
+            total_matches += stats.egraph_folds_matched + stats.egraph_algebra_matched +
+                stats.egraph_conds_matched + stats.egraph_projects_matched;
+            // The union rules' applied half. (`shares` is extraction-side
+            // materialization, not a rule application, so it is not part of
+            // the match⊇apply comparison and stays in `total_rewrites`.)
+            total_rule_applies += stats.folds + stats.algebra + stats.conds + stats.projects;
             total_rewrites += stats.beta + stats.etas + stats.folds + stats.algebra + stats.lets + stats.conds + stats.matches + stats.projects + stats.shares;
             total_islands += stats.islands;
             total_nodes += nodes;
@@ -1702,11 +1716,19 @@ test "SEG budget — every corpus program converges inside the round bound" {
         }
     }
     std.debug.print(
-        "SEG budget baseline: {d} files, {d} islands / {d} reachable nodes ({d} files with islands), {d} rounds, {d} rewrites, {d} e-graph rounds, {d} unions / {d} merges / {d} copies, {d} extract cost, {d} ms total; slowest {s} {d} ms ({d} rounds, {d} islands)\n",
-        .{ files, total_islands, total_nodes, covered, total_iters, total_rewrites, total_egraph_rounds, total_unions, total_merges, total_copies, total_extract_cost, total_ns / std.time.ns_per_ms, slow, slow_ns / std.time.ns_per_ms, slow_iters, slow_islands },
+        "SEG budget baseline: {d} files, {d} islands / {d} reachable nodes ({d} files with islands), {d} rounds, {d} rewrites, {d} e-graph rounds, {d} unions / {d} merges / {d} copies, {d} rule matches / {d} rule applies, {d} extract cost, {d} ms total; slowest {s} {d} ms ({d} rounds, {d} islands)\n",
+        .{ files, total_islands, total_nodes, covered, total_iters, total_rewrites, total_egraph_rounds, total_unions, total_merges, total_copies, total_matches, total_rule_applies, total_extract_cost, total_ns / std.time.ns_per_ms, slow, slow_ns / std.time.ns_per_ms, slow_iters, slow_islands },
     );
     try testing.expect(files > 0);
     try testing.expect(covered > 0);
     try testing.expect(total_unions > 0);
     try testing.expect(total_copies > 0);
+    // Non-vacuous (item 23): the e-graph engine also *matched* redexes on
+    // the corpus — the rule set actually fires, it does not merely run.
+    try testing.expect(total_matches > 0);
+    try testing.expect(total_rule_applies > 0);
+    // A rule's match always precedes (or equals) its application: the
+    // applied half is a subset of the recognized redexes. This pins the
+    // match-counter mechanics to the same corpus.
+    try testing.expect(total_matches >= total_rule_applies);
 }

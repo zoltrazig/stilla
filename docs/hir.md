@@ -1035,7 +1035,14 @@ class 给、缺省回退到节点计数（§8.2 末的落地清单）。
   `folds` / `algebra` / `conds` / `projects` / `materialized` / `copied` /
   `written`，外加 `extract_cost`（抽取选中形态的 DAG 总 cost，第 22 项）；驱动
   聚合成 `hir_seg.Stats.egraph_*` 与 `egraph_extract_cost`（§11 的基线逐项
-  打印）。
+  打印）。第 23 项把四个 union 规则的计数拆成**匹配 / 应用**两半：`folds` /
+  `algebra` / `conds` / `projects` 只数 `redirect` 真正改变类（合并或 preferred
+  移动）的**应用**，新增的 `folds_matched` / `algebra_matched` / `conds_matched` /
+  `projects_matched` 数识别出可用 redex（全 const 且折叠得出值 / `integerAlgebra`
+  有恒等式 / 条件类持 `bool` 常量 / 基类持构造器且下标界内）的**匹配**——应用
+  一定是其匹配的子集（`matched ≥ applied`），差就是「已近优，重投无变化」的静的
+  饱和信号，也是「规则真在跑、引擎非空跑」的证明（§11 基线在 union / merges /
+  copies 之外多打印 rule matches / rule applies 两项）。
 - **cost 与实际重写的分工**：cost 只在 arena 内部比较候选形态；`let` / 折叠 /
   代数规则严格减小节点数，β 按 §8.4 契约准入，known-variant `match` 按覆盖 /
   arity 证明准入，CSE sharing（§8.3）按 `isDuplicable` 与同 FE 准入——多 payload
@@ -1422,7 +1429,10 @@ lowering。可选变换每轮原位重写后重新跑结构 + 效果校验（§2
 island 成员（≈54%）**，共 **91 轮**、**109 次重写**，外层 arena 跑 **2061 轮
 saturation**（**41 次 union / 322 次同余 merges / 82 个写回拷贝**），抽取选中项
 的总 cost **5089**（第 22 项的 `Stats.egraph_extract_cost`，单位是 `CostModel`
-的权重，不是时间），总编译时间 **≈112 ms**（单文件最慢 ≈12 ms，`examples/fold` 与 `probes/seg` 之间随计时抖动）；
+的权重，不是时间）；第 23 项起基线行另打印规则引擎的**匹配 / 应用**两半——
+四个 union 规则在语料上合计 **83 个匹配 redex / 41 次应用**（匹配 ≥ 应用，差即
+「已近优、重投无变化」的静态饱和信号，也证明规则真在空跑之上运转）。总编译时间
+**≈112 ms**（单文件最慢 ≈12 ms，`examples/fold` 与 `probes/seg` 之间随计时抖动）；
 每个程序都在 `hir_seg.Config.max_iterations` 界内收敛（`Stats.converged == true`），
 每个 island 的 saturation 也在同一个界内到达不动点（`Stats.egraph_converged == true`）。
 测试断言两层收敛（CI 稳定），时间仅记录、不断言（CI 计时不是稳定 oracle）。
@@ -1436,7 +1446,10 @@ saturation**（**41 次 union / 322 次同余 merges / 82 个写回拷贝**）�
 同余合并与 saturation 轮数。第 22 项把选点从「优先级 + 最低索引」换成 per-opcode
 cost model（§8.2）：全语料 `rounds` / `unions` / `merges` / `copies` 四项与
 写回内容逐项不变（默认权重下最小 cost 与旧优先级选点一致），只多出
-`egraph_extract_cost` 一项聚合。
+`egraph_extract_cost` 一项聚合。第 23 项把 union 规则的应用计数补足为
+**匹配 / 应用**两半（新字段 `egraph_folds_matched` / `egraph_algebra_matched` /
+`egraph_conds_matched` / `egraph_projects_matched`，见 §8.2）：语料的应用计数与
+写回逐项不变，另多打印 rule matches / rule applies 两项聚合（83 / 41）。
 
 落地档映射（历史里程碑编号）：
 

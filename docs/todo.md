@@ -5,11 +5,18 @@
 「近期」内各项的先后是**建议顺序**，不是串行依赖；每项单独列出前置
 依赖。设计细节仍在两篇文档正文，本文件只记范围、依赖与验收。
 已完成的历史条目按原编号归档于「已完成」节，供跨文档交叉引用；
-「近期」从第 22 项续起，新增项一律追加到队尾。
+「近期」当前为空——原第 23 项已落地；新增项一律从第 25 项续起、追加到队尾。
 
 ## 近期（建议顺序）
 
-- [ ] **23. 覆盖 e-graph 的 SEG 统计与预算**（`hir_seg.zig` 的
+（空——全部清单项已落地；新工作从第 25 项编号续起，见文首。）
+
+## 已完成（归档，原「近期」第 1–24 项）
+
+> 以下条目均已落地，按完成时的编号保留，供 [effects.md](effects.md) 等正文
+> 交叉引用；「近期」当前为空，新工作从第 25 项编号续起。
+
+- [x] **23. 覆盖 e-graph 的 SEG 统计与预算**（`hir_seg.zig` 的
       `Stats`；`hir_seg_tests.zig` 的 `SEG budget`）
   - 现状：第 21 项已落 arena 一半——`hir_egraph.Stats`（`rounds` / `converged`
     / `eclasses` / `enodes` / `merges` / `unions` / 按规则计数 / `materialized`
@@ -20,14 +27,37 @@
     计数）、以及 extraction 选中的总 cost（依赖第 22 项）。
   - 范围：补齐上述三项；v1 计数保留（读旧字段的测试随命名迁移）。
   - 依赖：第 21 项（已落地）；cost 部分依赖第 22 项。
-  - 验收：`SEG budget` 对全语料断言 e-graph 引擎也在轮界内收敛且计数非零
-    （非空跑）；`Stats` 各字段语义在 `hir_seg.zig` 的 doc 注释说明；新基线
-    记入 hir.md。
-
-## 已完成（归档，原「近期」第 1–24 项）
-
-> 以下条目均已落地，按完成时的编号保留，供 [effects.md](effects.md) 等正文
-> 交叉引用；新工作从「近期」第 23 项续起（第 22 项不依赖 23，故先行落地）。
+  - 已完成：三项全部补齐并写入 hir.md 的 §8.2 / §11。
+    (a) **doc 注释**——`hir_egraph.Stats` 与 `hir_seg.Stats` 每个字段都有语义
+    doc：`hir_seg.zig` 侧补齐 `iterations` / `beta` / `etas` / `folds` /
+    `algebra` / `lets` / `conds` / `matches` / `projects` / `shares`（原只标了
+    `egraph_*` 的聚合语义与 `reorders`），`hir_egraph.zig` 侧补全按规则计数
+    的原字段并把四个 union 规则拆成匹配 / 应用两半分别注明；
+    (b) **按规则的匹配 / 应用计数**——`hir_egraph.Stats` 新增
+    `folds_matched` / `algebra_matched` / `conds_matched` / `projects_matched`，
+    在规则识别出可用 redex 时递增（折叠：全 const 且折叠得出值；代数：
+    `integerAlgebra` 返回恒等式；条件：条件类持 `bool` 常量；投影：基类持
+    构造器且下标界内），原 `folds` / `algebra` / `conds` / `projects` 保持
+    「重定向真正改变类」的应用计数，匹配 ⊇ 应用。`hir_seg.Stats` 聚合为
+    `egraph_folds_matched` / `egraph_algebra_matched` / `egraph_conds_matched` /
+    `egraph_projects_matched`（Rewriter 相应转发），`SEG budget` 基线行随之
+    多打印 rule matches / rule applies 两项聚合并断言非零（83 / 41，60 程序 /
+    4732 节点 / 2558 islands / 91 轮 / 109 重写 / 2061 arena 轮 / 41 union /
+    322 merges / 82 copies / 5089 extract cost / ≈112 ms，基线未变，只多两列），
+    匹配 ≥ 应用的不变量与 `egraph_*.matched ≥ 应用计数` 也进断言；
+    (c) **extraction 总 cost**——第 22 项已落地的 `extract_cost` /
+    `egraph_extract_cost` 已是该项（单位是 `CostModel` 权重，基线 5089），本项
+    不再重复实现，只在 §8.2 / §11 与本条目确认归属。
+    测试：`hir_egraph.zig` 白盒新增「per-rule counters separate recognized
+    redexes from applied unions」（`x + 0 → x` 的 matched ≥ applied、非 redex
+    的 `add.i32(%B0, 1i32)` 两项计数都为零）；`hir_seg_tests.zig` 的 arena
+    探针测试补 `egraph_algebra_matched` / `egraph_projects_matched` 非零且
+    ≥ 应用计数，`SEG budget` 断言 rule matches / rule applies 非零（非空跑）
+    且 matched ≥ applied。`zig build -fincremental test` 全绿（1232/1232）。
+  - 验收：`SEG budget` 对全语料断言 e-graph 引擎也在轮界内收敛（`egraph_converged`，
+    原有）且计数非零（rule matches / rule applies 均 > 0，新增）；`Stats` 各字段
+    语义在 `hir_seg.zig` 的 doc 注释说明（已完成 (a)）；新基线记入 hir.md
+    （§11 增补 rule matches / rule applies 两项聚合，§8.2 落匹配 / 应用口径）。
 
 - [x] **24. 通用可插拔 effect 格引擎**（[effects.md](effects.md) §1.3、§5.4、
       §5.6；新增 Target 节）

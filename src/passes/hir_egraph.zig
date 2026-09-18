@@ -91,8 +91,9 @@ const Ref = u32;
 /// An e-node id (index into `Island.nodes`).
 const NodeId = u32;
 
-/// What one island's saturation did — folded into `hir_seg.Stats`, and
-/// the object item 23 extends.
+/// What one island's saturation did — folded into `hir_seg.Stats`, the
+/// per-rule counts split into the recognized-redex (matched) and the
+/// applied halves (docs/todo.md 23).
 pub const Stats = struct {
     /// Saturation rounds this island ran (a quiet round counts).
     rounds: u64 = 0,
@@ -109,9 +110,34 @@ pub const Stats = struct {
     /// preferred extraction changed (one per firing, so a rule that lands
     /// on a class another rule already improved still counts).
     unions: usize = 0,
+    /// Times the constant-fold rule recognized a foldable redex — a
+    /// rep-carrying op whose operand classes all held a constant — whether
+    /// the fold was then refused (a would-be trap is the runtime's) or the
+    /// union was a no-op (the class already preferred the folded shape).
+    /// The applied half of the same redexes is `folds` below.
+    folds_matched: usize = 0,
+    /// Constant folds actually applied: the fold's class union landed
+    /// (`redirect` reported a change). Strictly a subset of the redexes
+    /// `folds_matched` recognized.
     folds: usize = 0,
+    /// Times the integer-algebra rule recognized a redex — a binary
+    /// integer-rep op on whose operands `integerAlgebra` returned an
+    /// identity — whether or not the union then changed the arena.
+    algebra_matched: usize = 0,
+    /// Integer-algebra identities actually applied (`x + 0 → x`, …).
     algebra: usize = 0,
+    /// Times the constant-condition rule recognized a redex — an `if` /
+    /// `and` / `or` whose condition operand class held a `bool` constant
+    /// (a non-bool constant never counts) — whether or not the union
+    /// landed.
+    conds_matched: usize = 0,
+    /// Constant-condition selections actually applied.
     conds: usize = 0,
+    /// Times the projection rule recognized a redex — a `field_get` whose
+    /// base class held a constructor member and whose index was in range —
+    /// whether or not the union landed.
+    projects_matched: usize = 0,
+    /// Aggregate projections actually applied (`field_get(C(…), i) → vi`).
     projects: usize = 0,
     /// `let` bindings synthesized for a shared operand class during extraction.
     materialized: usize = 0,
@@ -721,6 +747,10 @@ pub const Island = struct {
                 else
                     foldBinary(base, rep, values[0], values[1]);
                 if (folded) |value| {
+                    // The fold redex was recognized (all-const operands, a
+                    // value computed); whether the union below lands is the
+                    // applied half (`folds`).
+                    self.stats.folds_matched += 1;
                     const cc = try self.internNode(try self.addConstNode(n.ty, value));
                     if (try self.redirectToClass(cls, cc)) {
                         self.stats.folds += 1;
@@ -735,6 +765,9 @@ pub const Island = struct {
             const lc = self.constIn(n.operands[0]);
             const rc = self.constIn(n.operands[1]);
             const result = integerAlgebra(base, rep, lc, rc) orelse return false;
+            // The identity redex was recognized; whether the redirect lands
+            // is the applied half (`algebra`).
+            self.stats.algebra_matched += 1;
             switch (result) {
                 .keep => |idx| {
                     if (try self.redirectToClass(cls, n.operands[idx])) {
@@ -766,6 +799,9 @@ pub const Island = struct {
             else => return false,
         };
         if (taken >= n.regions.len) return false;
+        // The constant-condition redex was recognized; whether the redirect
+        // lands is the applied half (`conds`).
+        self.stats.conds_matched += 1;
         if (try self.redirectToClass(n.cls, n.regions[taken].body)) {
             self.stats.conds += 1;
             return true;
@@ -792,6 +828,10 @@ pub const Island = struct {
         const values = self.nodes.items[c].operands;
         const idx: usize = n.payload.field;
         if (idx >= values.len) return false;
+        // The projection redex was recognized (a constructor base with the
+        // index in range); whether the redirect lands is the applied half
+        // (`projects`).
+        self.stats.projects_matched += 1;
         if (try self.redirectToClass(n.cls, values[idx])) {
             self.stats.projects += 1;
             return true;
@@ -2044,9 +2084,34 @@ test "aggregate projection fires only for an in-range index over a constructor c
         const site = pr.region(pr.regionsOf(root)[0]).root;
         const result = try optimizeIsland(f.arena.allocator(), pr, f.analysis, root, .{});
         try testing.expectEqual(@as(usize, 0), result.stats.projects);
+        try testing.expectEqual(@as(usize, 0), result.stats.projects_matched);
         try testing.expect(result.stats.enodes > 0);
         try testing.expectEqualStrings("field_get", hir.registry.get(pr.node(site).op).name);
     }
+}
+
+test "per-rule counters separate recognized redexes from applied unions" {
+    // A saturated redex still *matches* on a later round, but an already-
+    // merged class no longer applies: matched ≥ applied, and the two are
+    // equal only when every recognition changed the arena.
+    var f = try fixture(i32ty, "fn (B0: i32) { add.i32(%B0, 0i32) }");
+    defer f.deinit();
+    const root = f.root();
+    const result = try optimizeIsland(f.arena.allocator(), f.pr(), f.analysis, root, .{});
+    // `x + 0 → x` matched and applied on the first round.
+    try testing.expect(result.stats.algebra_matched >= 1);
+    try testing.expect(result.stats.algebra_matched >= result.stats.algebra);
+    try testing.expect(result.stats.algebra >= 1);
+
+    // A non-redex shapes nothing: `add.i32(%B0, 1i32)` has no identity and
+    // no constant operand list, so no rule recognizes it.
+    var g = try fixture(i32ty, "fn (B0: i32) { add.i32(%B0, 1i32) }");
+    defer g.deinit();
+    const g_result = try optimizeIsland(g.arena.allocator(), g.pr(), g.analysis, g.root(), .{});
+    try testing.expectEqual(@as(usize, 0), g_result.stats.folds_matched);
+    try testing.expectEqual(@as(usize, 0), g_result.stats.algebra_matched);
+    try testing.expectEqual(@as(usize, 0), g_result.stats.folds);
+    try testing.expectEqual(@as(usize, 0), g_result.stats.algebra);
 }
 
 test "constant folding covers the 32/64-bit and float reps" {

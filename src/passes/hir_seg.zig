@@ -221,6 +221,8 @@ const reorder_rule = rewrite_contract.RewriteRule{
 
 /// What one `optimize` call did — for tests and the compile-time budget.
 pub const Stats = struct {
+    /// Analysis→rewrite rounds this pass ran (each round re-derives the
+    /// effect analysis before rewriting).
     iterations: u32 = 0,
     /// `true` when the last round was quiet — the pass reached a fixpoint of
     /// the current rule set within the bound. `false` when the
@@ -229,14 +231,31 @@ pub const Stats = struct {
     converged: bool = false,
     /// Reachable nodes that passed recursive island admission.
     islands: usize = 0,
+    /// β-reductions applied (a λ applied to its arguments becomes a `let`
+    /// chain).
     beta: usize = 0,
+    /// η-reductions applied (a wrapper `fn_ref` redirected to the function
+    /// it forwards to).
     etas: usize = 0,
+    /// Constant folds applied in the e-graph arena (the arena's applied
+    /// half; the recognized redexes are `egraph_folds_matched`).
     folds: usize = 0,
+    /// Integer-algebra identities applied in the e-graph arena (the
+    /// applied half; recognized redexes are `egraph_algebra_matched`).
     algebra: usize = 0,
+    /// `let`-family bounds applied (dead-let deletion / used-once
+    /// forwarding / trivial-atom copying).
     lets: usize = 0,
+    /// Constant-condition selections applied in the e-graph arena (the
+    /// applied half; recognized redexes are `egraph_conds_matched`).
     conds: usize = 0,
+    /// Known-variant `match` reductions to `let` applied.
     matches: usize = 0,
+    /// Aggregate projections applied in the e-graph arena (the applied
+    /// half; recognized redexes are `egraph_projects_matched`).
     projects: usize = 0,
+    /// `let` bindings synthesized for shared operand classes during
+    /// extraction (CSE sharing).
     shares: usize = 0,
     /// Adjacent operand pairs canonically reordered by the `reorder` rule
     /// (`swap_operands` legality; docs/effects.md §10.3–§10.5). Measures
@@ -264,6 +283,20 @@ pub const Stats = struct {
     /// the `hir_egraph.CostModel` units (item 22): each island's root
     /// class cost, summed.
     egraph_extract_cost: u64 = 0,
+    /// Constant-fold redexes the arena recognized across all islands /
+    /// rounds, summed (item 23's match half; `folds` is the applied half).
+    /// Non-zero proves the fold rule actually fires — the arena is not an
+    /// empty run.
+    egraph_folds_matched: usize = 0,
+    /// Integer-algebra redexes the arena recognized, summed (match half of
+    /// `algebra`).
+    egraph_algebra_matched: usize = 0,
+    /// Constant-condition redexes the arena recognized, summed (match half
+    /// of `conds`).
+    egraph_conds_matched: usize = 0,
+    /// Aggregate-projection redexes the arena recognized, summed (match
+    /// half of `projects`).
+    egraph_projects_matched: usize = 0,
 };
 
 pub const Config = struct {
@@ -333,6 +366,10 @@ pub fn optimize(arena: std.mem.Allocator, built: *hir.BuiltProgram, config: Conf
         stats.egraph_unions += rw.egraph_unions;
         stats.egraph_copies += rw.egraph_copies;
         stats.egraph_extract_cost += rw.egraph_extract_cost;
+        stats.egraph_folds_matched += rw.egraph_folds_matched;
+        stats.egraph_algebra_matched += rw.egraph_algebra_matched;
+        stats.egraph_conds_matched += rw.egraph_conds_matched;
+        stats.egraph_projects_matched += rw.egraph_projects_matched;
         if (!changed) {
             stats.converged = true;
             break;
@@ -386,6 +423,12 @@ const Rewriter = struct {
     /// the `hir_egraph.CostModel` units (item 22): each island's root
     /// class cost, summed.
     egraph_extract_cost: u64 = 0,
+    /// Per-rule redexes the arena recognized (match half); the applied
+    /// half is `folds` / `algebra` / `conds` / `projects` above.
+    egraph_folds_matched: usize = 0,
+    egraph_algebra_matched: usize = 0,
+    egraph_conds_matched: usize = 0,
+    egraph_projects_matched: usize = 0,
 
     /// Node ids whose content this round has already overwritten in place.
     /// An island-membership or analysis verdict about such a node describes
@@ -546,6 +589,10 @@ const Rewriter = struct {
         self.algebra += result.stats.algebra;
         self.conds += result.stats.conds;
         self.projects += result.stats.projects;
+        self.egraph_folds_matched += result.stats.folds_matched;
+        self.egraph_algebra_matched += result.stats.algebra_matched;
+        self.egraph_conds_matched += result.stats.conds_matched;
+        self.egraph_projects_matched += result.stats.projects_matched;
         self.shares += result.stats.materialized;
         if (!result.changed) return;
         self.changed = true;

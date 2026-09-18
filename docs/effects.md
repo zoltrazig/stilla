@@ -242,57 +242,100 @@ EffectResource =
 `{}` **只表示 `Pure`**；`{ MayTrap }` 等简写是在 `Pure` 上增加可能效果（故除法
 仍可能正常返回）；无条件 panic 的摘要即 `{ MayTrap }`。
 
-### 5.4 摘要元素、格接口与默认乘积格
+### 5.4 摘要元素：偏序、格与默认乘积格
 
 **格接口。** 一个**格实例**由 provider 声明，会话开始时统一 intern 并**冻结**，
 此后只读（§5.7）。接口义务是元素类型加八个操作——`join` / `meet` / `≤` / `eql` /
 `⊤` / `⊥` / 规范化 canonical form / 散列 digest——以及四个消费面投影：可观察性
 （`observable`，§10.1）、可丢弃（`discardable`，§10.1）、同资源可交换
-（`commutative`，§5.6）与 `stable`（§5.5）。`join` 是候选路径 / 分支的最小上界，
-`meet` 只用于**合并独立证明**且不进业务 API（仅 §5.4 的 law test），`⊤` / `⊥`
-由实例给出（默认实例的 `⊥` 与 `Pure` 同值）。实例之间只共享元素**形状**，不共享
-mode 集与资源偏序——固定乘积格是默认实例，不是接口本身。
+（`commutative`，§5.6）与 `stable`（§5.5）。`join` 是候选路径 / 分支的最小上界
+（lub），`meet` 是最大下界（glb）、只用于**合并独立证明**且不进业务 API（仅 §5.4
+的 law test），`⊤` / `⊥` 由实例给出（默认实例的 `⊥` 与 `Pure` 同值）。实例之间只
+共享元素**形状**，不共享 mode 集与资源偏序——固定乘积格是默认实例，不是接口本身。
 
-**摘要元素。** 摘要仍是四元组 `E = (A, T, D, Q)`；默认实例的 `A` 是**每 mode 一个
-资源集分量**：设 `K` 是已注册的有限资源 Id 集、`M` 是实例声明的 mode 集，每个
-mode 的分量为 `P(K) ∪ {All_m}`——普通集合按包含序，`All_m` 严格高于所有普通集合
-（包括 `K` 本身），并覆盖未知 / 后续资源（未声明 mode 不出现在 `M` 里，见 §5.7）。
-`AccessSet = ∏(m ∈ M) (P(K) ∪ {All_m})`，join/meet 按 mode 做并/交：
-`All_m ∪ S = All_m`、`All_m ∩ S = S`。
+**摘要承载的偏序（信息 / 精化序）。** `EffectSummary` 的取值空间不是裸集合，而是一个
+**偏序（poset）**：`≤` 是**信息 / 精化序**。`E ≤ F` 读作「E 比 F 更精」或「F 是 E
+的安全超近似」——**F 至少接纳 E 接纳的一切执行行为**。每个摘要因此是一条**抽象
+channel**：channel 越靠下，它排除的行为越多、给出的信息越多；`Pure` 是最佳 channel
+（只接纳「正常返回且无可观察交互」的行为），`Top` 是默认的全收 channel（接纳一切 =
+不含任何信息）。次后的每一节（§10/§11/§12）都可以这样读：**在一次精化上证明的事实，
+自动传递到其下的一切精化**。
 
-行的排序只为规范化与 interning，**不表示执行顺序**。`Read(Top)` 是 Read 分量的
-`All_Read`；缺失摘要直接使用完整 `Top`。**资源的分量语义由实例给出**（§5.7）：
-默认实例把每个 mode 分量当作普通集合，包含序就是集合包含；层级实例把分量当作
-声明森林上的**向下闭包集**，于是 `{child} ⊆ {parent}`——包含序随实例而变，这正是
-「可插拔」的实质。unknown 资源始终折进该 mode 的 `All` 位。别名是资源身份上的商，
-并 / 交 / 包含在规范化后仍然成立；overlap / disjoint 关系只影响**冲突查询**，不
-改变包含序。
+```text
+L = AccessSet × Bool × Bool × Bool              // 逐分量偏序的乘积，仍是偏序
+每个 mode 分量：(P(K) ∪ {All_m}, ⊆)             // 有限子集格 + 顶元 All_m
+控制位：{false, true}，false ≤ true              // 两元素链
+E ≤ F  iff  每个 mode 分量做集合包含；且每一布尔位 E_i ≤ F_i
+```
+
+- `≤` 是**逐分量偏序的乘积**：自反（`E ≤ E`）、反对称（`E ≤ F ∧ F ≤ E ⟹ E = F`）、
+  传递（`E ≤ F ∧ F ≤ G ⟹ E ≤ G`）都由资源集合的包含序与布尔位的 `false ≤ true`
+  逐分量继承，故 `(L, ≤)` 是偏序。
+- **有限高度。** 每个 `P(K) ∪ {All_m}` 有限、布尔位有限，故 `L` 有限。这是单调
+  transfer（§5.6 的组合在 `≤` 上单调，见下）的迭代**必然收敛**、唯一最小不动点可经
+  Kleene 迭代到达的序论保证——§8.2 的函数摘要 SCC 与 §11.1 的类型摘要在同一
+  前提下求解不动点。新资源注册后 `K` 变大、格随之变高，须失效重算（§5.7）。
+- **行排序只为规范化与 interning，不表示执行顺序。** `Read(Top)` 是 Read 分量的
+  `All_Read`；缺失摘要直接使用完整 `Top`。**资源的分量语义由实例给出**（§5.7）：
+  默认实例把每个 mode 分量当作普通集合，包含序就是集合包含；层级实例把分量当作
+  声明森林上的**向下闭包集**，于是 `{child} ⊆ {parent}`——包含序随实例而变，这正是
+  「可插拔」的实质。unknown 资源始终折进该 mode 的 `All` 位。别名是资源身份上的商，
+  并 / 交 / 包含在规范化后仍然成立；overlap / disjoint 关系只影响**冲突查询**，不
+  改变包含序。
+
+**lub / glb：join 与 meet 的序论身份。** 这个偏序是**格**——每对元素都有最小上界
+（lub，`⊔`）与最大下界（glb，`⊓`）：
 
 ```text
 E = (A, T, D, Q)     A = accesses  T = may_trap  D = may_diverge  Q = nondeterministic
 
-L = AccessSet × Bool × Bool × Bool
-E ≤ F  iff  A_E ⊆ A_F 且每一布尔位 E_i ≤ F_i（false ≤ true）
-E ⊔ F  = (A_E ∪ A_F, T_E ∨ T_F, D_E ∨ D_F, Q_E ∨ Q_F)
-E ⊓ F  = (A_E ∩ A_F, T_E ∧ T_F, D_E ∧ D_F, Q_E ∧ Q_F)
+E ⊔ F = lub{E, F} = (A_E ∪ A_F, T_E ∨ T_F, D_E ∨ D_F, Q_E ∨ Q_F)
+E ⊓ F = glb{E, F} = (A_E ∩ A_F, T_E ∧ T_F, D_E ∧ D_F, Q_E ∧ Q_F)
 
-Pure = (∅,   false, false, false)   // 格底，兼「已证明纯」
-Top  = (All, true,  true,  true)    // 所有资源、控制与非确定性均未知
+Pure = ⊥ = (∅,      false, false, false)   // 格底，兼「已证明纯」= 最佳 channel
+Top  = ⊤ = (All,    true,  true,  true)    // 格顶，一切未知 = 全收 channel
 ```
 
-- `⊔` 是候选路径 / 目标的最小上界，`⊓` 是最大下界；二者满足交换、结合、幂等与
-  吸收律。只有每个输入都覆盖实际行为时，meet 才能用于**合并独立证明**，不能拿
-  meet 代替分支 join。
-- 对当前分析固定有限的资源注册表与 mode 集，格为有限高度；新资源注册后须失效
-  重算。未知资源始终保留通配。
-- **meet 不进入业务 API**：`⊓` 的公式与格律保留给 law test（内部
-  `latticeMeet()`）；优化 / 分析查询面只暴露 join、sequence、conflict 与投影。
+- **`⊔` 是候选路径 / 目标的最小上界。** 一组候选（分支臂、有限 callee 集、替代方案）
+  每个都可能被执行，摘要必须同时覆盖它们各自的行为——最小上界正是「覆盖全部候选的
+  最精摘要」：对候选集足够，且不丢弃任何候选特有的事实。`⊔` 满足交换、结合、幂等与
+  吸收律。
+- **`⊓` 是最大下界，只用于合并独立证明。** 若两个摘要各自都是实际行为的**安全超近似**
+  （`true ≤ E` 且 `true ≤ F`），则 `true` 是 `{E, F}` 的下界，故
+  `true ≤ glb{E, F} = E ⊓ F`——**两个独立安全证明的 meet 仍是安全证明**。这是「在已
+  证明的 conservative 事实之上组合」的序论依据。**不能拿 meet 代替分支 join**：分支是
+  两个**候选**而非两个**证明**，实际行为只与其中一支相等，meet（共同部分）会漏掉各
+  支特有的行为。
+- **meet 不进入业务 API**：`⊓` 的公式与格律保留给 law test（内部 `latticeMeet()`）；
+  优化 / 分析查询面只暴露 join、sequence、conflict 与投影。
+- 两参数**单调性**：`E ≤ E' ⟹ E ⊔ F ≤ E' ⊔ F`（`⊓` 同理同向）——组合函数是偏序到偏序
+  的单调映射。这是 §8.2 / §11.1 每个 transfer 单调、迭代收敛的直接理由，也是 law
+  test 必须逐实例断言的性质（§14 验收）。
 - **摘要不跟踪 `may_return_normally`。** 正常返回是默认假设；`Bottom` 与
   `Pure` 同值，「推导下界 ≠ 已证明纯」的区分由 §8.2 的 `Pending` /
   `Ready(summary)` 状态机承担（不在格内）。后缀 DCE 的合法性由独立 must 事实
   `never_returns` 恢复——该 must 事实已落地（§10.1，hir_effects.zig 的
   greatest fixpoint），后缀删除在 M2b 消费者（hir_simplify.zig，`--simplify`）；
   摘要代数不变，`;` 合并仍保守并入后缀位。
+
+**序论谓词：派生合法性查询是序理想（下集）。** 每个派生查询在 `≤` 上是**向下闭**的
+（order ideal / down-set）：若它在 `F` 上成立，则对一切 `E ≤ F` 也成立。`total`
+（`!T ∧ !D`）、`observable_effect_free`（无 Write/Allocate/Release、无未知资源）、
+`Q = 0`（duplicable / seg_safe / speculate 的前提）都是典型的序理想；它们把 `L`
+切成**合法区（ideal）与不合法区**两部分构成的 cut。
+
+```text
+合法判定 = order ideal:
+    P(F) ∧ E ≤ F  ⟹  P(E)          // 在一次（conservative）摘要上达标 ⇒ 其下全部达标
+
+验证     = `derived ≤ stored`        // validate 逐节点复核派生 ≤ 存储，hir_effects.zig
+```
+
+被存下的注解是实际行为的安全超近似（`true ≤ stored`，§8.2 的 `Ready`）。优化器只问
+`P(stored)`；因 `P` 是序理想、`true ≤ stored`，故 `P(stored) ⟹ P(true)`——**合法性从
+保守摘要自动传递到实际行为**，也就是 §2.4「不存 bool、一律按 `readySummary` 派生」
+的序论正当性。`discardable` / `duplicable` 等把多个序理想与 ownership / lifetime 门
+组合，门的组件不是 effect 序的部分，须显式叠加——§10.1 强约束「缺一不可」照旧。
 
 **顺序组合与候选 join：语义角色不同，may-公式同式。**
 
@@ -331,9 +374,10 @@ Pure ; E = E ; Pure     = E
 Pure ⊔ E                = E                          // Pure 是格底
 ```
 
-实现时除上述例子外，还须检查 join/meet 格律、两参数单调性、`;` 与 `⊔` 的同式
-及摘要层交换，并配负例：**摘要相等不得单独放行交换 / 删除 / 复制**——程序级
-变换必须组合 `reorderable` / `discardable` 等门。
+实现时除上述例子外，还须检查 join/meet 格律、`≤` 的离散序公理（自反 / 反对称 /
+传递）、两参数单调性、`;` 与 `⊔` 的同式及摘要层交换，并配负例：**摘要相等不得
+单独放行交换 / 删除 / 复制**——程序级变换必须组合 `reorderable` / `discardable`
+等门；派生查询的**序理想性**（在 F 上成立 ⇒ 在其下一切精化上成立）有正例覆盖。
 
 ### 5.5 nondeterministic 与域稳定性
 
@@ -428,9 +472,11 @@ overlap / disjoint **只影响冲突查询**（`reorderable` 的输入），不�
 后者是包含序、冲突精度与 mode 标志（`commutative` / `observable` /
 `discardable`）随实例而变。
 
-**保护名与别名代表元。** 三类资源是**受保护名**，provider 既不可别名也不可放进
+**保护名与别名代表元。** 四类资源是**受保护名**，provider 既不可别名也不可放进
 树：`.module_const`（别名或祖先会吞并某个常量读，那是漏掉的初始化 / teardown
-依赖，§7.3）、`.top` 与 `.host_any`（改变通配覆盖范围就是换了一个元素）。别名类
+依赖，§7.3）、`.top` 与 `.host_any`（改变通配覆盖范围就是换了一个元素），以及
+**实例声明的 `unknown`**（它同是通配名：放进树会让向下闭包把它展开成具体行，
+破坏「unknown 折进 `All` 位」的规范化不变量，§5.4）。别名类
 的冻结代表元取类内**最小**成员（按资源序），所以别名书写顺序不影响身份；`stable`
 / `disjoint` / `unknown` 等资源事实在别名商建好**之后**再规范化，否则同一域的两种
 拼法会给出不同的 `stable` 答案。
@@ -1454,8 +1500,9 @@ MayTrap（含 panic）+ MayDiverge + nondeterministic
 
 **验收标准**：
 
-- **格律 law test 实例参数化**：join / meet 的交换 / 结合 / 幂等 / 吸收 / 单调性
-  用例对 `flat` 与 `hierarchy` 两实例同样通过（默认实例逐条不变）；两实例各自有
+- **格律 law test 实例参数化**：join / meet 的交换 / 结合 / 幂等 / 吸收 / 单调性，
+  **`≤` 的离散序公理（自反 / 反对称 / 传递）**与派生查询的序理想性（down-set）用例
+  对 `flat` 与 `hierarchy` 两实例同样通过（默认实例逐条不变）；两实例各自有
   `;` 与 `⊔` 同式（`sequence == join`）与摘要层交换的用例；
 - **第二实例的派生查询正 / 负例**：兄弟域读对在 `hierarchy` 下
   `canSwapOperands == true`、在 `flat`（无 `disjoint` 声明）下为 `false`；别名
@@ -1525,3 +1572,17 @@ hir_effects.zig / hir_simplify_tests.zig / hir_seg_tests.zig 的正负例覆盖�
   过度近似 float 除法）；registry 启动校验只断言 HIR 行自身的 typed 一致性。
 - **现有 pass（dead-instr 等）** 仍以 schema 位白名单做判定——正是本文想用派生
   查询替代的形态。
+- **§5.4 的 poset 视角**（本次修订）：摘要承载序被正式定义为逐分量偏序（信息 /
+  精化序）的乘积，`⊔` / `⊓` 被指认为 lub / glb，派生合法性谓词被指认为序理想
+  （down-set）。实现与之对应：`AccessSet.le` / `Summary.le` / `Engine.le` 给出序，
+  `join` / `sequence` 作 lub、`latticeMeet` 仅作 law test 的 glb，`validate` 的
+  `derived ≤ stored` 即序理想的验证方向。**两类核对已补齐**：① `le` 的离散序公理
+  （自反 / 反对称 / 传递）与派生谓词的序理想性已被列为逐实例的 law test 断言
+  （§14 验收，effects.zig 的参数化 law test 现逐实例断言三类公理）；② 序理想性
+  成立的前提是「访问行是规范化后的集合」，而层级实例一度允许把实例声明的
+  `unknown` 资源放进树里（如 `unknown = host(9)` 且 `host(9)` 是某节点的 child），
+  规范化会把 `host(9)` 当成普通后代具体保留在行里，不再折进该 mode 的 `All` 位——
+  与「unknown 资源始终折进该 mode 的 `All` 位」不变量相悖，序理想性在该例下可能
+  被破坏。**已修复**：`Engine.loadHierarchy` 把实例声明的 `unknown` 视为受保护名
+  （禁入别名 / 树边，`error.InvalidProvider`，§5.7），且 `canonicalizeMapped` 在
+  展开**后代**时同样把 unknown 折进 `All`（不只折头部），双保险保住不变量。

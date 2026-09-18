@@ -378,9 +378,19 @@ fn canonicalizeMapped(arena: std.mem.Allocator, ctx: CanonCtx, raw: []const Effe
         try buf.append(arena, .{ .resource = r, .mode = x.mode });
         // Resource inclusion (docs/effects.md §5.7): an access to `r`
         // reaches everything `r` includes. The product instance declares
-        // no inclusions, so this loop is empty for it.
+        // no inclusions, so this loop is empty for it. A descendant that
+        // is itself an unknown resource folds into the mode's `all` bit
+        // rather than leaking into the canonical row (the engine rejects
+        // such a tree edge at construction, but the canonicalizer keeps
+        // the invariant itself too — `CanonCtx` can also come from a
+        // hand-built carrier).
         for (ctx.descend) |pr| {
-            if (pr[0].eql(r)) try buf.append(arena, .{ .resource = pr[1], .mode = x.mode });
+            if (!pr[0].eql(r)) continue;
+            if (ctx.folds(pr[1]) and modeBit(x.mode) != 0) {
+                out.all |= modeBit(x.mode);
+            } else {
+                try buf.append(arena, .{ .resource = pr[1], .mode = x.mode });
+            }
         }
     }
     std.mem.sort(EffectAccess, buf.items, {}, accessLessThan);
@@ -1372,7 +1382,15 @@ pub const Engine = struct {
         // from it — does not depend on the declaration order.
         var alias_parent = std.HashMapUnmanaged(EffectResource, EffectResource, ResourceCtx, std.hash_map.default_max_load_percentage).empty;
         for (h.aliases) |pr| {
+            // The instance-declared `unknown` is a wildcard name, the same
+            // kind of element `.top` / `.host_any` are: aliasing it would
+            // move the wildcard's reach — a different element altogether
+            // (docs/effects.md §5.7 protected names). Rejected like the
+            // others rather than silently degrading the canonical form.
             if (isProtected(pr.a) or isProtected(pr.b)) return error.InvalidProvider;
+            if (h.unknown) |u| {
+                if (pr.a.eql(u) or pr.b.eql(u)) return error.InvalidProvider;
+            }
             var ra = aliasRoot(&alias_parent, pr.a);
             var rb = aliasRoot(&alias_parent, pr.b);
             if (ra.eql(rb)) continue;
@@ -1403,16 +1421,20 @@ pub const Engine = struct {
 
         for (h.parents) |e| {
             // A protected resource (a `ModuleConst`, or the wildcard
-            // names `.top` / `.host_any`) may neither be aliased nor
-            // placed in the tree: either would change which resources a
-            // wildcard covers, or let the downward closure subsume one
-            // constant read by another. A read that disappears is a
-            // missed init/teardown dependency (docs/effects.md §7.3), and
-            // a wildcard whose scope moved is a different element
-            // altogether.
+            // names `.top` / `.host_any`, or the instance-declared
+            // `unknown`) may neither be aliased nor placed in the tree:
+            // either would change which resources a wildcard covers, or
+            // let the downward closure subsume one constant read by
+            // another. A read that disappears is a missed init/teardown
+            // dependency (docs/effects.md §7.3), a wildcard whose scope
+            // moved is a different element altogether, and a tree edge
+            // touching the declared `unknown` would surface it as a
+            // *concrete* descendant instead of folding it into the mode's
+            // `all` bit (docs/effects.md §5.4/§5.7).
             if (isProtected(e.child) or isProtected(e.parent)) return error.InvalidProvider;
             const child = self.canonical(e.child);
             const parent = self.canonical(e.parent);
+            if (self.isUnknown(child) or self.isUnknown(parent)) return error.InvalidProvider;
             if (self.parents.get(child)) |prev| {
                 if (!prev.eql(parent)) return error.InvalidProvider;
             }
@@ -2992,6 +3014,11 @@ test "effects: lattice laws are instance-parameterized (docs/effects.md §5.7)" 
                     // bottom is the identity, top absorbs
                     try testing.expect((try eng.join(eng.bottom(), x)).eql(x));
                     try testing.expect((try eng.join(eng.top(), x)).eql(eng.top()));
+                    // `≤` is a partial order (docs/effects.md §5.4): reflexive,
+                    // antisymmetric, transitive.
+                    try testing.expect(eng.le(x, x));
+                    if (eng.le(x, y) and eng.le(y, x)) try testing.expect(eng.eql(x, y));
+                    if (eng.le(x, y) and eng.le(y, z)) try testing.expect(eng.le(x, z));
                 }
             }
         }
@@ -3208,6 +3235,44 @@ test "effects: an instance-declared unknown resource folds into the mode wildcar
     const concrete = try eng.summaryOf(&.{readOf(host(1))});
     try testing.expect(!concrete.accesses.wildcard(.read));
     try testing.expectEqual(@as(usize, 1), concrete.accesses.accesses.len);
+}
+
+test "effects: an instance-declared unknown may not be placed in the tree or aliased (docs/effects.md §5.7)" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    // The declared `unknown` is a wildcard: as a tree *parent* or
+    // *child*, or an alias endpoint, it would either change the
+    // wildcard's coverage or leak concrete into canonical rows via the
+    // downward closure — an invalid provider, not a silently degraded
+    // one (docs/effects.md §5.4/§5.7).
+    const as_child = Provider{
+        .id = "stilla.bad.unknown-tree",
+        .order = .{ .hierarchy = .{
+            .unknown = .{ .host = 9 },
+            .parents = &.{.{ .child = .{ .host = 9 }, .parent = .{ .host = 1 } }},
+        } },
+    };
+    try testing.expectError(error.InvalidProvider, Engine.init(a, &as_child, .{}));
+
+    const as_parent = Provider{
+        .id = "stilla.bad.unknown-tree",
+        .order = .{ .hierarchy = .{
+            .unknown = .{ .host = 9 },
+            .parents = &.{.{ .child = .{ .host = 1 }, .parent = .{ .host = 9 } }},
+        } },
+    };
+    try testing.expectError(error.InvalidProvider, Engine.init(a, &as_parent, .{}));
+
+    const as_alias = Provider{
+        .id = "stilla.bad.unknown-alias",
+        .order = .{ .hierarchy = .{
+            .unknown = .{ .host = 9 },
+            .aliases = &.{.{ .a = .{ .host = 9 }, .b = .{ .host = 5 } }},
+        } },
+    };
+    try testing.expectError(error.InvalidProvider, Engine.init(a, &as_alias, .{}));
 }
 
 test "effects: alias class identity does not depend on declaration order (docs/effects.md §5.7)" {
