@@ -176,6 +176,11 @@ pub const Config = struct {
     /// `HostBindingId`s use `hosts` directly.
     host_decls: []const effects.HostDecl = &.{},
     resources: effects.ResourceRegistry = .{},
+    /// The frozen lattice instance (docs/effects.md §5.7). A session
+    /// (`frontend.compile`) interns one and threads it here so every
+    /// consumer reads the same instance; when null the analysis interns
+    /// its own default `flat` instance over `resources`.
+    engine: ?*const effects.Engine = null,
     /// The module graph, used only to resolve the ownership class of
     /// generic named type instantiations. Without it, such a type is
     /// conservatively Unique.
@@ -191,6 +196,10 @@ pub const Analysis = struct {
     arena: std.mem.Allocator,
     built: *hir.BuiltProgram,
     config: Config,
+    /// The frozen lattice instance every composition and query goes
+    /// through (docs/effects.md §5.7). A session passes one in; a
+    /// white-box caller's analysis interns its own.
+    eng: effects.Engine,
     /// The resolved host table: symbol-keyed ABI declarations folded with
     /// the id-keyed entries of `config.hosts`, one entry per binding.
     hosts: effects.HostEffects,
@@ -262,10 +271,12 @@ pub const Analysis = struct {
             arena,
             try std.mem.concat(arena, effects.HostEffects.Entry, &.{ abi.entries, config.hosts.entries }),
         );
+        const eng: effects.Engine = if (config.engine) |e| e.* else try effects.Engine.initDefault(arena, config.resources);
         return .{
             .arena = arena,
             .built = built,
             .config = config,
+            .eng = eng,
             .hosts = merged,
             .memo = memo,
             .summary = summary,
@@ -300,6 +311,12 @@ pub const Analysis = struct {
     /// (function bodies and module-constant initializers) with its
     /// interned `ready` summary. Idempotent.
     pub fn analyze(self: *Analysis) Error!void {
+        // The hard cross-instance binding (docs/effects.md §5.7):
+        // interning happens here, so this is the point where the table
+        // binds. A second analysis of this program under a *different*
+        // lattice instance wipes the previous rows and re-derives every
+        // annotation — the old rows are dead weight, not facts.
+        try self.p().effect_interner.ensureInstance(self.eng.descriptor_digest);
         try self.solveSummaries();
         for (self.built.funcs.items) |rec| try self.annotateTree(rec.root);
         for (self.built.consts.items) |c| {
@@ -410,7 +427,7 @@ pub const Analysis = struct {
         // case, which is where `named`/`param` recursion lives.
         if (ty.ownership()) |ow| if (ow == .copy) return effects.pure;
         switch (ty) {
-            .primitive => |k| return if (k == .any or k == .hostdata) effects.top else effects.pure,
+            .primitive => |k| return if (k == .any or k == .hostdata) self.eng.top() else effects.pure,
             .module, .function, .cleanup => return effects.pure,
             .list, .box => |inner| return self.dropEffectInner(inner.*, visiting),
             .tuple => |elems| {
@@ -418,15 +435,15 @@ pub const Analysis = struct {
                 var i = elems.len;
                 while (i > 0) {
                     i -= 1;
-                    acc = try effects.sequence(self.arena, acc, try self.dropEffectInner(elems[i], visiting));
+                    acc = try self.eng.sequence(acc, try self.dropEffectInner(elems[i], visiting));
                 }
                 return acc;
             },
-            .param => return effects.top,
+            .param => return self.eng.top(),
             .named => |n| {
                 for (visiting.items) |v| if (meta.Type.eql(v, ty)) return effects.pure;
-                if (visiting.items.len >= max_drop_type_depth) return effects.top;
-                if (n.id >= self.built.types.len) return effects.top;
+                if (visiting.items.len >= max_drop_type_depth) return self.eng.top();
+                if (n.id >= self.built.types.len) return self.eng.top();
                 try visiting.append(self.arena, ty);
                 defer {
                     _ = visiting.pop();
@@ -435,14 +452,14 @@ pub const Analysis = struct {
                     .struct_ => |d| {
                         var acc = effects.pure;
                         if (d.drop) |dn| {
-                            if (self.findFuncByName(dn)) |fid| acc = try effects.sequence(self.arena, acc, try self.functionSummary(fid));
+                            if (self.findFuncByName(dn)) |fid| acc = try self.eng.sequence(acc, try self.functionSummary(fid));
                         }
                         var i = d.fields.len;
                         while (i > 0) {
                             i -= 1;
                             const ft = meta.substParams(self.arena, d.type_params, n.args, d.fields[i].type_);
                             if (try self.isCopyType(ft)) continue;
-                            acc = try effects.sequence(self.arena, acc, try self.dropEffectInner(ft, visiting));
+                            acc = try self.eng.sequence(acc, try self.dropEffectInner(ft, visiting));
                         }
                         return acc;
                     },
@@ -455,14 +472,14 @@ pub const Analysis = struct {
                                 i -= 1;
                                 const pt = meta.substParams(self.arena, d.type_params, n.args, v.payloads[i]);
                                 if (try self.isCopyType(pt)) continue;
-                                vsum = try effects.sequence(self.arena, vsum, try self.dropEffectInner(pt, visiting));
+                                vsum = try self.eng.sequence(vsum, try self.dropEffectInner(pt, visiting));
                             }
-                            acc = try effects.join(self.arena, acc, vsum);
+                            acc = try self.eng.join(acc, vsum);
                         }
                         return acc;
                     },
                     .opaque_ => |d| return self.hostRelease(d.host_id),
-                    .unknown => return effects.top,
+                    .unknown => return self.eng.top(),
                 }
             },
         }
@@ -552,7 +569,7 @@ pub const Analysis = struct {
 
     fn checkTeardownReads(self: *Analysis, c: hir.ConstRecord, allocator: std.mem.Allocator) Error!?[]const u8 {
         const de = try self.dropEffectOf(c.type_);
-        if (effects.isPure(de)) return null;
+        if (self.eng.isPure(de)) return null;
         const cur = self.initOrderOf(c) orelse return null;
         // Attribute direct reads / calls to the type's own hook body when
         // it has one; nested field hooks fall back to the generic form.
@@ -598,7 +615,7 @@ pub const Analysis = struct {
         reject_unknown: bool,
         allocator: std.mem.Allocator,
     ) Error!?[]const u8 {
-        if (reject_unknown and s.accesses.all[@intFromEnum(effects.EffectMode.read)]) {
+        if (reject_unknown and s.accesses.wildcard(.read)) {
             // An unknown read set may target any constant, including a
             // later one or this constant itself (docs/effects.md §7.3,
             // §9.4) — reject on the first initialized sibling.
@@ -669,7 +686,7 @@ pub const Analysis = struct {
                     if (cn.op == fn_ref_op and cn.payload == .func) {
                         switch (cn.payload.func) {
                             .func => |fid| {
-                                if (fid < self.built.funcs.items.len and self.known[fid] and !effects.isPure(self.summary[fid])) {
+                                if (fid < self.built.funcs.items.len and self.known[fid] and !self.eng.isPure(self.summary[fid])) {
                                     return self.built.funcs.items[fid].name;
                                 }
                             },
@@ -719,7 +736,7 @@ pub const Analysis = struct {
         wh.update(h.host_module);
         wh.update(h.type_name);
         const domain: effects.HostDomainId = @truncate(wh.final());
-        return effects.summaryOf(self.arena, &.{.{
+        return self.eng.summaryOf(&.{.{
             .resource = .{ .host = domain },
             .mode = .release,
         }});
@@ -773,7 +790,7 @@ pub const Analysis = struct {
         // is Pure, §7.3) therefore cannot stand; use `Top` (docs/effects.md
         // §14 audit note). Call-position host/intrinsic leaves carry no
         // hops, so ordinary direct calls are unaffected.
-        if (e.access_hops.len > 0) return effects.top;
+        if (e.access_hops.len > 0) return self.eng.top();
         const d = hir.registry.get(e.op);
         switch (d.transfer) {
             .atom => return d.own_effect,
@@ -781,30 +798,30 @@ pub const Analysis = struct {
             .strict_ltr => {
                 var acc = d.own_effect;
                 for (pr.operands(id)) |op| {
-                    acc = try effects.sequence(self.arena, acc, try self.effectOf(op));
+                    acc = try self.eng.sequence(acc, try self.effectOf(op));
                 }
                 return acc;
             },
             .field_get => {
                 var acc = self.fieldGetOwn(id);
                 for (pr.operands(id)) |op| {
-                    acc = try effects.sequence(self.arena, acc, try self.effectOf(op));
+                    acc = try self.eng.sequence(acc, try self.effectOf(op));
                 }
                 return acc;
             },
             .let_ => {
                 var acc = d.own_effect;
                 for (pr.operands(id)) |op| {
-                    acc = try effects.sequence(self.arena, acc, try self.effectOf(op));
+                    acc = try self.eng.sequence(acc, try self.effectOf(op));
                 }
                 for (pr.regionsOf(id)) |r| {
                     // The region's pattern is not an HIR node: a list
                     // pattern's element reads (`read_index`/`split_list`,
                     // cfg may_trap) must be sequenced here explicitly.
                     if (pr.region(r).pattern) |pt| {
-                        if (self.patternMayTrap(pt)) acc = try effects.sequence(self.arena, acc, effects.may_trap);
+                        if (self.patternMayTrap(pt)) acc = try self.eng.sequence(acc, effects.may_trap);
                     }
-                    acc = try effects.sequence(self.arena, acc, try self.effectOf(pr.region(r).root));
+                    acc = try self.eng.sequence(acc, try self.effectOf(pr.region(r).root));
                 }
                 return acc;
             },
@@ -813,18 +830,18 @@ pub const Analysis = struct {
                 var acc = d.own_effect;
                 var alt = effects.pure;
                 for (pr.operands(id)) |op| {
-                    acc = try effects.sequence(self.arena, acc, try self.effectOf(op));
+                    acc = try self.eng.sequence(acc, try self.effectOf(op));
                 }
                 for (pr.regionsOf(id)) |r| {
-                    alt = try effects.join(self.arena, alt, try self.effectOf(pr.region(r).root));
+                    alt = try self.eng.join(alt, try self.effectOf(pr.region(r).root));
                 }
-                return effects.sequence(self.arena, acc, alt);
+                return self.eng.sequence(acc, alt);
             },
             .match => {
                 var acc = d.own_effect;
                 var arms = effects.pure;
                 for (pr.operands(id)) |op| {
-                    acc = try effects.sequence(self.arena, acc, try self.effectOf(op));
+                    acc = try self.eng.sequence(acc, try self.effectOf(op));
                 }
                 for (pr.regionsOf(id)) |r| {
                     // An arm's pattern test precedes its body: sequence the
@@ -833,22 +850,22 @@ pub const Analysis = struct {
                     // the semantic role is sequence (docs/effects.md §5.4).
                     var arm = effects.pure;
                     if (pr.region(r).pattern) |pt| {
-                        if (self.patternMayTrap(pt)) arm = try effects.sequence(self.arena, arm, effects.may_trap);
+                        if (self.patternMayTrap(pt)) arm = try self.eng.sequence(arm, effects.may_trap);
                     }
-                    arm = try effects.sequence(self.arena, arm, try self.effectOf(pr.region(r).root));
-                    arms = try effects.join(self.arena, arms, arm);
+                    arm = try self.eng.sequence(arm, try self.effectOf(pr.region(r).root));
+                    arms = try self.eng.join(arms, arm);
                 }
-                return effects.sequence(self.arena, acc, arms);
+                return self.eng.sequence(acc, arms);
             },
             .call => {
                 const ops = pr.operands(id);
                 var acc = d.own_effect;
                 if (ops.len > 0) {
-                    acc = try effects.sequence(self.arena, acc, try self.effectOf(ops[0]));
+                    acc = try self.eng.sequence(acc, try self.effectOf(ops[0]));
                     for (ops[1..]) |arg| {
-                        acc = try effects.sequence(self.arena, acc, try self.effectOf(arg));
+                        acc = try self.eng.sequence(acc, try self.effectOf(arg));
                     }
-                    acc = try effects.sequence(self.arena, acc, try self.callBound(ops));
+                    acc = try self.eng.sequence(acc, try self.callBound(ops));
                 }
                 return acc;
             },
@@ -856,21 +873,21 @@ pub const Analysis = struct {
                 var acc = d.own_effect;
                 const ops = pr.operands(id);
                 if (ops.len > 0) {
-                    acc = try effects.sequence(self.arena, acc, try self.dropEffectOf(pr.node(ops[0]).ty));
-                    acc = try effects.sequence(self.arena, acc, try self.effectOf(ops[0]));
+                    acc = try self.eng.sequence(acc, try self.dropEffectOf(pr.node(ops[0]).ty));
+                    acc = try self.eng.sequence(acc, try self.effectOf(ops[0]));
                 }
                 return acc;
             },
             .module_const => {
                 const cid = switch (e.payload) {
                     .module_const => |c| c,
-                    else => return effects.top,
+                    else => return self.eng.top(),
                 };
                 var raw = [_]effects.EffectAccess{.{
                     .resource = .{ .module_const = cid },
                     .mode = .read,
                 }};
-                return effects.summaryOf(self.arena, &raw);
+                return self.eng.summaryOf(&raw);
             },
         }
     }
@@ -886,7 +903,7 @@ pub const Analysis = struct {
     fn fieldGetOwn(self: *Analysis, id: hir.ExprId) Summary {
         const pr = self.p();
         const ops = pr.operands(id);
-        if (ops.len == 0) return effects.top;
+        if (ops.len == 0) return self.eng.top();
         return switch (pr.node(ops[0]).ty) {
             .named, .tuple => effects.pure,
             // A list index read lowers to a bounds-checked `read_index`
@@ -897,11 +914,11 @@ pub const Analysis = struct {
             // the bounds proof the projection rule consumes (hir.md
             // §8.3). Any other list base keeps the conservative `Top`.
             .list => blk: {
-                if (!std.mem.eql(u8, hir.registry.get(pr.node(ops[0]).op).name, "list_make")) break :blk effects.top;
-                if (@as(usize, pr.node(id).payload.field) >= pr.operands(ops[0]).len) break :blk effects.top;
+                if (!std.mem.eql(u8, hir.registry.get(pr.node(ops[0]).op).name, "list_make")) break :blk self.eng.top();
+                if (@as(usize, pr.node(id).payload.field) >= pr.operands(ops[0]).len) break :blk self.eng.top();
                 break :blk effects.pure;
             },
-            else => effects.top,
+            else => self.eng.top(),
         };
     }
 
@@ -922,12 +939,12 @@ pub const Analysis = struct {
                 var acc: ?Summary = null;
                 for (targets.items) |t| {
                     const b = try self.targetBound(t);
-                    acc = if (acc) |a| try effects.join(self.arena, a, b) else b;
+                    acc = if (acc) |a| try self.eng.join(a, b) else b;
                 }
                 return acc.?;
             }
         }
-        return effects.top;
+        return self.eng.top();
     }
 
     /// The context-free `effect_bound` of one resolved target
@@ -939,7 +956,21 @@ pub const Analysis = struct {
     fn targetBound(self: *Analysis, t: ResolvedTarget) Error!Summary {
         return switch (t) {
             .func => |fid| self.functionSummary(fid),
-            .host => |hb| self.hosts.lookup(hb) orelse effects.top,
+            .host => |hb| try self.hostSummary(hb),
+        };
+    }
+
+    /// A host binding's summary as *this instance* sees it
+    /// (docs/effects.md §5.7, §13): the declaration is used verbatim only
+    /// under an explicit `StillaExecution.forbidden` attestation; every
+    /// weaker attestation — and a missing declaration — is this
+    /// instance's full `top`, which covers the modes the provider
+    /// declared rather than only the built-in four.
+    fn hostSummary(self: *Analysis, hb: hir.HostBindingId) Error!Summary {
+        const e = self.hosts.lookupEntry(hb) orelse return self.eng.top();
+        return switch (e.stilla_execution) {
+            .forbidden => self.eng.admitted(e.summary),
+            .may_execute, .unknown => self.eng.top(),
         };
     }
 
@@ -1038,7 +1069,7 @@ pub const Analysis = struct {
     /// makes the site `Top`. The same target set feeds `collectCallees`, so
     /// this only ever reads finalized or in-progress SCC facts.
     fn callBound(self: *Analysis, ops: []const hir.ExprId) Error!Summary {
-        if (ops.len == 0) return effects.top;
+        if (ops.len == 0) return self.eng.top();
         var targets = std.ArrayListUnmanaged(ResolvedTarget).empty;
         defer targets.deinit(self.arena);
         if (try self.resolveTargets(ops[0], &targets)) {
@@ -1046,7 +1077,7 @@ pub const Analysis = struct {
                 var acc: ?Summary = null;
                 for (targets.items) |t| {
                     const b = try self.targetCallBound(t, ops);
-                    acc = if (acc) |a| try effects.join(self.arena, a, b) else b;
+                    acc = if (acc) |a| try self.eng.join(a, b) else b;
                 }
                 return acc.?;
             }
@@ -1063,19 +1094,23 @@ pub const Analysis = struct {
         switch (t) {
             .func => |fid| return self.functionSummary(fid),
             .host => |hb| {
-                const entry = self.hosts.lookupEntry(hb) orelse return effects.top;
-                if (entry.stilla_execution != .may_execute) return entry.effectiveSummary();
-                const positions = entry.callbacks orelse return entry.effectiveSummary();
-                var acc = entry.summary;
+                const entry = self.hosts.lookupEntry(hb) orelse return self.eng.top();
+                // Only a `may_execute` binding with an explicit callback
+                // contract is bounded below by its declaration; every
+                // other shape is this instance's `top` (docs/effects.md
+                // §13).
+                if (entry.stilla_execution != .may_execute) return self.hostSummary(hb);
+                const positions = entry.callbacks orelse return self.hostSummary(hb);
+                var acc = try self.eng.admitted(entry.summary);
                 for (positions) |pos| {
                     // Bounds-check before widening: `pos + 1` would overflow
                     // on a 32-bit target when `pos` is `maxInt(u32)`, and a
                     // wrapped index is a wrong answer, not a conservative
                     // one. Arg 0 is ops[1], so a valid position is
                     // `< ops.len - 1`.
-                    if (pos >= ops.len - 1) return effects.top;
-                    const bound = try self.callbackBound(ops[@as(usize, pos) + 1]) orelse return effects.top;
-                    acc = try effects.join(self.arena, acc, bound);
+                    if (pos >= ops.len - 1) return self.eng.top();
+                    const bound = try self.callbackBound(ops[@as(usize, pos) + 1]) orelse return self.eng.top();
+                    acc = try self.eng.join(acc, bound);
                 }
                 return acc;
             },
@@ -1099,7 +1134,7 @@ pub const Analysis = struct {
                 var acc: ?Summary = null;
                 for (targets.items) |t| {
                     const b = try self.targetBound(t);
-                    acc = if (acc) |a| try effects.join(self.arena, a, b) else b;
+                    acc = if (acc) |a| try self.eng.join(a, b) else b;
                 }
                 return acc.?;
             }
@@ -1116,11 +1151,11 @@ pub const Analysis = struct {
     /// member reads the in-progress approximation; every other id reads
     /// the finalized value (docs/effects.md §8.2).
     pub fn functionSummary(self: *Analysis, fid: hir.FuncId) Error!Summary {
-        if (fid >= self.built.funcs.items.len) return effects.top;
+        if (fid >= self.built.funcs.items.len) return self.eng.top();
         if (self.solving) |s| {
             if (self.comp_of[fid] == s) return self.cur[fid];
         }
-        if (!self.known[fid]) return effects.top;
+        if (!self.known[fid]) return self.eng.top();
         return self.summary[fid];
     }
 
@@ -1280,11 +1315,11 @@ pub const Analysis = struct {
             @memset(self.memo, null);
             for (comp, 0..) |f, k| {
                 const body = try self.recordBodySummary(self.built.funcs.items[f]);
-                next[k] = try effects.join(self.arena, seed, body);
+                next[k] = try self.eng.join(seed, body);
             }
             var changed = false;
             for (comp, 0..) |f, k| {
-                if (!next[k].eql(self.cur[f])) {
+                if (!self.eng.eql(next[k], self.cur[f])) {
                     self.cur[f] = next[k];
                     changed = true;
                 }
@@ -1302,7 +1337,7 @@ pub const Analysis = struct {
         // constant initializers; neither lives in the synthetic empty
         // init body (hir_build `buildInitBody`), so its summary is
         // conservatively Top whenever the module has storage.
-        if (rec.kind == .init and self.moduleHasStorage(rec.module)) return effects.top;
+        if (rec.kind == .init and self.moduleHasStorage(rec.module)) return self.eng.top();
         return self.lambdaBodySummary(rec.root);
     }
 
@@ -1506,11 +1541,11 @@ pub const Analysis = struct {
     pub fn lambdaBodySummary(self: *Analysis, root: hir.ExprId) Error!Summary {
         const pr = self.p();
         const rs = pr.regionsOf(root);
-        if (rs.len == 0) return effects.top;
+        if (rs.len == 0) return self.eng.top();
         const reg = pr.region(rs[0]);
         const body = try self.effectOf(reg.root);
-        const cleanup: Summary = (try self.cleanupEffect(reg.root)) orelse effects.top;
-        return effects.sequence(self.arena, body, cleanup);
+        const cleanup: Summary = (try self.cleanupEffect(reg.root)) orelse self.eng.top();
+        return self.eng.sequence(body, cleanup);
     }
 
     // -----------------------------------------------------------------
@@ -1708,8 +1743,8 @@ pub const Analysis = struct {
     /// `Top` — never `Pure` for an unmodelled subtree.
     pub fn observedEffect(self: *Analysis, id: hir.ExprId) Error!?Summary {
         const e = self.readySummary(id) orelse return null;
-        const cleanup: Summary = (try self.cleanupEffect(id)) orelse effects.top;
-        const out = try effects.sequence(self.arena, e, cleanup);
+        const cleanup: Summary = (try self.cleanupEffect(id)) orelse self.eng.top();
+        const out = try self.eng.sequence(e, cleanup);
         return out;
     }
 
@@ -1748,7 +1783,7 @@ pub const Analysis = struct {
             const tk = pr.cleanup_tokens.items[i];
             if (!in_subtree.contains(tk.origin_expr)) continue;
             const drop = try self.dropEffectOf(tk.ty);
-            acc = if (acc) |a| try effects.sequence(self.arena, a, drop) else drop;
+            acc = if (acc) |a| try self.eng.sequence(a, drop) else drop;
         }
         return acc orelse effects.pure;
     }
@@ -1759,7 +1794,7 @@ pub const Analysis = struct {
     /// on the stronger, literal cleanup-free proof.
     pub fn cleanupDiscardable(self: *Analysis, id: hir.ExprId) Error!bool {
         const ce = (try self.cleanupEffect(id)) orelse return false;
-        return effects.isPure(try effects.discardView(self.arena, ce));
+        return self.eng.isPure(try self.eng.discardView(ce));
     }
 
     /// Whether destroying a value of `ty` is itself discardable — the
@@ -1769,17 +1804,17 @@ pub const Analysis = struct {
     pub fn bindingCleanupDiscardable(self: *Analysis, ty: meta.Type) Error!bool {
         if (!self.p().cleanup_modeled) return false;
         const d = try self.dropEffectOf(ty);
-        return effects.isPure(try effects.discardView(self.arena, d));
+        return self.eng.isPure(try self.eng.discardView(d));
     }
 
     pub fn isTotal(self: *Analysis, id: hir.ExprId) bool {
         const s = self.readySummary(id) orelse return false;
-        return effects.isTotal(s);
+        return self.eng.isTotal(s);
     }
 
     pub fn observableEffectFree(self: *Analysis, id: hir.ExprId) bool {
         const s = self.readySummary(id) orelse return false;
-        return effects.isObservableEffectFree(s);
+        return self.eng.isObservableEffectFree(s);
     }
 
     /// `total` + `observable_effect_free` + cleanup-safe (docs/effects.md
@@ -1789,8 +1824,8 @@ pub const Analysis = struct {
     /// stronger literal `cleanupFree`.
     pub fn canFloatAsTree(self: *Analysis, id: hir.ExprId) Error!bool {
         const s = self.readySummary(id) orelse return false;
-        if (!effects.isTotal(s)) return false;
-        if (!effects.isObservableEffectFree(s)) return false;
+        if (!self.eng.isTotal(s)) return false;
+        if (!self.eng.isObservableEffectFree(s)) return false;
         if (!try self.cleanupDiscardable(id)) return false;
         return self.ownershipGate(id);
     }
@@ -1800,10 +1835,10 @@ pub const Analysis = struct {
     /// expression's own cleanup and ignores `Q`), and the ownership gate.
     pub fn isDiscardable(self: *Analysis, id: hir.ExprId) Error!bool {
         const s = self.readySummary(id) orelse return false;
-        if (!effects.isTotal(s)) return false;
-        if (!effects.isObservableEffectFree(s)) return false;
+        if (!self.eng.isTotal(s)) return false;
+        if (!self.eng.isObservableEffectFree(s)) return false;
         const observed = try self.observedEffect(id) orelse return false;
-        if (!effects.isPure(try effects.discardView(self.arena, observed))) return false;
+        if (!self.eng.isPure(try self.eng.discardView(observed))) return false;
         return self.ownershipGate(id);
     }
 
@@ -1824,8 +1859,8 @@ pub const Analysis = struct {
     /// support (`isSegAdmissible`).
     pub fn isSegSafe(self: *Analysis, id: hir.ExprId) Error!bool {
         const s = self.readySummary(id) orelse return false;
-        if (!effects.isTotal(s)) return false;
-        if (!effects.isObservableEffectFree(s)) return false;
+        if (!self.eng.isTotal(s)) return false;
+        if (!self.eng.isObservableEffectFree(s)) return false;
         if (s.nondeterministic) return false;
         const cap = try self.capabilityOf(self.p().node(id).ty) orelse return false;
         if (cap != .copy) return false;
@@ -1856,8 +1891,8 @@ pub const Analysis = struct {
     /// `move.effects == {}` insufficient on its own (§6.2 强约束).
     pub fn isIntrinsicallySpeculatable(self: *Analysis, id: hir.ExprId) Error!bool {
         const s = self.readySummary(id) orelse return false;
-        if (!effects.isTotal(s)) return false;
-        if (!effects.isObservableEffectFree(s)) return false;
+        if (!self.eng.isTotal(s)) return false;
+        if (!self.eng.isObservableEffectFree(s)) return false;
         if (s.nondeterministic) return false;
         if (!try self.cleanupFree(id)) return false;
         return self.ownershipGate(id);
@@ -1897,7 +1932,7 @@ pub const Analysis = struct {
         if (!try self.cleanupFree(b)) return false;
         if (!try self.ownershipGate(a)) return false;
         if (!try self.ownershipGate(b)) return false;
-        return effects.orderCompatible(a_s, b_s, self.config.resources);
+        return self.eng.orderCompatible(a_s, b_s);
     }
 
     /// `canMaterializeOperand` (docs/effects.md §12.1): the operand at
@@ -1946,10 +1981,9 @@ pub const Analysis = struct {
     pub fn orderCompatible(self: *Analysis, a: hir.ExprId, b: hir.ExprId) bool {
         const sa = self.readySummary(a) orelse return false;
         const sb = self.readySummary(b) orelse return false;
-        return effects.orderCompatible(sa, sb, self.config.resources);
+        return self.eng.orderCompatible(sa, sb);
     }
 };
-
 // ---------------------------------------------------------------------------
 // White-box tests (docs/hir.md §10.2: owning module `test {}`)
 // ---------------------------------------------------------------------------
@@ -1967,6 +2001,38 @@ const Fixture = struct {
         self.arena.deinit();
     }
 };
+
+/// `build` plus host-module interface text (docs/host-bindings.md §3.4):
+/// the `standard_library` map registers the module's members as host
+/// bindings, which is how a white-box test gets more than one host
+/// binding with a distinct effect declaration.
+fn buildWithHostIface(
+    entry: []const u8,
+    texts: []const struct { []const u8, []const u8 },
+    ifaces: []const struct { []const u8, []const u8 },
+) !Fixture {
+    var arena0 = std.heap.ArenaAllocator.init(testing.allocator);
+    errdefer arena0.deinit();
+    const arena = try arena0.allocator().create(std.heap.ArenaAllocator);
+    arena.* = arena0;
+    const alloc = arena.allocator();
+
+    var sources = moduleinfo.Sources{};
+    var source_map = std.StringHashMapUnmanaged([]const u8).empty;
+    for (texts) |pair| try source_map.put(alloc, pair[0], pair[1]);
+    sources.source = source_map;
+    var iface_map = std.StringHashMapUnmanaged([]const u8).empty;
+    for (ifaces) |pair| try iface_map.put(alloc, pair[0], pair[1]);
+    sources.standard_library = iface_map;
+
+    var builder = moduleinfo.Builder.init(alloc, sources);
+    const graph = builder.build(entry) catch return error.Diagnostic;
+    var ck = checker.Checker.init(alloc);
+    _ = ck.check(graph) catch return error.Diagnostic;
+    var bdiag: moduleinfo.Diag = undefined;
+    const built = hir_build.buildProgramDiag(alloc, graph, &ck.annotation, &bdiag) catch return error.Diagnostic;
+    return .{ .arena = arena, .built = built, .graph = graph };
+}
 
 fn build(entry: []const u8, texts: []const struct { []const u8, []const u8 }) !Fixture {
     var arena0 = std.heap.ArenaAllocator.init(testing.allocator);
@@ -2312,7 +2378,7 @@ test "hir_effects: undeclared host metadata is Top, declared metadata refines it
     // it may reach any module constant.
     const undeclared = try an.functionSummary(shout);
     try testing.expect(undeclared.eql(effects.top));
-    try testing.expect(undeclared.accesses.all[@intFromEnum(effects.EffectMode.read)]);
+    try testing.expect(undeclared.accesses.wildcard(.read));
     try testing.expect((try an.validate(testing.allocator)) == null);
 
     // Declare every host binding pure *and* `forbidden`: the host call
@@ -3687,4 +3753,129 @@ test "hir_effects: a list_make index read in range is trap-free, out of range st
     // No proof in either direction: the conservative `Top` stands.
     try testing.expect(an.fieldGetOwn(oob).may_trap);
     try testing.expect(an.fieldGetOwn(not_ctor).may_trap);
+}
+
+test "hir_effects: the lattice instance changes a rewrite-legality verdict (docs/effects.md §5.7)" {
+    var f = try buildWithHostIface("app", &.{.{
+        "app",
+        \\const sensor = import("sensor");
+        \\fn main() -> void { }
+        \\fn pick(x: int32) -> int32 { sensor.read(x) + sensor.peek(x) }
+    }}, &.{.{
+        "sensor",
+        \\fn read(x: int32) -> int32;
+        \\fn peek(x: int32) -> int32;
+    }});
+    defer f.deinit();
+    const arena = f.arena.allocator();
+
+    // Two host bindings, each declared (under a `forbidden` attestation)
+    // as a read of its own host domain.
+    const read_id = hostIndexOf(f.built, "sensor.read") orelse return error.TestUnexpectedResult;
+    const peek_id = hostIndexOf(f.built, "sensor.peek") orelse return error.TestUnexpectedResult;
+    const s_read = try effects.summaryOf(arena, &.{.{ .resource = .{ .host = 1 }, .mode = .read }});
+    const s_peek = try effects.summaryOf(arena, &.{.{ .resource = .{ .host = 2 }, .mode = .read }});
+    const entries = try arena.alloc(effects.HostEffects.Entry, f.built.hosts.items.len);
+    for (0..f.built.hosts.items.len) |i| {
+        entries[i] = .{
+            .host = @intCast(i),
+            .summary = if (i == read_id) s_read else if (i == peek_id) s_peek else effects.pure,
+            .stilla_execution = .forbidden,
+        };
+    }
+
+    // The `add` whose two operands are the two host calls.
+    var target: ?hir.ExprId = null;
+    for (f.built.program.exprs.items, 0..) |e, i| {
+        if (!std.mem.eql(u8, hir.registry.get(e.op).name, "add.i32")) continue;
+        const id: hir.ExprId = @intCast(i);
+        if (f.built.program.operands(id).len == 2) {
+            target = id;
+            break;
+        }
+    }
+    const id = target orelse return error.TestUnexpectedResult;
+
+    // The default instance: two undeclared, distinct host domains are not
+    // disjoint, so the swap is refused.
+    var an = try Analysis.init(arena, f.built, .{ .graph = f.graph, .hosts = .{ .entries = entries } });
+    try an.analyze();
+    try testing.expect(!(try an.canSwapOperands(id, 0, 1)));
+
+    // The same program under a `hierarchy` instance that places the two
+    // domains under one root as sibling subtrees. They are provably
+    // disjoint there, so the very same rewrite becomes legal — the
+    // instance changes a legality verdict, not just a fingerprint. The
+    // ancestor is a *host* domain, so the edge stays inside the
+    // non-module-const namespace.
+    const parents = [_]effects.ResourceOrder.Edge{
+        .{ .child = .{ .host = 1 }, .parent = .{ .host = 9 } },
+        .{ .child = .{ .host = 2 }, .parent = .{ .host = 9 } },
+    };
+    const provider = effects.Provider{
+        .id = "stilla.test.sibling-hosts",
+        .order = .{ .hierarchy = .{ .parents = &parents } },
+    };
+    var eng = try effects.Engine.init(arena, &provider, .{});
+    // The hard cross-instance binding (docs/effects.md §5.7): re-binding
+    // one program to a second instance is an explicit `reset`, never a
+    // silent mix. The rows `an` interned under `flat` are dead weight.
+    try f.built.program.effect_interner.reset(eng.descriptor_digest);
+    var an2 = try Analysis.init(arena, f.built, .{ .graph = f.graph, .hosts = .{ .entries = entries }, .engine = &eng });
+    try an2.analyze();
+    try testing.expect(try an2.canSwapOperands(id, 0, 1));
+}
+
+/// The dense id of the host binding with `key`, or null.
+fn hostIndexOf(built: *hir.BuiltProgram, key: []const u8) ?usize {
+    for (built.hosts.items, 0..) |hb, i| {
+        if (std.mem.eql(u8, hb.key, key)) return i;
+    }
+    return null;
+}
+
+test "hir_effects: an undeclared host call is the instance top, extra modes included (docs/effects.md §5.7, §13)" {
+    var f = try buildWithHostIface("app", &.{.{
+        "app",
+        \\const sensor = import("sensor");
+        \\fn main() -> void { let unused: int32 = sensor.read(1); }
+    }}, &.{.{
+        "sensor",
+        \\fn read(x: int32) -> int32;
+    }});
+    defer f.deinit();
+    const arena = f.arena.allocator();
+
+    // A five-mode instance with *no* host declaration for `sensor.read`:
+    // the call must be that instance's `top`, not the built-in-mode
+    // `effects.top` (which would silently under-approximate the extra
+    // mode).
+    const provider = effects.Provider{ .id = "stilla.test.extra-mode", .modes = &effects.hierarchy_modes };
+    var eng = try effects.Engine.init(arena, &provider, .{});
+    var an = try Analysis.init(arena, f.built, .{ .graph = f.graph, .engine = &eng });
+    try an.analyze();
+
+    var found = false;
+    for (f.built.program.exprs.items, 0..) |e, i| {
+        if (e.op != call_op) continue;
+        const s = try an.effectOf(@intCast(i));
+        try testing.expect(s.accesses.wildcard(effects.mode_commute_update));
+        try testing.expect(s.eql(eng.top()));
+        try testing.expect(!s.eql(effects.top));
+        found = true;
+    }
+    try testing.expect(found);
+
+    // The same program under the default four-mode instance is the
+    // built-in `top`, so the widening is the instance's, not a blanket
+    // change. Binding one program to a second instance is an explicit
+    // `reset` of the interner (docs/effects.md §5.7).
+    const def_eng = try effects.Engine.initDefault(arena, .{});
+    try f.built.program.effect_interner.reset(def_eng.descriptor_digest);
+    var an2 = try Analysis.init(arena, f.built, .{ .graph = f.graph });
+    try an2.analyze();
+    for (f.built.program.exprs.items, 0..) |e, i| {
+        if (e.op != call_op) continue;
+        try testing.expect((try an2.effectOf(@intCast(i))).eql(effects.top));
+    }
 }

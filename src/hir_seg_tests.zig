@@ -840,6 +840,76 @@ test "SEG: CSE is refused for a Unique operand (not duplicable)" {
     try testing.expectEqual(@as(usize, 3), try countNodes(&b, "app.f", "struct_make"));
 }
 
+test "SEG: the lattice instance changes the AIR — the reorder rule consumes swap_operands" {
+    const sensor = try probe_corpus.read(testing.allocator, "probes/cases", "lattice_reorder_host_sensor");
+    defer testing.allocator.free(sensor);
+    const app = try probe_corpus.read(testing.allocator, "probes/cases", "lattice_reorder_host_app");
+    defer testing.allocator.free(app);
+    const texts = [_]struct { []const u8, []const u8 }{
+        .{ "sensor", sensor },
+        .{ "app", app },
+    };
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const s_peek = try effects.summaryOf(a, &.{.{ .resource = .{ .host = 3 }, .mode = .read }});
+    const s_read = try effects.summaryOf(a, &.{.{ .resource = .{ .host = 2 }, .mode = .read }});
+    const decls = [_]effects.HostDecl{
+        .{ .key = "sensor.read", .summary = s_read, .stilla_execution = .forbidden },
+        .{ .key = "sensor.peek", .summary = s_peek, .stilla_execution = .forbidden },
+    };
+
+    // The operand order the *caller wrote*: `peek + read`, so the peek
+    // host-call is the first operand of the `add`. `writePeekFirst` is true
+    // exactly when operand 0 is the peek call and operand 1 the read call.
+    var b1 = try buildText("app", &texts);
+    defer b1.deinit();
+    const writePeekFirst = struct {
+        fn check(b: *Built) !bool {
+            var peek: ?hir.HostBindingId = null;
+            var read: ?hir.HostBindingId = null;
+            for (b.built.hosts.items, 0..) |hb, i| {
+                if (std.mem.eql(u8, hb.key, "sensor.peek")) peek = @intCast(i);
+                if (std.mem.eql(u8, hb.key, "sensor.read")) read = @intCast(i);
+            }
+            const f = try findFunc(b, "app.f");
+            const add = (try findNode(b, f.root, "add.i32")) orelse return error.TestUnexpectedResult;
+            const ops = b.built.program.operands(add);
+            if (ops.len != 2) return error.TestUnexpectedResult;
+            const targetOf = struct {
+                fn of(bld: *Built, call: hir.ExprId) ?hir.HostBindingId {
+                    const pr = &bld.built.program;
+                    const callee = pr.node(pr.operands(call)[0]);
+                    if (callee.payload != .func or callee.payload.func != .host) return null;
+                    return callee.payload.func.host;
+                }
+            }.of;
+            const h0 = targetOf(b, ops[0]) orelse return error.TestUnexpectedResult;
+            const h1 = targetOf(b, ops[1]) orelse return error.TestUnexpectedResult;
+            return h0 == peek and h1 == read;
+        }
+    }.check;
+
+    // Flat instance (default): host(3) and host(2) are distinct but
+    // undeclared, so they conflict — the swap is refused, SEG's output is
+    // byte-identical to the input shape.
+    const flat_stats = try segAllWith(&b1, &decls);
+    try testing.expectEqual(@as(usize, 0), flat_stats.reorders);
+    try testing.expect(try writePeekFirst(&b1));
+
+    // The `example_hierarchy` instance declares host(3)→host(1) and
+    // host(2)→host(1): two sibling subtrees, provably disjoint. The very
+    // same code now reorders the operands into canonical order (read
+    // first), and the reorder lands in the produced AIR.
+    var eng = try effects.Engine.init(a, &effects.example_hierarchy, .{});
+    var b2 = try buildText("app", &texts);
+    defer b2.deinit();
+    const hier_stats = try hir_seg.optimize(b2.arena.allocator(), b2.built, .{ .graph = b2.graph, .host_decls = &decls, .engine = &eng });
+    try revalidateRewrittenWith(&b2, &decls);
+    try testing.expect(hier_stats.reorders >= 1);
+    try testing.expect(!(try writePeekFirst(&b2)));
+}
+
 test "SEG: CSE is refused for an observable or Q-carrying host read" {
     const sensor = try probe_corpus.read(testing.allocator, "probes/cases", "seg_cse_host_sensor");
     defer testing.allocator.free(sensor);

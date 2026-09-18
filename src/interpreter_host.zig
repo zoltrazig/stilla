@@ -14,6 +14,7 @@ const types = @import("interpreter_types.zig");
 const loader_mod = @import("interpreter_loader.zig");
 const host_bind = @import("host_bind.zig");
 const frontend = @import("frontend.zig");
+const effects = @import("effects.zig");
 const moduleinfo = @import("moduleinfo.zig");
 const artifact_bundle = @import("artifact_bundle.zig");
 const VmCtx = interpreter.VmCtx;
@@ -154,6 +155,10 @@ pub const RunProgramOptions = struct {
     ifaces: []const IfaceText = &.{},
     /// The `builtin.print` output hook — no default (docs/host-bindings.md §7).
     print: ?PrintHook = null,
+    /// The lattice provider (docs/effects.md §5.7): the instance's mode
+    /// set and resource partial order. Null = the default `flat`
+    /// instance.
+    provider: ?*const effects.Provider = null,
 };
 
 pub const BuildProgramError = frontend.CompileError ||
@@ -209,9 +214,11 @@ pub fn buildProgram(
         .sources = sources,
         .entry_fn = options.entry_fn,
         .host_decls = host_decls,
+        .provider = options.provider,
     }) catch |err| switch (err) {
         error.Diagnostic => return error.CompileFailed, // never carries a value; the value path below is the norm
         error.OutOfMemory => return error.OutOfMemory,
+        error.InvalidProvider => return error.CompileFailed,
     };
     const program = &(compilation.program orelse {
         if (out_compilation) |oc| oc.* = compilation;

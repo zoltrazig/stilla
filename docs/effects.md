@@ -52,8 +52,9 @@
 - **不做 source-level effect type**（如 `!{IO}`）：效果摘要只是编译器内部的
   metadata / refinement，不进入语言类型。
 - **不做低层内存效果**（别名、store buffer）：资源是**抽象语义资源**，不是地址。
-- **不做可扩展的通用 lattice 引擎**：用一套固定乘积格，只覆盖有限的 mode 与
-  `Host(resource, Read/Write)` + `ModuleConst(Read)`。
+
+可扩展的通用格引擎**不在非目标之列**：mode 集与资源偏序由 provider 声明、会话
+开始时统一 intern 并冻结，固定乘积格只是其中一个默认实例（§5.7）。
 
 ## 2. 解决方案概览
 
@@ -241,17 +242,31 @@ EffectResource =
 `{}` **只表示 `Pure`**；`{ MayTrap }` 等简写是在 `Pure` 上增加可能效果（故除法
 仍可能正常返回）；无条件 panic 的摘要即 `{ MayTrap }`。
 
-### 5.4 乘积格、偏序、join/meet 与顺序 / 候选组合
+### 5.4 摘要元素、格接口与默认乘积格
 
-**格与偏序。** 设 `K` 是已注册的有限资源 Id 集，`M` 是固定的四种 mode。每个
-mode 的资源集合格为 `P(K) ∪ {All_m}`：普通集合按包含序，`All_m` 严格高于所有
-普通集合（包括 `K` 本身），并覆盖未知 / 后续资源。
+**格接口。** 一个**格实例**由 provider 声明，会话开始时统一 intern 并**冻结**，
+此后只读（§5.7）。接口义务是元素类型加八个操作——`join` / `meet` / `≤` / `eql` /
+`⊤` / `⊥` / 规范化 canonical form / 散列 digest——以及四个消费面投影：可观察性
+（`observable`，§10.1）、可丢弃（`discardable`，§10.1）、同资源可交换
+（`commutative`，§5.6）与 `stable`（§5.5）。`join` 是候选路径 / 分支的最小上界，
+`meet` 只用于**合并独立证明**且不进业务 API（仅 §5.4 的 law test），`⊤` / `⊥`
+由实例给出（默认实例的 `⊥` 与 `Pure` 同值）。实例之间只共享元素**形状**，不共享
+mode 集与资源偏序——固定乘积格是默认实例，不是接口本身。
+
+**摘要元素。** 摘要仍是四元组 `E = (A, T, D, Q)`；默认实例的 `A` 是**每 mode 一个
+资源集分量**：设 `K` 是已注册的有限资源 Id 集、`M` 是实例声明的 mode 集，每个
+mode 的分量为 `P(K) ∪ {All_m}`——普通集合按包含序，`All_m` 严格高于所有普通集合
+（包括 `K` 本身），并覆盖未知 / 后续资源（未声明 mode 不出现在 `M` 里，见 §5.7）。
 `AccessSet = ∏(m ∈ M) (P(K) ∪ {All_m})`，join/meet 按 mode 做并/交：
 `All_m ∪ S = All_m`、`All_m ∩ S = S`。
 
 行的排序只为规范化与 interning，**不表示执行顺序**。`Read(Top)` 是 Read 分量的
-`All_Read`；缺失摘要直接使用完整 `Top`。资源 overlap 只影响冲突查询，不改变格
-的包含序；普通域 Id 按标识集合计算，Top 才按通配规则计算。
+`All_Read`；缺失摘要直接使用完整 `Top`。**资源的分量语义由实例给出**（§5.7）：
+默认实例把每个 mode 分量当作普通集合，包含序就是集合包含；层级实例把分量当作
+声明森林上的**向下闭包集**，于是 `{child} ⊆ {parent}`——包含序随实例而变，这正是
+「可插拔」的实质。unknown 资源始终折进该 mode 的 `All` 位。别名是资源身份上的商，
+并 / 交 / 包含在规范化后仍然成立；overlap / disjoint 关系只影响**冲突查询**，不
+改变包含序。
 
 ```text
 E = (A, T, D, Q)     A = accesses  T = may_trap  D = may_diverge  Q = nondeterministic
@@ -356,7 +371,18 @@ R1 != R2               => 默认可交换，**前提是可证不相交**
   会话开始时统一 intern 并**冻结**。落地形态只有两项：**`stable` 域集合**与
   **显式 `disjoint` 对**（`ResourceRegistry`）；没有层级 / alias 表。disjoint
   不具传递性；跨提供方或未声明的对一律按冲突处理——disjoint 声明是 opt-in
-  精度：漏声明只少优化、不损 soundness。域内层级 / alias 例外是 Target。
+  精度：漏声明只少优化、不损 soundness。域内层级 / alias 例外作为资源偏序的
+  一个实例（`hierarchy`）见 §5.7。
+- **真实 host 域的树边已声明**：`effects.zig` 的 `stdlib_host_tree` provider
+  给六个标准库 host 模块（`builtin` / `list` / `string` / `array` /
+  `hashmap` / `math`，即 `interpreter_host.zig` 的 `defaultHostRegistry`）声明了
+  树边——`builtin` 归 `host(11)` 的 I/O 根、另外三个集合与字符串归 `host(21)`
+  的集合根、`math` 归 `host(31)` 的纯标量根，域 id 常量
+  `domain_builtin` / `domain_list` / `domain_string` / `domain_array` /
+  `domain_hashmap` / `domain_math`（§5.7 也可参用）。该 provider 经
+  `Engine.init` 校验冻结，兄弟子树读对（如 `list` 与 `string`）在它之下可证
+  disjoint、`orderCompatible == true`，在默认 flat 实例下仍冲突——与
+  `example_hierarchy` 的正 / 负例同构，但命名真实的宿主模块。
 
 **为什么域粒度、而不是单个 IO bit**：
 
@@ -366,6 +392,83 @@ Read(Host.Clock)      vs Read(Host.Clock)       → 不可交换（nondeterminis
 Write(Host.Output)    vs Read(Host.FileSystem)  → 可交换
 Write(Host.OS)        vs Read(Host.OS)          → 冲突
 ```
+
+### 5.7 格实例与 provider 契约
+
+**实例 = 声明 + 引擎。** 一个**格实例**由 provider 声明两件事，会话开始时由引擎
+统一 intern、校验并**冻结**，此后只读：
+
+| 声明 | 义务 |
+| --- | --- |
+| 操作表 | 实例选择一张**运行时操作表**（`effects.Ops`）：`canonicalize` / `join` / `meet` / `le` / `relation` / `⊤` / `eql` / `hash` / 可观察性 / `discard_view` / `stable` / 同资源可交换。多个实例可共享实现与元素载体；表本身是接口义务清单，也是「选择实例」成为运行时决定而非闭合配置分支的地方。容器层操作（`⊤` / `eql` / `hash`）对所有实例同式——实例只在**规范化**（别名商与资源包含）与**冲突关系**两处分化。 |
+| mode 集 | 每个 mode 的 `id`（非穷尽枚举，上限 64 个）、`name`、`commutative`（同资源同 mode 对在 `stable` 资源上可交换，`read` 为真）、`observable`（丢弃携带该访问的表达式可观察，§10.1，`read` 为假）、`discardable`（`discard_view` 丢弃该 mode，`read` 为真）。必须包含四个内建 mode（`read` / `write` / `allocate` / `release`）；provider 可追加 mode。 |
+| 资源偏序 | 资源身份（**别名折叠**）、冲突关系（`equal` / `disjoint` / `overlap`）、`stable` 集合、以及被视为 unknown（规范化时折进 mode 的 `All` 位、冲突查询中恒冲突）的资源。 |
+
+**两个落地实例。**
+
+- `flat`（**默认实例**，即 §5.4 的固定乘积格，代码里的 `ProductLattice`）：每个 mode
+  分量是普通资源集合，包含序 = 集合包含；`stable` 域集合 + 显式 `disjoint` 对；
+  未声明的不同资源对按冲突处理；unknown = `.top` / `.host_any`。行为与 provider
+  机制引入前逐字相同，充当插件化的回归基线。
+- `hierarchy`（**第二实例**，演示「可插拔」非空接口）：资源组成域树
+  （`parents`，`child ≤ parent`）加别名（`aliases`）。分量是声明森林上的
+  **向下闭包集**：访问 `parent` 包含其所有后代，于是 `{child} ⊆ {parent}`、
+  `meet({parent},{child}) = {child}`、`join({parent},{child}) = {parent}`，
+  而兄弟子树既不可比又不相交（`meet = ⊥`）。冲突侧：同树互为祖先者 overlap；
+  兄弟子树可证不相交；不同树可证不相交；别名折叠为同一身份；unknown = `.top` /
+  `.host_any` / 实例声明的 `unknown`。**树外资源一律 overlap**——漏一条树边只少
+  精度，不损 soundness。
+
+**格律与偏序的分工。** `join` = 逐 mode 并、`meet` = 逐 mode 交、`≤` = 逐分量
+包含、`⊤` / `⊥` 是同一套代数，但分量语义（集合 or 向下闭包集）由实例的
+`canonicalize` 决定，因此**包含序随实例而变**：层级实例下 `{child} ≤ {parent}`，
+默认实例下二者不可比。别名是资源集上的商，并 / 交 / 包含在规范化后仍成立；
+overlap / disjoint **只影响冲突查询**（`reorderable` 的输入），不改变包含序。
+故「第二实例通过全部格律 law test」与「第二实例改变结论」不矛盾：前者是格律不变，
+后者是包含序、冲突精度与 mode 标志（`commutative` / `observable` /
+`discardable`）随实例而变。
+
+**保护名与别名代表元。** 三类资源是**受保护名**，provider 既不可别名也不可放进
+树：`.module_const`（别名或祖先会吞并某个常量读，那是漏掉的初始化 / teardown
+依赖，§7.3）、`.top` 与 `.host_any`（改变通配覆盖范围就是换了一个元素）。别名类
+的冻结代表元取类内**最小**成员（按资源序），所以别名书写顺序不影响身份；`stable`
+/ `disjoint` / `unknown` 等资源事实在别名商建好**之后**再规范化，否则同一域的两种
+拼法会给出不同的 `stable` 答案。
+
+**声明值的闭包。** 声明值（`HostDecl.summary` 等）经 `Engine.admitted` 进入会话：
+携带**任何** wildcard 的声明值就是全集，被放大为该实例的 `⊤`——否则四 mode 的
+`effects.top` 会在五 mode 实例下悄悄少算第五个 mode；出现实例未声明 mode 的声明值
+同样取 `⊤`（§9.3 的精神：缺失声明 ≠ pure）。其余声明值在实例下规范化后逐字使用。
+反向的义务是 provider 自己的：`host_top` 是四个**内建** mode 的声明值，追加了
+mode 的 provider 必须在自己的宿主语义声明里写出这些 mode 的访问。
+
+**一个会话一个实例。** interning 与注解相等现在有**硬性绑定**：`effects.Interner`
+携带当前实例的 `Engine.descriptor_digest`（由 provider 身份 / 版本、规范化后的
+mode 集与资源偏序散列，**不含** registry——行的身份取决于格规范化，不随
+stable / disjoint 冲突事实而变），每次 `Analysis.analyze` 先经
+`ensureInstance` 校验绑定：同一实例无操作，换了实例则 `reset` 该 interner——
+清空既有行与摘要表、重播 ∅ / ⊤ 种子，再重推全部注解。两个「载体相同、语义
+不同」的元素（`flat` 的 `Read(host=2)` 与 `hierarchy` 的 `Read(host=2)`，后者
+隐含其后代）绝不能共用一个 interner 行；对同一 program 换实例分析必须重推全部
+注解，旧实例的行只是垃圾而非事实（换回旧实例同样重推，旧行不复活）。以
+`descriptor_digest` 而非实例指针为键，正例是「两个 provider 语义等价」（如
+`null` 与显式 `stilla.product.default`）共用同一 intern 空间，反例是「同名不同
+格」（mode / 偏序 / alias 任一变化）强制失效。
+
+**冻结、非法声明与失效。** 非法声明是 provider 的 bug，引擎在构造时拒绝
+（`error.InvalidProvider`），**不静默降级**：mode 重复 / 超过 64 个 / 缺内建
+mode、别名或层级成环、一个 child 两个 parent、别名 / 树边涉及受保护名，都属此类。
+冻结实例自持身份串、mode 名与全部资源表，不借用调用方的可变状态。会话内 mode 集
+与资源偏序不可变；后续注册新资源须失效重算（§5.4）。
+
+**消费面。** `hir_effects` 的派生查询、函数摘要 SCC fixpoint、SEG legality、
+`rewrite_contract.Requirement`、module-const 初始化 / teardown 检查、host 元数据
+（`HostDecl` / `HostEffects.resolve` / `consolidate`）都读同一个引擎实例；CFG 层的
+粗粒度 op 位保持**显式分层**（§15，不要求逐位相等）。
+
+**指纹。** `EffectEnvironmentFingerprint` 把 provider 身份 / 版本、规范化后的 mode
+集、资源偏序与 registry generation 纳入语义键（§13）：会话的格描述子或注册表任一
+变化即失效缓存 phase-2/3 结果，且与集合书写顺序无关。
 
 ## 6. 效果在表达式上的组合
 
@@ -733,7 +836,8 @@ warrant 在规则自身的构造里（β→let 逐参数嵌套、LTR，不删除
 不做函数指针化的表驱动；`effect` 落为 bool 集合结构体（一条规则可同时持有多个
 保证）。首批实例是 β（hir_seg.zig）与 dead-let（hir_simplify.zig）；随后是 SEG
 的 `ruleLet` 三分支（`let_dead` / `let_forward` / `let_atom`，hir_seg.zig），
-以及 η（`eta_rule`）与 selective ANF（`anf_rule`，hir_simplify.zig）。
+以及 η（`eta_rule`）与 selective ANF（`anf_rule`，hir_simplify.zig）；再后是
+重排规则 `reorder`（`reorder_rule`，hir_seg.zig，§10.5）。
 `Materializable` 是这两批之后新增的标签：`canMaterializeOperand(parent, slot)`
 （§12.1 的 ANF 准入）判定「slot 处的 operand 可提为合成 `let` 的 init」——
 其前的 operand 可被推迟（`Class.seq` 时更要求 Copy，因就地处弃的 Unique 会被
@@ -770,6 +874,7 @@ let-unused  : MayDiscard(init) → 引擎自动要求 discardable(init)
 let-forward : PreservesEvaluationCount + MayReorder + maps_full_expr
               + preserves_cleanup = cleanup_free_subtree
 let-atom    : MayDuplicate + maps_full_expr（原子可 `duplicable`）
+reorder     : PreservesEvaluationCount + MayReorder（§10.5）
 ```
 
 **现状：契约已落地为类型**（`passes/rewrite_contract.zig`）。`RewriteContract`
@@ -802,8 +907,25 @@ PreservesOrder`、`maps_scope` / `maps_full_expr` 为真、
 `materializable`——合成 `let` 与源级 `let` 不同，**不跨 FE**（init 沿用父节点的
 FE，不重盖），其唯一额外义务是析构点重合，由 `canMaterializeOperand`
 （§12.1）经派生查询出证。两者的匹配层（λ 形状 / 链界 / 类型相等 / 全性，
-以及“首个不可浮动 operand”）仍是结构性 applicability。详见
+以及"首个不可浮动 operand"）仍是结构性 applicability。详见
 [hir.md](hir.md) §8.4–§8.5。
+
+**reorder：消费 `swap_operands` 的边界规则**（`reorder_rule`，hir_seg.zig，
+§10.3 的 `Requirement.swap_operands`）。它是第一个**生产中**消费重排合法性的
+规则——也是第二格实例能改产出 AIR 的落点（§5.7 的验收即「第二实例让 SEG /
+ANF 产出不同 AIR」）。`tryReorder` 在 `strict_ltr` 父节点上找相邻 operand 对，
+满足 `canSwapOperands`（两者都 ready、读槽位、cleanup-free、ownership-gated、
+`orderCompatible`——后者的冲突 / disjoint 判定随实例而变）且当前序不是规范序
+（`rowLess`：按 (mode, resource) 的 canonical 行序，外加 wildcard 位与 flag
+tie-break）即交换两个 operand 槽。`legality = { swap_operands }` +
+`effect = { PreservesEvaluationCount | MayReorder }`：不删除、不复制，每个
+operand 仍按新序精确求值一次；同一父节点的同一 FE 内交换，无 scope / FE /
+cleanup 义务。两个守卫保证默认实例零扰动：只考察**非空** access 行的 operand
+（纯对从不入列），且行必须互异（相等行规范序平凡、`canSwapOperands` 也拒
+绝）；默认 flat 实例下未声明的异域读呈 conflict，`orderCompatible` 恒否，故
+`reorder` 在空 registry 上从不触发（SEG budget 的 rewrite 计数不变）。termination
+是 `max_iterations` 界的单调排序：`rowLess` 是全序，每次交换把该对推向规范序，
+配对不会反复摆动。
 
 `(fn(x) { x + 1 })(host.read())` 整体仍不能进纯 term 的 equality saturation
 ——但 β 本身不删除、不复制、不重排 `arg`，契约（求值次数 / 序 / scope / FE /
@@ -1245,7 +1367,7 @@ generation / 版本、effect-domain 注册表（`domains`）与 `stable` / `disj
 
 ## 14. 模型范围与验收
 
-**最小范围**（固定乘积格与保守查询，不做通用 lattice 引擎）：
+**最小范围**（固定乘积格为**默认实例**、保守查询；格实例可插拔见 §5.7）：
 
 ```text
 MayTrap（含 panic）+ MayDiverge + nondeterministic
@@ -1262,6 +1384,17 @@ MayTrap（含 panic）+ MayDiverge + nondeterministic
 - 固定乘积格：每模式的规范化访问行 + `All` 通配；`join` / `sequence` / 内部
   `latticeMeet` / `le`；`Pure == Bottom` 与 `Top` / `host_top`；行与摘要
   interner；`Pending | Ready(EffectSummaryId)` 查询门。
+- **格实例（§5.7）**：`effects.Engine` 在会话（`Analysis.init` / `frontend.compile`）
+  开始时把 provider 声明（mode 集 + 资源偏序 + 操作表 `effects.Ops`）统一 intern、
+  校验并冻结；`ProductLattice` 是默认实例（即上一条的固定乘积格，行为逐字不变，
+  回归基线），`HierarchyLattice` 是第二实例——分量是 `child ≤ parent` 森林上的
+  向下闭包集，故包含序随实例而变（`{child} ≤ {parent}`），另加别名商与森林冲突
+  关系。`join` / `meet` 的逐 mode 循环与规范化在实例内部；容器层操作（`⊤` /
+  `eql` / `hash`）两实例同式。派生查询（`isObservableEffectFree` /
+  `discardView` / `isPure` / `orderCompatible` / `canSwapOperands`）由引擎按实例
+  的 mode 标志与资源关系实现；声明值经 `Engine.admitted` 闭包（带 wildcard 或
+  外来 mode 一律取该实例的 `⊤`），受保护名（`.module_const` / `.top` /
+  `.host_any`）不得被别名或放进树。
 - transfer 按 descriptor 的 `own_effect` + `TransferKind` 组合 operand / region
   / callee；`OperandUse` 由 `UsePolicy` + callee 签名 / operand capability 逐
   occurrence 解析。
@@ -1321,6 +1454,20 @@ MayTrap（含 panic）+ MayDiverge + nondeterministic
 
 **验收标准**：
 
+- **格律 law test 实例参数化**：join / meet 的交换 / 结合 / 幂等 / 吸收 / 单调性
+  用例对 `flat` 与 `hierarchy` 两实例同样通过（默认实例逐条不变）；两实例各自有
+  `;` 与 `⊔` 同式（`sequence == join`）与摘要层交换的用例；
+- **第二实例的派生查询正 / 负例**：兄弟域读对在 `hierarchy` 下
+  `canSwapOperands == true`、在 `flat`（无 `disjoint` 声明）下为 `false`；别名
+  折叠后同一资源的读写仍冲突；追加 mode 的 `commutative` 标志直接改变
+  `conflictOf`；
+- **指纹随格描述子变化**：provider 身份 / 版本、规范化后的 mode 集、资源偏序、
+  registry generation 各自变化均改变 `EffectEnvironmentFingerprint`，而集合书写
+  顺序无关；
+- **第二实例跑通全链**：`hierarchy` provider 经 `frontend.Options.provider`
+  驱动一次完整编译（`--simplify` × `--seg` 开启）；全语料产出的规范 AIR 与默认
+  实例逐字相同（因而解释器结果相同），且 `frontend_cache` 的语义键随 provider
+  选择变化而失效；
 - 三个 pass 的**合法性判定**没有 `switch(op)` 特判——合法性一律来自派生查询
   （规则匹配层的 applicability 按 typed opcode 分派，§10.3）；
 - **negative tests**：`let x = 10/y in 0` 不许删 x；`host.read() * 0` 不许变 0；
@@ -1345,7 +1492,9 @@ hir_effects.zig / hir_simplify_tests.zig / hir_seg_tests.zig 的正负例覆盖�
 **开放问题**（待决项与验收条件见 [todo.md](todo.md) 的「待决」节）：
 
 - 域间 overlap / disjoint 声明的具体条目：形式见 §5.6，内容随真实 host 域出现
-  后按需补全。
+  后按需补全。`hierarchy` 实例（§5.7）已给出树 + 别名的形式；真实 host 域的树边
+  已由 `stdlib_host_tree`（effects.zig，§5.6）声明六模块三兄弟子树，其余宿主模块
+  的树边随其 effects 声明补入。
 - teardown 检查的链与措辞（§7.2）：Core 现措辞只约束「hook 及其传递调用」，字段
   / 容器元素级 hook 的读与 Copy 常量的 teardown 期读取均未表达。待规范澄清后
   回填本节与 checker 行为。
@@ -1355,6 +1504,16 @@ hir_effects.zig / hir_simplify_tests.zig / hir_seg_tests.zig 的正负例覆盖�
   的「已完成」第 2 项）；运行时侧契约校验刻意不在范围内。
 
 **现状核对（哪些特设实现已被本文派生查询取代）：**
+
+- **可插拔格**：`effects.Engine`（§5.7）把 mode 集、资源偏序与**操作表**从
+  编译期闭合枚举改为 provider 声明、会话开始 intern 后冻结。`ProductLattice`
+  是默认实例（固定乘积格），`HierarchyLattice` 是第二实例（`child ≤ parent` 的
+  向下闭包分量 + 别名商 + 森林冲突关系），二者共享并 / 交 / 包含的实现而只在
+  规范化与 `relation` 处分化——包含序因此随实例而变。`hir_effects` 的组合与派生
+  查询都由 `Analysis.eng` 统一转发（SCC 收敛比较走 `eng.eql`），
+  `frontend.compile` / `frontend.Options.provider` 负责一次冻结并贯通效应分析、
+  M2b 消费者、SEG 与每次重校验；`interpreter_host.RunProgramOptions.provider` 是
+  嵌入侧入口。
 
 - **module-const 依赖检查**：checker_validate.zig 的 `InitOrder` 曾是 AST 级
   特设 walker，现由 `hir_effects.Analysis.checkModuleDependencies` 取代——用函数

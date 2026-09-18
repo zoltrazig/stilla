@@ -17,19 +17,82 @@
     e-graph 维度并断言 `egraph_converged`，基线已重录进 hir.md 的「验收与
     落地现状」。**尚缺**：`Stats` 各字段的 doc 注释（`hir_seg.zig` 侧只标了
     `egraph_*` 的聚合语义）、按规则的匹配 / 应用计数（现在只有应用后成功的
-    计数）、以及 extraction 选中的总 cost 已随第 22 项落地
-    （`hir_egraph.Stats.extract_cost` / `hir_seg.Stats.egraph_extract_cost`，
-    已进 `SEG budget` 基线行），本项只需在本范围里保留它。
+    计数）、以及 extraction 选中的总 cost（依赖第 22 项）。
   - 范围：补齐上述三项；v1 计数保留（读旧字段的测试随命名迁移）。
   - 依赖：第 21 项（已落地）；cost 部分依赖第 22 项。
   - 验收：`SEG budget` 对全语料断言 e-graph 引擎也在轮界内收敛且计数非零
     （非空跑）；`Stats` 各字段语义在 `hir_seg.zig` 的 doc 注释说明；新基线
     记入 hir.md。
 
-## 已完成（归档，原「近期」第 1–22 项）
+## 已完成（归档，原「近期」第 1–24 项）
 
 > 以下条目均已落地，按完成时的编号保留，供 [effects.md](effects.md) 等正文
 > 交叉引用；新工作从「近期」第 23 项续起（第 22 项不依赖 23，故先行落地）。
+
+- [x] **24. 通用可插拔 effect 格引擎**（[effects.md](effects.md) §1.3、§5.4、
+      §5.6；新增 Target 节）
+  - 现状：§5.4 的格是**写死的乘积格**——`EffectMode` 是闭合 `enum(u2)`
+    （read / write / allocate / release，`effects.zig` 的 `mode_count`），
+    `AccessSet` 是 `all: [mode_count]bool` + 具体访问行，`joinAccess` /
+    `latticeMeetAccess` 直接对四个 mode 循环；资源是闭合 union
+    （`module_const` / `host` / `runtime` / `extension` / `host_any` / `top`），
+    mode 通配 `All_m` 由 per-mode bool 承担、`.top` 资源在规范化时折进该 bool。
+    §1.3 明确把「可扩展的通用 lattice 引擎」列为**非目标**；域间关系
+    （`stable` 集合与显式 `disjoint` 对）是格子**之外**的侧表
+    （`ResourceRegistry`），只被 `conflictOf` / `orderCompatible` /
+    `stableReadPair` 消费，并由 `EffectEnvironmentFingerprint` 的
+    `hashResourceRegistry` 按该侧表形态散列。消费面：`hir_effects.zig` 的派生
+    查询（`isDiscardable` / `isDuplicable` / `canSwapOperands` /
+    `canMaterializeOperand` / `cleanupEffect` …）、函数摘要 SCC fixpoint、
+    SEG legality / `isSegSafe`、`rewrite_contract.Requirement`、module-const
+    初始化 / teardown 检查、host 元数据（`effects.HostDecl` /
+    `HostEffects.resolve` / `consolidate`），以及 CFG 层的保守 op 位。
+  - 范围：把 effect 摘要从固定乘积格升级为**可插拔格引擎**，固定乘积格成为
+    其中一个默认实例（行为逐字不变，充当插件化的回归基线）：
+    (a) 规范先行——撤 §1.3 的非目标，§5.4 改写为「摘要元素 + 格接口」的抽象
+    （接口义务：`join` / `meet` / `≤` / `eql` / `⊤` / `⊥` / 规范化 canonical
+    form / 散列），mode 集与资源偏序改由 provider 声明、会话开始统一 intern
+    后冻结，而非编译期闭合枚举；
+    (b) `effects.zig` 抽出格接口（arena + 元素类型 + 操作），现有 `Summary` /
+    `AccessSet` 改造为默认实例（`ProductLattice`），`joinAccess` /
+    `latticeMeetAccess` 的逐 mode 循环降为实例内部实现；
+    (c) 域间层级 / alias 例外（§5.6 的 Target）从侧表升为格资源偏序的一个
+    实例，`All` 通配与 per-mode bool 由该实例给出；
+    (d) interning / 指纹：`EffectEnvironmentFingerprint` 把格描述子（mode 集、
+    资源偏序、provider registry generation）纳入语义键，格或注册表变化即失效
+    缓存 phase-2/3 结果；现有指纹测试须继续成立；
+    (e) 消费面按派生查询重述（查询语义不变），CFG 粗粒度 op 位保持**显式
+    分层**（不要求逐位相等）；
+    (f) 至少一个**第二实例**（非默认格，如资源层级实例）跑通 queries / SEG /
+    ANF / 指纹全链，证明「可插拔」不是空接口。
+  - 验收：格律 law test 改为**实例参数化**（现有 join / meet 的交换 / 结合 /
+    幂等 / 吸收 / 单调性用例对新实例同样通过，默认实例逐条不变）；默认实例
+    回归——全语料 `--simplify` × `--seg` 四组合解释器差分逐字不变、SEG
+    budget 基线不变；第二实例的派生查询正 / 负例；指纹随格描述子（mode 集、
+    资源偏序、registry generation）变化而变的负例与顺序无关正例；§1.3 非目标
+    段删除并指向新节；第二实例能产出**不同的 SEG/ANF AIR**。
+  - 已完成：(a)–(f) 与上述验收项均已实现并有测试（`zig build -fincremental test`
+    全绿，SEG budget 计数与改动前逐项相同，全语料 `--simplify` × `--seg` 四组合
+    差分不变）：格接口（`effects.Ops`）+ 默认实例 `ProductLattice` + 第二实例
+    `HierarchyLattice`（`child ≤ parent` 的向下闭包分量 + 别名商 + 森林冲突关系，
+    包含序随实例而变）；mode 集 / 资源偏序 / 操作表由 provider 声明、
+    `Engine.init` 校验并冻结；指纹纳入格描述子；`Analysis.eng` 统一转发组合与
+    派生查询，`frontend.compile` 一次冻结贯通全链，interning 以
+    `Engine.descriptor_digest` 硬绑定实例（换实例即 `reset` 重推，§5.7「一个会话
+    一个实例」）。三处缺口全部闭合：
+    (i) 生产中消费重排合法性的 rewrite 落地——`reorder_rule`（hir_seg.zig，
+    §10.4，legality `swap_operands`）在 `strict_ltr` 父节点的相邻 operand 对上按
+    `rowLess` 规范序交换，`hir_seg.zig` 的 `Stats.reorders` 计数；
+    `probes/cases/lattice_reorder_host_{sensor,app}.st` 给出白盒验收（默认实例
+    0 次、例层级实例 ≥1 次且 operand 序翻转），`frontend_pass_smoke_tests.zig`
+    的黑盒验收断言同一 probe 在 `product_provider` 与 `example_hierarchy` 下规范
+    AIR **确实不同**（而全语料差分仍逐字不变）——「provider-specific SEG/ANF
+    产出差异」验收补齐；(ii) interning 与注解相等以 `descriptor_digest` 硬绑定
+    单实例；(iii) 真实 host 域的树边已声明——`effects.zig` 的 `stdlib_host_tree`
+    给六个标准库 host 模块（`domain_builtin` / `domain_list` / `domain_string` /
+    `domain_array` / `domain_hashmap` / `domain_math`）声明三棵兄弟子树（I/O、
+    集合、纯标量），经 `Engine.init` 校验冻结，白盒测试断言兄弟域读对
+    `orderCompatible` 在它之下为真、在 flat 之下为假（§5.6）。
 
 - [x] **22. Cost model 与 Extraction**（[hir.md](hir.md) §8.2 的
       cost model / extraction 条目）
@@ -691,6 +754,7 @@
 - [ ] effect 域间层级 / alias 例外表（[effects.md](effects.md) §5.6 Target）：
       现只有 `stable` 域集合与显式 `disjoint` 对，域内层级 / alias 例外未建模；
       与「待决」的 overlap/disjoint 具体条目是同一方向的精度补全。
+      **已提升为「近期」：** 作为第 24 项通用格引擎的资源偏序实例落地。
 - [ ] 函数摘要的增量失效：标脏 / 世代号 / 依赖传播（[effects.md](effects.md)
       §8.3）。现为全量重算；触发条件是「缓存 phase-2/3 结果」——
       `EffectEnvironmentFingerprint`（「已完成」第 2 项）是已落地的先决条件，本项

@@ -140,6 +140,17 @@ fail to be useful to one test, and the dynamically enumerated corpus
 would run it through every differential. Add a fixture here instead of
 inlining a whole Stilla program in a test body.
 
+- `lattice_reorder_host_{sensor,app}.st`: the `reorder` rule's fixture
+  ([effects.md](effects.md) §10.4–§10.5). `sensor` declares two host reads
+  on sibling domains (host(2) / host(3), chosen by the embedding); the app
+  writes them as `peek(x) + read(x)`, i.e. the *reverse* canonical order,
+  so the `example_hierarchy` lattice (both are children of host(1) —
+  provably disjoint subtrees) swaps the operands and the flat
+  `product_provider` refuses them (distinct undeclared domains conflict).
+  The same probe is the acceptance that a second lattice instance changes
+  the produced AIR (todo.md 24; `frontend_pass_smoke_tests.zig`,
+  `hir_seg_tests.zig`).
+
 Some LLIR instructions have no one-to-one source construct. `spill_take`,
 `spill_put`, `result_take`, argument-window instructions, `jal`/`jalr`/`jr`,
 `auipc`, `lui`, long-branch inversions, and replacement/release variants are

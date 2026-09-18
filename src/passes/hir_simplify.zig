@@ -134,6 +134,11 @@ pub const Config = struct {
     /// with `host_decls` so the rounds and the re-validation share one
     /// environment.
     resources: effects.ResourceRegistry = .{},
+    /// The frozen lattice instance (docs/effects.md §5.7) handed to every
+    /// internal `hir_effects.Analysis` so the rounds and the caller's
+    /// final re-validation read one instance. Null = the default `flat`
+    /// instance over `resources`.
+    engine: ?*const effects.Engine = null,
     /// Bound on analysis → rewrite rounds (each round re-derives effects).
     max_iterations: u32 = 8,
 };
@@ -147,7 +152,7 @@ pub fn optimize(arena: std.mem.Allocator, built: *hir.BuiltProgram, config: Conf
     var stats = Stats{};
     var iter: u32 = 0;
     while (iter < config.max_iterations) : (iter += 1) {
-        var analysis = try hir_effects.Analysis.init(arena, built, .{ .graph = config.graph, .host_decls = config.host_decls, .resources = config.resources });
+        var analysis = try hir_effects.Analysis.init(arena, built, .{ .graph = config.graph, .host_decls = config.host_decls, .resources = config.resources, .engine = config.engine });
         try analysis.analyze();
         var rw = Rewriter{ .arena = arena, .built = built, .analysis = &analysis };
         const changed = try rw.run();

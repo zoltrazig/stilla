@@ -198,6 +198,27 @@ const eta_rule = rewrite_contract.RewriteRule{
     },
 };
 
+/// The operand-reorder rule (docs/effects.md §10.3–§10.5): the production
+/// consumer of the `swap_operands` legality. It canonicalizes the operand
+/// order of a `strict_ltr` parent under the *active lattice instance*:
+/// two adjacent operands swap when `canSwapOperands` admits the move and
+/// the pair is not already in canonical summary order. This is the rule
+/// through which a second lattice instance produces *different* AIR — a
+/// `hierarchy` provider that places two host domains as disjoint sibling
+/// subtrees proves reads of them reorderable where the flat instance sees
+/// a conflict. The canonical target order (`rowLess`) is instance-shaped:
+/// it compares canonical access rows by (mode, resource), so an instance
+/// that proves a pair disjoint simply allows the canonical move the flat
+/// instance refused.
+const reorder_rule = rewrite_contract.RewriteRule{
+    .name = "reorder",
+    .applicability = .shape,
+    .legality = &.{.swap_operands},
+    .contract = .{
+        .effect = .{ .preserves_evaluation_count = true, .may_reorder = true },
+    },
+};
+
 /// What one `optimize` call did — for tests and the compile-time budget.
 pub const Stats = struct {
     iterations: u32 = 0,
@@ -217,6 +238,11 @@ pub const Stats = struct {
     matches: usize = 0,
     projects: usize = 0,
     shares: usize = 0,
+    /// Adjacent operand pairs canonically reordered by the `reorder` rule
+    /// (`swap_operands` legality; docs/effects.md §10.3–§10.5). Measures
+    /// how much a provider's lattice gets to move (0 for the default flat
+    /// instance over an empty registry).
+    reorders: usize = 0,
 
     // --- the SEG arena's own facts (docs/todo.md 21 / 23) ---
     /// Islands that actually went through the e-graph engine (encode
@@ -252,6 +278,11 @@ pub const Config = struct {
     /// with `host_decls` so the rounds and the re-validation share one
     /// environment.
     resources: effects.ResourceRegistry = .{},
+    /// The frozen lattice instance (docs/effects.md §5.7) handed to every
+    /// internal `hir_effects.Analysis` so the rounds and the caller's
+    /// final re-validation read one instance. Null = the default `flat`
+    /// instance over `resources`.
+    engine: ?*const effects.Engine = null,
     /// Bound on analysis→rewrite rounds (each round re-derives effects).
     /// The same bound caps one island's e-graph saturation rounds.
     max_iterations: u32 = 8,
@@ -273,7 +304,7 @@ pub fn optimize(arena: std.mem.Allocator, built: *hir.BuiltProgram, config: Conf
     var beta_done = std.AutoHashMapUnmanaged(hir.FuncId, void).empty;
     var iter: u32 = 0;
     while (iter < config.max_iterations) : (iter += 1) {
-        var analysis = try hir_effects.Analysis.init(arena, built, .{ .graph = config.graph, .host_decls = config.host_decls, .resources = config.resources });
+        var analysis = try hir_effects.Analysis.init(arena, built, .{ .graph = config.graph, .host_decls = config.host_decls, .resources = config.resources, .engine = config.engine });
         try analysis.analyze();
         var rw = Rewriter{
             .arena = arena,
@@ -294,6 +325,7 @@ pub fn optimize(arena: std.mem.Allocator, built: *hir.BuiltProgram, config: Conf
         stats.matches += rw.matches;
         stats.projects += rw.projects;
         stats.shares += rw.shares;
+        stats.reorders += rw.reorders;
         stats.egraph_islands += rw.egraph_islands;
         stats.egraph_rounds += rw.egraph_rounds;
         stats.egraph_converged = stats.egraph_converged and rw.egraph_converged;
@@ -341,6 +373,7 @@ const Rewriter = struct {
     matches: usize = 0,
     projects: usize = 0,
     shares: usize = 0,
+    reorders: usize = 0,
 
     // SEG arena facts, accumulated from `hir_egraph` per island.
     egraph_islands: usize = 0,
@@ -929,7 +962,91 @@ const Rewriter = struct {
                 return true;
             }
         }
+        if (try self.tryReorder(id)) {
+            self.reorders += 1;
+            try self.markDirty(id);
+            return true;
+        }
         return false;
+    }
+
+    /// The reorder rule (docs/effects.md §10.3–§10.5): canonicalize the
+    /// operand order of a `strict_ltr` parent by swapping an adjacent pair
+    /// that is order-compatible under the active lattice instance and not
+    /// already in canonical summary order. This is the production consumer
+    /// of `rewrite_contract.swap_operands` — the rule through which a
+    /// second lattice instance changes *AIR*, not just a legality verdict:
+    /// a `hierarchy` provider that proves two sibling host reads disjoint
+    /// admits the swap the flat instance refuses.
+    ///
+    /// Termination contract: `rowLess` is a strict total order on the rows
+    /// the pair is compared by, so each swap moves that pair one step
+    /// closer to the canonical order and the pass's `max_iterations` bound
+    /// caps the loop — reordering, like the other rules, offers a
+    /// bounded-round contract, not a decreasing-measure one. The only
+    /// operands considered are effect-bearing (a non-empty canonical row),
+    /// so a pure pair never churns under any instance.
+    fn tryReorder(self: *Rewriter, id: hir.ExprId) Error!bool {
+        const pr = self.p();
+        const n = pr.node(id);
+        if (hir.registry.get(n.op).policy != .strict_ltr) return false;
+        const ops = try self.dupOperands(id);
+        if (ops.len < 2) return false;
+        for (0..ops.len - 1) |i| {
+            const a = ops[i];
+            const b = ops[i + 1];
+            if (self.dirty.contains(a) or self.dirty.contains(b)) continue;
+            const a_s = self.analysis.readySummary(a) orelse continue;
+            const b_s = self.analysis.readySummary(b) orelse continue;
+            // Only pairs that actually carry effects: a pure operand has an
+            // empty canonical row, and swapping it past anything is the
+            // flat instance's no-op (every numeric op would otherwise be a
+            // candidate and the corpus would churn).
+            if (a_s.accesses.isEmpty() or b_s.accesses.isEmpty()) continue;
+            // Already in canonical order — nothing to do. Equal rows are
+            // trivially canonical and `canSwapOperands` refuses them too.
+            if (rowLess(a_s, b_s)) continue;
+            if (!try rewrite_contract.check(
+                self.analysis,
+                reorder_rule.legality,
+                .{ .swap = .{ .parent = id, .lhs_slot = @intCast(i), .rhs_slot = @intCast(i + 1) } },
+            )) continue;
+            // Swap the two operand slots in the live expr_buffer. `ops` is
+            // a private copy; the node's operands are a contiguous Range
+            // into `expr_buffer`, so swapping those two entries is the
+            // whole tree mutation the rule needs.
+            const range = n.operands;
+            const lo = range.start + @as(u32, @intCast(i));
+            std.mem.swap(hir.ExprId, &pr.expr_buffer.items[lo], &pr.expr_buffer.items[lo + 1]);
+            return true;
+        }
+        return false;
+    }
+
+    /// Deterministic canonical ranking of two summaries, in the reorder
+    /// rule's instance-shape: `a < b` when `a`'s canonical access row sorts
+    /// before `b`'s (by all-mode bits, then (mode, resource) lexicographic,
+    /// then row length), with the flag bits as the final tie-break. Rows
+    /// are canonical (sorted, deduped), so this is a strict total order
+    /// over the pairs the rule examines. The pair's *swappability* is the
+    /// instance's verdict (`canSwapOperands`); this order only decides
+    /// which direction "canonical" points.
+    fn rowLess(a: effects.Summary, b: effects.Summary) bool {
+        if (a.accesses.all != b.accesses.all) return a.accesses.all < b.accesses.all;
+        const aa = a.accesses.accesses;
+        const bb = b.accesses.accesses;
+        const n = @min(aa.len, bb.len);
+        for (0..n) |i| {
+            const x = aa[i];
+            const y = bb[i];
+            if (x.mode != y.mode) return @intFromEnum(x.mode) < @intFromEnum(y.mode);
+            if (x.resource.eql(y.resource)) continue;
+            return x.resource.lessThan(y.resource);
+        }
+        if (aa.len != bb.len) return aa.len < bb.len;
+        if (a.may_trap != b.may_trap) return !a.may_trap;
+        if (a.may_diverge != b.may_diverge) return !a.may_diverge;
+        return !a.nondeterministic and b.nondeterministic;
     }
 
     /// Known-variant `match` → `let` (hir.md §8.6). When the scrutinee is a

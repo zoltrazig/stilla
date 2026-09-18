@@ -755,12 +755,18 @@ call(fnref consume, move(%B0))
 
 ```text
 EffectSummary {
-    accesses:        AccessSet,   // 资源访问集合（Read/Write/Allocate/Release，按抽象语义域）
+    accesses:        AccessSet,   // 资源访问集合（按抽象语义域 × provider 声明的 mode）
     may_trap:        bool,        // 可能异常终止，含 panic
     may_diverge:     bool,        // 可能发散
     nondeterministic:bool,        // 两次求值结果可不同
 }
 ```
+
+摘要元素与格代数由**格实例**给出（[effects.md](effects.md) §5.4 / §5.7）：mode 集
+与资源偏序由 provider 声明、会话开始 intern 后冻结，`flat` 固定乘积格是默认实例，
+`hierarchy`（域树 + 别名）是第二实例。`hir_effects.Analysis` 持有该冻结实例
+（`eng`），组合与全部派生查询都经它转发；`frontend.compile` 一次冻结并贯通
+效应分析、M2b 消费者、SEG 与每次重校验。
 
 - **effect 层中 panic = trap**：都置 `may_trap = true`，运行时都跳过销毁。
 - **不跟踪 `may_return_normally`**：正常返回是默认假设；后缀 DCE 由独立 must
@@ -1066,9 +1072,10 @@ class 给、缺省回退到节点计数（§8.2 末的落地清单）。
 | aggregate projection | ✅ | `field_get(C(v0, …, vn), i) → vi`（`C` = `struct_make` / `tuple_make` / `list_make`；已知下标；越界 / 非构造基拒绝）。`struct_make` 的 operand 按声明序，`tuple_make` / `list_make` 按位置序，payload `field` 是字段 / 元素下标——即 `hir_build_expr.fieldRead` 的索引。乱序书写的 struct 构造被 builder 的临时 `let` 链隔开（§5.6），故不触发。list 的 `idx < operand len` 就是边界证明：只有 `list_make` 基的已知常量下标在界内时才归约，与 `hir_effects.fieldGetOwn` 的「界内不 trap」细化一致（`field_get` 的 list 基否则保守 `Top`）。**tuple / list 投影是 IR 级规则**：Stilla 没有元素读取后缀（Core Expression Binding Power Table），元素只经解构 pattern 读取，源码不产生 tuple / list 的 `field_get`；两者由白盒规则测试覆盖 |
 | α-equivalence | ✅* | island 内由 arena 的 hash-consing + `rebuild` 同余合并承担（α-相等子树自然同类）；β 克隆时的**捕获规避** fresh-binder 重映射仍由驱动做 |
 | CSE-style sharing | ✅ | 同一 island 内、同一 `strict_ltr` 无 region 节点的 operand 列表里，两个**同类**且 `isDuplicable` 的纯子树由 extraction materialize 成一个合成 `let`，非平凡原子才 materialize、trivial atom 直接复制（详见下） |
+| operand reorder | ✅* | 相邻 operand 对交换、按 `rowLess` 规范序（`canSwapOperands` / `reorder_rule`，§8.8）；仅当实例下该对 `orderCompatible`——默认 flat 空 registry 上从不触发，`hierarchy` 实例下兄弟域读对可交换（docs/effects.md §10.3–§10.5） |
 | associativity / commutativity | ❌ | 搜索空间问题，未立项 |
 | Unique rewrite | ❌ | 需线性等式系统 |
-| host calls / `drop` / consuming match / panic 重排 | ❌ | — |
+| host calls / `drop` / consuming match / panic 重排 | ⚠️/❌ | 仅**序兼容对**可重排（`reorder` 规则，§8.8）；`drop` / consuming match / panic 不重排 |
 
 > 源级 `let` 的 init 自成 FE
 > （§5.6），所以 `let` 不是 island 成员，规则由各分支的契约准入（`hir_seg.zig`
@@ -1284,6 +1291,24 @@ init（这时已是 `%B0`）是 island 成员、与本轮分析一致，故下�
 下一轮（重新计算 island 后才生效）——这也是 §8.2 的有界轮数契约在
 `let` 上的代价：延后一轮，不是放弃。
 
+### 8.8 operand reorder（`reorder_rule`）
+
+**规则。** `strict_ltr` 父节点的相邻 operand 对 `(i, i+1)`，在
+`canSwapOperands(parent, i, i+1)` 通过（两者都 ready、读槽位、cleanup-free、
+ownership-gated、`eng.orderCompatible`）且当前序不是规范序时，交换两个 operand
+槽。规范序是确定性全序 `rowLess`：先比 wildcard 位、再按 (mode, resource)
+逐条比 canonical 访问行、再比行长，flag 位收尾。这是生产中消费
+`rewrite_contract.swap_operands` 的规则（docs/effects.md §10.3–§10.4）——也是
+第二格实例能改 SEG 产出的落点：`hierarchy` 实例把兄弟域读对证成 disjoint 后，
+`reorder` 把它们摆回规范序，而默认 `flat` 实例（未声明异域冲突）绝不触发
+（SEG 空 registry 上 reorder 计数恒为 0）。
+
+**termination 与守卫。** `rowLess` 是全序，交换只朝规范序移动，配对不会摆动，
+round bound（`max_iterations`）兜底。只考察**非空** access 行的 pair（纯对
+不入列），且行必须互异（相等行规范序平凡）。交换在 `expr_buffer` 内完成——
+operands 是连续 Range，两个条目互换即整个树内改动，再 `markDirty` 交给下一轮
+重分析。
+
 ## 9. HIR → CFG/AIR lowering 契约
 
 原则：把 HIR 的语义不变量翻译成 CFG 结构，不重新发明 CFG 层的职责。
@@ -1418,7 +1443,7 @@ cost model（§8.2）：全语料 `rounds` / `unions` / `merges` / `copies` 四�
 | 档 | 内容 | 落点 |
 | --- | --- | --- |
 | M1a | 结构 HIR：AST→HIR 构建、结构校验、HIR→CFG lowering；直降路径删除后成为唯一前端路径 | hir_build.zig / hir_validate.zig / hir_lower.zig |
-| M1b | 效果基础设施：`SemanticInfo.effect`、固定乘积格、transfer、cleanup 门、派生查询、host 语义注册表 | effects.zig / hir_effects.zig |
+| M1b | 效果基础设施：`SemanticInfo.effect`、可插拔格引擎（默认实例 = 固定乘积格，第二实例 `hierarchy`）、transfer、cleanup 门、派生查询、host 语义注册表 | effects.zig / hir_effects.zig |
 | M2a | SEG 规则子集（β / η / let / 常折叠 / 整数代数 / 聚合投影 / known-variant match / CSE sharing）；union 规则在 slotted e-graph arena 里走 encode → 有界 saturation → extraction，β / η / let / match 是驱动层的 boundary rewrite；可执行文件默认开、`--no-seg` 关 | hir_seg.zig / hir_egraph.zig |
 | M2b | 摘要化消费者：函数摘要 SCC least fixpoint、精确 `drop_effect(T)`、module-const 检查、dead-let / selective ANF / `never_returns` 后缀删除 | hir_effects.zig / hir_simplify.zig |
 

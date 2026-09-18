@@ -32,6 +32,7 @@ const cfg_inline = @import("passes/cfg_inline.zig");
 const cfg_lower_llir = @import("passes/cfg_lower_llir.zig");
 const llir_validate = @import("passes/llir_validate.zig");
 const probe_corpus = @import("probe_corpus.zig");
+const effects = @import("effects.zig");
 const testing = std.testing;
 
 /// A compiled probe plus the arena holding its borrowed source text:
@@ -190,4 +191,118 @@ test "probe pass smoke: optimizer + drop lowering + LLIR backend" {
         const bytes2 = try lower.emitBin(back, a);
         try testing.expectEqualSlices(u8, bytes, bytes2);
     }
+}
+
+/// Compile one probe with an explicit lattice provider through the whole
+/// effect chain: analysis → M2b consumers → SEG → re-validation.
+fn compileProbeWithProvider(spec: []const u8, provider: *const effects.Provider) !Compiled {
+    var source_arena = std.heap.ArenaAllocator.init(testing.allocator);
+    errdefer source_arena.deinit();
+    const a = source_arena.allocator();
+    const text = try probe_corpus.read(a, "probes", spec);
+    var sources = moduleinfo.Sources{};
+    var source_map = std.StringHashMapUnmanaged([]const u8).empty;
+    try source_map.put(a, spec, text);
+    sources.source = source_map;
+    const comp = try frontend.compile(testing.allocator, .{
+        .entry = spec,
+        .sources = sources,
+        .entry_fn = "main",
+        .optimize = true,
+        .seg = true,
+        .simplify = true,
+        .provider = provider,
+    });
+    return .{ .comp = comp, .source_arena = source_arena };
+}
+
+// The second lattice instance (docs/effects.md §5.7) must run the *whole*
+// chain — effect analysis, the M2b consumers, SEG, and every
+// re-validation — not merely be selectable. Because no probe declares a
+// resource the example `hierarchy` instance places in its tree (its
+// domains are `host(1..7)`, chosen by an embedding), the difference the
+// instance can make is precision, not a different legal conclusion, so
+// the differential is expected to be verbatim.
+test "lattice provider: the second instance drives a whole compile unchanged" {
+    var corpus = try probe_corpus.list(testing.allocator, "probes");
+    defer corpus.deinit();
+    for (corpus.names) |spec| {
+        var plain = try compileProbeWithProvider(spec, &effects.product_provider);
+        defer plain.deinit();
+        var hierarchical = try compileProbeWithProvider(spec, &effects.example_hierarchy);
+        defer hierarchical.deinit();
+        const a = testing.allocator;
+        const plain_air = try cfg.print(try plain.program(), a);
+        defer a.free(plain_air);
+        const hier_air = try cfg.print(try hierarchical.program(), a);
+        defer a.free(hier_air);
+        try testing.expectEqualStrings(plain_air, hier_air);
+    }
+}
+
+/// Compile a *two-module* probe (a host-module iface under
+/// `standard_library`) through the whole chain under an explicit lattice
+/// provider, with host declarations for the iface's members.
+fn compileHostProbeWithProvider(provider: *const effects.Provider, host_decls: []const effects.HostDecl) !Compiled {
+    var source_arena = std.heap.ArenaAllocator.init(testing.allocator);
+    errdefer source_arena.deinit();
+    const a = source_arena.allocator();
+    const app = try probe_corpus.read(a, "probes/cases", "lattice_reorder_host_app");
+    const sensor = try probe_corpus.read(a, "probes/cases", "lattice_reorder_host_sensor");
+    var sources = moduleinfo.Sources{};
+    var source_map = std.StringHashMapUnmanaged([]const u8).empty;
+    try source_map.put(a, "app", app);
+    sources.source = source_map;
+    var iface_map = std.StringHashMapUnmanaged([]const u8).empty;
+    try iface_map.put(a, "sensor", sensor);
+    sources.standard_library = iface_map;
+    const comp = try frontend.compile(testing.allocator, .{
+        .entry = "app",
+        .sources = sources,
+        .entry_fn = "main",
+        .optimize = true,
+        .seg = true,
+        .simplify = true,
+        .provider = provider,
+        .host_decls = host_decls,
+    });
+    return .{ .comp = comp, .source_arena = source_arena };
+}
+
+// The production `reorder` rule (docs/effects.md §10.3–§10.5) consumes
+// `canSwapOperands` / `rewrite_contract.swap_operands` — the one consumer
+// that makes a second lattice instance produce *different* SEG output, not
+// just a different legality verdict. The probe's `sensor.read` (host(2))
+// and `sensor.peek` (host(3)) are one `add`'s two operands. Under the flat
+// provider the two domains conflict, the swap is refused, and the AIR keeps
+// the written `peek + read` order; under `example_hierarchy` (both hosts
+// are children of host(1), i.e. provably disjoint sub-trees) the rule
+// canonicalizes the operand order to `read + peek`. Whole-chain AIR
+// difference = item-24 acceptance (i).
+test "lattice provider: the reorder rule changes the produced AIR under the second instance" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const decls = [_]effects.HostDecl{
+        .{ .key = "sensor.read", .summary = try effects.summaryOf(a, &.{.{ .resource = .{ .host = 2 }, .mode = .read }}), .stilla_execution = .forbidden },
+        .{ .key = "sensor.peek", .summary = try effects.summaryOf(a, &.{.{ .resource = .{ .host = 3 }, .mode = .read }}), .stilla_execution = .forbidden },
+    };
+
+    var plain = try compileHostProbeWithProvider(&effects.product_provider, &decls);
+    defer plain.deinit();
+    var hierarchical = try compileHostProbeWithProvider(&effects.example_hierarchy, &decls);
+    defer hierarchical.deinit();
+    const plain_air = try cfg.print(try plain.program(), a);
+    defer a.free(plain_air);
+    const hier_air = try cfg.print(try hierarchical.program(), a);
+    defer a.free(hier_air);
+    try testing.expect(!std.mem.eql(u8, plain_air, hier_air));
+    // The flat instance's output is the written order; the hierarchy's is
+    // the canonical one — the differential is directional, not noise.
+    try testing.expect(std.mem.indexOf(u8, plain_air, "sensor#peek") != null);
+    const canonical = std.mem.indexOf(u8, hier_air, "sensor#read");
+    const peek_after = std.mem.indexOf(u8, hier_air, "sensor#peek");
+    try testing.expect(canonical != null);
+    try testing.expect(peek_after != null);
+    try testing.expect(canonical.? < peek_after.?);
 }

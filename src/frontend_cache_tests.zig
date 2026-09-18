@@ -383,3 +383,53 @@ test "cache: an environment change flips the compile outcome while parses stay c
     try testing.expect(!cache.effect_environment.eql(fp));
     try testing.expectEqual(@as(u32, 1), cache.stats.effect_environment_changes);
 }
+
+test "cache: selecting a different lattice instance invalidates the effect environment" {
+    var cache = frontend_cache.FrontendCache.init(testing.allocator);
+    defer cache.deinit();
+    var source_map = std.StringHashMapUnmanaged([]const u8).empty;
+    defer source_map.deinit(testing.allocator);
+    try source_map.put(testing.allocator, "app", "fn main() -> int32 { 0 }");
+    var sources = moduleinfo.Sources{};
+    sources.source = source_map;
+
+    var base = try frontend.compile(testing.allocator, .{
+        .entry = "app",
+        .sources = sources,
+        .entry_fn = "main",
+        .cache = &cache,
+    });
+    defer base.deinit();
+    const parses = cache.stats.parses;
+    const fp = cache.effect_environment;
+    const key = cache.semanticKey("app").?;
+
+    // The lattice descriptor is part of the environment (docs/effects.md
+    // §5.7): selecting the `hierarchy` instance moves the fingerprint,
+    // and hence the semantic key, without touching the parse.
+    var hierarchical = try frontend.compile(testing.allocator, .{
+        .entry = "app",
+        .sources = sources,
+        .entry_fn = "main",
+        .cache = &cache,
+        .provider = &effects.example_hierarchy,
+    });
+    defer hierarchical.deinit();
+    try testing.expectEqual(parses, cache.stats.parses);
+    try testing.expect(!cache.effect_environment.eql(fp));
+    try testing.expect(!key.eql(cache.semanticKey("app").?));
+    try testing.expectEqual(@as(u32, 1), cache.stats.effect_environment_changes);
+
+    // Declaring the default instance explicitly is the same environment
+    // as declaring nothing, so it comes back to the original digest.
+    var explicit = try frontend.compile(testing.allocator, .{
+        .entry = "app",
+        .sources = sources,
+        .entry_fn = "main",
+        .cache = &cache,
+        .provider = &effects.product_provider,
+    });
+    defer explicit.deinit();
+    try testing.expect(cache.effect_environment.eql(fp));
+    try testing.expectEqual(@as(u32, 2), cache.stats.effect_environment_changes);
+}
