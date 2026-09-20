@@ -91,7 +91,7 @@ const Fused = struct {
             .entry = "app",
             .sources = sources,
             .entry_fn = "main",
-            .optimize = optimize,
+            .optimize = .{ .cfg = optimize },
         });
         errdefer compilation.deinit();
         // The program struct lives by value in the compilation; copy it

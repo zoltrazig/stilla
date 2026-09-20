@@ -24,6 +24,7 @@
 
 const std = @import("std");
 const stilla = @import("stilla");
+const OptimizeConfig = stilla.frontend.OptimizeConfig;
 
 const usage =
     \\usage: stilla [options] <input>
@@ -52,12 +53,13 @@ const usage =
     \\                    LLIR magic) and execute; mutually exclusive with
     \\                    --emit-hir, --emit-asm, --emit-bin, --output,
     \\                    --no-entry-fn
-    \\  --seg             enable the M2a SEG pass (hir.md §11) before CFG
-    \\                    lowering; on by default
-    \\  --no-seg          disable the M2a SEG pass (the opt-out)
-    \\  --simplify        enable the M2b effect-driven HIR consumers
-    \\                    (dead-let + selective A-Normal Form, hir.md
-    \\                    §11) before CFG lowering; off by default
+    \\  --opt <name>      enable one optimization toggle; <name> is an
+    \\                    OptimizeConfig field (e.g. seg, hir, cfg,
+    \\                    egraph_fold, cfg_inline); last occurrence wins
+    \\  --no-opt <name>   disable one optimization toggle
+    \\                    (default: seg and cfg on, hir off, every
+    \\                    sub-toggle on)
+    \\  --opt-list        list every optimization toggle and its default
     \\  --module <spec>   module specifier for the entry source (default: the
     \\                    input file's stem, e.g. app.st -> "app")
     \\  --entry-fn <name> entry function to mark (default: "main")
@@ -92,15 +94,11 @@ const Options = struct {
     /// True when `--run` was given: compile (or load a binary) and
     /// execute. Mutually exclusive with the emission flags.
     run: bool = false,
-    /// Run the M2a SEG pass (hir.md §11) before CFG lowering. The
-    /// executable ships SEG on by default (like `optimize`, the library
-    /// default is off and embedders set `Options.seg` explicitly);
-    /// `--no-seg` is the opt-out.
-    seg: bool = true,
-    /// True when `--simplify` was given: run the M2b effect-driven HIR
-    /// consumers (dead-let + selective A-Normal Form, hir.md §11) before
-    /// CFG lowering. Off by default.
-    simplify: bool = false,
+    /// Optimization toggles (`optimize_config.zig`). The executable ships
+    /// the SEG and CFG gates on, `hir` off, and every sub-toggle on; the
+    /// library default is every gate off. `--opt`/`--no-opt <name>` set
+    /// fields (last occurrence wins).
+    optimize: OptimizeConfig = .{ .seg = true, .cfg = true },
     search_dirs: std.ArrayList([]const u8) = .empty,
 };
 
@@ -202,12 +200,10 @@ fn compileInput(
         .entry_fn = opts.entry_fn,
         .entry_fn_explicit = opts.entry_fn_explicit,
         .io = io,
-        // The executable ships the optimized AIR by default (optimizer.md):
-        // the toggle is code-only, so there is no CLI flag to turn
-        // it off; embedders of the library control it via Options.
-        .optimize = true,
-        .seg = opts.seg,
-        .simplify = opts.simplify,
+        // The executable ships SEG on and the optimized AIR on by default
+        // (optimizer.md); `--opt`/`--no-opt <name>` change individual
+        // toggles, and embedders of the library set `Options.optimize`.
+        .optimize = opts.optimize,
     };
     return stilla.frontend.compile(arena, options) catch {
         errPrint(io, gpa, "stilla: compilation failed\n", .{}) catch {};
@@ -472,6 +468,9 @@ fn parseArgs(io: std.Io, gpa: std.mem.Allocator, args: []const []const u8) !?Opt
         } else if (parse_options and (std.mem.eql(u8, a, "-h") or std.mem.eql(u8, a, "--help"))) {
             try std.Io.File.writeStreamingAll(std.Io.File.stdout(), io, usage);
             return null;
+        } else if (parse_options and std.mem.eql(u8, a, "--opt-list")) {
+            try writeOptList(io, gpa);
+            return null;
         } else if (parse_options and std.mem.eql(u8, a, "--output")) {
             i += 1;
             if (i >= args.len) return argErr(io, gpa, "--output needs a file argument");
@@ -493,12 +492,15 @@ fn parseArgs(io: std.Io, gpa: std.mem.Allocator, args: []const []const u8) !?Opt
             opts.emit_asm = true;
         } else if (parse_options and std.mem.eql(u8, a, "--run")) {
             opts.run = true;
-        } else if (parse_options and std.mem.eql(u8, a, "--seg")) {
-            opts.seg = true;
-        } else if (parse_options and std.mem.eql(u8, a, "--no-seg")) {
-            opts.seg = false;
-        } else if (parse_options and std.mem.eql(u8, a, "--simplify")) {
-            opts.simplify = true;
+        } else if (parse_options and (std.mem.eql(u8, a, "--opt") or std.mem.eql(u8, a, "--no-opt"))) {
+            const enable = std.mem.eql(u8, a, "--opt");
+            i += 1;
+            if (i >= args.len) return argErr(io, gpa, "--opt/--no-opt needs a name argument");
+            if (!stilla.frontend.setOptimizeByName(&opts.optimize, args[i], enable)) {
+                const msg = try std.fmt.allocPrint(gpa, "unknown optimization '{s}'", .{args[i]});
+                defer gpa.free(msg);
+                return argErr(io, gpa, msg);
+            }
         } else if (parse_options and std.mem.eql(u8, a, "--emit-bin")) {
             i += 1;
             if (i >= args.len) return argErr(io, gpa, "--emit-bin needs a file argument");
@@ -578,6 +580,35 @@ fn errPrint(io: std.Io, gpa: std.mem.Allocator, comptime fmt: []const u8, args: 
 /// Write raw bytes to stderr.
 fn errWrite(io: std.Io, bytes: []const u8) !void {
     try std.Io.File.writeStreamingAll(std.Io.File.stderr(), io, bytes);
+}
+
+/// Build the `--opt-list` text: one line per `OptimizeConfig` field, with
+/// its default state read from the struct (never hard-coded) and the three
+/// top-level gates marked. Pure, so a unit test can assert on the listing
+/// without touching the fd-1 stdout sink.
+fn optListText(gpa: std.mem.Allocator) ![]u8 {
+    var out = std.ArrayList(u8).empty;
+    errdefer out.deinit(gpa);
+    try out.appendSlice(gpa, "optimization toggles (OptimizeConfig fields; use --opt <name> / --no-opt <name>):\n");
+    inline for (stilla.frontend.optimizeToggleNames) |name| {
+        const on = @field(stilla.frontend.OptimizeConfig{}, name);
+        const is_gate = std.mem.eql(u8, name, "hir") or
+            std.mem.eql(u8, name, "seg") or
+            std.mem.eql(u8, name, "cfg");
+        try out.print(gpa, "  {s: <15} {s}{s}\n", .{
+            name,
+            if (on) "on" else "off",
+            if (is_gate) " (gate)" else "",
+        });
+    }
+    return out.toOwnedSlice(gpa);
+}
+
+/// Write the `--opt-list` listing to stdout.
+fn writeOptList(io: std.Io, gpa: std.mem.Allocator) !void {
+    const text = try optListText(gpa);
+    defer gpa.free(text);
+    try std.Io.File.writeStreamingAll(std.Io.File.stdout(), io, text);
 }
 
 /// Write `text` as `; `-prefixed comment lines, labeled with the module
@@ -838,32 +869,60 @@ test "parseArgs --emit-hir sets the HIR mode; defaults off" {
     try testing.expect(!o2.emit_hir);
 }
 
-test "parseArgs SEG defaults on; --no-seg opts out" {
+test "parseArgs SEG defaults on; --no-opt seg opts out" {
     var o1 = (try parseArgs(std.Io.failing, testing.allocator, &.{ "stilla", "app.st" })).?;
     defer o1.search_dirs.deinit(testing.allocator);
-    try testing.expect(o1.seg);
+    try testing.expect(o1.optimize.seg);
 
-    var o2 = (try parseArgs(std.Io.failing, testing.allocator, &.{ "stilla", "--no-seg", "app.st" })).?;
+    var o2 = (try parseArgs(std.Io.failing, testing.allocator, &.{ "stilla", "--no-opt", "seg", "app.st" })).?;
     defer o2.search_dirs.deinit(testing.allocator);
-    try testing.expect(!o2.seg);
+    try testing.expect(!o2.optimize.seg);
 
-    // `--seg` stays an explicit enable (the default already), also when it
-    // follows `--no-seg`.
-    var o3 = (try parseArgs(std.Io.failing, testing.allocator, &.{ "stilla", "--no-seg", "--seg", "app.st" })).?;
+    // `--opt seg` stays an explicit enable, also when it follows
+    // `--no-opt seg` (last occurrence wins).
+    var o3 = (try parseArgs(std.Io.failing, testing.allocator, &.{ "stilla", "--no-opt", "seg", "--opt", "seg", "app.st" })).?;
     defer o3.search_dirs.deinit(testing.allocator);
-    try testing.expect(o3.seg);
+    try testing.expect(o3.optimize.seg);
 }
 
-test "parseArgs --simplify enables the M2b consumers; defaults off" {
-    var o1 = (try parseArgs(std.Io.failing, testing.allocator, &.{ "stilla", "--simplify", "app.st" })).?;
+test "parseArgs --opt hir enables the M2b consumers; defaults off" {
+    var o1 = (try parseArgs(std.Io.failing, testing.allocator, &.{ "stilla", "--opt", "hir", "app.st" })).?;
     defer o1.search_dirs.deinit(testing.allocator);
-    try testing.expect(o1.simplify);
-    try testing.expect(o1.seg);
+    try testing.expect(o1.optimize.hir);
+    try testing.expect(o1.optimize.seg);
 
     var o2 = (try parseArgs(std.Io.failing, testing.allocator, &.{ "stilla", "app.st" })).?;
     defer o2.search_dirs.deinit(testing.allocator);
-    try testing.expect(!o2.simplify);
-    try testing.expect(o2.seg);
+    try testing.expect(!o2.optimize.hir);
+    try testing.expect(o2.optimize.seg);
+}
+
+test "parseArgs --opt / --no-opt toggle OptimizeConfig fields; unknown name rejected" {
+    var o1 = (try parseArgs(std.Io.failing, testing.allocator, &.{ "stilla", "--opt", "egraph_fold", "app.st" })).?;
+    defer o1.search_dirs.deinit(testing.allocator);
+    try testing.expect(o1.optimize.egraph_fold);
+
+    var o2 = (try parseArgs(std.Io.failing, testing.allocator, &.{ "stilla", "--no-opt", "cfg_inline", "app.st" })).?;
+    defer o2.search_dirs.deinit(testing.allocator);
+    try testing.expect(!o2.optimize.cfg_inline);
+
+    // An unknown name and a missing name are both usage errors.
+    try testing.expectError(error.InputOutput, parseArgs(std.Io.failing, testing.allocator, &.{ "stilla", "--opt", "not_a_toggle", "app.st" }));
+    try testing.expectError(error.InputOutput, parseArgs(std.Io.failing, testing.allocator, &.{ "stilla", "--opt" }));
+}
+
+test "parseArgs --opt-list lists the toggles" {
+    // `parseArgs` writes the listing to fd 1, which under `zig build test`
+    // is the test-runner's `--listen` protocol pipe (see the note above),
+    // so the terminal `--opt-list` parse is CLI-probed; this asserts the
+    // pure listing that arm hands to stdout. A representative gate and
+    // sub-toggle must both appear.
+    const text = try optListText(testing.allocator);
+    defer testing.allocator.free(text);
+    try testing.expect(std.mem.indexOf(u8, text, "hir") != null);
+    try testing.expect(std.mem.indexOf(u8, text, "hir             off (gate)") != null);
+    try testing.expect(std.mem.indexOf(u8, text, "cfg_cse") != null);
+    try testing.expect(std.mem.indexOf(u8, text, "cfg_cse         on") != null);
 }
 
 test "parseArgs --emit-hir conflicts with the other emission modes" {
@@ -920,7 +979,7 @@ test "renderHirBuffer renders aggregate member identity and destructuring lets" 
         \\}
     );
     sources.source = smap;
-    var compilation = try stilla.frontend.compile(testing.allocator, .{ .entry = "app", .sources = sources, .entry_fn = "main", .optimize = true });
+    var compilation = try stilla.frontend.compile(testing.allocator, .{ .entry = "app", .sources = sources, .entry_fn = "main", .optimize = .{ .cfg = true } });
     defer compilation.deinit();
 
     var failed_label: ?[]const u8 = null;
@@ -946,7 +1005,7 @@ test "renderHirBuffer rejects an unserializable function and names it" {
         \\fn main() -> void { take(lists.builtin.print) }
     );
     sources.source = smap;
-    var compilation = try stilla.frontend.compile(testing.allocator, .{ .entry = "app", .sources = sources, .entry_fn = "main", .optimize = true });
+    var compilation = try stilla.frontend.compile(testing.allocator, .{ .entry = "app", .sources = sources, .entry_fn = "main", .optimize = .{ .cfg = true } });
     defer compilation.deinit();
 
     var failed_label: ?[]const u8 = null;
@@ -1005,7 +1064,7 @@ test "run --emit-bin writes the LLIR binary; CLI bytes equal a direct serializat
     defer smap.deinit(testing.allocator);
     try smap.put(testing.allocator, "app", src);
     sources.source = smap;
-    var compilation = try stilla.frontend.compile(testing.allocator, .{ .entry = "app", .sources = sources, .entry_fn = "main", .optimize = true });
+    var compilation = try stilla.frontend.compile(testing.allocator, .{ .entry = "app", .sources = sources, .entry_fn = "main", .optimize = .{ .cfg = true } });
     defer compilation.deinit();
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
@@ -1063,7 +1122,7 @@ test "run --run resolves the entry through the builder's func_ids" {
         \\fn main() -> int32 { 40 + 2 }
     );
     sources.source = smap;
-    var compilation = try stilla.frontend.compile(a, .{ .entry = "app", .sources = sources, .entry_fn = "main", .optimize = true });
+    var compilation = try stilla.frontend.compile(a, .{ .entry = "app", .sources = sources, .entry_fn = "main", .optimize = .{ .cfg = true } });
     defer compilation.deinit();
     const program = &compilation.program.?;
 

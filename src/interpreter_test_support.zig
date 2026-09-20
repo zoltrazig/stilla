@@ -89,9 +89,7 @@ pub fn loadFull(
         .entry = "app",
         .sources = sources,
         .entry_fn = "main",
-        .optimize = optimize,
-        .seg = seg,
-        .simplify = simplify,
+        .optimize = .{ .cfg = optimize, .seg = seg, .hir = simplify },
         .host_decls = host_decls,
     });
     errdefer compilation.deinit();

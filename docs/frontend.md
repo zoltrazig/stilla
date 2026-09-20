@@ -56,9 +56,9 @@ canonical HIR
 annotated HIR
     │
     │  [optional] effect consumers  dead-let + selective A-Normal Form
-    │              (derived `isDiscardable` / `canFloatAsTree`; `--simplify`)
-    │  SEG (e-graph arena)       pure-Copy island rewrites (default on;
-    │              `--no-seg` opts out, library `Options.seg` opts in)
+    │              (derived `isDiscardable` / `canFloatAsTree`; `hir` gate)
+    │  SEG (e-graph arena)       pure-Copy island rewrites (`seg` gate on
+    │              in the executable, off in the library)
     │              each re-runs structural + effect validation (hir.md §2.4)
     ▼
     │  HIR→CFG lowering  CFG AIR generation
@@ -186,17 +186,20 @@ which a future cache of phase-2/3 results must include in its key so a
 changed contract does not reuse a conclusion derived under the old one.
 See [module-graph.md](module-graph.md).
 
-**Aggressive optimization (optional)** — `Options.optimize_aggressive`
-(code-only, like `optimize`) runs the optimizer sequence to a bounded
-fixpoint instead of once: iteration 1 is the full sequence; each later
-iteration repeats the same fixed order with the one-shot inliner
-skipped (re-running it on spliced recursive callees would grow the CFG
-without bound), until a full iteration changes nothing or the cap
-`cfg_optimize.aggressive_max_iters` is reached, with the air.md
-validator guarding every rewrite inside each iteration. The default
-(`false`) keeps the single ordered pass and its near-linear compile
-time; `true` is for embedders who want more aggressive simplification
-and accept the bounded extra cost ([optimizer.md](optimizer.md)).
+**Optimization configuration (optional)** — `frontend.Options` takes
+the `OptimizeConfig` struct (`optimize_config.zig`): one boolean per
+optimization unit. The top-level gates are `hir` (the M2b
+effect-driven consumers), `seg` (the M2a SEG pass), and `cfg` (the
+mid-level CFG optimizer); each gate has a sub-toggle per rewrite, all
+on by default, while every gate is off by default in the library. The
+`stilla` executable turns `seg` and `cfg` on and leaves `hir` off, and
+exposes a generic `--opt <name>` / `--no-opt <name>` pair (last
+occurrence wins) instead of dedicated flags. Optimization is a single
+ordered pass — there is no fixpoint or aggressive mode, so compile
+time stays near-linear. The air.md validator (`cfg.validate`) runs
+before the sequence and after every rewrite, so an optimizer bug that
+violates structure, SSA, typing, or the ownership dataflow is a
+compile-time diagnostic ([optimizer.md](optimizer.md)).
 
 ## 3. Pipeline stage documents
 

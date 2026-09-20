@@ -141,6 +141,12 @@ pub const Config = struct {
     engine: ?*const effects.Engine = null,
     /// Bound on analysis → rewrite rounds (each round re-derives effects).
     max_iterations: u32 = 8,
+    /// Run dead-let elimination.
+    dead_let: bool = true,
+    /// Run selective A-Normal Form (operand materialization).
+    anf: bool = true,
+    /// Run `never_returns` straight-line suffix deletion.
+    never_suffix: bool = true,
 };
 
 /// Apply the M2b consumers to every function body and constant
@@ -154,7 +160,7 @@ pub fn optimize(arena: std.mem.Allocator, built: *hir.BuiltProgram, config: Conf
     while (iter < config.max_iterations) : (iter += 1) {
         var analysis = try hir_effects.Analysis.init(arena, built, .{ .graph = config.graph, .host_decls = config.host_decls, .resources = config.resources, .engine = config.engine });
         try analysis.analyze();
-        var rw = Rewriter{ .arena = arena, .built = built, .analysis = &analysis };
+        var rw = Rewriter{ .arena = arena, .built = built, .analysis = &analysis, .cfg = config };
         const changed = try rw.run();
         stats.iterations += 1;
         stats.dead_lets += rw.dead_lets;
@@ -169,6 +175,7 @@ const Rewriter = struct {
     arena: std.mem.Allocator,
     built: *hir.BuiltProgram,
     analysis: *hir_effects.Analysis,
+    cfg: Config = .{},
     changed: bool = false,
     dead_lets: usize = 0,
     hoists: usize = 0,
@@ -229,18 +236,18 @@ const Rewriter = struct {
         // gone, and the value-producing rules (dead-let / ANF) do not
         // apply to a value that never materializes. Recurse into the
         // post-rewrite children only.
-        if (try self.neverSuffix(id)) {
+        if (self.cfg.never_suffix and try self.neverSuffix(id)) {
             try self.recurse(id);
             return;
         }
         // Try the rules first, while `id`'s operand annotations are still
         // the ones the analysis derived this round.
-        if (try self.tryDeadLet(id)) {
+        if (self.cfg.dead_let and try self.tryDeadLet(id)) {
             self.changed = true;
             self.dead_lets += 1;
             return;
         }
-        if (try self.tryAnf(id)) {
+        if (self.cfg.anf and try self.tryAnf(id)) {
             self.changed = true;
             self.hoists += 1;
             return;
@@ -811,4 +818,103 @@ fn neverTy(p: *hir.Program, id: hir.ExprId) bool {
         .primitive => |k| k == .never,
         else => false,
     };
+}
+
+test "hir_simplify: dead_let toggle keeps a discardable dead let" {
+    var f = try build("app", &.{.{
+        "app",
+        \\fn pure(x: int32) -> int32 { x + 1 }
+        \\fn f(x: int32) -> int32 {
+        \\    let unused: int32 = pure(x);
+        \\    7
+        \\}
+    }});
+    defer f.deinit();
+    const stats = try optimize(f.arena.allocator(), f.built, .{ .graph = f.graph, .dead_let = false });
+    try testing.expectEqual(@as(usize, 0), stats.dead_lets);
+    try expectRewrittenValid(&f);
+    const body = funcBody(&f, "app.f").?;
+    try testing.expect(std.mem.eql(u8, opName(&f.built.program, body), "let"));
+}
+
+test "hir_simplify: anf toggle keeps the first non-floatable operand in place" {
+    var f = try build("app", &.{.{
+        "app",
+        \\const builtin = import("builtin");
+        \\fn pure(x: int32) -> int32 { x * 2 }
+        \\fn f(x: int32) -> int32 {
+        \\    pure(1) + builtin.hash(x)
+        \\}
+    }});
+    defer f.deinit();
+    const stats = try optimize(f.arena.allocator(), f.built, .{ .graph = f.graph, .anf = false });
+    try testing.expectEqual(@as(usize, 0), stats.hoists);
+    try expectRewrittenValid(&f);
+    const body = funcBody(&f, "app.f").?;
+    try testing.expect(std.mem.eql(u8, opName(&f.built.program, body), "add.i32"));
+}
+
+test "hir_simplify: never_suffix toggle keeps the unreachable suffix" {
+    var f = try build("app", &.{.{
+        "app",
+        \\const builtin = import("builtin");
+        \\fn boom() -> void { builtin.panic("x") }
+        \\fn f(x: int32) -> int32 {
+        \\    builtin.print("before");
+        \\    boom();
+        \\    builtin.print("dead");
+        \\    x + 1
+        \\}
+    }});
+    defer f.deinit();
+    const stats = try optimize(f.arena.allocator(), f.built, .{ .graph = f.graph, .never_suffix = false });
+    try testing.expectEqual(@as(usize, 0), stats.suffix_deletions);
+    try expectRewrittenValid(&f);
+    const body = funcBody(&f, "app.f").?;
+    try testing.expect(countOp(&f.built.program, body, "add.i32") >= 1);
+}
+
+test "hir_simplify: default Config still applies all three rewrites" {
+    {
+        var f = try build("app", &.{.{
+            "app",
+            \\fn pure(x: int32) -> int32 { x + 1 }
+            \\fn f(x: int32) -> int32 {
+            \\    let unused: int32 = pure(x);
+            \\    7
+            \\}
+        }});
+        defer f.deinit();
+        const stats = try optimize(f.arena.allocator(), f.built, .{ .graph = f.graph });
+        try testing.expect(stats.dead_lets > 0);
+    }
+    {
+        var f = try build("app", &.{.{
+            "app",
+            \\const builtin = import("builtin");
+            \\fn pure(x: int32) -> int32 { x * 2 }
+            \\fn f(x: int32) -> int32 {
+            \\    pure(1) + builtin.hash(x)
+            \\}
+        }});
+        defer f.deinit();
+        const stats = try optimize(f.arena.allocator(), f.built, .{ .graph = f.graph });
+        try testing.expect(stats.hoists > 0);
+    }
+    {
+        var f = try build("app", &.{.{
+            "app",
+            \\const builtin = import("builtin");
+            \\fn boom() -> void { builtin.panic("x") }
+            \\fn f(x: int32) -> int32 {
+            \\    builtin.print("before");
+            \\    boom();
+            \\    builtin.print("dead");
+            \\    x + 1
+            \\}
+        }});
+        defer f.deinit();
+        const stats = try optimize(f.arena.allocator(), f.built, .{ .graph = f.graph });
+        try testing.expect(stats.suffix_deletions > 0);
+    }
 }

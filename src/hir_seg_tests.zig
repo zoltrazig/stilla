@@ -4,7 +4,7 @@
 //! checker + HIR builder, runs the pass, re-validates structure and
 //! effects, and checks the observable rule set, the negative cases, the
 //! corpus (compiles through the seam with SEG on), the four
-//! `--simplify` × `--seg` combinations interpreting every corpus program
+//! `hir` × `seg` combinations interpreting every corpus program
 //! identically, and the corpus-level compile-time / round budget.
 //!
 //! Wired into root.zig's test block; run via `zig build test`.
@@ -484,6 +484,85 @@ test "SEG: η-reduction is refused for trap / non-fn_ref / swapped-argument wrap
         try testing.expectEqual(@as(usize, 1), targets.items.len);
         try testing.expectEqual(hir.FuncKind.lambda, b.built.funcs.items[targets.items[0]].kind);
     }
+}
+
+test "SEG: the beta toggle suppresses β while defaults reduce it" {
+    const src = try probe_corpus.read(testing.allocator, "probes/cases", "seg_beta_let_no_duplication");
+    defer testing.allocator.free(src);
+    var on_b = try buildText("app", &.{.{ "app", src }});
+    defer on_b.deinit();
+    const on = try segAll(&on_b);
+    try testing.expect(on.beta >= 1);
+    const on_text = try flatText(testing.allocator, try funcText(&on_b, "app.dup"));
+    defer testing.allocator.free(on_text);
+    try testing.expect(std.mem.indexOf(u8, on_text, "let ") != null);
+
+    var off_b = try buildText("app", &.{.{ "app", src }});
+    defer off_b.deinit();
+    const off = try hir_seg.optimize(off_b.arena.allocator(), off_b.built, .{ .graph = off_b.graph, .beta = false });
+    try testing.expectEqual(@as(usize, 0), off.beta);
+    const off_text = try flatText(testing.allocator, try funcText(&off_b, "app.dup"));
+    defer testing.allocator.free(off_text);
+    // The β-redex survives: no `let`, and the call node is still there.
+    try testing.expect(std.mem.indexOf(u8, off_text, "let ") == null);
+    try testing.expect(std.mem.indexOf(u8, off_text, "call(") != null);
+}
+
+test "SEG: the eta toggle suppresses η while defaults reduce it" {
+    const src = try probe_corpus.read(testing.allocator, "probes", "eta");
+    defer testing.allocator.free(src);
+    var on_b = try buildText("eta", &.{.{ "eta", src }});
+    defer on_b.deinit();
+    const on = try segAll(&on_b);
+    try testing.expect(on.etas >= 1);
+
+    var off_b = try buildText("eta", &.{.{ "eta", src }});
+    defer off_b.deinit();
+    const off = try hir_seg.optimize(off_b.arena.allocator(), off_b.built, .{ .graph = off_b.graph, .eta = false });
+    try testing.expectEqual(@as(usize, 0), off.etas);
+    // The wrapper value keeps pointing at its own λ record, not the callee.
+    var targets = std.ArrayListUnmanaged(hir.FuncId).empty;
+    defer targets.deinit(testing.allocator);
+    try fnRefTargets(&off_b, "eta.via_lambda", &targets);
+    try testing.expectEqual(@as(usize, 1), targets.items.len);
+    try testing.expectEqual(hir.FuncKind.lambda, off_b.built.funcs.items[targets.items[0]].kind);
+}
+
+test "SEG: the reorder toggle suppresses the lattice swap while defaults apply it" {
+    const sensor = try probe_corpus.read(testing.allocator, "probes/cases", "lattice_reorder_host_sensor");
+    defer testing.allocator.free(sensor);
+    const app = try probe_corpus.read(testing.allocator, "probes/cases", "lattice_reorder_host_app");
+    defer testing.allocator.free(app);
+    const texts = [_]struct { []const u8, []const u8 }{
+        .{ "sensor", sensor },
+        .{ "app", app },
+    };
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const s_peek = try effects.summaryOf(a, &.{.{ .resource = .{ .host = 3 }, .mode = .read }});
+    const s_read = try effects.summaryOf(a, &.{.{ .resource = .{ .host = 2 }, .mode = .read }});
+    const decls = [_]effects.HostDecl{
+        .{ .key = "sensor.read", .summary = s_read, .stilla_execution = .forbidden },
+        .{ .key = "sensor.peek", .summary = s_peek, .stilla_execution = .forbidden },
+    };
+    var eng = try effects.Engine.init(a, &effects.example_hierarchy, .{});
+
+    // Default: the hierarchy instance proves the sibling host reads
+    // disjoint, so the reorder rule canonicalizes the operand order.
+    var on_b = try buildText("app", &texts);
+    defer on_b.deinit();
+    const on = try hir_seg.optimize(on_b.arena.allocator(), on_b.built, .{ .graph = on_b.graph, .host_decls = &decls, .engine = &eng });
+    try revalidateRewrittenWith(&on_b, &decls);
+    try testing.expect(on.reorders >= 1);
+
+    // Disabled: the same instance still admits the swap, but the toggle
+    // refuses it, so the caller's operand order is preserved.
+    var off_b = try buildText("app", &texts);
+    defer off_b.deinit();
+    const off = try hir_seg.optimize(off_b.arena.allocator(), off_b.built, .{ .graph = off_b.graph, .host_decls = &decls, .engine = &eng, .reorder = false });
+    try revalidateRewrittenWith(&off_b, &decls);
+    try testing.expectEqual(@as(usize, 0), off.reorders);
 }
 
 test "SEG: a wrapper/callee function-type mismatch refuses η" {
@@ -1191,7 +1270,7 @@ fn compileAir(spec: []const u8, text: []const u8, seg: bool) ![]u8 {
         .entry = spec,
         .sources = sources,
         .entry_fn = "main",
-        .seg = seg,
+        .optimize = .{ .seg = seg },
     });
     defer comp.deinit();
     if (comp.program) |*p| return cfg.print(p, testing.allocator);
@@ -1302,7 +1381,7 @@ test "SEG: enabling the pass rewrites the AIR; both forms round-trip" {
     defer testing.allocator.free(off);
     const on = try compileAir("app", src, true);
     defer testing.allocator.free(on);
-    // `Options.seg` off (the library default) and on differ: `f`'s `x + 0`
+    // `OptimizeConfig.seg` off (the library default) and on differ: `f`'s `x + 0`
     // is folded away only when the pass runs. Both programs are structurally
     // valid canonical AIR (the frontend validator runs inside compile); a
     // standalone parser round-trip confirms the serialized form too.
@@ -1398,7 +1477,7 @@ const Compiled = struct {
 };
 
 /// Compile one corpus program through the whole pipeline under one
-/// `--simplify` × `--seg` combination and print its canonical AIR.
+/// `hir` × `seg` combination and print its canonical AIR.
 fn compileProgram(text: []const u8, seg: bool, simplify: bool) !Compiled {
     var l = try support.loadOpts(text, false, seg, simplify);
     errdefer l.deinit();
@@ -1445,7 +1524,7 @@ fn runCompiled(c: *Compiled) !Term {
     };
 }
 
-/// The four `--simplify` × `--seg` combinations (hir.md §11): the M2b
+/// The four `hir` × `seg` combinations (hir.md §11): the M2b
 /// consumers and SEG are independent passes, so every combination must
 /// interpret a corpus program identically — output, termination, and
 /// panic message (hir.md §10.3). Combination 0 is the all-off baseline
@@ -1469,7 +1548,7 @@ fn roundTripAir(air: []const u8, path: []const u8) !void {
     };
 }
 
-/// Every `--simplify` × `--seg` combination must agree with the all-off
+/// Every `hir` × `seg` combination must agree with the all-off
 /// baseline verbatim — output, termination, and panic message (hir.md
 /// §10.3) — and every combination's canonical AIR must round-trip
 /// through the standalone parser. `expect_panic` pins the intended

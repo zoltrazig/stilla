@@ -74,11 +74,11 @@
 //!   from scratch before rewriting; the caller re-validates structurally
 //!   and by effects after the pass. No transform is allowed to rely on
 //!   the pre-rewrite static conclusions (hir.md §2.4).
-//! - **Default-on in the executable** — the `stilla` CLI runs this pass by
-//!   default (`--no-seg` opts out); the library default stays off
-//!   (`frontend.Options.seg`), matching `optimize`, so embedders and tests
-//!   keep explicit control. The compile-time / round budget that justifies
-//!   the default is recorded in docs/hir.md §11.
+//! - **Default-on in the executable** — the `stilla` CLI enables this gate
+//!   by default (`--no-opt seg` opts out); the library default stays off
+//!   (`frontend.OptimizeConfig.seg`), matching the `hir` gate, so embedders
+//!   and tests keep explicit control. The compile-time / round budget that
+//!   justifies the default is recorded in docs/hir.md §11.
 //!
 //! The boundary rewrites stay deliberately in-place: HIR is an append-only
 //! arena and every node has exactly one parent (§3.7), so mutating a node's
@@ -319,6 +319,20 @@ pub const Config = struct {
     /// Bound on analysis→rewrite rounds (each round re-derives effects).
     /// The same bound caps one island's e-graph saturation rounds.
     max_iterations: u32 = 8,
+    // Boundary rewrites (driver-level, admitted by rewrite_contract).
+    beta: bool = true,
+    eta: bool = true,
+    let_dead: bool = true,
+    let_forward: bool = true,
+    let_atom: bool = true,
+    match: bool = true,
+    reorder: bool = true,
+    // E-graph arena rules (forwarded to hir_egraph.Config.rules).
+    egraph_fold: bool = true,
+    egraph_algebra: bool = true,
+    egraph_cond: bool = true,
+    egraph_project: bool = true,
+    egraph_cse: bool = true,
 };
 
 /// Rewrite every function body and constant initializer in place to the
@@ -345,6 +359,7 @@ pub fn optimize(arena: std.mem.Allocator, built: *hir.BuiltProgram, config: Conf
             .analysis = &analysis,
             .beta_done = &beta_done,
             .max_egraph_rounds = config.max_iterations,
+            .cfg = config,
         };
         const changed = try rw.run();
         stats.iterations += 1;
@@ -448,6 +463,10 @@ const Rewriter = struct {
     /// Saturation-round bound handed to the e-graph arena (mirrors
     /// `Config.max_iterations`).
     max_egraph_rounds: u32 = 8,
+
+    /// Which rewrites this pass may apply (beta/eta/let/match/reorder and
+    /// the e-graph arena's own rule toggles, forwarded per island).
+    cfg: Config = .{},
 
     fn p(self: *Rewriter) *hir.Program {
         return &self.built.program;
@@ -575,7 +594,13 @@ const Rewriter = struct {
             self.p(),
             self.analysis,
             id,
-            .{ .max_rounds = self.max_egraph_rounds },
+            .{ .max_rounds = self.max_egraph_rounds, .rules = .{
+                .fold = self.cfg.egraph_fold,
+                .algebra = self.cfg.egraph_algebra,
+                .cond = self.cfg.egraph_cond,
+                .project = self.cfg.egraph_project,
+                .cse = self.cfg.egraph_cse,
+            } },
         );
         if (result.stats.enodes == 0) return; // encode rejected the island
         self.egraph_islands += 1;
@@ -611,7 +636,7 @@ const Rewriter = struct {
         // holds for the `let` family (`applyRules` still tries it when the
         // node is not an island) and for η.
         if (self.analysisValid(id)) {
-            if (try self.tryBeta(id)) {
+            if (self.cfg.beta and try self.tryBeta(id)) {
                 self.changed = true;
                 self.beta += 1;
                 try self.markDirty(id);
@@ -626,7 +651,7 @@ const Rewriter = struct {
             // η is the other boundary rewrite: its `fn_ref` operand has no
             // SEG encoding, so it is admitted by its own §8.5 contract
             // rather than by island membership (`encOf`).
-            if (try self.tryEta(id)) {
+            if (self.cfg.eta and try self.tryEta(id)) {
                 self.changed = true;
                 self.etas += 1;
                 try self.markDirty(id);
@@ -997,19 +1022,19 @@ const Rewriter = struct {
     /// island gate, which only `match` needs (its arms must be island
     /// members).
     fn applyRules(self: *Rewriter, id: hir.ExprId, allowed: bool) Error!bool {
-        if (try self.ruleLet(id)) {
+        if ((self.cfg.let_dead or self.cfg.let_forward or self.cfg.let_atom) and try self.ruleLet(id)) {
             self.lets += 1;
             try self.markDirty(id);
             return true;
         }
-        if (allowed and std.mem.eql(u8, hir.registry.get(self.p().node(id).op).name, "match")) {
+        if (self.cfg.match and allowed and std.mem.eql(u8, hir.registry.get(self.p().node(id).op).name, "match")) {
             if (try self.ruleMatch(id)) {
                 self.matches += 1;
                 try self.markDirty(id);
                 return true;
             }
         }
-        if (try self.tryReorder(id)) {
+        if (self.cfg.reorder and try self.tryReorder(id)) {
             self.reorders += 1;
             try self.markDirty(id);
             return true;
@@ -1305,7 +1330,7 @@ const Rewriter = struct {
 
         const scan = try self.scanUses(body, bind);
         const uses = scan.count;
-        if (uses == 0) {
+        if (self.cfg.let_dead and uses == 0) {
             if (!try rewrite_contract.check(self.analysis, let_dead_rule.legality, .{ .expr = init })) return false;
             const bind_ty = pr.binder(bind).ty;
             if (!try rewrite_contract.checkCleanup(let_dead_rule, self.analysis, .{ .binder_destruction = bind_ty })) return false;
@@ -1330,7 +1355,7 @@ const Rewriter = struct {
         // initializer may only land in such a slot when it is itself a
         // `local` node.
         if (scan.binder_operand and !std.mem.eql(u8, hir.registry.get(pr.node(init).op).name, "local")) return false;
-        if (uses == 1) {
+        if (self.cfg.let_forward and uses == 1) {
             if (!self.encOf(init)) return false;
             // A node rewritten earlier this round has a dead shape behind
             // its cached island verdict; defer the fold to next round's
@@ -1348,7 +1373,10 @@ const Rewriter = struct {
             pr.remapCleanupOrigin(body, id);
             return true;
         }
-        if (!isTrivialAtom(pr, init)) return false;
+        // The trivial-atom branch is the `uses >= 2` duplication case; a
+        // disabled dead / used-once branch must not fall into it.
+        if (uses < 2) return false;
+        if (!self.cfg.let_atom or !isTrivialAtom(pr, init)) return false;
         if (!try rewrite_contract.check(self.analysis, let_atom_rule.legality, .{ .expr = init })) return false;
         try self.substAll(body, bind, init);
         pr.exprs.items[id] = pr.node(body);

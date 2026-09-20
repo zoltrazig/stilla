@@ -12,21 +12,16 @@
 The optimizer is a fixed sequence of semantics-preserving CFG→CFG
 rewrites that runs after [cfg-lowering.md](cfg-lowering.md) lowering
 and before the runtime consumes the AIR. It is wired into
-`frontend.compile` behind `frontend.Options.optimize` (default off;
-the `stilla` executable hardcodes it on; code-only toggle, no CLI flag).
+`frontend.compile` behind the `cfg` gate of `OptimizeConfig`
+(`optimize_config.zig`): the library default is off, and the `stilla`
+executable turns it on (see [Config gating](#config-gating) for all
+gates and sub-toggles).
 
-The sequence runs as a **single ordered pass by default — no
-iteration to fixpoint** — so compile time stays near-linear.
-`frontend.Options.optimize_aggressive` (code-only, like `optimize`)
-requests bounded iteration instead: the sequence loops until a full
-iteration changes nothing (the printed text form is unchanged) or the
-compile-time cap `cfg_optimize.aggressive_max_iters` is reached. The
-air.md validator (`cfg.validate`) runs before the sequence and after
-every rewrite *within each iteration*: an optimizer bug that violates
-structure, SSA, typing, or the ownership dataflow is a compile-time
-diagnostic in either mode. The single-pass default is byte-identical in
-both modes' shared path: `optimizeAggressive` with `max_iters = 1` is
-exactly the default single pass.
+The sequence runs as a **single ordered pass — no iteration to
+fixpoint** — so compile time stays near-linear. The air.md validator
+(`cfg.validate`) runs before the sequence and after every rewrite: an
+optimizer bug that violates structure, SSA, typing, or the ownership
+dataflow is a compile-time diagnostic.
 
 Constant folding, arithmetic simplification, block-local common
 subexpression elimination, and copy folding run **on-the-fly at each
@@ -42,6 +37,25 @@ if-conversion, dead-block elimination, drop elision, dead-instruction
 elimination, jump threading, phi simplification** — followed by the
 post-optimization drop-lowering pass (below). The ordered inventory
 with the driver entry is [passes.md](passes.md).
+
+## Config gating
+
+Optimization is configured by `OptimizeConfig` (`optimize_config.zig`),
+one boolean per optimization unit. Three top-level gates select a
+family, and each family has one sub-toggle per rewrite:
+
+| Gate | Units (sub-toggles) |
+| --- | --- |
+| `hir` | `dead_let`, `anf`, `never_suffix` |
+| `seg` | `seg_beta`, `seg_eta`, `seg_let_dead`, `seg_let_forward`, `seg_let_atom`, `seg_match`, `seg_reorder`, `egraph_fold`, `egraph_algebra`, `egraph_cond`, `egraph_project`, `egraph_cse` |
+| `cfg` | `cfg_tail_call`, `cfg_inline`, `cfg_cse`, `cfg_copy_prop`, `cfg_pre`, `cfg_if_convert`, `cfg_dead_block`, `cfg_drop_elide`, `cfg_dead_instr`, `cfg_jump_thread`, `cfg_phi_simplify` |
+
+**Library defaults:** every gate off, every sub-toggle on.
+**Executable defaults:** `seg` and `cfg` on, `hir` off, every
+sub-toggle on. The CLI exposes one generic pair, `--opt <name>` /
+`--no-opt <name>`, where `<name>` is a config field name; the last
+occurrence wins. The dedicated `--seg`, `--no-seg`, and `--simplify`
+flags are removed.
 
 ## The LLIR lowering boundary (separate from the CFG optimizer)
 
@@ -184,11 +198,9 @@ Candidate rules:
   front); call-site arguments 1:1 with the callee's parameters (a
   void-typed parameter produces no call operand);
 - **one-shot by contract** — the spliced body's own call sites are not
-  re-scanned this round; aggressive iteration never re-runs the
-  inliner, because re-inlining a spliced *recursive* callee would keep
-  finding new call sites inside its own copies and grow the CFG without
-  bound (fib.st measures 26 → 138 non-phi instructions over four
-  iterations);
+  re-scanned this round; the inliner is never re-run, because
+  re-inlining a spliced *recursive* callee would keep finding new call
+  sites inside its own copies and grow the CFG without bound;
 - the surrounding passes clean up: `cse`/`copyProp`/`pre`/`deadInstr`
   absorb the duplicated redundancy, `dropElide`/drop lowering see the
   new drops, and `phiSimplify`/`jumpThread` clean the new blocks.
@@ -343,42 +355,6 @@ phis are kept — the AIR has no undefined value), forwarding their
 operands; pairs with jump threading (threading produces single-incoming
 phis).
 
-### Aggressive fixpoint iteration
-
-`src/passes/cfg_optimize.zig`'s `optimizeAggressive(program, allocator,
-max_iters)` runs the sequence repeatedly — iteration 1 is the
-full fixed order; each later iteration is the same order
-with the one-shot inliner skipped — until a full iteration
-produces a byte-identical printed text form (the fixpoint: no rewrite
-in the sequence changed anything) or `max_iters` iterations have run.
-The inliner is excluded from later iterations by contract (re-running
-it on a spliced *recursive* callee keeps finding new call
-sites inside its own copies — the CFG grows without bound instead of
-converging). The remaining passes re-run over the same order with the
-air.md validator after every rewrite; the loop always terminates at
-equality or the cap. Whether a later iteration shrinks, reshapes (PRE
-inserts edge computations, if-conversion trades phis for selects), or
-leaves a program alone is program-dependent, so "aggressive never worse
-than the default single pass" is enforced empirically over the example
-corpus (below), not by construction. The documented one-shot behaviors
-a later iteration does catch:
-
-- **jump-threading chains** — a chain collapsed in one pass may leave
-  one forwarding block behind, which the next iteration's threading
-  removes;
-- **dead blocks from late passes** — a block orphaned by a pass that
-  runs after dead-block elimination (threading, phi simplification) is
-  removed by the next iteration's dead-block elimination.
-
-`frontend.Options.optimize_aggressive` (default off) wires the loop
-into `frontend.compile` with the cap `cfg_optimize.aggressive_max_iters`
-(4). Every iteration is guarded by the air.md validator, so the mode
-cannot weaken the optimizer's invariant contract; it only spends more
-compile time. The corpus harness (Optimization harness, below) doubles
-as the never-worse
-check: aggressive output is asserted ≤ the default single-pass output
-on the example corpus (text bytes, non-phi instructions, blocks).
-
 ### Drop lowering (post-optimization)
 
 `src/passes/cfg_lower_drop.zig` — after the optimizer sequence, expand every
@@ -399,7 +375,7 @@ round-trip (air.md).
 
 The optimization harness compiles the corpus (`examples/` plus added
 benchmarks: `ownership.st` with `drop` hooks, `match.st` ADT `match`),
-runs `optimize`, and reports instruction / block / text-byte counts
+runs the `cfg` gate, and reports instruction / block / text-byte counts
 before and after. The report prints only when the frontend test binary
 runs with stderr attached to a terminal — run the compiled
 `.zig-cache/o/*/test` binary directly; under `zig build test` stderr is
@@ -410,6 +386,7 @@ error, so the report is suppressed there to keep the log clean.
 
 | File | Role |
 | --- | --- |
+| `src/passes/optimize_config.zig` | `OptimizeConfig`: one boolean per optimization unit (the `hir` / `seg` / `cfg` gates and their sub-toggles) |
 | `src/passes/cfg_optimize.zig` | the optimizer driver — runs the full sequence |
 | `src/passes/cfg_tail_call.zig` | tail call optimization |
 | `src/passes/cfg_inline.zig` | function inlining (one-shot, non-recursive direct calls) |

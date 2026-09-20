@@ -4,7 +4,7 @@
 //! the pass over real modules through the checker + HIR builder,
 //! re-validates structure and effects, checks the acceptance negative
 //! cases (trap / host / Unique / cleanup), the fixpoint + determinism,
-//! the whole-pipeline corpus with `--simplify`, and consumers-on vs
+//! the whole-pipeline corpus with the `hir` gate, and consumers-on vs
 //! consumers-off interpreter equivalence.
 //!
 //! Wired into root.zig's test block; run via `zig build test`.
@@ -314,7 +314,7 @@ fn compileAir(spec: []const u8, text: []const u8, simplify: bool) ![]u8 {
         .entry = spec,
         .sources = sources,
         .entry_fn = "main",
-        .simplify = simplify,
+        .optimize = .{ .hir = simplify },
     });
     defer comp.deinit();
     if (comp.program) |*p| return cfg.print(p, testing.allocator);
@@ -421,7 +421,7 @@ fn corpusSimplify(dir: []const u8, spec: []const u8) !void {
     };
     defer testing.allocator.free(text);
     const air = compileAir(spec, text, true) catch |err| {
-        std.debug.print("simplify corpus: {s} failed to compile with --simplify ({s})\n", .{ path, @errorName(err) });
+        std.debug.print("simplify corpus: {s} failed to compile with the hir gate ({s})\n", .{ path, @errorName(err) });
         return error.TestUnexpectedResult;
     };
     defer testing.allocator.free(air);

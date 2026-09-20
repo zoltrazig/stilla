@@ -9,9 +9,9 @@
 >   HIR→CFG lowering（hir_lower.zig 与 hir_lower_expr / `_control` / `_call` /
 >   `_pattern`）；module-const 依赖检查。
 > - **消费者**：dead-let + selective A-Normal Form + `never_returns` 后缀删除
->   （hir_simplify.zig，`--simplify`，默认关）；SEG（hir_seg.zig 的 island 驱动
->   与 hir_egraph.zig 的 slotted e-graph arena，可执行文件默认开、`--no-seg`
->   关闭；库默认关、`Options.seg` 开启）。
+>   （hir_simplify.zig，`hir` 门，`--opt hir`，默认关）；SEG（hir_seg.zig 的
+>   island 驱动与 hir_egraph.zig 的 slotted e-graph arena，`seg` 门可执行文件
+>   默认开、库默认关）。
 > - **设计已定但未实现**（§11、[todo.md](todo.md)）：HIRTypeId canonical 表、
 >   source span side table。
 > - **阅读约定**：数据结构以 hir.zig 的落地形态为准；标 **Target** 的段落是
@@ -79,20 +79,20 @@ flowchart TD
     BUILD --> V1[hir.validate 结构校验]
     V1 --> EFF[hir_effects.analyze + validate]
     EFF --> MC[checkModuleDependencies]
-    MC --> SIMPQ{--simplify?}
+    MC --> SIMPQ{hir 门?}
     SIMPQ -->|是| ANF[dead-let / selective ANF] --> RV1[revalidateHir]
-    SIMPQ -->|否| SEGQ{--no-seg?}
+    SIMPQ -->|否| SEGQ{seg 门?}
     RV1 --> SEGQ
-    SEGQ -->|否| SEG[SEG island 重写（e-graph arena）] --> RV2[revalidateHir]
-    SEGQ -->|是| LOWER[HIR→CFG lowering]
+    SEGQ -->|是| SEG[SEG island 重写（e-graph arena）] --> RV2[revalidateHir]
+    SEGQ -->|否| LOWER[HIR→CFG lowering]
     RV2 --> LOWER
     LOWER --> AIRC[CFG AIR]
     AIRC --> OPT[optimizer + drop lowering]
     OPT --> LLIR[LLIR]
 ```
 
-`--simplify` 与 SEG **先后独立**：`--simplify` 默认关，SEG 默认开
-（`--no-seg` 关闭）；两者都开时先 ANF 再 SEG，各自改写后都要
+`hir` 门与 SEG **先后独立**：`hir` 默认关，SEG 默认开
+（`--no-opt seg` 关闭）；两者都开时先 ANF 再 SEG，各自改写后都要
 `revalidateHir`（§2.4）。两者都不长在 CFG 上。
 
 **Target 形态（未立项）：**
@@ -112,7 +112,7 @@ flowchart TD
 ### 2.3 与现状管线的边界
 
 现状（唯一路径）：`module graph → checker（AST 注解）→ HIR 构建 → 结构校验 →
-效果分析校验 → module-const 检查 → [--simplify] → SEG（默认开，`--no-seg`关）→
+效果分析校验 → module-const 检查 → [hir 门] → SEG（seg 门，可执行文件默认开）→
 重新校验 →
 HIR→CFG lowering → optimizer → LLIR`。直降路径不再存在。
 
@@ -707,7 +707,7 @@ let B0: i32 = call(fnref H0) in       // host binding：effectful → 提为 let
 - 合成 let 只能从**同一 full expression 内**提子表达式并保持 LTR；**不改变**
   临时量的销毁注册。
 
-> **消费者（hir_simplify.zig，`--simplify`，默认关）**：以 `can_float_as_tree`
+> **消费者（hir_simplify.zig，`hir` 门，默认关）**：以 `can_float_as_tree`
 > 逐 operand 判定，父节点为 `strict_ltr` 时每轮只提**第一个**不可浮动 operand
 > （链从外向内）；惰性 region 内不跨边界提升。**Copy operand 总是可提**；
 > **Unique operand 仅在父节点已转移或就地处弃它时可提**：合成的 `let` 绑定在
@@ -1422,9 +1422,9 @@ lowering。可选变换每轮原位重写后重新跑结构 + 效果校验（§2
   hir_effects_never.zig（never_returns 最大不动点）、hir_effects_drop.zig
   （精确 `drop_effect(T)`）、hir_effects_const.zig（module-const 检查）、
   hir_effects_queries.zig（派生查询 / capability / 清理门）与之协作；
-- 消费者：hir_simplify.zig（`--simplify`，默认关；dead-let / selective ANF /
+- 消费者：hir_simplify.zig（`hir` 门，默认关；dead-let / selective ANF /
   `never_returns` 后缀删除）、hir_seg.zig（island 准入 / boundary rewrite / 轮循环；
-  可执行文件默认开、`--no-seg` 关；库默认关）+ hir_egraph.zig（slotted e-graph
+  `seg` 门可执行文件默认开、库默认关）+ hir_egraph.zig（slotted e-graph
   arena：e-class 表 / union-find / encode / 有界 saturation / extraction）+
   hir_egraph_rules.zig（纯哈希 / 相等 / 常量折叠 / 整数代数 helpers，从 e-graph
   驱动层拆出、对驱动层 / e-graph 环无回依赖，经文件作用域别名复用）；
@@ -1466,7 +1466,7 @@ cost model（§8.2）：全语料 `rounds` / `unions` / `merges` / `copies` 四�
 | --- | --- | --- |
 | M1a | 结构 HIR：AST→HIR 构建、结构校验、HIR→CFG lowering；直降路径删除后成为唯一前端路径 | hir_build.zig / hir_validate.zig / hir_lower.zig |
 | M1b | 效果基础设施：`SemanticInfo.effect`、可插拔格引擎（默认实例 = 固定乘积格，第二实例 `hierarchy`）、transfer、cleanup 门、派生查询、host 语义注册表 | effects_lattice.zig / effects_engine.zig / hir_effects*.zig |
-| M2a | SEG 规则子集（β / η / let / 常折叠 / 整数代数 / 聚合投影 / known-variant match / CSE sharing）；union 规则在 slotted e-graph arena 里走 encode → 有界 saturation → extraction，β / η / let / match 是驱动层的 boundary rewrite；可执行文件默认开、`--no-seg` 关 | hir_seg.zig / hir_egraph.zig / hir_egraph_rules.zig |
+| M2a | SEG 规则子集（β / η / let / 常折叠 / 整数代数 / 聚合投影 / known-variant match / CSE sharing）；union 规则在 slotted e-graph arena 里走 encode → 有界 saturation → extraction，β / η / let / match 是驱动层的 boundary rewrite；`seg` 门可执行文件默认开 | hir_seg.zig / hir_egraph.zig / hir_egraph_rules.zig |
 | M2b | 摘要化消费者：函数摘要 SCC least fixpoint、精确 `drop_effect(T)`、module-const 检查、dead-let / selective ANF / `never_returns` 后缀删除 | hir_effects*.zig / hir_simplify.zig |
 
 **尚未实现**（完整清单见 [todo.md](todo.md)）：

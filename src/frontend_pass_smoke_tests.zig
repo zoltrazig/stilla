@@ -68,7 +68,7 @@ fn compileProbe(dir: []const u8, spec: []const u8, optimize: bool) !Compiled {
         .entry = spec,
         .sources = sources,
         .entry_fn = "main",
-        .optimize = optimize,
+        .optimize = .{ .cfg = optimize },
     });
     return .{ .comp = comp, .source_arena = source_arena };
 }
@@ -208,9 +208,7 @@ fn compileProbeWithProvider(spec: []const u8, provider: *const effects.Provider)
         .entry = spec,
         .sources = sources,
         .entry_fn = "main",
-        .optimize = true,
-        .seg = true,
-        .simplify = true,
+        .optimize = .{ .cfg = true, .seg = true, .hir = true },
         .provider = provider,
     });
     return .{ .comp = comp, .source_arena = source_arena };
@@ -260,9 +258,7 @@ fn compileHostProbeWithProvider(provider: *const effects.Provider, host_decls: [
         .entry = "app",
         .sources = sources,
         .entry_fn = "main",
-        .optimize = true,
-        .seg = true,
-        .simplify = true,
+        .optimize = .{ .cfg = true, .seg = true, .hir = true },
         .provider = provider,
         .host_decls = host_decls,
     });

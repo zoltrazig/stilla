@@ -189,8 +189,23 @@ pub const CostModel = struct {
 };
 
 pub const Config = struct {
+    pub const Rules = struct {
+        /// Constant folding.
+        fold: bool = true,
+        /// Integer algebra identities.
+        algebra: bool = true,
+        /// Constant `if` / `and` / `or`.
+        cond: bool = true,
+        /// Aggregate projection (`field_get` over a constructor).
+        project: bool = true,
+        /// Materialize shared subtrees as synthesized `let`s (CSE sharing).
+        cse: bool = true,
+    };
+
     /// Bound on saturation rounds (the caller's `max_iterations`).
     max_rounds: u32 = 8,
+    /// Which union rules this island may apply.
+    rules: Rules = .{},
 };
 
 pub const Result = struct {
@@ -260,6 +275,7 @@ pub const Island = struct {
     pr: *hir.Program,
     analysis: *hir_effects.Analysis,
     max_rounds: u32,
+    rules: Config.Rules = .{},
 
     classes: std.ArrayList(EClass) = .empty,
     nodes: std.ArrayList(ENode) = .empty,
@@ -284,7 +300,7 @@ pub const Island = struct {
     written: std.ArrayList(hir.ExprId) = .empty,
 
     pub fn init(arena: std.mem.Allocator, pr: *hir.Program, analysis: *hir_effects.Analysis, config: Config) Island {
-        return .{ .arena = arena, .pr = pr, .analysis = analysis, .max_rounds = config.max_rounds };
+        return .{ .arena = arena, .pr = pr, .analysis = analysis, .max_rounds = config.max_rounds, .rules = config.rules };
     }
 
     // -----------------------------------------------------------------
@@ -714,12 +730,12 @@ pub const Island = struct {
     fn applyRules(self: *Island, nid: NodeId) Error!bool {
         const n = self.nodes.items[nid];
         const d = hir.registry.get(n.op);
-        if (d.typed) return self.ruleNumeric(nid);
+        if (d.typed and (self.rules.fold or self.rules.algebra)) return self.ruleNumeric(nid);
         const base = baseName(d.name);
-        if (std.mem.eql(u8, base, "if") or std.mem.eql(u8, base, "and") or std.mem.eql(u8, base, "or")) {
+        if (self.rules.cond and (std.mem.eql(u8, base, "if") or std.mem.eql(u8, base, "and") or std.mem.eql(u8, base, "or"))) {
             return self.ruleConstCond(nid);
         }
-        if (std.mem.eql(u8, base, "field_get")) return self.ruleProject(nid);
+        if (self.rules.project and std.mem.eql(u8, base, "field_get")) return self.ruleProject(nid);
         return false;
     }
 
@@ -733,7 +749,7 @@ pub const Island = struct {
         const base = baseName(d.name);
         const cls = self.find(n.cls);
 
-        if (n.operands.len >= 1 and n.operands.len <= 2) {
+        if (self.rules.fold and n.operands.len >= 1 and n.operands.len <= 2) {
             var values: [2]meta.ConstValue = undefined;
             var all_const = true;
             for (n.operands, 0..) |op, k| {
@@ -762,7 +778,7 @@ pub const Island = struct {
             }
         }
 
-        if (n.operands.len == 2 and isIntegerRep(rep)) {
+        if (self.rules.algebra and n.operands.len == 2 and isIntegerRep(rep)) {
             const lc = self.constIn(n.operands[0]);
             const rc = self.constIn(n.operands[1]);
             const result = integerAlgebra(base, rep, lc, rc) orelse return false;
@@ -1020,6 +1036,7 @@ pub const Island = struct {
     };
 
     fn materialization(self: *Island, n: ENode) Error!?Plan {
+        if (!self.rules.cse) return null;
         const d = hir.registry.get(n.op);
         if (d.regions != .none or d.policy != .strict_ltr) return null;
         if (n.operands.len < 2) return null;
@@ -1414,6 +1431,53 @@ test "the arena merges α-equal island subtrees into one e-class (CSE)" {
     try testing.expectEqualStrings("let", hir.registry.get(pr.node(body).op).name);
     try testing.expectEqual(@as(usize, 1), countNodes(pr, root, "mul.i32"));
     try testing.expectEqual(@as(usize, 4), countNodes(pr, root, "local"));
+}
+
+test "rules.fold toggle: constant folding fires by default and is suppressed off" {
+    {
+        var f = try fixture(i32ty, "fn () { add.i32(1i32, 2i32) }");
+        defer f.deinit();
+        const pr = f.pr();
+        const body = pr.region(pr.regionsOf(f.root())[0]).root;
+        const result = try optimizeIsland(f.arena.allocator(), pr, f.analysis, body, .{});
+        try testing.expect(result.stats.folds >= 1);
+        try testing.expectEqualStrings("const", hir.registry.get(pr.node(body).op).name);
+    }
+    {
+        var f = try fixture(i32ty, "fn () { add.i32(1i32, 2i32) }");
+        defer f.deinit();
+        const pr = f.pr();
+        const body = pr.region(pr.regionsOf(f.root())[0]).root;
+        const result = try optimizeIsland(f.arena.allocator(), pr, f.analysis, body, .{ .rules = .{ .fold = false } });
+        try testing.expectEqual(@as(usize, 0), result.stats.folds);
+        try testing.expectEqual(@as(usize, 0), result.stats.folds_matched);
+        try testing.expectEqualStrings("add.i32", hir.registry.get(pr.node(body).op).name);
+    }
+}
+
+test "rules.cse toggle: the synthesized sharing let fires by default and is suppressed off" {
+    const text = "fn (B0: i32, B1: i32) { add.i32(mul.i32(%B0, %B1), mul.i32(%B0, %B1)) }";
+    {
+        var f = try fixture(i32ty, text);
+        defer f.deinit();
+        const pr = f.pr();
+        const body = pr.region(pr.regionsOf(f.root())[0]).root;
+        const result = try optimizeIsland(f.arena.allocator(), pr, f.analysis, body, .{});
+        try testing.expectEqual(@as(usize, 1), result.stats.materialized);
+        try testing.expectEqual(@as(usize, 1), countNodes(pr, body, "mul.i32"));
+    }
+    {
+        var f = try fixture(i32ty, text);
+        defer f.deinit();
+        const pr = f.pr();
+        const body = pr.region(pr.regionsOf(f.root())[0]).root;
+        const result = try optimizeIsland(f.arena.allocator(), pr, f.analysis, body, .{ .rules = .{ .cse = false } });
+        try testing.expectEqual(@as(usize, 0), result.stats.materialized);
+        // The two α-equal `mul`s stay distinct tree nodes (no synthesized
+        // `let`), and extraction wrote nothing.
+        try testing.expectEqual(@as(usize, 2), countNodes(pr, body, "mul.i32"));
+        try testing.expect(!result.changed);
+    }
 }
 
 test "SLOT numbering reuses one slot per binder and keeps free-binder identity" {

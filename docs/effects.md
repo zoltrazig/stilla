@@ -10,8 +10,8 @@
 >   `passes/rewrite_contract.zig`；首批实例 β 与 dead-let，随后是 `ruleLet` 的
 >   `let_dead` / `let_forward` / `let_atom` 三分支，以及 η 与 selective ANF）。
 > - **消费者**：dead-let + selective ANF + `never_returns` 后缀删除
->   （`--simplify`，默认关）、SEG（hir_seg.zig 驱动 + hir_egraph.zig
->   arena；可执行文件默认开、`--no-seg` 关；库默认关、`Options.seg` 开启）。
+>   （`hir` 门，默认关）、SEG（hir_seg.zig 驱动 + hir_egraph.zig
+>   arena；`seg` 门可执行文件默认开、库默认关、`OptimizeConfig.seg` 开启）。
 >
 > 配套文档：使用该模型的 IR 见 [hir.md](hir.md)。本文自含效果模型所需的全部
 > 定义；两者重叠的概念（求值序、值使用、效果）在本文给出权威定义，[hir.md](hir.md) 保留
@@ -315,7 +315,7 @@ Top  = ⊤ = (All,    true,  true,  true)    // 格顶，一切未知 = 全收 c
   `Pure` 同值，「推导下界 ≠ 已证明纯」的区分由 §8.2 的 `Pending` /
   `Ready(summary)` 状态机承担（不在格内）。后缀 DCE 的合法性由独立 must 事实
   `never_returns` 恢复——该 must 事实已落地（§10.1，hir_effects.zig 的
-  greatest fixpoint），后缀删除在 M2b 消费者（hir_simplify.zig，`--simplify`）；
+   greatest fixpoint），后缀删除在 M2b 消费者（hir_simplify.zig，`hir` 门）；
   摘要代数不变，`;` 合并仍保守并入后缀位。
 
 **序论谓词：派生合法性查询是序理想（下集）。** 每个派生查询在 `≤` 上是**向下闭**的
@@ -811,8 +811,8 @@ ownership 可用性与 lifetime 栅栏，**缺一不可**。
   推导（`hir_effects.exprNever`：`never` 型节点、严格求值子项、全臂分支、可解析
   callee 集）。推导保守（取不到即 false）；递归 SCC 取 **greatest fixpoint**
   （coinductive：`fn f() -> void { f() }` 真的不返回，least fixpoint 会漏掉）。
-  调用点后同一直行区域的后缀不可达，M2b 消费者（`hir_simplify.zig`，
-  `--simplify`）整段删除（§12.4）并退役该区域的 FE 清理 token。被删节点不可达，
+   调用点后同一直行区域的后缀不可达，M2b 消费者（`hir_simplify.zig`，
+   `hir` 门）整段删除（§12.4）并退役该区域的 FE 清理 token。被删节点不可达，
   故 `cleanupEffect` 的 `in_subtree` 本就不再计入，退役是 token 表卫生 +
   `cleanupOriginsReachable` 不变量。结果类型特化为 `never` 后由 `hir_lower_expr`
   的「`never` 型节点终止块」规则落地为 `trap`。摘要代数不变，`;` 合并仍保守并入
@@ -1220,8 +1220,7 @@ planner / CFG 层生成。effect 系统保证 DCE 不会误删带重要 destruct
 
 三个首要消费者，共同点是**合法性全部来自派生查询，任何一个都没有 `switch(op)`
 特判**。dead-let 与 selective ANF、`never_returns` 后缀删除在 hir_simplify.zig
-（`--simplify`，默认关），SEG 准入在 hir_seg.zig（可执行文件默认开、`--no-seg`
-关；库默认关）。
+（`hir` 门，默认关），SEG 准入在 hir_seg.zig（`seg` 门可执行文件默认开、库默认关）。
 
 ### 12.1 Selective A-Normal Form
 
@@ -1512,7 +1511,7 @@ MayTrap（含 panic）+ MayDiverge + nondeterministic
   registry generation 各自变化均改变 `EffectEnvironmentFingerprint`，而集合书写
   顺序无关；
 - **第二实例跑通全链**：`hierarchy` provider 经 `frontend.Options.provider`
-  驱动一次完整编译（`--simplify` × `--seg` 开启）；全语料产出的规范 AIR 与默认
+  驱动一次完整编译（`hir` 门 × `seg` 门开启）；全语料产出的规范 AIR 与默认
   实例逐字相同（因而解释器结果相同），且 `frontend_cache` 的语义键随 provider
   选择变化而失效；
 - 三个 pass 的**合法性判定**没有 `switch(op)` 特判——合法性一律来自派生查询

@@ -27,8 +27,11 @@ const effects = @import("effects.zig");
 const hir_seg = @import("passes/hir_seg.zig");
 const hir_simplify = @import("passes/hir_simplify.zig");
 const hir_lower = @import("passes/hir_lower.zig");
-const cfg_optimize = @import("passes/cfg_optimize.zig");
 const cfg_parse = @import("passes/cfg_parse.zig");
+
+pub const OptimizeConfig = @import("passes/optimize_config.zig").OptimizeConfig;
+pub const setOptimizeByName = @import("passes/optimize_config.zig").setByName;
+pub const optimizeToggleNames = @import("passes/optimize_config.zig").names;
 
 pub const CompileError = error{ OutOfMemory, Diagnostic, InvalidProvider };
 
@@ -106,47 +109,10 @@ pub const Options = struct {
     /// Member tables and all phase-2/3 side tables are still re-derived
     /// every compile. Null = today's fresh-compile behavior.
     cache: ?*frontend_cache.FrontendCache = null,
-    /// Run the SEG pass (hir.md §11 M2a) between effect analysis and
-    /// HIR→CFG lowering: rewrite admissible pure-Copy islands (β, let
-    /// simplification, constant folding, integer algebra), then
-    /// re-validate structure and effects (§2.4). The pass obeys the
-    /// bounded-round contract (hir_seg.Config.max_iterations) and its
-    /// corpus-level compile-time / iteration baseline is recorded in
-    /// hir.md §11. Default off — embedders and tests keep the faithful
-    /// unrewritten HIR; the `stilla` executable enables it by default
-    /// (`--no-seg` opts out).
-    seg: bool = false,
-    /// Run the effect-driven HIR consumers (hir.md §11 M2b): dead-let
-    /// elimination and selective A-Normal Form, both admitted solely by
-    /// the derived `isDiscardable` / `canFloatAsTree` queries
-    /// (effects.md §12), plus `never_returns` suffix deletion — the
-    /// straight-line suffix after a call that never returns is
-    /// unreachable and is dropped (effects.md §10.1 / §12.4). Default
-    /// off, like `seg` — the pass has its own compile-time budget and no
-    /// CLI-visible semantic oracle beyond the interpreter differential.
-    simplify: bool = false,
-    /// Run the mid-level optimizer (Passes 7–8) over the lowered CFG
-    /// before returning (optimizer.md): tail call elimination, constant
-    /// folding, CSE, PRE, copy propagation, dead-block elimination, jump
-    /// threading, phi simplification, and drop elision — followed by the
-    /// post-optimization drop lowering, which expands every
-    /// statically-expandable `drop` in the CFG (structs, tuples, boxes,
-    /// unions), leaving only the drops that must reach the runtime
-    /// (opaque host types, `hostdata`, `list[T]`, `any`). Default off —
-    /// embedders and tests keep the faithful raw CFG; the `stilla`
-    /// executable enables it. The toggle is code-only (no CLI flag).
-    optimize: bool = false,
-    /// When `optimize` is set, run the Pass 7–8 sequence to a bounded
-    /// fixpoint instead of once (optimizer.md, §8.9): iteration 1 is the
-    /// full sequence; each later iteration repeats the same fixed order
-    /// with the one-shot inliner skipped (re-running it on spliced
-    /// recursive callees would grow the CFG without bound), until a full
-    /// iteration changes nothing or the compile-time cap
-    /// `cfg_optimize.aggressive_max_iters` is reached, with the air.md
-    /// §13 validator still guarding every rewrite inside each iteration.
-    /// Code-only toggle (no CLI flag), like `optimize`; the default
-    /// keeps the single ordered pass and its near-linear compile time.
-    optimize_aggressive: bool = false,
+    /// Optimization toggles (`optimize_config.zig`, one bool per unit).
+    /// Library default: every gate off. The `stilla` executable enables
+    /// the `seg` and `cfg` gates; `--opt`/`--no-opt <name>` set fields.
+    optimize: OptimizeConfig = .{},
 };
 
 /// The frontend's output: the arena, the phase-1 graph, and the phase-3
@@ -234,18 +200,24 @@ fn revalidateHir(arena_alloc: std.mem.Allocator, graph: *moduleinfo.ModuleGraph,
     return null;
 }
 
-/// Run the optimizer (optimizer.md): the default single ordered pass,
-/// or the bounded fixpoint loop when `aggressive` — `optimizeAggressive`
-/// with `max_iters = 1` is exactly the single pass, so the aggressive
-/// mode is a pure extension of the same driver. The validator inside
-/// `optimize`/`optimizeAggressive` guards every rewrite; a violation
+/// Run the optimizer (optimizer.md): the single ordered Pass 7–8
+/// sequence, with `opt`'s per-pass toggles threaded into `cfg_optimize`.
+/// The validator inside `optimize` guards every rewrite; a violation
 /// surfaces as `error.ValidationFailed` here.
-fn runOptimizer(program: *cfg.IrProgram, allocator: std.mem.Allocator, aggressive: bool) !void {
-    if (aggressive) {
-        try lower.optimizeAggressive(program, allocator, cfg_optimize.aggressive_max_iters);
-    } else {
-        try lower.optimize(program, allocator);
-    }
+fn runOptimizer(program: *cfg.IrProgram, allocator: std.mem.Allocator, opt: OptimizeConfig) !void {
+    try lower.optimize(program, allocator, .{
+        .tail_call = opt.cfg_tail_call,
+        .inline_calls = opt.cfg_inline,
+        .cse = opt.cfg_cse,
+        .copy_prop = opt.cfg_copy_prop,
+        .pre = opt.cfg_pre,
+        .if_convert = opt.cfg_if_convert,
+        .dead_block = opt.cfg_dead_block,
+        .drop_elide = opt.cfg_drop_elide,
+        .dead_instr = opt.cfg_dead_instr,
+        .jump_thread = opt.cfg_jump_thread,
+        .phi_simplify = opt.cfg_phi_simplify,
+    });
 }
 
 /// Compile a program: entry module → AIR (frontend.md §1, §2).
@@ -364,21 +336,46 @@ pub fn compile(allocator: std.mem.Allocator, options: Options) CompileError!Comp
                 .message = msg,
             }}, graph, builder.loaded_sources.items);
         }
-        if (options.simplify) {
+        if (options.optimize.hir) {
             // M2b effect-driven consumers (hir.md §11): dead-let +
             // selective A-Normal Form, then re-validate structure and
             // effects on the rewritten program (hir.md §2.4).
-            _ = hir_simplify.optimize(arena_alloc, built, .{ .graph = graph, .host_decls = options.host_decls, .resources = options.resources, .engine = &engine }) catch return error.OutOfMemory;
+            _ = hir_simplify.optimize(arena_alloc, built, .{
+                .graph = graph,
+                .host_decls = options.host_decls,
+                .resources = options.resources,
+                .engine = &engine,
+                .dead_let = options.optimize.dead_let,
+                .anf = options.optimize.anf,
+                .never_suffix = options.optimize.never_suffix,
+            }) catch return error.OutOfMemory;
             if (revalidateHir(arena_alloc, graph, built, options.host_decls, options.resources, &engine) catch return error.OutOfMemory) |diag| {
                 return failed(arena, &.{diag}, graph, builder.loaded_sources.items);
             }
         }
-        if (options.seg) {
+        if (options.optimize.seg) {
             // M2a SEG (hir.md §11): rewrite islands after the validated
             // effect analysis, then re-validate structure and effects on
             // the rewritten program (hir.md §2.4 — a transform may not
             // assume the pre-rewrite static conclusions still hold).
-            _ = hir_seg.optimize(arena_alloc, built, .{ .graph = graph, .host_decls = options.host_decls, .resources = options.resources, .engine = &engine }) catch return error.OutOfMemory;
+            _ = hir_seg.optimize(arena_alloc, built, .{
+                .graph = graph,
+                .host_decls = options.host_decls,
+                .resources = options.resources,
+                .engine = &engine,
+                .beta = options.optimize.seg_beta,
+                .eta = options.optimize.seg_eta,
+                .let_dead = options.optimize.seg_let_dead,
+                .let_forward = options.optimize.seg_let_forward,
+                .let_atom = options.optimize.seg_let_atom,
+                .match = options.optimize.seg_match,
+                .reorder = options.optimize.seg_reorder,
+                .egraph_fold = options.optimize.egraph_fold,
+                .egraph_algebra = options.optimize.egraph_algebra,
+                .egraph_cond = options.optimize.egraph_cond,
+                .egraph_project = options.optimize.egraph_project,
+                .egraph_cse = options.optimize.egraph_cse,
+            }) catch return error.OutOfMemory;
             if (revalidateHir(arena_alloc, graph, built, options.host_decls, options.resources, &engine) catch return error.OutOfMemory) |diag| {
                 return failed(arena, &.{diag}, graph, builder.loaded_sources.items);
             }
@@ -408,16 +405,15 @@ pub fn compile(allocator: std.mem.Allocator, options: Options) CompileError!Comp
         }}, graph, builder.loaded_sources.items);
     }
 
-    // Mid-level optimizer (Passes 7–8, optimizer.md): by default a
-    // single ordered pass over the lowered CFG; `optimize_aggressive`
-    // loops the same sequence to a bounded fixpoint. The lowering
-    // validator already ran inside lowerProgram (before the sequence);
-    // afterwards the optimized program is re-validated structurally by
-    // round-tripping it through the canonical text form and its parser
-    // (air.md §13), so an optimizer bug surfaces as a diagnostic here
-    // rather than at the runtime consumer.
-    if (options.optimize) {
-        runOptimizer(&program, arena_alloc, options.optimize_aggressive) catch |err| switch (err) {
+    // Mid-level optimizer (Passes 7–8, optimizer.md): a single ordered
+    // pass over the lowered CFG, with `optimize`'s per-pass toggles. The
+    // lowering validator already ran inside lowerProgram (before the
+    // sequence); afterwards the optimized program is re-validated
+    // structurally by round-tripping it through the canonical text form
+    // and its parser (air.md §13), so an optimizer bug surfaces as a
+    // diagnostic here rather than at the runtime consumer.
+    if (options.optimize.cfg) {
+        runOptimizer(&program, arena_alloc, options.optimize) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             error.ValidationFailed => {
                 // The air.md §13 validator rejected the program after a

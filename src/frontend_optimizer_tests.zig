@@ -15,6 +15,7 @@ const std = @import("std");
 const cfg = @import("cfg.zig");
 const meta = @import("meta.zig");
 const frontend = @import("frontend.zig");
+const moduleinfo = @import("moduleinfo.zig");
 const lower = @import("lower.zig");
 const cfg_parse = @import("passes/cfg_parse.zig");
 const cfg_lower_emit = @import("passes/cfg_lower_emit.zig");
@@ -22,7 +23,6 @@ const testing = std.testing;
 const helpers = @import("frontend_test_support.zig");
 const compileText = helpers.compileText;
 const compileOpt = helpers.compileOpt;
-const compileAggressive = helpers.compileAggressive;
 const irText = helpers.irText;
 const funcBody = helpers.funcBody;
 // ---------------------------------------------------------------------------
@@ -138,7 +138,7 @@ test "Pass 7 skips a tail call whose chain merges another arm's value" {
     var full = try compileText("app", &.{.{ "app", src }});
     defer full.deinit();
     var fprogram = full.program.?;
-    try lower.optimize(&fprogram, full.arena.allocator());
+    try lower.optimize(&fprogram, full.arena.allocator(), .{});
     const ftext = try irText(&fprogram);
     defer testing.allocator.free(ftext);
     try testing.expect(std.mem.indexOf(u8, ftext, "call @app.f") != null);
@@ -275,7 +275,7 @@ test "Pass 7 runs before the Pass 8 pipeline" {
     defer c.deinit();
 
     var program = c.program.?;
-    try lower.optimize(&program, c.arena.allocator());
+    try lower.optimize(&program, c.arena.allocator(), .{});
 
     const text = try irText(&program);
     defer testing.allocator.free(text);
@@ -857,7 +857,7 @@ test "Pass 8.1 folded AIR round-trips through the standalone cfg parser" {
     defer c.deinit();
 
     var program = c.program.?;
-    try lower.optimize(&program, c.arena.allocator());
+    try lower.optimize(&program, c.arena.allocator(), .{});
 
     const text = try irText(&program);
     defer testing.allocator.free(text);
@@ -1545,7 +1545,7 @@ test "Pass 8.3 lower.optimize on a full program round-trips through the standalo
     defer c.deinit();
 
     var program = c.program.?;
-    try lower.optimize(&program, c.arena.allocator());
+    try lower.optimize(&program, c.arena.allocator(), .{});
 
     const text = try irText(&program);
     defer testing.allocator.free(text);
@@ -1760,7 +1760,7 @@ test "Pass 8.5 lower.optimize on a program with a dead block round-trips" {
     defer c.deinit();
 
     var program = c.program.?;
-    try lower.optimize(&program, c.arena.allocator());
+    try lower.optimize(&program, c.arena.allocator(), .{});
 
     const text = try irText(&program);
     defer testing.allocator.free(text);
@@ -1843,214 +1843,81 @@ test "Pass 8.5 keeps diamonds with impure arms branchy" {
 }
 
 // ---------------------------------------------------------------------------
-// Pass 8.9 — optional optimizer fixpoint iteration (optimizer.md, §8.9)
+// OptimizeConfig — independent per-toggle gating (`optimize_config.zig`)
 // ---------------------------------------------------------------------------
 
-// Compile-time regression guard for the aggressive loop cap: the
-// demonstrating test below needs a second iteration to fire, so a cap
-// below 2 would silently turn aggressive mode into the single pass and
-// the test would stop demonstrating. The check fails at compile time,
-// not at runtime.
-comptime {
-    if (lower.aggressive_max_iters < 2) {
-        @compileError("optimizer aggressive_max_iters must be >= 2 (the demonstrating fixpoint test needs a second iteration)");
+/// Compile the entry module from (specifier, source) pairs with an explicit
+/// `OptimizeConfig` (the shared `compileText`/`compileOpt` helpers fix it).
+fn compileWithOpt(entry: []const u8, texts: []const struct { []const u8, []const u8 }, opt: frontend.OptimizeConfig) !frontend.Compilation {
+    var sources = moduleinfo.Sources{};
+    var source_map = std.StringHashMapUnmanaged([]const u8).empty;
+    defer source_map.deinit(testing.allocator);
+    for (texts) |pair| {
+        try source_map.put(testing.allocator, pair[0], pair[1]);
     }
+    sources.source = source_map;
+    return frontend.compile(testing.allocator, .{ .entry = entry, .sources = sources, .entry_fn = "main", .optimize = opt });
 }
 
-test "Pass 8.3 PRE survives block-id gaps left by a prior dead-block pass" {
-    // The aggressive fixpoint loop re-runs PRE (and every other pass)
-    // over a program whose previous iteration's dead-block elimination
-    // removed blocks without renumbering — block ids are creation
-    // indices, not part of the text form (air.md §13), so a removed
-    // block leaves a gap. PRE's dominator matrix must be sized by the
-    // largest id, not the block count, or the re-run indexes out of
-    // bounds (the single-pass driver never re-runs PRE on a mutated
-    // program, which is why the bug was latent).
-    var t = try cfg_parse.parseText(
-        \\module "app" {
-        \\func @f(a: int32, b: int32, c: bool) -> bool {
-        \\entry:
-        \\    br %2 ? pos : neg
-        \\pos:
-        \\    j join
-        \\neg:
-        \\    %3: bool = lt %0, %1
-        \\    j join
-        \\dead:
-        \\    %4: bool = lt %0, %1
-        \\    j join
-        \\join:
-        \\    %5: bool = lt %0, %1
-        \\    ret %5
-        \\}
-        \\}
-    );
-    defer t.arena.deinit();
-    try lower.deadBlock(&t.program, t.arena.allocator());
-    // `dead` is gone but its id slot is not reclaimed: the survivors are
-    // ids 0, 1, 2, 4 — blocks.len (4) under-counts the live id space.
-    try testing.expectEqual(@as(usize, 4), t.program.funcs[0].blocks.len);
-    try lower.pre(&t.program, t.arena.allocator());
-    // PRE still rewrites the join's partially redundant comparison (only
-    // the `neg` edge computes it) into a join phi.
-    const join = t.program.funcs[0].blocks[t.program.funcs[0].blocks.len - 1];
-    try testing.expect(join.instrs[0].op == .phi);
-}
+test "OptimizeConfig: disabling a cfg sub-pass changes the AIR (cfg_cse)" {
+    // `cfgpass_cse_module_member` reads `lib.ratio` twice in one block. With
+    // the `cfg` gate on and every sub-toggle default (on), the mid-level
+    // module/member CSE collapses the two loads to one; with `cfg_cse` off
+    // the duplicate loads survive, so the AIR differs for exactly that
+    // sub-pass (optimizer.md, Pass 8.4).
+    const app_src = try helpers.probeSource("probes/cases", "cfgpass_cse_module_member");
+    defer testing.allocator.free(app_src);
+    const lib_src = try helpers.probeSource("probes/cases", "cfgpass_cse_module_member_lib");
+    defer testing.allocator.free(lib_src);
+    const texts = &.{ .{ "app", app_src }, .{ "lib", lib_src } };
 
-test "Pass 8.9 a second iteration enables a further simplification" {
-    // The inliner splices make/show/consume into `main`, and the splice
-    // continuations form a forwarding chain. Iteration 1's jump threading
-    // collapses most of it but leaves the chain's tail blocks behind —
-    // the pass's own doc (cfg_jump_thread.zig): "a chain collapsed in one
-    // pass may leave one forwarding block behind, which a later
-    // optimization invocation removes". The aggressive loop's second
-    // iteration re-runs threading and removes both leftovers, so the
-    // edges jump straight to their targets and the blocks are gone. This
-    // is the plan's "tail-call enabling a dead-block removal" family: a
-    // late-pass leftover that only the next iteration's dead/forwarding
-    // elimination reaches.
-    const src_buf = try helpers.probeSource("probes/cases", "opt_fixpoint_second_iteration");
-    defer testing.allocator.free(src_buf);
-    const src = &.{.{ "app", src_buf }};
+    var on = try compileWithOpt("app", texts, .{ .cfg = true });
+    defer on.deinit();
+    var off = try compileWithOpt("app", texts, .{ .cfg = true, .cfg_cse = false });
+    defer off.deinit();
 
-    // Default single pass: the chain tail blocks survive as empty
-    // forwarding blocks (`inline_join_1:` / `inline_join_2:`), each a
-    // bare `j` to the next segment.
-    var def = try compileOpt("app", src);
-    defer def.deinit();
-    const def_text = try irText(&def.program.?);
-    defer testing.allocator.free(def_text);
-    try testing.expect(std.mem.indexOf(u8, def_text, "inline_join_1:\n        j inline_join") != null);
-    try testing.expect(std.mem.indexOf(u8, def_text, "inline_join_2:\n        j entry_2") != null);
+    const on_text = try irText(&on.program.?);
+    defer testing.allocator.free(on_text);
+    const off_text = try irText(&off.program.?);
+    defer testing.allocator.free(off_text);
 
-    // Aggressive mode (bounded fixpoint): the second iteration's jump
-    // threading removes both leftovers — the forwarding blocks are gone
-    // and the edges go straight to their ultimate targets. The output is
-    // strictly smaller.
-    var agg = try compileAggressive("app", src);
-    defer agg.deinit();
-    const agg_text = try irText(&agg.program.?);
-    defer testing.allocator.free(agg_text);
-    try testing.expect(std.mem.indexOf(u8, agg_text, "inline_join_1:\n        j inline_join") == null);
-    try testing.expect(std.mem.indexOf(u8, agg_text, "inline_join_2:\n        j entry_2") == null);
-    try testing.expect(agg_text.len < def_text.len);
-    try testing.expect(countBlocks(&agg.program.?) < countBlocks(&def.program.?));
+    // The AIR differs, and the difference is the disabled sub-pass: CSE on
+    // leaves one `load_member`, CSE off leaves the original two.
+    try testing.expect(!std.mem.eql(u8, on_text, off_text));
+    try testing.expect(std.mem.count(u8, funcBody(on_text, "func @app.f"), "load_member") == 1);
+    try testing.expect(std.mem.count(u8, funcBody(off_text, "func @app.f"), "load_member") == 2);
 
-    // The aggressive output is stable at the fixpoint: the same raw
-    // program optimized with two iterations and with the full cap
-    // produces the same text, so the loop stopped on "no change", not
-    // on the cap.
-    var agg_cap = try compileText("app", src);
-    defer agg_cap.deinit();
-    var agg_cap_prog = agg_cap.program.?;
-    try lower.optimizeAggressive(&agg_cap_prog, agg_cap.arena.allocator(), lower.aggressive_max_iters);
-    const agg_cap_text = try irText(&agg_cap_prog);
-    defer testing.allocator.free(agg_cap_text);
-    var agg_two = try compileText("app", src);
-    defer agg_two.deinit();
-    var agg_two_prog = agg_two.program.?;
-    try lower.optimizeAggressive(&agg_two_prog, agg_two.arena.allocator(), 2);
-    const agg_two_text = try irText(&agg_two_prog);
-    defer testing.allocator.free(agg_two_text);
-    try testing.expectEqualStrings(agg_two_text, agg_cap_text);
-    // The two-iteration result is the full-pipeline aggressive output
-    // (drop-lowered) modulo the drop expansion itself: the leftover
-    // forwarding blocks are gone in both.
-    try testing.expect(std.mem.indexOf(u8, agg_two_text, "inline_join_1:") == null);
-    try testing.expect(std.mem.indexOf(u8, agg_two_text, "inline_join_2:") == null);
-
-    // Default output is deterministic (two fresh compiles, byte-identical)
-    // and the aggressive output re-parses to itself (air.md §13).
-    var def2 = try compileOpt("app", src);
-    defer def2.deinit();
-    const def2_text = try irText(&def2.program.?);
-    defer testing.allocator.free(def2_text);
-    try testing.expectEqualStrings(def_text, def2_text);
-    var p = cfg.Parser.init(testing.allocator);
-    defer p.deinit();
-    const reparsed = try p.parse(agg_text);
-    const retext = try irText(&reparsed);
-    defer testing.allocator.free(retext);
-    try testing.expectEqualStrings(agg_text, retext);
-}
-
-test "Pass 8.9 aggressive mode is never worse than the default on the corpus" {
-    // The whole existing optimizer corpus (the same examples the Pass 8.9
-    // harness in frontend_cfg_passes_tests.zig measures): aggressive
-    // output must be ≤ the default single-pass output in text bytes,
-    // non-phi instructions, and blocks. The default is byte-identical
-    // across two fresh compiles (determinism guard for "default output
-    // byte-identical to today").
-    const corpus = [_][]const u8{
-        "examples/basics.st",
-        "examples/fib.st",
-        "examples/functions.st",
-        "examples/structs.st",
-        "examples/any.st",
-        "examples/fib_tail_call.st",
-        "examples/minmax.st",
-        "examples/nest.st",
-        "examples/ownership.st",
-        "examples/match.st",
-        "examples/strings.st",
-        "examples/floats.st",
-        "examples/fold.st",
-        "examples/box.st",
-        "examples/maps.st",
-        "examples/arrays.st",
-        "examples/generics.st",
-        "examples/madd.st",
-    };
-    const io = std.testing.io;
-    for (corpus) |path| {
-        const src = try std.Io.Dir.cwd().readFileAlloc(io, path, testing.allocator, .limited(1 << 20));
-        defer testing.allocator.free(src);
-        const texts = &.{.{ "app", src }};
-
-        var def = try compileOpt("app", texts);
-        defer def.deinit();
-        const def_text = try irText(&def.program.?);
-        defer testing.allocator.free(def_text);
-
-        var def2 = try compileOpt("app", texts);
-        defer def2.deinit();
-        const def2_text = try irText(&def2.program.?);
-        defer testing.allocator.free(def2_text);
-        try testing.expectEqualStrings(def_text, def2_text);
-
-        var agg = try compileAggressive("app", texts);
-        defer agg.deinit();
-        const agg_text = try irText(&agg.program.?);
-        defer testing.allocator.free(agg_text);
-        try testing.expect(agg_text.len <= def_text.len);
-        try testing.expect(countNonPhi(&agg.program.?) <= countNonPhi(&def.program.?));
-        try testing.expect(countBlocks(&agg.program.?) <= countBlocks(&def.program.?));
-
+    // Both forms round-trip through the standalone parser (air.md §13).
+    for ([_][]const u8{ on_text, off_text }) |air| {
         var p = cfg.Parser.init(testing.allocator);
         defer p.deinit();
-        const reparsed = try p.parse(agg_text);
-        const retext = try irText(&reparsed);
-        defer testing.allocator.free(retext);
-        try testing.expectEqualStrings(agg_text, retext);
+        const reparsed = try p.parse(air);
+        const again = try irText(&reparsed);
+        defer testing.allocator.free(again);
+        try testing.expectEqualStrings(air, again);
     }
 }
 
-/// The corpus measurements (optimizer.md, §8.9): instructions, non-phi
-/// instructions, and blocks across the program.
-fn countNonPhi(program: *const cfg.IrProgram) usize {
-    var n: usize = 0;
-    for (program.funcs) |f| {
-        for (f.blocks) |b| {
-            for (b.instrs) |instr| {
-                if (instr.op != .phi) n += 1;
-            }
-        }
+test "OptimizeConfig: every toggle is independently configurable" {
+    // For every field of `OptimizeConfig`, start from all gates on and flip
+    // that one field away from its library default; the pipeline must still
+    // compile and its AIR must round-trip. This is the per-toggle
+    // independence check behind `--opt`/`--no-opt <name>`.
+    const src = try helpers.probeSource("examples", "fib");
+    defer testing.allocator.free(src);
+    const defaults = frontend.OptimizeConfig{};
+    inline for (frontend.optimizeToggleNames) |name| {
+        var opt = frontend.OptimizeConfig{ .hir = true, .seg = true, .cfg = true };
+        @field(opt, name) = !@field(defaults, name);
+        var c = try compileWithOpt("app", &.{.{ "app", src }}, opt);
+        defer c.deinit();
+        const text = try irText(&c.program.?);
+        defer testing.allocator.free(text);
+        var p = cfg.Parser.init(testing.allocator);
+        defer p.deinit();
+        const reparsed = try p.parse(text);
+        const again = try irText(&reparsed);
+        defer testing.allocator.free(again);
+        try testing.expectEqualStrings(text, again);
     }
-    return n;
-}
-
-fn countBlocks(program: *const cfg.IrProgram) usize {
-    var n: usize = 0;
-    for (program.funcs) |f| n += f.blocks.len;
-    return n;
 }

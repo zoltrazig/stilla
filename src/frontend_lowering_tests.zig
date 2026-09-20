@@ -609,7 +609,7 @@ test "Pass 7 emits tailcall for a move/unique self-recursive fold" {
     defer testing.allocator.free(src);
     try source_map.put(testing.allocator, "app", src);
     sources.source = source_map;
-    var c = try frontend.compile(testing.allocator, .{ .entry = "app", .sources = sources, .entry_fn = "main", .optimize = true });
+    var c = try frontend.compile(testing.allocator, .{ .entry = "app", .sources = sources, .entry_fn = "main", .optimize = .{ .cfg = true } });
     defer c.deinit();
 
     const program = c.program.?;
@@ -637,7 +637,7 @@ test "iter.fold with a unique accumulator compiles and fold_with tailcalls" {
     defer testing.allocator.free(src);
     try source_map.put(testing.allocator, "app", src);
     sources.source = source_map;
-    var c = try frontend.compile(testing.allocator, .{ .entry = "app", .sources = sources, .entry_fn = "main", .optimize = true });
+    var c = try frontend.compile(testing.allocator, .{ .entry = "app", .sources = sources, .entry_fn = "main", .optimize = .{ .cfg = true } });
     defer c.deinit();
 
     const program = c.program.?;
@@ -661,7 +661,7 @@ test "iter.try_fold is Stilla source and short-circuits on Break" {
     defer testing.allocator.free(src);
     try source_map.put(testing.allocator, "app", src);
     sources.source = source_map;
-    var c = try frontend.compile(testing.allocator, .{ .entry = "app", .sources = sources, .entry_fn = "main", .optimize = true });
+    var c = try frontend.compile(testing.allocator, .{ .entry = "app", .sources = sources, .entry_fn = "main", .optimize = .{ .cfg = true } });
     defer c.deinit();
 
     const program = c.program.?;

@@ -720,7 +720,7 @@ test "Pass 8.0 inlining: nested splices keep block names unique and round-trip" 
     defer testing.allocator.free(src_text);
     var c = try compileText("app", &.{.{ "app", src_text }});
     defer c.deinit();
-    try lower.optimize(&c.program.?, c.arena.allocator());
+    try lower.optimize(&c.program.?, c.arena.allocator(), .{});
 
     const text = try irText(&c.program.?);
     defer testing.allocator.free(text);
@@ -818,7 +818,7 @@ test "Pass 8.9 optimization harness: corpus compile, optimize, and measure" {
 
         var opt = try compileText("app", &.{.{ "app", src }});
         defer opt.deinit();
-        try lower.optimize(&opt.program.?, opt.arena.allocator());
+        try lower.optimize(&opt.program.?, opt.arena.allocator(), .{});
         const opt_text = try irText(&opt.program.?);
         defer testing.allocator.free(opt_text);
 
@@ -889,7 +889,7 @@ test "float fold to inf survives the optimizer round-trip" {
     defer source_map.deinit(testing.allocator);
     try source_map.put(testing.allocator, "app", src);
     sources.source = source_map;
-    var c = try frontend.compile(testing.allocator, .{ .entry = "app", .sources = sources, .entry_fn = "f", .optimize = true });
+    var c = try frontend.compile(testing.allocator, .{ .entry = "app", .sources = sources, .entry_fn = "f", .optimize = .{ .cfg = true } });
     defer c.deinit();
     const text = try cfg.print(&c.program.?, testing.allocator);
     defer testing.allocator.free(text);

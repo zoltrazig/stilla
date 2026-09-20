@@ -425,8 +425,8 @@ Consumers of the CFG:
 - **[optimizer](optimizer.md)** — the CFG is the base for the mid-level
   optimizer, a fixed sequence of semantics-preserving
   CFG→CFG rewrites run as a **single ordered pass** (no iteration to
-  fixpoint) behind `frontend.Options.optimize`; `optimize_aggressive`
-  opts into the bounded fixpoint loop ([optimizer.md](optimizer.md)).
+  fixpoint) behind the `cfg` gate of `OptimizeConfig`
+  ([optimizer.md](optimizer.md)).
 
 ## Implementation files
 

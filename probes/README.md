@@ -108,7 +108,7 @@ The detailed probes cover the source-reachable operation/type matrix:
 Every `probes/*.st` file is enumerated at test time by
 `src/probe_corpus.zig`, so a new probe automatically joins the HIR build
 corpus (`hir_tests.zig`), the canonical-AIR seam round-trip, the M2b
-consumers and `--simplify` × `--seg` four-combination differentials
+consumers and `hir` × `seg` four-combination differentials
 (`hir_simplify_tests.zig`, `hir_seg_tests.zig`), the SEG corpus budget
 (`hir_seg_tests.zig`), and the per-pass smoke suite
 (`frontend_pass_smoke_tests.zig`) — no hardcoded list to update.

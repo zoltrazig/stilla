@@ -114,7 +114,7 @@ fn loadWith(app: []const u8, iface: []const u8) !Loaded {
         .entry = "app",
         .sources = sources,
         .entry_fn = "main",
-        .optimize = false,
+        .optimize = .{},
     });
     errdefer compilation.deinit();
     const program = &(compilation.program orelse {

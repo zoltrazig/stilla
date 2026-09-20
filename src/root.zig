@@ -168,6 +168,7 @@ test {
     _ = @import("hir_simplify_tests.zig");
     _ = @import("passes/hir_seg.zig");
     _ = @import("passes/hir_simplify.zig");
+    _ = @import("passes/optimize_config.zig");
     _ = @import("host_tests.zig");
     _ = @import("stdbundle_tests.zig");
     _ = @import("vm_instr.zig");

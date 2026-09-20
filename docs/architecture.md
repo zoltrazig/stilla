@@ -47,10 +47,10 @@ CFG lowering — hir_lower.lowerProgram → cfg.IrProgram
     ▼
 AIR validator (cfg_validate, air.md) on every lowered program
     ▼
-optimizer — cfg_optimize.optimizeOnce:
+optimizer — cfg_optimize.optimizeOnce (`cfg` gate):
          tailCall → inline → cse → copyProp → pre → ifConvert →
          deadBlock → dropElide → deadInstr → jumpThread → phiSimplify
-         (aggressive: bounded fixpoint, optimizer.md)
+         (single ordered pass, optimizer.md)
     ▼
 drop lowering — cfg_lower_drop expands statically-expandable drops
     ▼
@@ -63,10 +63,10 @@ per-module LLIR artifacts  →  interpreter (loader + dispatch)  →  result
 `frontend.compile` (frontend.zig) is the one-call driver of the whole
 compile side: module graph → checker → HIR build → structural validation
 → effect analysis + validation, then the module-const dependency check
-(HIR seam) → optional effect consumers / SEG → HIR→CFG
-lowering → validation → optional optimization (single pass or bounded
-fixpoint) → drop lowering → re-validation and the canonical text
-round-trip.
+(HIR seam) → optional effect consumers / SEG (the `hir` / `seg` gates)
+→ HIR→CFG lowering → validation → optional optimization (the `cfg`
+gate, a single ordered pass) → drop lowering → re-validation and the
+canonical text round-trip.
 Everything the compile allocates lives in one arena that outlives the
 call; diagnostics follow first-error-wins unless the stage collects
 (lexer/parser/checker collect per-module).
@@ -78,7 +78,7 @@ call; diagnostics follow first-error-wins unless the stage collects
 | Lexer / parser / AST | `lex.zig`, `parser.zig`, `ast.zig`, `parse/` (grammar sub-parsers) | text → tokens → `ast.Program`; recovery + diagnostics (AST re-exports the source primitives from `meta.zig`) | module resolution, types |
 | Module graph | `moduleinfo.zig` + `passes/module_load.zig`, `module_scan.zig`, `topo_sort.zig`, `module_materialize.zig`, `module_check.zig` | module identity, specifier resolution, dedup, cycles, topo order, member tables, host-binding classification | function bodies |
 | Checker | `passes/checker.zig` + `checker_annotate.zig`, `checker_validate.zig`, `checker_ownership.zig`, `monomorphize.zig`, `type_infer.zig`, `type_resolve.zig`, `type_shape.zig` | name/type/ownership annotation; generic expansion; all static checks | control flow |
-| HIR seam (implemented) | `hir.zig`, `effects.zig`, `passes/hir_build.zig` (+ `hir_build_block` / `_expr` / `_path` / `_call` / `_control` / `_pattern`), `hir_validate.zig`, `hir_effects.zig`, `hir_simplify.zig`, `hir_seg.zig`, `hir_egraph.zig`, `hir_lower.zig` (+ `hir_lower_expr` / `hir_lower_control` / `hir_lower_call` / `hir_lower_pattern`), `passes/hir_parse.zig`, `passes/hir_print.zig` | canonical monomorphic HIR between the checker and CFG lowering: consumes the checker's annotation and module-graph decisions only (no re-inference); binder / region / pattern normalization, full-expression fences, ownership view carried over; effect infrastructure (`EffectSummary` lattice, `effect_transfer`, SCC-fixpoint function summaries, precise `drop_effect`, cleanup gate, derived legality queries) annotated onto nodes and validated, plus the summary-driven module-const init/teardown check; opt-in consumers (dead-let / selective ANF, `--simplify`) and SEG (default on in the executable, `--no-seg` opts out) — the only frontend lowering path | re-deriving static decisions and host ABI metadata wiring (later); post-CFG drop expansion and LLIR lifecycle stay with the CFG / backend |
+| HIR seam (implemented) | `hir.zig`, `effects.zig`, `passes/hir_build.zig` (+ `hir_build_block` / `_expr` / `_path` / `_call` / `_control` / `_pattern`), `hir_validate.zig`, `hir_effects.zig`, `hir_simplify.zig`, `hir_seg.zig`, `hir_egraph.zig`, `hir_lower.zig` (+ `hir_lower_expr` / `hir_lower_control` / `hir_lower_call` / `hir_lower_pattern`), `passes/hir_parse.zig`, `passes/hir_print.zig` | canonical monomorphic HIR between the checker and CFG lowering: consumes the checker's annotation and module-graph decisions only (no re-inference); binder / region / pattern normalization, full-expression fences, ownership view carried over; effect infrastructure (`EffectSummary` lattice, `effect_transfer`, SCC-fixpoint function summaries, precise `drop_effect`, cleanup gate, derived legality queries) annotated onto nodes and validated, plus the summary-driven module-const init/teardown check; the `hir` gate consumers (dead-let / selective ANF, `--opt hir`) and the `seg` gate (on in the executable, `--no-opt seg` opts out) — the only frontend lowering path | re-deriving static decisions and host ABI metadata wiring (later); post-CFG drop expansion and LLIR lifecycle stay with the CFG / backend |
 | Metadata | `meta.zig` | the self-contained shared type/metadata layer every pass agrees on: the source primitives (`SourceId` / `Span` / `Ident` / `ParamMode`), `PrimitiveKind`, `Diagnostic`, the resolved `Type` with its `Ownership` / `TypeId` / `Param` / `FunctionType`, the nominal-declaration environment (`TypeDecl` / `StructDecl` / `UnionDecl` / `OpaqueDecl` / `HostTypeId`), `ConstValue`, and the `substParams` substitution | any dependency — it imports only `std`, never the AST, CFG, HIR, or a pass; `ast.zig` depends on it |
 | CFG AIR | `cfg.zig` (op schema, `IrProgram`) + `passes/cfg_lex.zig`, `cfg_parse.zig`, `cfg_print.zig` | the mid-level IR, its text form, and the ops themselves | semantics — the validator enforces them |
 | CFG lowering | `lower.zig` + `passes/cfg_lower_*.zig` | HIR→CFG emission helpers driven by `hir_lower`: evaluation order, destruction placement, module init functions, syscalls for host bindings | optimization (runs later) |

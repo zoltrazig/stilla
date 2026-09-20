@@ -99,7 +99,7 @@ fn runBinRoundTrip(src: []const u8, expected: []const u8) !void {
         .entry = "app",
         .sources = sources,
         .entry_fn = "main",
-        .optimize = false,
+        .optimize = .{},
     });
     defer compilation.deinit();
     const program = &(compilation.program orelse {
@@ -407,7 +407,7 @@ test "M6: the drop-hook type-decl reference is per-artifact (local id vs import)
         .entry = "app",
         .sources = sources,
         .entry_fn = "main",
-        .optimize = false,
+        .optimize = .{},
     });
     defer compilation.deinit();
     const program = &(compilation.program orelse return error.TestUnexpectedResult);
@@ -538,7 +538,7 @@ fn buildBundleRun(
         .entry = "app",
         .sources = sources,
         .entry_fn = "main",
-        .optimize = false,
+        .optimize = .{},
     });
     const program = &(compilation.program orelse {
         if (compilation.diag) |d| std.log.err("COMPILE DIAG: {s}", .{d.message});
