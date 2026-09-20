@@ -1413,12 +1413,21 @@ lowering。可选变换每轮原位重写后重新跑结构 + 效果校验（§2
   `_call` / `_control` / `_pattern`）；
 - 文本形式 hir_print.zig / hir_parse.zig（§4）；
 - 结构校验 hir_validate.zig（§10.1 第一级）；
-- 效果模型 effects.zig；HIR 集成 / 派生查询 / 函数摘要 SCC fixpoint / 精确
-  `drop_effect(T)` / module-const 检查 hir_effects.zig；
+- 效果模型 effects.zig（对外聚合筒：格代数 effects_lattice.zig、资源注册
+  effects_registry.zig、哈希原语 effects_hash.zig、格引擎 / provider / 实例
+  effects_engine.zig、host 元数据与环境指纹 effects_host.zig、§5.6 冲突查询
+  effects_conflict.zig）；HIR 集成 / 效果注解由
+  hir_effects.zig（Analysis 本体 + 效果计算）按 §8.2 的 seam 拆分为
+  hir_effects_summary.zig（调用 / 函数摘要 SCC fixpoint）、
+  hir_effects_never.zig（never_returns 最大不动点）、hir_effects_drop.zig
+  （精确 `drop_effect(T)`）、hir_effects_const.zig（module-const 检查）、
+  hir_effects_queries.zig（派生查询 / capability / 清理门）与之协作；
 - 消费者：hir_simplify.zig（`--simplify`，默认关；dead-let / selective ANF /
   `never_returns` 后缀删除）、hir_seg.zig（island 准入 / boundary rewrite / 轮循环；
   可执行文件默认开、`--no-seg` 关；库默认关）+ hir_egraph.zig（slotted e-graph
-  arena：e-class 表 / union-find / encode / 有界 saturation / extraction）；
+  arena：e-class 表 / union-find / encode / 有界 saturation / extraction）+
+  hir_egraph_rules.zig（纯哈希 / 相等 / 常量折叠 / 整数代数 helpers，从 e-graph
+  驱动层拆出、对驱动层 / e-graph 环无回依赖，经文件作用域别名复用）；
 - lowering hir_lower.zig（+ hir_lower_expr / `_control` / `_call` / `_pattern`），
   复用 lower.zig / cfg_lower_* 发射机制；
 - 测试：hir_tests.zig / hir_simplify_tests.zig / hir_seg_tests.zig。
@@ -1456,9 +1465,9 @@ cost model（§8.2）：全语料 `rounds` / `unions` / `merges` / `copies` 四�
 | 档 | 内容 | 落点 |
 | --- | --- | --- |
 | M1a | 结构 HIR：AST→HIR 构建、结构校验、HIR→CFG lowering；直降路径删除后成为唯一前端路径 | hir_build.zig / hir_validate.zig / hir_lower.zig |
-| M1b | 效果基础设施：`SemanticInfo.effect`、可插拔格引擎（默认实例 = 固定乘积格，第二实例 `hierarchy`）、transfer、cleanup 门、派生查询、host 语义注册表 | effects.zig / hir_effects.zig |
-| M2a | SEG 规则子集（β / η / let / 常折叠 / 整数代数 / 聚合投影 / known-variant match / CSE sharing）；union 规则在 slotted e-graph arena 里走 encode → 有界 saturation → extraction，β / η / let / match 是驱动层的 boundary rewrite；可执行文件默认开、`--no-seg` 关 | hir_seg.zig / hir_egraph.zig |
-| M2b | 摘要化消费者：函数摘要 SCC least fixpoint、精确 `drop_effect(T)`、module-const 检查、dead-let / selective ANF / `never_returns` 后缀删除 | hir_effects.zig / hir_simplify.zig |
+| M1b | 效果基础设施：`SemanticInfo.effect`、可插拔格引擎（默认实例 = 固定乘积格，第二实例 `hierarchy`）、transfer、cleanup 门、派生查询、host 语义注册表 | effects_lattice.zig / effects_engine.zig / hir_effects*.zig |
+| M2a | SEG 规则子集（β / η / let / 常折叠 / 整数代数 / 聚合投影 / known-variant match / CSE sharing）；union 规则在 slotted e-graph arena 里走 encode → 有界 saturation → extraction，β / η / let / match 是驱动层的 boundary rewrite；可执行文件默认开、`--no-seg` 关 | hir_seg.zig / hir_egraph.zig / hir_egraph_rules.zig |
+| M2b | 摘要化消费者：函数摘要 SCC least fixpoint、精确 `drop_effect(T)`、module-const 检查、dead-let / selective ANF / `never_returns` 后缀删除 | hir_effects*.zig / hir_simplify.zig |
 
 **尚未实现**（完整清单见 [todo.md](todo.md)）：
 PRE（跨语句 / 分支的共享）；HIRTypeId canonical 表。
