@@ -31,7 +31,7 @@ pub fn buildBlock(b: *hir_build.Builder, info: *moduleinfo.ModuleInfo, blk: *con
 
 fn buildStmts(b: *hir_build.Builder, info: *moduleinfo.ModuleInfo, stmts: []const ast.Stmt, i: usize, result: ?*const ast.Expr) hir_build.BuildError!hir.ExprId {
     if (i >= stmts.len) {
-        return if (result) |r| hir_build_expr.buildExpr(b, info, r) else hir_build_expr.voidLiteral(b, meta.Span.init(0, 0, 0));
+        return if (result) |r| hir_build_expr.buildExpr(b, info, r) else hir_build_expr.voidLiteral(b, null);
     }
     const stmt = &stmts[i];
     switch (stmt.*) {
@@ -54,7 +54,7 @@ fn buildStmts(b: *hir_build.Builder, info: *moduleinfo.ModuleInfo, stmts: []cons
 fn seq2(b: *hir_build.Builder, span: meta.Span, e: hir.ExprId, rest: hir.ExprId) hir_build.BuildError!hir.ExprId {
     const rest_ty = b.built.program.node(rest).ty;
     const ops = try b.built.program.addOperands(&.{ e, rest });
-    return b.built.program.addExpr(.{ .op = try b.op(span, "seq"), .ty = rest_ty, .operands = ops });
+    return b.built.program.addExpr(.{ .op = try b.op(span, "seq"), .ty = rest_ty, .operands = ops, .origin = try b.origin(span) });
 }
 
 /// Block-level `using` alias: a module-valued alias registers a compile-
@@ -187,7 +187,7 @@ pub fn letNode(b: *hir_build.Builder, span: meta.Span, init: hir.ExprId, binder_
     const rid = try b.built.program.addRegion(binder_ids, body, null);
     const regs = try b.built.program.addRegions(&.{rid});
     const ty = b.built.program.node(body).ty;
-    return b.built.program.addExpr(.{ .op = try b.op(span, "let"), .ty = ty, .operands = ops, .regions = regs });
+    return b.built.program.addExpr(.{ .op = try b.op(span, "let"), .ty = ty, .operands = ops, .regions = regs, .origin = try b.origin(span) });
 }
 
 /// A `let` statement. Irrefutable patterns only (the checker rejects
@@ -237,7 +237,7 @@ fn buildLet(
     const rid = try b.built.program.addRegion(binder_ids.items, body, pat_id);
     const regs = try b.built.program.addRegions(&.{rid});
     const ty = b.built.program.node(body).ty;
-    return b.built.program.addExpr(.{ .op = try b.op(ls.span, "let"), .ty = ty, .operands = ops, .regions = regs });
+    return b.built.program.addExpr(.{ .op = try b.op(ls.span, "let"), .ty = ty, .operands = ops, .regions = regs, .origin = try b.origin(ls.span) });
 }
 
 /// The identifier bound by a plain identifier pattern (`p` with no
@@ -272,17 +272,18 @@ fn buildDropStmt(
     if (mode == .borrow) {
         return b.fail(ds.span, "cannot drop borrowed binding '{s}'", .{ds.name.text});
     }
-    const local = try localNode(b, info, bind);
+    const local = try localNode(b, info, bind, ds.name.span);
     const ops = try b.built.program.addOperands(&.{local});
-    const drop = try b.built.program.addExpr(.{ .op = try b.op(ds.span, "drop"), .ty = .{ .primitive = .void }, .operands = ops });
+    const drop = try b.built.program.addExpr(.{ .op = try b.op(ds.span, "drop"), .ty = .{ .primitive = .void }, .operands = ops, .origin = try b.origin(ds.span) });
     const rest = try buildStmts(b, info, stmts, i + 1, result);
     return seq2(b, ds.span, drop, rest);
 }
 
-/// A `local` read of a binder.
-pub fn localNode(b: *hir_build.Builder, info: *moduleinfo.ModuleInfo, bind: hir.BinderId) hir_build.BuildError!hir.ExprId {
+/// A `local` read of a binder. `span` is the identifier occurrence's
+/// span, or null for synthesized reads (no source position).
+pub fn localNode(b: *hir_build.Builder, info: *moduleinfo.ModuleInfo, bind: hir.BinderId, span: ?meta.Span) hir_build.BuildError!hir.ExprId {
     const ty = b.built.program.binders.items[bind].ty;
-    return b.built.program.addExpr(.{ .op = try b.op(meta.Span.init(0, 0, 0), "local"), .ty = ty, .payload = .{ .binder = bind }, .sema = try viewOf(b, info, ty, bind, .read) });
+    return b.built.program.addExpr(.{ .op = try b.op(span orelse meta.Span.init(0, 0, 0), "local"), .ty = ty, .payload = .{ .binder = bind }, .sema = try viewOf(b, info, ty, bind, .read), .origin = if (span) |s| try b.origin(s) else hir.no_origin });
 }
 
 /// A binder's created-state view: params arrive owned (except borrow

@@ -28,7 +28,7 @@ pub fn controlNode(b: *hir_build.Builder, span: meta.Span, op_name: []const u8, 
     const regs = try b.built.program.addRegions(&.{ rt, re });
     const tty = b.built.program.node(then).ty;
     const ety = b.built.program.node(else_).ty;
-    return b.built.program.addExpr(.{ .op = try b.op(span, op_name), .ty = unifyJoin(tty, ety), .operands = ops, .regions = regs });
+    return b.built.program.addExpr(.{ .op = try b.op(span, op_name), .ty = unifyJoin(tty, ety), .operands = ops, .regions = regs, .origin = try b.origin(span) });
 }
 
 /// The join type of two branch values: never contributes nothing; equal
@@ -99,5 +99,5 @@ pub fn buildMatch(b: *hir_build.Builder, info: *moduleinfo.ModuleInfo, e: *const
     const regs = try b.built.program.addRegions(reg_ids.items);
     var jt: meta.Type = .{ .primitive = .void };
     for (arm_tys.items) |t2| jt = unifyJoin(jt, t2);
-    return b.built.program.addExpr(.{ .op = try b.op(m.span, "match"), .ty = b.annotatedType(info, e) orelse jt, .operands = ops, .regions = regs });
+    return b.built.program.addExpr(.{ .op = try b.op(m.span, "match"), .ty = b.annotatedType(info, e) orelse jt, .operands = ops, .regions = regs, .origin = try b.origin(m.span) });
 }

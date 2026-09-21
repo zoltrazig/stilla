@@ -32,12 +32,12 @@ pub fn memberLeaf(b: *hir_build.Builder, info: *moduleinfo.ModuleInfo, specifier
                 const bits = cfgIntrinsicConstBits(specifier, name) orelse
                     return b.fail(span, "intrinsic '{s}.{s}' has no expansion", .{ specifier, name });
                 const v: f32 = @bitCast(bits);
-                return b.built.program.addExpr(.{ .op = try b.op(span, "const"), .ty = vm.type_, .payload = .{ .const_value = .{ .float = v } } });
+                return b.built.program.addExpr(.{ .op = try b.op(span, "const"), .ty = vm.type_, .payload = .{ .const_value = .{ .float = v } }, .origin = try b.origin(span) });
             }
             const key = try b.qualified(specifier, name);
             const cid = b.const_ids.get(key) orelse
                 return b.fail(span, "constant '{s}' has no record", .{key});
-            return b.built.program.addExpr(.{ .op = try b.op(span, "module_const"), .ty = vm.type_, .payload = .{ .module_const = cid } });
+            return b.built.program.addExpr(.{ .op = try b.op(span, "module_const"), .ty = vm.type_, .payload = .{ .module_const = cid }, .origin = try b.origin(span) });
         },
         .func => |f| {
             if (f.body != null and f.type_params.len == 0) {
@@ -45,7 +45,7 @@ pub fn memberLeaf(b: *hir_build.Builder, info: *moduleinfo.ModuleInfo, specifier
                 const fid = b.func_ids.get(key) orelse
                     return b.fail(span, "function '{s}' has no record", .{key});
                 const rec = b.built.funcs.items[fid];
-                return b.built.program.addExpr(.{ .op = try b.op(span, "fn_ref"), .ty = try b.funcType(rec.params, rec.ret), .payload = .{ .func = .{ .func = fid } } });
+                return b.built.program.addExpr(.{ .op = try b.op(span, "fn_ref"), .ty = try b.funcType(rec.params, rec.ret), .payload = .{ .func = .{ .func = fid } }, .origin = try b.origin(span) });
             }
             // Bodyless member: a host binding or a bundle intrinsic.
             // A *bare value use* of an intrinsic function member
@@ -58,7 +58,7 @@ pub fn memberLeaf(b: *hir_build.Builder, info: *moduleinfo.ModuleInfo, specifier
             const key = try b.qualified(specifier, name);
             const hid = b.host_ids.get(key) orelse
                 return b.fail(span, "host binding '{s}' has no record", .{key});
-            return b.built.program.addExpr(.{ .op = try b.op(span, "fn_ref"), .ty = vm.type_, .payload = .{ .func = .{ .host = hid } } });
+            return b.built.program.addExpr(.{ .op = try b.op(span, "fn_ref"), .ty = vm.type_, .payload = .{ .func = .{ .host = hid } }, .origin = try b.origin(span) });
         },
     }
 }
@@ -93,7 +93,7 @@ pub fn buildLambda(b: *hir_build.Builder, info: *moduleinfo.ModuleInfo, lam: *co
     // after its body is fully built (its own nested λs appended first).
     // Fallible — an OOM here must propagate, not be swallowed.
     try b.pending_lambdas.append(b.arena, fid);
-    return b.built.program.addExpr(.{ .op = try b.op(lam.span, "fn_ref"), .ty = try b.funcType(params, ret), .payload = .{ .func = .{ .func = fid } } });
+    return b.built.program.addExpr(.{ .op = try b.op(lam.span, "fn_ref"), .ty = try b.funcType(params, ret), .payload = .{ .func = .{ .func = fid } }, .origin = try b.origin(lam.span) });
 }
 pub fn buildCall(b: *hir_build.Builder, info: *moduleinfo.ModuleInfo, e: *const ast.Expr, c: *const ast.Call) hir_build.BuildError!hir.ExprId {
     const ann_inst = if (b.ann.per_module.get(info.specifier)) |ma| ma.call_of.get(c) else null;
@@ -106,13 +106,13 @@ pub fn buildCall(b: *hir_build.Builder, info: *moduleinfo.ModuleInfo, e: *const 
                 return b.fail(c.span, "instance '{s}' has no record", .{key});
             const rec = b.built.funcs.items[fid];
             callee_ty = try b.funcType(rec.params, rec.ret);
-            callee = try b.built.program.addExpr(.{ .op = try b.op(c.span, "fn_ref"), .ty = callee_ty.?, .payload = .{ .func = .{ .func = fid } } });
+            callee = try b.built.program.addExpr(.{ .op = try b.op(c.span, "fn_ref"), .ty = callee_ty.?, .payload = .{ .func = .{ .func = fid } }, .origin = try b.origin(c.span) });
         } else {
             const key = try b.qualified(inst.module.specifier, inst.decl.name.text);
             const hid = b.host_ids.get(key) orelse
                 return b.fail(c.span, "host binding '{s}' has no record", .{key});
             callee_ty = inst.signature;
-            callee = try b.built.program.addExpr(.{ .op = try b.op(c.span, "fn_ref"), .ty = callee_ty.?, .payload = .{ .func = .{ .host = hid } } });
+            callee = try b.built.program.addExpr(.{ .op = try b.op(c.span, "fn_ref"), .ty = callee_ty.?, .payload = .{ .func = .{ .host = hid } }, .origin = try b.origin(c.span) });
         }
     } else {
         // The callee is built first (mirrors the reference lowerer's
@@ -149,7 +149,7 @@ pub fn buildCall(b: *hir_build.Builder, info: *moduleinfo.ModuleInfo, e: *const 
     } else {
         ty = .{ .primitive = .void };
     }
-    return b.built.program.addExpr(.{ .op = try b.op(c.span, "call"), .ty = ty, .operands = ops });
+    return b.built.program.addExpr(.{ .op = try b.op(c.span, "call"), .ty = ty, .operands = ops, .origin = try b.origin(c.span) });
 }
 
 /// The callee leaf of a bare path in call position: a module-member
@@ -167,7 +167,7 @@ fn resolvePathCallee(b: *hir_build.Builder, info: *moduleinfo.ModuleInfo, e: *co
         // a value callee built exactly like `buildPathValue`'s local
         // chain (annotations on the original callee expression). The
         // lowering emits the member load then an indirect call.
-        var cur = try hir_build_block.localNode(b, info, b.lookup(path[0].text).?);
+        var cur = try hir_build_block.localNode(b, info, b.lookup(path[0].text).?, path[0].span);
         var cur_ty = b.built.program.node(cur).ty;
         for (path[1..], 0..) |seg, i| {
             // Only the final read of the chain carries the path's
@@ -217,7 +217,7 @@ fn resolvePathCallee(b: *hir_build.Builder, info: *moduleinfo.ModuleInfo, e: *co
 /// A single-name callee that is not a module member: a local binding
 /// (fn-typed value) or a module-level alias.
 fn localCallee(b: *hir_build.Builder, info: *moduleinfo.ModuleInfo, id: meta.Ident) hir_build.BuildError!hir.ExprId {
-    if (b.lookup(id.text)) |bind| return hir_build_block.localNode(b, info, bind);
+    if (b.lookup(id.text)) |bind| return hir_build_block.localNode(b, info, bind, id.span);
     if (info.alias(id.text)) |a| {
         switch (a.target) {
             .value => |mr| return memberLeaf(b, info, mr.module, mr.name, id.span, false),
@@ -237,7 +237,7 @@ pub fn buildSpecialize(b: *hir_build.Builder, info: *moduleinfo.ModuleInfo, s: *
         const fid = b.func_ids.get(key) orelse
             return b.fail(s.span, "instance '{s}' has no record", .{key});
         const rec = b.built.funcs.items[fid];
-        return b.built.program.addExpr(.{ .op = try b.op(s.span, "fn_ref"), .ty = try b.funcType(rec.params, rec.ret), .payload = .{ .func = .{ .func = fid } } });
+        return b.built.program.addExpr(.{ .op = try b.op(s.span, "fn_ref"), .ty = try b.funcType(rec.params, rec.ret), .payload = .{ .func = .{ .func = fid } }, .origin = try b.origin(s.span) });
     }
     const vm = inst.module.valueMember(inst.decl.name.text) orelse
         return b.fail(s.span, "member not found", .{});
@@ -289,7 +289,7 @@ fn intrinsicWrapperFnRef(b: *hir_build.Builder, info: *moduleinfo.ModuleInfo, sp
     };
     if (b.wrapper_cache.get(key)) |fid| {
         const rec = b.built.funcs.items[fid];
-        return b.built.program.addExpr(.{ .op = try b.op(span, "fn_ref"), .ty = try b.funcType(rec.params, rec.ret), .payload = .{ .func = .{ .func = fid } } });
+        return b.built.program.addExpr(.{ .op = try b.op(span, "fn_ref"), .ty = try b.funcType(rec.params, rec.ret), .payload = .{ .func = .{ .func = fid } }, .origin = try b.origin(span) });
     }
     const name = try std.fmt.allocPrint(b.arena, "{s}.{s}.intrinsic.{d}", .{ info.specifier, vm.name.text, b.next_intrinsic_id });
     b.next_intrinsic_id += 1;
@@ -312,7 +312,7 @@ fn intrinsicWrapperFnRef(b: *hir_build.Builder, info: *moduleinfo.ModuleInfo, sp
     const hid = b.host_ids.get(try b.qualified(owner.specifier, vm.name.text)) orelse
         return b.fail(span, "intrinsic '{s}.{s}' has no host record", .{ owner.specifier, vm.name.text });
     b.built.funcs.items[fid].root = try synthIntrinsicRoot(b, fid, hid);
-    return b.built.program.addExpr(.{ .op = try b.op(span, "fn_ref"), .ty = sig, .payload = .{ .func = .{ .func = fid } } });
+    return b.built.program.addExpr(.{ .op = try b.op(span, "fn_ref"), .ty = sig, .payload = .{ .func = .{ .func = fid } }, .origin = try b.origin(span) });
 }
 
 /// The forwarding body of a first-class intrinsic wrapper: parameters
@@ -335,7 +335,7 @@ fn synthIntrinsicRoot(b: *hir_build.Builder, fid: hir.FuncId, hid: hir.HostBindi
         try binder_ids.append(b.arena, bind);
         try b.bindName(prm.name.text, bind);
         if (hir_build.isVoid(prm.type_)) continue;
-        try args.append(b.arena, try hir_build_block.localNode(b, info, bind));
+        try args.append(b.arena, try hir_build_block.localNode(b, info, bind, null));
     }
     const callee_leaf = try b.built.program.addExpr(.{ .op = try b.op(meta.Span.init(0, 0, 0), "fn_ref"), .ty = host_rec.signature, .payload = .{ .func = .{ .host = hid } } });
     var all = std.ArrayList(hir.ExprId).empty;

@@ -272,6 +272,11 @@ const Validator = struct {
         if (e.sema >= self.program.semantic_infos.items.len) {
             return self.fail("expr {d} carries sema id {d} out of range", .{ fr.id, e.sema });
         }
+        // Origins: absent (0) is always fine; a present id must name a
+        // span in the interned table (hir.md §3.2).
+        if (e.origin != hir.no_origin and e.origin >= self.program.origins.items.len) {
+            return self.fail("expr {d} carries origin {d} out of range", .{ fr.id, e.origin });
+        }
 
         // Payload pairs with the opcode.
         const tag = std.meta.activeTag(e.payload);
@@ -815,6 +820,25 @@ test "out-of-range full_expr and sema ids are rejected" {
     // The seeded ids (0 = default FE / owned view) are in range.
     const ok = try p.addExpr(.{ .op = op_const, .ty = ty_int, .payload = .{ .const_value = .{ .int = 1 } } });
     const m3 = try validate(&p, ok, arena.allocator());
+    try t.expect(m3 == null);
+}
+
+test "out-of-range origin ids are rejected; absent origins validate" {
+    var arena = std.heap.ArenaAllocator.init(t.allocator);
+    defer arena.deinit();
+    var p = (try fresh(arena.allocator())).prog;
+    // A nonzero origin naming no span in the table is rejected...
+    const bad_origin = try p.addExpr(.{ .op = op_const, .ty = ty_int, .payload = .{ .const_value = .{ .int = 1 } }, .origin = 42 });
+    const m1 = try validate(&p, bad_origin, arena.allocator());
+    try t.expect(m1 != null);
+    // ...an interned one is accepted...
+    _ = try p.addOrigin(meta.Span.init(0, 3, 9));
+    const good_origin = try p.addExpr(.{ .op = op_const, .ty = ty_int, .payload = .{ .const_value = .{ .int = 2 } }, .origin = 1 });
+    const m2 = try validate(&p, good_origin, arena.allocator());
+    try t.expect(m2 == null);
+    // ...and an absent one stays valid.
+    const no_span = try p.addExpr(.{ .op = op_const, .ty = ty_int, .payload = .{ .const_value = .{ .int = 3 } } });
+    const m3 = try validate(&p, no_span, arena.allocator());
     try t.expect(m3 == null);
 }
 

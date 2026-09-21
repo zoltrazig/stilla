@@ -29,7 +29,7 @@ fn buildPathValue(b: *hir_build.Builder, info: *moduleinfo.ModuleInfo, e: *const
     const path = p.path;
     if (path.len == 1) {
         const n = path[0].text;
-        if (b.lookup(n)) |bind| return hir_build_block.localNode(b, info, bind);
+        if (b.lookup(n)) |bind| return hir_build_block.localNode(b, info, bind, path[0].span);
         if (info.module_values.get(n) != null or b.aliasModule(n) != null) {
             return b.fail(path[0].span, "module value '{s}' has no runtime value", .{n});
         }
@@ -47,7 +47,7 @@ fn buildPathValue(b: *hir_build.Builder, info: *moduleinfo.ModuleInfo, e: *const
     }
     if (b.lookup(path[0].text)) |bind| {
         const bind_ty = b.built.program.binders.items[bind].ty;
-        var cur = try hir_build_block.localNode(b, info, bind);
+        var cur = try hir_build_block.localNode(b, info, bind, path[0].span);
         var cur_ty = bind_ty;
         for (path[1..], 0..) |seg, i| {
             // Only the final read of the chain carries the path's
@@ -148,18 +148,19 @@ fn buildStructConstruct(b: *hir_build.Builder, info: *moduleinfo.ModuleInfo, e: 
     if (!permuted) {
         for (written.items, written_idx.items) |v, idx| decl_reads[idx] = v;
         const ops = try b.built.program.addOperands(decl_reads);
-        struct_node = try b.built.program.addExpr(.{ .op = try b.op(p.span, "struct_make"), .ty = value_ty, .operands = ops });
+        struct_node = try b.built.program.addExpr(.{ .op = try b.op(p.span, "struct_make"), .ty = value_ty, .operands = ops, .origin = try b.origin(p.span) });
     } else {
         const temps = try b.arena.alloc(hir.BinderId, written.items.len);
         for (written.items, 0..) |v, w| {
             temps[w] = try b.built.program.addBinder(b.built.program.node(v).ty, .value);
         }
         for (written_idx.items, 0..) |idx, wpos| {
-            const read = try hir_build_block.localNode(b, info, temps[wpos]);
+            // The decl-order reads are synthesized (no source position).
+            const read = try hir_build_block.localNode(b, info, temps[wpos], null);
             decl_reads[idx] = read;
         }
         const ops = try b.built.program.addOperands(decl_reads);
-        struct_node = try b.built.program.addExpr(.{ .op = try b.op(p.span, "struct_make"), .ty = value_ty, .operands = ops });
+        struct_node = try b.built.program.addExpr(.{ .op = try b.op(p.span, "struct_make"), .ty = value_ty, .operands = ops, .origin = try b.origin(p.span) });
         // Wrap in temp-let regions, innermost bound last (written order
         // preserved: each temp's region contains the later-written ones).
         var wi: usize = written.items.len;
@@ -190,5 +191,5 @@ fn buildVariantConstruct(b: *hir_build.Builder, info: *moduleinfo.ModuleInfo, e:
             return b.fail(p.span, "unknown union type '{s}'", .{name});
         result_ty = .{ .named = .{ .id = tid, .args = &.{} } };
     }
-    return b.built.program.addExpr(.{ .op = try b.op(p.span, "variant_make"), .ty = result_ty, .operands = ops, .payload = .{ .tag = tag } });
+    return b.built.program.addExpr(.{ .op = try b.op(p.span, "variant_make"), .ty = result_ty, .operands = ops, .payload = .{ .tag = tag }, .origin = try b.origin(p.span) });
 }

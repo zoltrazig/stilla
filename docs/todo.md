@@ -774,8 +774,9 @@
       原位树重写器是其前身。
 - [ ] `HIRTypeId` canonical 表（[hir.md](hir.md) §3.8 Target）：为 SEG 的 O(1)
       类型相等与摘要 interning 给 `meta.Type` 加一张 canonical 表。
-- [ ] source span side table（[hir.md](hir.md) §3.6）：`ExprNode.origin` 的 span
-      表尚未落地。
+- [x] source span side table（[hir.md](hir.md) §3.2）：已落地——`Program.origins`
+      + `origin_map` interning，builder 从 AST span 填充 `ExprNode.origin`；
+      `Program.originOf` 查询，validator 拒越界 id。合成节点保持 0，克隆继承。
 - [ ] Unique / consuming / borrowed 情形进 SEG（需线性等式系统）。
 - [ ] Typed HIR Target 形态：monomorphization / ownership 检查在 HIR 上
       完成（[hir.md](hir.md) §2.3 远期边界；未立项）。

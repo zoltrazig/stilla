@@ -12,8 +12,7 @@
 >   （hir_simplify.zig，`hir` 门，`--opt hir`，默认关）；SEG（hir_seg.zig 的
 >   island 驱动与 hir_egraph.zig 的 slotted e-graph arena，`seg` 门可执行文件
 >   默认开、库默认关）。
-> - **设计已定但未实现**（§11、[todo.md](todo.md)）：HIRTypeId canonical 表、
->   source span side table。
+> - **设计已定但未实现**（§11、[todo.md](todo.md)）：HIRTypeId canonical 表。
 > - **阅读约定**：数据结构以 hir.zig 的落地形态为准；标 **Target** 的段落是
 >   设计意图，不是现状。
 
@@ -154,7 +153,7 @@ HIR 落在 checker 与 CFG lowering 之间，是**兼容边界**，不是对两�
 | --- | --- | --- |
 | 句柄 | 稠密 u32 索引 | `ExprId RegionId BinderId PatternId ScopeId FullExprId SemanticInfoId SourceOriginId AttrSetId OpId FuncId HostBindingId ConstId` |
 | 类型 | 内联 `meta.Type` | `ExprNode.ty` / `Binder.ty`；无独立 HIR TypeId（§3.8） |
-| 名字 / span | 仅 side table | 不参与结构比较；source span 目前**未填充** |
+| 名字 / span | 仅 side table | 不参与结构比较；source span 落在 `origins` side table（§3.2），builder 从 AST 填充 |
 | 容器 | arena + 扁平缓冲 | `exprs / regions / binders / patterns / scopes / full_exprs / semantic_infos` + `expr_buffer / region_buffer / binder_buffer` |
 | 节点 | `ExprNode` | 极小：op / ty / operands / regions / attrs / sema / full_expr / origin / payload / access_hops |
 | op | registry | `OpId` 单表条目 + `OpDescriptor` |
@@ -174,8 +173,10 @@ hir.Program
  ├─ scopes:         Arena<Scope>
  ├─ full_exprs:     Arena<FullExpr>
  ├─ semantic_infos: Arena<SemanticInfo>
+ ├─ origins:        Arena<meta.Span>        // ExprNode.origin 的 span 表
  ├─ effect_interner: effects.Interner
- └─ sema_map:       (view, state) → SemanticInfoId interning 表
+ ├─ sema_map:       (view, state) → SemanticInfoId interning 表
+ └─ origin_map:     Span → SourceOriginId interning 表
 
 hir.BuiltProgram
  ├─ program, arena
@@ -185,7 +186,11 @@ hir.BuiltProgram
 
 - id 0 是哨兵：`sema` 初始为 owned/pending，`full_expr` 初始为 0。
 - `attrs` 只有 `AttrSetId = u32` 与哨兵 `attr_empty = 0`，**无 interner**。
-- `origin` 是 `SourceOriginId`（0 = none）；span side table **尚未落地**。
+- `origin` 是 `SourceOriginId`（0 = none）；span side table 已落地：id 进
+  `origins`（0 号是哨兵，永不引用），相同 span 经 `origin_map` 共享一个 id。
+  AST→HIR builder 为每个源码构造节点记录其 AST span；合成节点（脱糖、
+  wrapper、文本重建）保持 0，克隆节点继承 donor 的 origin。origin 是注释性
+  元数据：不进 canonical 文本、不影响 lowered AIR、不参与结构相等。
 
 ### 3.3 ExprNode
 

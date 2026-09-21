@@ -117,6 +117,118 @@ test "S4: build fib-class module and validate every function root" {
     try expectEffectsAll(b.built, b.graph);
 }
 
+// ---------------------------------------------------------------------------
+// Source spans (hir.md §3.2): the builder records every source-built
+// node's AST span in the interned `origins` side table; synthetic nodes
+// (module-init λ, canonical-text rebuilds) keep none.
+// ---------------------------------------------------------------------------
+
+/// Every node reachable from `root` (operands, then region roots).
+fn reachableNodes(alloc: std.mem.Allocator, pr: *const hir.Program, root: hir.ExprId) !std.ArrayList(hir.ExprId) {
+    var out = std.ArrayList(hir.ExprId).empty;
+    errdefer out.deinit(alloc);
+    var work = std.ArrayList(hir.ExprId).empty;
+    defer work.deinit(alloc);
+    try work.append(alloc, root);
+    while (work.pop()) |id| {
+        try out.append(alloc, id);
+        for (pr.operands(id)) |op| try work.append(alloc, op);
+        for (pr.regionsOf(id)) |rid| try work.append(alloc, pr.region(rid).root);
+    }
+    return out;
+}
+
+test "S4: source spans — built nodes carry their AST span, synthetics none" {
+    var b = try buildText("app", &.{
+        .{ "lib", "fn twice(n: int32) -> int32 { n + n }" },
+        .{
+            "app",
+            \\const builtin = import("builtin");
+            \\const lib = import("lib");
+            \\fn fib(n: int32) -> int32 {
+            \\    if (n < 2) { n } else { fib(n - 1) + fib(n - 2) }
+            \\}
+            \\fn main() -> void {
+            \\    builtin.print(builtin.str(lib.twice(fib(5))));
+            \\}
+        },
+    });
+    defer b.deinit();
+    const pr = &b.built.program;
+    const app_src = b.graph.module("app").?.source.?;
+    const lib_src = b.graph.module("lib").?.source.?;
+
+    var fib_root: ?hir.ExprId = null;
+    var main_root: ?hir.ExprId = null;
+    for (b.built.funcs.items) |f| {
+        if (std.mem.eql(u8, f.name, "app.fib")) fib_root = f.root;
+        if (std.mem.eql(u8, f.name, "app.main")) main_root = f.root;
+        if (std.mem.eql(u8, f.name, "lib.twice")) {
+            const sp = pr.originOf(f.root) orelse return error.TestUnexpectedResult;
+            try testing.expectEqual(lib_src.id, sp.source);
+            try testing.expectEqualStrings("twice", lib_src.text[sp.start..sp.end]);
+        }
+    }
+    const fib = fib_root orelse return error.TestUnexpectedResult;
+    const main = main_root orelse return error.TestUnexpectedResult;
+
+    // Member-function λ roots carry the declaration's name span...
+    const fib_decl = pr.originOf(fib) orelse return error.TestUnexpectedResult;
+    try testing.expectEqual(app_src.id, fib_decl.source);
+    try testing.expectEqualStrings("fib", app_src.text[fib_decl.start..fib_decl.end]);
+
+    // ...and every node in a source-built body resolves to a span inside
+    // its own module's source (multi-module: fib/twice origins never
+    // cross). The one legitimate exception is the synthesized void tail
+    // of a discarded-void statement (`seq(call, void)`), which is built
+    // without a source position.
+    for ([_]hir.ExprId{ fib, main }) |root| {
+        var nodes = try reachableNodes(testing.allocator, pr, root);
+        defer nodes.deinit(testing.allocator);
+        try testing.expect(nodes.items.len > 1);
+        var synthetic_voids: usize = 0;
+        for (nodes.items) |id| {
+            const n = pr.node(id);
+            const is_void_const = n.payload == .const_value and n.payload.const_value == .void;
+            if (pr.originOf(id)) |sp| {
+                try testing.expectEqual(app_src.id, sp.source);
+                try testing.expect(sp.end <= app_src.text.len and sp.start < sp.end);
+            } else {
+                try testing.expect(is_void_const);
+                synthetic_voids += 1;
+            }
+        }
+        // fib has none; main has exactly the discarded print's tail.
+        const want: usize = if (root == main) 1 else 0;
+        try testing.expectEqual(want, synthetic_voids);
+    }
+
+    // Exact-span spot checks in main: the literal, and the inner call.
+    var nodes = try reachableNodes(testing.allocator, pr, main);
+    defer nodes.deinit(testing.allocator);
+    var saw_five = false;
+    var saw_inner_call = false;
+    for (nodes.items) |id| {
+        const n = pr.node(id);
+        const sp = pr.originOf(id) orelse continue; // synthetic void tail
+        const text = app_src.text[sp.start..sp.end];
+        if (n.payload == .const_value and n.payload.const_value == .int and n.payload.const_value.int == 5) {
+            try testing.expectEqualStrings("5", text);
+            saw_five = true;
+        }
+        if (hir.registry.get(n.op).name.len == 4 and std.mem.eql(u8, hir.registry.get(n.op).name, "call") and std.mem.eql(u8, text, "fib(5)")) {
+            saw_inner_call = true;
+        }
+    }
+    try testing.expect(saw_five and saw_inner_call);
+
+    // Synthetics: the module-init λ records are predeclared spanless.
+    for (b.built.funcs.items) |f| {
+        if (f.kind == .init) try testing.expect(pr.originOf(f.root) == null);
+    }
+    try expectValidAll(b.built);
+}
+
 /// The corpus harness: compile every `dir/*.st` module as its own entry
 /// (each file read from disk at the repo root — `zig build test` runs
 /// there, like `zig build examples`), build the HIR, and validate every

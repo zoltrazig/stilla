@@ -43,8 +43,13 @@
 //!   by `BinderId` (no implicit positional mapping).
 //! - **Attributes are a sentinel** (`attr_empty` = 0, no interner):
 //!   hir.md §3.2 allows an empty v1 placeholder.
-//! - **Source origins are deferred**: nodes carry `SourceOriginId` (0 =
-//!   none); the span side table arrives with the AST builder (S4).
+//! - **Source origins**: nodes carry `SourceOriginId` (0 = none) into the
+//!   interned `origins` span side table. The AST builder records each
+//!   source construct's span (identical spans share one id); synthetic
+//!   nodes (desugarings, wrapper records, canonical-text rebuilds) keep
+//!   none, and clones inherit the donor's origin. Origins are annotation
+//!   metadata: they never change the canonical text or the lowered AIR,
+//!   and structural equality ignores them.
 
 const std = @import("std");
 const meta = @import("meta.zig");
@@ -888,6 +893,12 @@ pub const Program = struct {
     /// Interned effect summaries (docs/effects.md §5, hir.md §3.6):
     /// `SemanticInfo.effect` ids index this table.
     effect_interner: effects.Interner,
+    /// Interned source spans (hir.md §3.2): `ExprNode.origin` ids index
+    /// this table. Entry 0 is the `no_origin` sentinel and is never
+    /// referenced.
+    origins: std.ArrayList(meta.Span) = .empty,
+    /// Dedupe map so identical spans share one `SourceOriginId`.
+    origin_map: std.AutoHashMapUnmanaged(meta.Span, SourceOriginId) = .empty,
     /// Dedupe map for `(ownership_view, effect state)` pairs so nodes
     /// with equal annotations share one SemanticInfoId.
     sema_map: std.HashMapUnmanaged(SemaKey, SemanticInfoId, SemaKeyCtx, std.hash_map.default_max_load_percentage) = .empty,
@@ -934,6 +945,9 @@ pub const Program = struct {
         try p.full_exprs.append(arena, .{});
         // The seeded default is the canonical `(owned, pending)` entry.
         try p.sema_map.put(arena, .{ .view = .owned, .state = .pending }, default_sema);
+        // Origins entry 0 is the `no_origin` sentinel (never referenced);
+        // interning therefore starts at id 1.
+        try p.origins.append(arena, meta.Span.init(0, 0, 0));
         return p;
     }
 
@@ -1099,6 +1113,27 @@ pub const Program = struct {
     /// member chains).
     pub fn setAccessHops(self: *Program, id: ExprId, hops: []const AccessHop) void {
         self.exprs.items[id].access_hops = hops;
+    }
+
+    /// Intern a source span and return its dense id (identical spans
+    /// share one id; the id is never `no_origin`). Accepts every valid
+    /// span, including zero-length ones.
+    pub fn addOrigin(self: *Program, span: meta.Span) !SourceOriginId {
+        const gop = try self.origin_map.getOrPut(self.arena, span);
+        if (gop.found_existing) return gop.value_ptr.*;
+        // Roll the map entry back if the table append fails, so an OOM
+        // never leaves an id that names no span.
+        errdefer self.origin_map.removeByPtr(gop.key_ptr);
+        gop.value_ptr.* = @intCast(self.origins.items.len);
+        try self.origins.append(self.arena, span);
+        return gop.value_ptr.*;
+    }
+
+    /// The source span recorded on a node, or null when the node is
+    /// synthetic / rebuilt from canonical text (`origin == no_origin`).
+    pub fn originOf(self: *const Program, id: ExprId) ?meta.Span {
+        const o = self.exprs.items[id].origin;
+        return if (o == no_origin) null else self.origins.items[o];
     }
 
     pub fn region(self: *const Program, id: RegionId) Region {
@@ -1601,6 +1636,36 @@ test "registry: the M2a SEG island set carries `seg`, nothing else does" {
         const op = registry.get(registry.id(name) orelse return error.TestUnexpectedResult);
         try t.expect(op.seg == null);
     }
+}
+
+test "origins: spans intern, share ids, and resolve through originOf" {
+    var arena = std.heap.ArenaAllocator.init(t.allocator);
+    defer arena.deinit();
+    var p = try Program.init(arena.allocator());
+
+    // Entry 0 is the no_origin sentinel; interning starts at 1.
+    try t.expectEqual(@as(usize, 1), p.origins.items.len);
+
+    const b = try p.addBinder(ty_int, .value);
+    const plain = try p.addExpr(.{ .op = opId("local").?, .ty = ty_int, .payload = .{ .binder = b } });
+    try t.expectEqual(no_origin, p.node(plain).origin);
+    try t.expect(p.originOf(plain) == null); // synthetic = no span
+
+    const s1 = meta.Span.init(7, 10, 24);
+    const s2 = meta.Span.init(3, 0, 5);
+    const o1 = try p.addOrigin(s1);
+    try t.expect(o1 != no_origin);
+    // Identical spans share one id; distinct spans (across sources, and
+    // zero-length ones) get distinct ids.
+    try t.expectEqual(o1, try p.addOrigin(s1));
+    const o2 = try p.addOrigin(s2);
+    const o3 = try p.addOrigin(meta.Span.init(9, 40, 40)); // zero-length
+    try t.expect(o1 != o2 and o2 != o3 and o1 != o3);
+    try t.expectEqual(@as(usize, 4), p.origins.items.len);
+
+    const located = try p.addExpr(.{ .op = opId("local").?, .ty = ty_int, .payload = .{ .binder = b }, .origin = o1 });
+    try t.expectEqual(s1, p.originOf(located).?);
+    try t.expectEqual(@as(meta.SourceId, 7), p.originOf(located).?.source);
 }
 
 test "text passes are analyzed (forces hir_print/hir_parse analysis in test builds)" {

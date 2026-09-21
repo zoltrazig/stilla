@@ -124,6 +124,13 @@ pub const Builder = struct {
             self.fail(span, "HIR op '{s}' is not registered (add a typed_descriptors row)", .{name});
     }
 
+    /// Intern the source span of the AST construct being built (hir.md
+    /// §3.2 `origins` side table) for the node under construction.
+    /// Synthetic nodes simply do not set `.origin`.
+    pub fn origin(self: *Builder, span: meta.Span) BuildError!hir.SourceOriginId {
+        return self.built.program.addOrigin(span);
+    }
+
     // -- environment --------------------------------------------------------
 
     pub fn pushScope(self: *Builder) !void {
@@ -460,7 +467,16 @@ pub fn buildFuncBody(b: *Builder, fid: hir.FuncId) BuildError!void {
     const ty = try b.funcType(params_sig, f.ret);
     const rid = try b.built.program.addRegion(binder_ids.items, body, null);
     const regs = try b.built.program.addRegions(&.{rid});
-    const node = try b.built.program.addExpr(.{ .op = try b.op(meta.Span.init(0, 0, 0), "lambda"), .ty = ty, .regions = regs });
+    // The λ wrapper node carries the declaration's provenance when the
+    // record has one (init records are predeclared spanless; host
+    // modules have no source). The empty-span convention is the
+    // FuncRecord one (span_start/end are raw offsets, 0/0 = none).
+    const info = b.graph.modules[f.module];
+    const decl_span: ?meta.Span = if (info.source != null and !(f.span_start == 0 and f.span_end == 0))
+        meta.Span.init(info.source.?.id, f.span_start, f.span_end)
+    else
+        null;
+    const node = try b.built.program.addExpr(.{ .op = try b.op(meta.Span.init(0, 0, 0), "lambda"), .ty = ty, .regions = regs, .origin = if (decl_span) |s| try b.origin(s) else hir.no_origin });
     b.built.funcs.items[fid].root = node;
 }
 
@@ -469,7 +485,7 @@ pub fn buildFuncBody(b: *Builder, fid: hir.FuncId) BuildError!void {
 /// The init record's body is a void literal; the const initializer trees
 /// live on the const records.
 fn buildInitBody(b: *Builder) BuildError!hir.ExprId {
-    return hir_build_expr.voidLiteral(b, meta.Span.init(0, 0, 0));
+    return hir_build_expr.voidLiteral(b, null);
 }
 
 /// One module-constant initializer tree, stashed on the record.
