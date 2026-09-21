@@ -175,6 +175,7 @@ zig build            # build + install both artifacts:
 zig build examples   # compile every examples/*.st to AIR, LLIR asm, and LLIR bin under zig-out/examples/
 zig build embed      # run the host-embedding example (examples/embed/random_demo.zig)
 zig build test       # run unit tests
+zig build test -Dtest-filter=<name>   # rerun only matching unit tests (repeatable)
 ```
 
 For consumers that link the static library (C, C++, …):

@@ -6,7 +6,7 @@ Zig implementation of the Stilla v1.3 runtime and Stilla-to-CFG-AIR compiler. Us
 
 - `zig build -fincremental` installs `zig-out/lib/libstilla.a` and `zig-out/bin/stilla`.
 - `zig build -fincremental --release=safe` builds the same artifacts with ReleaseSafe optimizations.
-- `zig build -fincremental test` runs the complete library and CLI test suite; prefer this before finishing. CI (`.github/workflows/ci.yml`) runs it with `-Doptimize=ReleaseSafe`, then builds the toolchain and runs `python3 tools/stsmith/sweep.py`.
+- `zig build -fincremental test` runs the complete library and CLI test suite; prefer this before finishing. Adding `-Dtest-filter=<name>` (repeatable) reruns only matching unit tests. CI (`.github/workflows/ci.yml`) runs it with `-Doptimize=ReleaseSafe`, then builds the toolchain and runs `python3 tools/stsmith/sweep.py`.
 - `zig fmt src/` formats sources. Run it before `zig fmt --check src/`; the tree is currently format-clean.
 - `zig build -fincremental run -- examples/fib.st` compiles one Stilla source to CFG AIR on stdout; with no input it defaults to `examples/fib.st`.
 - `zig build -fincremental examples` always regenerates AIR, LLIR assembly, and LLIR binary artifacts under `zig-out/examples/` and prints their sizes.

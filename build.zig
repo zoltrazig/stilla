@@ -124,11 +124,21 @@ pub fn build(b: *std.Build) void {
     const run_step = b.step("run", "Compile a Stilla file to AIR, LLIR asm, or LLIR bin — or execute with --run");
     run_step.dependOn(&run_cmd.step);
 
+    // `-Dtest-filter=<name>` (repeatable): restrict the unit-test binaries
+    // below to test declarations whose name contains `<name>`. The probe and
+    // embed subprocess steps in `test_step` are not unit tests and ignore it.
+    const test_filters = b.option(
+        []const []const u8,
+        "test-filter",
+        "Run only tests whose name contains this substring (repeatable)",
+    ) orelse &.{};
+
     // Unit tests, run with `zig build test`. The test executable reuses the
     // `stilla` module (its `test` blocks are reachable through
     // `std.testing.refAllDecls` in root.zig).
     const mod_tests = b.addTest(.{
         .root_module = mod,
+        .filters = test_filters,
     });
     const run_mod_tests = b.addRunArtifact(mod_tests);
 
@@ -140,6 +150,7 @@ pub fn build(b: *std.Build) void {
     // against the exe module.
     const exe_tests = b.addTest(.{
         .root_module = exe_module,
+        .filters = test_filters,
     });
     const run_exe_tests = b.addRunArtifact(exe_tests);
     test_step.dependOn(&run_exe_tests.step);
@@ -292,6 +303,7 @@ pub fn build(b: *std.Build) void {
     });
     const gen_tests = b.addTest(.{
         .root_module = gen_test_module,
+        .filters = test_filters,
     });
     const run_gen_tests = b.addRunArtifact(gen_tests);
     test_step.dependOn(&run_gen_tests.step);
