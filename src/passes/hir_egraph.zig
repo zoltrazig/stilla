@@ -140,6 +140,9 @@ pub const Stats = struct {
     projects_matched: usize = 0,
     /// Aggregate projections actually applied (`field_get(C(…), i) → vi`).
     projects: usize = 0,
+    /// In-place commutativity canonicalization swaps performed (the
+    /// matched half; `merges` counts the applied half).
+    ac: usize = 0,
     /// `let` bindings synthesized for a shared operand class during extraction.
     materialized: usize = 0,
     /// Fresh subtrees written at a site (a redirected class or a non-member
@@ -200,6 +203,9 @@ pub const Config = struct {
         project: bool = true,
         /// Materialize shared subtrees as synthesized `let`s (CSE sharing).
         cse: bool = true,
+        /// Integer commutativity (AC-lite): canonicalization + congruence
+        /// identities + `0 - x → neg x`.
+        ac: bool = true,
     };
 
     /// Bound on saturation rounds (the caller's `max_iterations`).
@@ -730,7 +736,7 @@ pub const Island = struct {
     fn applyRules(self: *Island, nid: NodeId) Error!bool {
         const n = self.nodes.items[nid];
         const d = hir.registry.get(n.op);
-        if (d.typed and (self.rules.fold or self.rules.algebra)) return self.ruleNumeric(nid);
+        if (d.typed and (self.rules.fold or self.rules.algebra or self.rules.ac)) return self.ruleNumeric(nid);
         const base = baseName(d.name);
         if (self.rules.cond and (std.mem.eql(u8, base, "if") or std.mem.eql(u8, base, "and") or std.mem.eql(u8, base, "or"))) {
             return self.ruleConstCond(nid);
@@ -778,7 +784,61 @@ pub const Island = struct {
             }
         }
 
+        // Integer commutativity (AC-lite, `rules.ac`): canonicalize the
+        // operand order in place so the round's `rebuild` hash-conses
+        // `a ⊕ b` with `b ⊕ a` into one class. No mirrored e-node (a
+        // mirror is itself commutative, so `saturate`'s node loop would
+        // never terminate) and no `propose` (it would raise
+        // `preferred_prio` and perturb identity extraction) — a lone
+        // `b + a` extracts unchanged; AC only surfaces through genuine
+        // sharing. The swap mutates the node's arena slice in place (the
+        // `rebuild` precedent); the stale index bucket is harmless because
+        // `rebuild` clears and rebuilds every bucket. Sound because island
+        // admission already proved every operand `isSegSafe` (total,
+        // observable-effect-free, deterministic, `Copy`, cleanup-free) —
+        // integer LTR evaluation order is unobservable inside an island, so
+        // no path-sensitive `reorderable(a, b)` query is consulted
+        // (docs/effects.md §12.3).
+        if (self.rules.ac and n.operands.len == 2 and isIntegerRep(rep) and isCommutativeInt(base)) {
+            const c0 = self.find(n.operands[0]);
+            const c1 = self.find(n.operands[1]);
+            if (c0 > c1) {
+                const tmp = n.operands[0];
+                n.operands[0] = n.operands[1];
+                n.operands[1] = tmp;
+                self.stats.ac += 1;
+                return true;
+            }
+        }
+
         if (self.rules.algebra and n.operands.len == 2 and isIntegerRep(rep)) {
+            // Class-equality congruence identities (`rules.ac`): checked
+            // BEFORE `integerAlgebra`, which early-returns `null` for
+            // non-constant operands and would make these dead code. Pure
+            // class checks, zero node creation (except the zero const).
+            if (self.rules.ac and self.find(n.operands[0]) == self.find(n.operands[1])) {
+                const sub_or_bxor = std.mem.eql(u8, base, "sub") or std.mem.eql(u8, base, "bxor");
+                const is_band = std.mem.eql(u8, base, "band");
+                const is_bor = std.mem.eql(u8, base, "bor");
+                if (sub_or_bxor or is_band or is_bor) {
+                    self.stats.algebra_matched += 1;
+                    const target: Ref = if (sub_or_bxor) blk: {
+                        const zero: meta.ConstValue = switch (rep) {
+                            .i32 => intCV(i32, 0),
+                            .i64 => intCV(i64, 0),
+                            .u32 => intCV(u32, 0),
+                            .u64 => intCV(u64, 0),
+                            else => unreachable, // isIntegerRep gates above
+                        };
+                        break :blk try self.internNode(try self.addConstNode(n.ty, zero));
+                    } else if (is_band) n.operands[0] else n.operands[1];
+                    if (try self.redirectToClass(cls, target)) {
+                        self.stats.algebra += 1;
+                        return true;
+                    }
+                    return false;
+                }
+            }
             const lc = self.constIn(n.operands[0]);
             const rc = self.constIn(n.operands[1]);
             const result = integerAlgebra(base, rep, lc, rc) orelse return false;
@@ -794,6 +854,33 @@ pub const Island = struct {
                 },
                 .value => |value| {
                     const cc = try self.internNode(try self.addConstNode(n.ty, value));
+                    if (try self.redirectToClass(cls, cc)) {
+                        self.stats.algebra += 1;
+                        return true;
+                    }
+                },
+                .negate => |idx| {
+                    // `0 - x → neg x` belongs to the AC bundle (`rules.ac`):
+                    // with AC disabled the identity stays a `sub`.
+                    if (!self.rules.ac) return false;
+                    // Mirror `addConstNode` but unary. The
+                    // created node cannot trigger further creation, and
+                    // later visits no-op at `redirectToClass` — bounded
+                    // churn, same as the fold path.
+                    const neg_op = negOpId(rep) orelse return false;
+                    const ops = try self.arena.alloc(Ref, 1);
+                    ops[0] = n.operands[idx];
+                    const nn = try self.addNode(.{
+                        .op = neg_op,
+                        .ty = n.ty,
+                        .payload = .none,
+                        .operands = ops,
+                        .regions = try self.arena.alloc(RegionTerm, 0),
+                        .access_hops = &.{},
+                        .origin = null,
+                        .full_expr = self.island_fe,
+                    });
+                    const cc = try self.internNode(nn);
                     if (try self.redirectToClass(cls, cc)) {
                         self.stats.algebra += 1;
                         return true;
@@ -1146,12 +1233,18 @@ pub const Island = struct {
             .bind => |b| .{ .bind = self.mapBinder(b, overlay) },
             .type_test => |tt| .{ .type_test = .{ .ty = tt.ty, .bind = self.mapBinder(tt.bind, overlay) } },
             .tuple => |elems| blk: {
-                const fresh = try self.arena.alloc(hir.PatternId, elems.len);
+                // Pattern children live *inside* the pattern (there is no
+                // program-owned pattern-child buffer), so they must be
+                // allocated from the program's arena. The island `arena`
+                // is a per-island scratch arena dropped after extraction:
+                // a child slice allocated there would dangle in the
+                // long-lived HIR as soon as `saturateIsland` returns.
+                const fresh = try self.pr.arena.alloc(hir.PatternId, elems.len);
                 for (elems, 0..) |e, i| fresh[i] = try self.copyPattern(e, overlay);
                 break :blk .{ .tuple = fresh };
             },
             .list => |lp| blk: {
-                const fresh = try self.arena.alloc(hir.PatternId, lp.elems.len);
+                const fresh = try self.pr.arena.alloc(hir.PatternId, lp.elems.len);
                 for (lp.elems, 0..) |e, i| fresh[i] = try self.copyPattern(e, overlay);
                 break :blk .{ .list = .{
                     .elems = fresh,
@@ -1159,7 +1252,7 @@ pub const Island = struct {
                 } };
             },
             .struct_ => |sp| blk: {
-                const fresh = try self.arena.alloc(hir.Pattern.FieldPattern, sp.fields.len);
+                const fresh = try self.pr.arena.alloc(hir.Pattern.FieldPattern, sp.fields.len);
                 for (sp.fields, 0..) |f, i| {
                     fresh[i] = .{ .field = f.field, .pat = try self.copyPattern(f.pat, overlay) };
                 }
@@ -1314,6 +1407,8 @@ const fminIeee = hir_egraph_rules.fminIeee;
 const fmaxIeee = hir_egraph_rules.fmaxIeee;
 const integerAlgebra = hir_egraph_rules.integerAlgebra;
 const intAlgebraT = hir_egraph_rules.intAlgebraT;
+const isCommutativeInt = hir_egraph_rules.isCommutativeInt;
+const negOpId = hir_egraph_rules.negOpId;
 
 // ---------------------------------------------------------------------------
 // White-box tests (hir.md §10.2: owning module `test {}`)
@@ -1719,6 +1814,67 @@ test "integer algebra identities are declared, not guessed" {
     try testing.expectEqual(@as(usize, 0), intAlgebraT(i32, "shl", null, z).?.keep);
     // Float reps take no integer identity.
     try testing.expect(integerAlgebra("add", .f32, null, null) == null);
+}
+
+test "AC: commutative operands merge into one class" {
+    var f = try fixture(i32ty, "fn (B0: i32, B1: i32) { add.i32(add.i32(%B0, %B1), add.i32(%B1, %B0)) }");
+    defer f.deinit();
+    const pr = f.pr();
+    const body = pr.region(pr.regionsOf(f.root())[0]).root;
+    const a0 = pr.operands(body)[0];
+    const a1 = pr.operands(body)[1];
+    var it = f.island();
+    _ = try it.encode(f.root());
+    try it.saturate();
+    // The canonicalization swap fired, and `rebuild` hash-consed the two
+    // now-identical `add` nodes into one class with two members.
+    try testing.expect(it.stats.ac > 0);
+    const c = it.classOfOrigin(a0).?;
+    try testing.expectEqual(c, it.classOfOrigin(a1).?);
+    try testing.expectEqual(@as(usize, 2), it.memberCount(c));
+}
+
+test "AC: x - x collapses to const 0 once commutativity merged the operands" {
+    // `(a*b) - (b*a)`: the congruence identity needs the AC merge first —
+    // with distinct operand classes `integerAlgebra` has no redex here.
+    var f = try fixture(i32ty, "fn (B0: i32, B1: i32) { sub.i32(mul.i32(%B0, %B1), mul.i32(%B1, %B0)) }");
+    defer f.deinit();
+    const pr = f.pr();
+    const body = pr.region(pr.regionsOf(f.root())[0]).root;
+    var it = f.island();
+    _ = try it.encode(f.root());
+    try it.saturate();
+    try testing.expect(it.stats.ac > 0);
+    // The sub's class holds the folded `const 0` member.
+    const sub_cls = it.classOfOrigin(body).?;
+    const zero = it.constIn(sub_cls).?;
+    try testing.expectEqual(@as(i64, 0), zero.int);
+}
+
+test "AC: float adds are never canonicalized (NaN payload / ±0 observable)" {
+    const f32ty = meta.Type{ .primitive = .float32 };
+    var f = try fixture(f32ty, "fn (B0: f32, B1: f32) { add.f32(add.f32(%B0, %B1), add.f32(%B1, %B0)) }");
+    defer f.deinit();
+    const pr = f.pr();
+    const body = pr.region(pr.regionsOf(f.root())[0]).root;
+    const a0 = pr.operands(body)[0];
+    const a1 = pr.operands(body)[1];
+    var it = f.island();
+    _ = try it.encode(f.root());
+    try it.saturate();
+    // No swap fired, and the two adds stayed distinct classes.
+    try testing.expectEqual(@as(usize, 0), it.stats.ac);
+    try testing.expect(it.classOfOrigin(a0).? != it.classOfOrigin(a1).?);
+}
+
+test "AC: 0 - x extracts to neg (the .negate identity)" {
+    var f = try fixture(i32ty, "fn (B0: i32) { sub.i32(0i32, %B0) }");
+    defer f.deinit();
+    const pr = f.pr();
+    const body = pr.region(pr.regionsOf(f.root())[0]).root;
+    const result = try optimizeIsland(f.arena.allocator(), pr, f.analysis, body, .{});
+    try testing.expect(result.stats.algebra >= 1);
+    try testing.expectEqualStrings("neg.i32", hir.registry.get(pr.node(body).op).name);
 }
 
 // ---------------------------------------------------------------------------

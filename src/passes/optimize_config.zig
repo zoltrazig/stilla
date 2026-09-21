@@ -27,6 +27,8 @@ pub const OptimizeConfig = struct {
     egraph_cond: bool = true,
     egraph_project: bool = true,
     egraph_cse: bool = true,
+    /// Integer commutativity (AC-lite) for the SEG e-graph arena.
+    egraph_ac: bool = true,
 
     // --- CFG mid-level optimizer (cfg_optimize.zig) ---
     /// Gate: run the CFG optimizer + post-optimization drop lowering.
@@ -89,7 +91,7 @@ test "setByName rejects an unknown name without mutating" {
 
 test "names has one entry per toggle field" {
     // Hard-coded so a table that silently drifts fails here.
-    try std.testing.expectEqual(@as(usize, 29), names.len);
+    try std.testing.expectEqual(@as(usize, 30), names.len);
     try std.testing.expectEqual(std.meta.fields(OptimizeConfig).len, names.len);
 }
 

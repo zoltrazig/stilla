@@ -38,18 +38,30 @@
 //!   driver — and, in the arena (`hir_egraph.zig`): aggregate projection
 //!   (`field_get(C(…), i) → vi` for a known index when `C` is
 //!   `struct_make` / `tuple_make` / `list_make`, §8.3), constant folding
-//!   over the typed reps, integer algebra identities, and CSE-style
+//!   over the typed reps, integer algebra identities (the constant
+//!   identities plus the class-equality congruence identities
+//!   `x - x → 0` / `x ^ x → 0` / `x & x → x` / `x | x → x` and
+//!   `0 - x → neg x`), integer commutativity canonicalization (AC-lite:
+//!   operands swapped in place so congruence merges `a ⊕ b` / `b ⊕ a`; the
+//!   swap is licensed by the island's `isSegSafe` admission — total,
+//!   observable-effect-free, deterministic, `Copy` operands — so LTR
+//!   evaluation order is unobservable and no `reorderable` query is
+//!   consulted, docs/effects.md §12.3), and
+//!   CSE-style
 //!   sharing (an operand class used at least twice by one `strict_ltr`,
 //!   region-free island node materializes into a synthesized `let` when its
 //!   preferred e-node is not a trivial atom, and duplicates otherwise,
 //!   §8.3). Tuple / list projection is IR-level only (Stilla has no
 //!   element-read suffix); not in scope: non-sibling (cross-statement /
-//!   cross-branch) sharing, associativity / commutativity search, `move` /
+//!   cross-branch) sharing, associativity search, `move` /
 //!   `drop` / borrow, host calls (§8.3).
-//! - **Extraction cost and the termination contract** — the arena's cost is
-//!   the preferred e-node (0 = the class's `encode` original, 1 = a rule's
-//!   choice) with the lowest e-node index as the deterministic tie-break
-//!   (hir.md §8.2); no per-opcode weights yet. The folding / algebra /
+//! - **Extraction cost and the termination contract** — the arena's
+//!   extraction cost is the `hir_egraph.CostModel` minimum (per-opcode
+//!   weights by registry class, default = node count), relaxed bottom-up
+//!   over the class DAG; the tie-break is lowest cost, then the class's
+//!   preferred e-node (0 = the class's `encode` original, 1 = a rule's
+//!   choice), then the lowest e-node index (hir.md §8.2). The folding /
+//!   algebra /
 //!   aggregate-projection rules strictly reduce it; β (a boundary rewrite,
 //!   not an e-class extraction) is admitted by its contract and the
 //!   known-variant `match` reduction by its coverage / arity proof. Two
@@ -297,6 +309,9 @@ pub const Stats = struct {
     /// Aggregate-projection redexes the arena recognized, summed (match
     /// half of `projects`).
     egraph_projects_matched: usize = 0,
+    /// In-place commutativity canonicalization swaps performed, summed
+    /// (the matched half; the applied half flows through `egraph_merges`).
+    egraph_ac: usize = 0,
 };
 
 pub const Config = struct {
@@ -333,6 +348,9 @@ pub const Config = struct {
     egraph_cond: bool = true,
     egraph_project: bool = true,
     egraph_cse: bool = true,
+    /// Integer commutativity for the arena (canonicalization + congruence
+    /// identities + `0 - x → neg x`).
+    egraph_ac: bool = true,
 };
 
 /// Rewrite every function body and constant initializer in place to the
@@ -385,6 +403,7 @@ pub fn optimize(arena: std.mem.Allocator, built: *hir.BuiltProgram, config: Conf
         stats.egraph_algebra_matched += rw.egraph_algebra_matched;
         stats.egraph_conds_matched += rw.egraph_conds_matched;
         stats.egraph_projects_matched += rw.egraph_projects_matched;
+        stats.egraph_ac += rw.egraph_ac;
         if (!changed) {
             stats.converged = true;
             break;
@@ -444,6 +463,7 @@ const Rewriter = struct {
     egraph_algebra_matched: usize = 0,
     egraph_conds_matched: usize = 0,
     egraph_projects_matched: usize = 0,
+    egraph_ac: usize = 0,
 
     /// Node ids whose content this round has already overwritten in place.
     /// An island-membership or analysis verdict about such a node describes
@@ -600,6 +620,7 @@ const Rewriter = struct {
                 .cond = self.cfg.egraph_cond,
                 .project = self.cfg.egraph_project,
                 .cse = self.cfg.egraph_cse,
+                .ac = self.cfg.egraph_ac,
             } },
         );
         if (result.stats.enodes == 0) return; // encode rejected the island
@@ -618,6 +639,7 @@ const Rewriter = struct {
         self.egraph_algebra_matched += result.stats.algebra_matched;
         self.egraph_conds_matched += result.stats.conds_matched;
         self.egraph_projects_matched += result.stats.projects_matched;
+        self.egraph_ac += result.stats.ac;
         self.shares += result.stats.materialized;
         if (!result.changed) return;
         self.changed = true;

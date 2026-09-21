@@ -188,6 +188,18 @@ pub fn baseName(name: []const u8) []const u8 {
     return name;
 }
 
+/// Integer commutativity set (AC-lite): mirrors `llir_fusion.isCommutative`'s
+/// op set. Floats (NaN payload / ±0 are observable) and the ordering
+/// comparisons (`a < b` is `b > a`, a different rule) are excluded: callers
+/// gate on `isIntegerRep` and this set simply omits `lt`/`gt`/`le`/`ge`.
+pub fn isCommutativeInt(base: []const u8) bool {
+    const set = [_][]const u8{ "add", "mul", "eq", "ne", "band", "bor", "bxor" };
+    for (set) |op| {
+        if (std.mem.eql(u8, base, op)) return true;
+    }
+    return false;
+}
+
 pub fn isCtorName(name: []const u8) bool {
     return std.mem.eql(u8, name, "struct_make") or
         std.mem.eql(u8, name, "tuple_make") or
@@ -508,6 +520,8 @@ const AlgebraResult = union(enum) {
     keep: usize,
     /// The result is this constant (drops both operands).
     value: meta.ConstValue,
+    /// `0 - x` → `neg x`; payload is the operand index to negate.
+    negate: usize,
 };
 
 pub fn integerAlgebra(base: []const u8, rep: hir.ScalarRep, lc: ?meta.ConstValue, rc: ?meta.ConstValue) ?AlgebraResult {
@@ -518,6 +532,15 @@ pub fn integerAlgebra(base: []const u8, rep: hir.ScalarRep, lc: ?meta.ConstValue
         .u64 => intAlgebraT(u64, base, lc, rc),
         else => null,
     };
+}
+
+/// OpId of the `neg.<rep>` op for an integer rep. The registry defines
+/// `neg.i32`/`neg.i64`/`neg.u32`/`neg.u64`, so this only fails for
+/// non-integer reps; callers treat `null` as "no rewrite".
+pub fn negOpId(rep: hir.ScalarRep) ?hir.OpId {
+    var buf: [16]u8 = undefined;
+    const name = std.fmt.bufPrint(&buf, "neg.{s}", .{@tagName(rep)}) catch return null;
+    return hir.opId(name);
 }
 
 pub fn intAlgebraT(comptime T: type, base: []const u8, lc: ?meta.ConstValue, rc: ?meta.ConstValue) ?AlgebraResult {
@@ -533,6 +556,7 @@ pub fn intAlgebraT(comptime T: type, base: []const u8, lc: ?meta.ConstValue, rc:
         if (rz) return .{ .keep = 0 };
     } else if (std.mem.eql(u8, base, "sub")) {
         if (rz) return .{ .keep = 0 };
+        if (lz) return .{ .negate = 1 };
     } else if (std.mem.eql(u8, base, "mul")) {
         if (lo) return .{ .keep = 1 };
         if (ro) return .{ .keep = 0 };

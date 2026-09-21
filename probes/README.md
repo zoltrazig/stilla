@@ -91,7 +91,12 @@ The detailed probes cover the source-reachable operation/type matrix:
   and the read were), and a trivial-atom class inside a `let`-body island is
   duplicated to both operands — the emitted binder reads stay copies of the
   island-external `let` binder. The refusal sits here too: a may-trap
-  initializer is no island member, so its α-equal products never merge
+  initializer is no island member, so its α-equal products never merge.
+  Three more cases: `(a + b) + (b + a)` merges via integer
+  commutativity canonicalization (one evaluation materialized),
+  `(a * b) - (b * a)` collapses to 0 (commutativity plus the
+  `x - x → 0` identity compound), and `0 - a` rewrites to `neg` (AIR-text
+  change only; `neg` and `sub` cost the same)
 - `never_suffix.st`: the `never_returns` must fact's suffix deletion
   ([effects.md](effects.md) §10.1) — a structurally-never callee
   (`builtin.panic` behind a `void` signature) deletes the statements after

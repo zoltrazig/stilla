@@ -54,10 +54,33 @@ fn refused_kept(a: int32, b: int32) -> int32 {
     q + q
 }
 
+// Integer commutativity (AC-lite): `(b + a)` is canonicalized to `(a + b)`
+// in place, congruence merges the two `add` classes, and extraction
+// materializes one evaluation at the outer `add`: `let t = a + b { t + t }`.
+fn commutative_shared(a: int32, b: int32) -> int32 {
+    (a + b) + (b + a)
+}
+
+// Compounds AC with the `x - x → 0` congruence identity: only after
+// commutativity merges the two `mul` classes are the sub's operands one
+// class, which collapses the whole body to the constant `0`.
+fn self_difference(a: int32, b: int32) -> int32 {
+    (a * b) - (b * a)
+}
+
+// `0 - x → neg x`: `neg` costs the same as `sub`, so this is an AIR-text
+// change (the site names `neg`), not a cost change.
+fn zero_minus(a: int32) -> int32 {
+    (0 - a) + a
+}
+
 fn main() -> void {
     builtin.print(builtin.str(merged_after_rule(3, 4)));
     builtin.print(builtin.str(deep_merge(2, 3, 5)));
     builtin.print(builtin.str(outer_binder_dup(7)));
     builtin.print(builtin.str(refused_kept(4, 2)));
     builtin.print(builtin.str(projected_merged(6, 5)));
+    builtin.print(builtin.str(commutative_shared(2, 3)));
+    builtin.print(builtin.str(self_difference(3, 4)));
+    builtin.print(builtin.str(zero_minus(9)));
 }

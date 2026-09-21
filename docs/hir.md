@@ -1027,6 +1027,34 @@ class 给、缺省回退到节点计数（§8.2 末的落地清单）。
   默认权重下全语料的抽取结果与「priority + 最低索引」逐字相同（§11 基线不变）。
   规则外的形态（β 的 `let` 链、多 payload `match` 的绑定叶、materialize 出的
   合成 `let`）不在 arena 里，由驱动按各自契约准入。
+- **integer 交换律（AC-lite，`egraph_ac` 开关，默认开）**：`ruleNumeric` 对
+  base 属于交换集（`add` / `mul` / `eq` / `ne` / `band` / `bor` / `bxor`，与
+  `llir_fusion.isCommutative` 同集）、rep 为 integer 的二元节点做**规范化**：
+  `find(op0) != find(op1)` 时原位交换 operand 使 `find(op0) < find(op1)`（
+  `n.operands` 是 per-node arena 切片，原地改写安全；每轮 `rebuild()` 清空并
+  重建全部 index bucket，过期 bucket 只多一次 `nodeEql` 比较），随后同一轮的
+  `rebuild()` hash-cons 把两个现已同形的节点并成一类——零新建节点。不做镜像
+  e-node（镜像自身也可交换，saturate 的 `while` 循环永不终止），也不用
+  `propose`（会把 `preferred_prio` 提到 1，扰动 identity extraction；孤立的
+  `b + a` 抽取结果不变，AC 只经真实共享显形）。同域的同余恒等式在
+  `integerAlgebra` **之前**检查（后者对非常量 operand 早退 `null`）：
+  `x - x → 0`、`x ^ x → 0`（重定向到 rep 的零常量）、`x & x → x`、
+  `x | x → x`（`.keep` 重定向）——纯类相等判定，零建节点；`0 - x → neg x`
+  经新的 `.negate` `AlgebraResult` 变体构建一元 `neg.<rep>` 节点后
+  `redirectToClass`。三者与交换律复合：`(a*b) - (b*a)` 之所以折叠为 `0`，
+  先靠规范化合并两个 `mul` 类，再由 `x - x` 触发。作用域仅 integer rep（
+  浮点的 NaN payload / ±0 可观察，排序比较是另一条规则，`.byte` 与既有
+  代数门一致地排除）。`neg` 与 `sub` 的 cost 同为 1，`0 - x → neg x` 只在
+  AIR 文本（或 CSE 到既有 `neg`）可观察。交换计数进 `hir_egraph.Stats.ac`
+  （识别/交换这一半；应用一半计入 `merges`），驱动聚合为
+  `hir_seg.Stats.egraph_ac`。该交换之所以**不改语义**，依据是效果系统而非
+  `reorderable(a, b)`：island 准入要求每个节点（含每个 operand）通过
+  `isSegSafe`——`total`（不 trap）、`observable_effect_free`、`Q = 0`
+  （deterministic）、`Copy`（无 move/drop 顺序）、cleanup-free 且过 ownership
+  门（见 effects.md §12.3）。整数 LTR 求值顺序在 island 内因此不可观察，原位
+  交换 operand 合法；反之，任何可能 trap、有可观察效果或 nondeterministic 的
+  节点都进不了 arena，AC 永远不会在顺序可观察的表达式上运行（浮点的 NaN
+  payload / ±0 与顺序无关却仍可观察，故另按 rep 排除，见上）。
 - **identity extraction**：类的 preferred 优先级为 0、且该类里仍有一个
   `origin == 站点` 的成员、元数匹配时，直接递归回站点自己的 operand / region，
   一个节点都不新建（`Stats.written == 0`）；否则深拷贝：region 重建成新的
@@ -1077,7 +1105,7 @@ class 给、缺省回退到节点计数（§8.2 末的落地清单）。
 | used-once let forwarding | ✅ | 单次使用：把 init 内容搬进使用点；init 需为 island 成员（Copy、cleanup-free） |
 | trivial-atom forwarding | ✅ | const / local / fn_ref 无求值、无 region，可复制到每个使用点；原子需 `isDuplicable` |
 | constant folding | ✅ | 按 typed rep；**可能 trap 的折叠被拒**（trap 归运行时） |
-| integer algebra identities | ✅ | `x + 0 → x`、`x * 1 → x` 等，仅 integer rep |
+| integer algebra identities | ✅ | `x + 0 → x`、`x * 1 → x`、`x - x → 0`、`x ^ x → 0`、`x & x → x`、`x \| x → x`、`0 - x → neg x`，仅 integer rep |
 | constant `if` / `and` / `or` | ✅ | 常量条件选中已求值分支（另一分支是 island 成员） |
 | η-reduction | ✅ | 值位置 `fn_ref` 重定向；λ 记录不动（§8.5） |
 | known variant `match` | ✅ | 已知 tag 的 `variant_make` scrutinee → 覆盖 arm 的 `let` 链；payload 仅 bind / wildcard 叶 |
@@ -1085,7 +1113,8 @@ class 给、缺省回退到节点计数（§8.2 末的落地清单）。
 | α-equivalence | ✅* | island 内由 arena 的 hash-consing + `rebuild` 同余合并承担（α-相等子树自然同类）；β 克隆时的**捕获规避** fresh-binder 重映射仍由驱动做 |
 | CSE-style sharing | ✅ | 同一 island 内、同一 `strict_ltr` 无 region 节点的 operand 列表里，两个**同类**且 `isDuplicable` 的纯子树由 extraction materialize 成一个合成 `let`，非平凡原子才 materialize、trivial atom 直接复制（详见下） |
 | operand reorder | ✅* | 相邻 operand 对交换、按 `rowLess` 规范序（`canSwapOperands` / `reorder_rule`，§8.8）；仅当实例下该对 `orderCompatible`——默认 flat 空 registry 上从不触发，`hierarchy` 实例下兄弟域读对可交换（docs/effects.md §10.3–§10.5） |
-| associativity / commutativity | ❌ | 搜索空间问题，未立项 |
+| integer commutativity (AC-lite) | ✅ | 规范化（canonicalization）而非搜索：`find(op0) > find(op1)` 时原位交换二元 integer rep 节点的 operand，使同类节点 hash-cons 合并；仅 integer rep（`add` / `mul` / `eq` / `ne` / `band` / `bor` / `bxor`），排除浮点（NaN payload / ±0 可观察）与排序比较（`a < b` 是 `b > a`，另一条规则）；交换的合法性由 island 的 `isSegSafe` 准入（total / 无 observable_effect / deterministic / Copy）保证，LTR 求值顺序不可观察 |
+| associativity | ❌ | 搜索空间问题，未立项 |
 | Unique rewrite | ❌ | 需线性等式系统 |
 | host calls / `drop` / consuming match / panic 重排 | ⚠️/❌ | 仅**序兼容对**可重排（`reorder` 规则，§8.8）；`drop` / consuming match / panic 不重排 |
 

@@ -47,7 +47,7 @@ family, and each family has one sub-toggle per rewrite:
 | Gate | Units (sub-toggles) |
 | --- | --- |
 | `hir` | `dead_let`, `anf`, `never_suffix` |
-| `seg` | `seg_beta`, `seg_eta`, `seg_let_dead`, `seg_let_forward`, `seg_let_atom`, `seg_match`, `seg_reorder`, `egraph_fold`, `egraph_algebra`, `egraph_cond`, `egraph_project`, `egraph_cse` |
+| `seg` | `seg_beta`, `seg_eta`, `seg_let_dead`, `seg_let_forward`, `seg_let_atom`, `seg_match`, `seg_reorder`, `egraph_fold`, `egraph_algebra`, `egraph_cond`, `egraph_project`, `egraph_cse`, `egraph_ac` |
 | `cfg` | `cfg_tail_call`, `cfg_inline`, `cfg_cse`, `cfg_copy_prop`, `cfg_pre`, `cfg_if_convert`, `cfg_dead_block`, `cfg_drop_elide`, `cfg_dead_instr`, `cfg_jump_thread`, `cfg_phi_simplify` |
 
 **Library defaults:** every gate off, every sub-toggle on.

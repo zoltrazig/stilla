@@ -1261,6 +1261,11 @@ test "SEG: two fresh builds produce the same optimized text (deterministic)" {
 // ---------------------------------------------------------------------------
 
 fn compileAir(spec: []const u8, text: []const u8, seg: bool) ![]u8 {
+    return compileAirOpt(spec, text, .{ .seg = seg });
+}
+
+/// Same pipeline with an explicit `OptimizeConfig` (sub-toggle isolation).
+fn compileAirOpt(spec: []const u8, text: []const u8, optimize: frontend.OptimizeConfig) ![]u8 {
     var sources = moduleinfo.Sources{};
     var source_map = std.StringHashMapUnmanaged([]const u8).empty;
     defer source_map.deinit(testing.allocator);
@@ -1270,7 +1275,7 @@ fn compileAir(spec: []const u8, text: []const u8, seg: bool) ![]u8 {
         .entry = spec,
         .sources = sources,
         .entry_fn = "main",
-        .optimize = .{ .seg = seg },
+        .optimize = optimize,
     });
     defer comp.deinit();
     if (comp.program) |*p| return cfg.print(p, testing.allocator);
@@ -1701,6 +1706,25 @@ test "SEG arena — the arena's projection rule is observable in the AIR" {
     try testing.expect(std.mem.indexOf(u8, on, "read_field") == null);
 }
 
+test "SEG arena — integer commutativity (egraph_ac) is observable in the AIR" {
+    const text = try probe_corpus.read(testing.allocator, "probes", "egraph");
+    defer testing.allocator.free(text);
+    const off = try compileAir("app", text, false);
+    defer testing.allocator.free(off);
+    const on = try compileAir("app", text, true);
+    defer testing.allocator.free(on);
+    // (a) SEG as a whole rewrites the probe's AIR.
+    try testing.expect(!std.mem.eql(u8, off, on));
+    // (b) The new rule isolated: `.egraph_ac = false` vs the default-on
+    // SEG compile. Only with AC do the commutative merges
+    // (`(a + b) + (b + a)`, `(a * b) - (b * a)`) and the `0 - a → neg`
+    // rewrite land; the probe's pre-existing shapes (e.g. `x * 1`)
+    // are unchanged by the toggle.
+    const ac_off = try compileAirOpt("app", text, .{ .seg = true, .egraph_ac = false });
+    defer testing.allocator.free(ac_off);
+    try testing.expect(!std.mem.eql(u8, ac_off, on));
+}
+
 // ---------------------------------------------------------------------------
 // Corpus budget: the recorded SEG compile-time / rounds / island baseline
 // ---------------------------------------------------------------------------
@@ -1729,6 +1753,7 @@ test "SEG budget — every corpus program converges inside the round bound" {
     var total_extract_cost: u64 = 0;
     var total_matches: u64 = 0;
     var total_rule_applies: u64 = 0;
+    var total_ac: u64 = 0;
     var total_islands: usize = 0;
     var total_nodes: usize = 0;
     var covered: usize = 0;
@@ -1778,6 +1803,7 @@ test "SEG budget — every corpus program converges inside the round bound" {
             total_extract_cost += stats.egraph_extract_cost;
             total_matches += stats.egraph_folds_matched + stats.egraph_algebra_matched +
                 stats.egraph_conds_matched + stats.egraph_projects_matched;
+            total_ac += stats.egraph_ac;
             // The union rules' applied half. (`shares` is extraction-side
             // materialization, not a rule application, so it is not part of
             // the match⊇apply comparison and stays in `total_rewrites`.)
@@ -1795,8 +1821,8 @@ test "SEG budget — every corpus program converges inside the round bound" {
         }
     }
     std.debug.print(
-        "SEG budget baseline: {d} files, {d} islands / {d} reachable nodes ({d} files with islands), {d} rounds, {d} rewrites, {d} e-graph rounds, {d} unions / {d} merges / {d} copies, {d} rule matches / {d} rule applies, {d} extract cost, {d} ms total; slowest {s} {d} ms ({d} rounds, {d} islands)\n",
-        .{ files, total_islands, total_nodes, covered, total_iters, total_rewrites, total_egraph_rounds, total_unions, total_merges, total_copies, total_matches, total_rule_applies, total_extract_cost, total_ns / std.time.ns_per_ms, slow, slow_ns / std.time.ns_per_ms, slow_iters, slow_islands },
+        "SEG budget baseline: {d} files, {d} islands / {d} reachable nodes ({d} files with islands), {d} rounds, {d} rewrites, {d} e-graph rounds, {d} unions / {d} merges / {d} copies, {d} rule matches / {d} rule applies, {d} ac swaps, {d} extract cost, {d} ms total; slowest {s} {d} ms ({d} rounds, {d} islands)\n",
+        .{ files, total_islands, total_nodes, covered, total_iters, total_rewrites, total_egraph_rounds, total_unions, total_merges, total_copies, total_matches, total_rule_applies, total_ac, total_extract_cost, total_ns / std.time.ns_per_ms, slow, slow_ns / std.time.ns_per_ms, slow_iters, slow_islands },
     );
     try testing.expect(files > 0);
     try testing.expect(covered > 0);
@@ -1806,6 +1832,9 @@ test "SEG budget — every corpus program converges inside the round bound" {
     // the corpus — the rule set actually fires, it does not merely run.
     try testing.expect(total_matches > 0);
     try testing.expect(total_rule_applies > 0);
+    // Non-vacuous (AC): the commutativity canonicalization swapped operand
+    // pairs somewhere in the corpus, not merely compiled.
+    try testing.expect(total_ac > 0);
     // A rule's match always precedes (or equals) its application: the
     // applied half is a subset of the recognized redexes. This pins the
     // match-counter mechanics to the same corpus.

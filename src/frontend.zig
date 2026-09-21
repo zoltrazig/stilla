@@ -375,6 +375,7 @@ pub fn compile(allocator: std.mem.Allocator, options: Options) CompileError!Comp
                 .egraph_cond = options.optimize.egraph_cond,
                 .egraph_project = options.optimize.egraph_project,
                 .egraph_cse = options.optimize.egraph_cse,
+                .egraph_ac = options.optimize.egraph_ac,
             }) catch return error.OutOfMemory;
             if (revalidateHir(arena_alloc, graph, built, options.host_decls, options.resources, &engine) catch return error.OutOfMemory) |diag| {
                 return failed(arena, &.{diag}, graph, builder.loaded_sources.items);
