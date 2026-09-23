@@ -16,7 +16,7 @@ const checker = @import("stilla").checker;
 const hir_build_block = @import("hir_build_block.zig");
 const hir_build_expr = @import("hir_build_expr.zig");
 const hir_build_cleanup = @import("hir_build_cleanup.zig");
-pub const BuildError = error{ OutOfMemory, Diagnostic };
+pub const BuildError = error{ OutOfMemory, Diagnostic, UnsupportedCleanupType };
 
 /// Program-wide first-class intrinsic wrapper cache key: the declaring
 /// Key of the program-wide first-class intrinsic wrapper cache: the
@@ -190,6 +190,11 @@ pub const Builder = struct {
         return .{ .function = .{ .params = params, .ret = rp } };
     }
 
+    /// Intern a type into the program's canonical pool.
+    pub fn internTy(self: *Builder, ty: meta.Type) BuildError!hir.HIRTypeId {
+        return self.built.program.intern(ty);
+    }
+
     /// The checker's annotated type of an expression in module `info`.
     pub fn annotatedType(self: *Builder, info: *moduleinfo.ModuleInfo, e: *const ast.Expr) ?meta.Type {
         const ma = self.ann.per_module.get(info.specifier) orelse return null;
@@ -278,7 +283,7 @@ fn predeclareModule(b: *Builder, info: *moduleinfo.ModuleInfo) BuildError!void {
                 var rec = hir.ConstRecord{
                     .name = vm.name.text,
                     .module = mi,
-                    .type_ = vm.type_,
+                    .type_ = try b.built.program.intern(vm.type_),
                     .key = key,
                     .init = null,
                 };
@@ -292,7 +297,7 @@ fn predeclareModule(b: *Builder, info: *moduleinfo.ModuleInfo) BuildError!void {
             },
             .func => |f| if (f.body == null) {
                 const key = try b.qualified(info.specifier, vm.name.text);
-                try b.built.hosts.append(b.arena, .{ .module = mi, .name = vm.name.text, .signature = vm.type_, .key = key });
+                try b.built.hosts.append(b.arena, .{ .module = mi, .name = vm.name.text, .signature = try b.built.program.intern(vm.type_), .key = key });
                 try b.host_ids.put(b.arena, key, @intCast(b.built.hosts.items.len - 1));
             },
         }
@@ -410,13 +415,21 @@ fn buildModuleFuncs(b: *Builder, info: *moduleinfo.ModuleInfo) BuildError!void {
 pub fn predeclare(b: *Builder, kind: hir.FuncKind, info: *moduleinfo.ModuleInfo, name: []const u8, params: []meta.Param, ret: meta.Type, span: meta.Span, body: ?*const ast.Block) BuildError!hir.FuncId {
     const mi = try b.modIdx(info.specifier);
     const id: hir.FuncId = @intCast(b.built.funcs.items.len);
-    const owned_params = try b.arena.dupe(meta.Param, params);
+    const owned_params = try b.arena.alloc(hir.FuncParam, params.len);
+    for (params, 0..) |p, i| {
+        owned_params[i] = .{
+            .span = p.span,
+            .name = p.name,
+            .mode = p.mode,
+            .ty = try b.built.program.intern(p.type_),
+        };
+    }
     try b.built.funcs.append(b.built.arena, .{
         .name = name,
         .kind = kind,
         .module = mi,
         .params = owned_params,
-        .ret = ret,
+        .ret = try b.built.program.intern(ret),
         .root = undefined,
         .span_start = span.start,
         .span_end = span.end,
@@ -451,7 +464,7 @@ pub fn buildFuncBody(b: *Builder, fid: hir.FuncId) BuildError!void {
     // Bind parameters: one binder per param, in order.
     var binder_ids = std.ArrayList(hir.BinderId).empty;
     for (f.params) |p| {
-        const bind = try b.built.program.addBinder(p.type_, switch (p.mode) {
+        const bind = try b.built.program.addBinder(b.built.program.typeOf(p.ty), switch (p.mode) {
             .plain => .value,
             .borrow => .borrow,
             .move => .move,
@@ -463,8 +476,7 @@ pub fn buildFuncBody(b: *Builder, fid: hir.FuncId) BuildError!void {
         try hir_build_block.buildBlock(b, b.graph.modules[f.module], blk)
     else
         try buildInitBody(b);
-    const params_sig = try b.arena.dupe(meta.Param, f.params);
-    const ty = try b.funcType(params_sig, f.ret);
+    const ty = try f.signature(&b.built.program, b.arena);
     const rid = try b.built.program.addRegion(binder_ids.items, body, null);
     const regs = try b.built.program.addRegions(&.{rid});
     // The λ wrapper node carries the declaration's provenance when the
@@ -476,7 +488,7 @@ pub fn buildFuncBody(b: *Builder, fid: hir.FuncId) BuildError!void {
         meta.Span.init(info.source.?.id, f.span_start, f.span_end)
     else
         null;
-    const node = try b.built.program.addExpr(.{ .op = try b.op(meta.Span.init(0, 0, 0), "lambda"), .ty = ty, .regions = regs, .origin = if (decl_span) |s| try b.origin(s) else hir.no_origin });
+    const node = try b.built.program.addExpr(.{ .op = try b.op(meta.Span.init(0, 0, 0), "lambda"), .ty = try b.built.program.intern(ty), .regions = regs, .origin = if (decl_span) |s| try b.origin(s) else hir.no_origin });
     b.built.funcs.items[fid].root = node;
 }
 

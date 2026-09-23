@@ -31,7 +31,7 @@ const std = @import("std");
 const hir = @import("stilla").hir;
 const meta = @import("stilla").meta;
 
-const ParseError = error{ Syntax, OutOfMemory };
+const ParseError = error{ Syntax, OutOfMemory, UnsupportedCleanupType };
 
 /// A parse diagnostic (message + position). `parseText` reports only the
 /// error; callers holding a `Parser` can read `diag` for the detail.
@@ -394,9 +394,14 @@ pub const Parser = struct {
     fn litConst(self: *Parser, value: meta.ConstValue, kind: meta.PrimitiveKind) ParseError!hir.ExprId {
         return self.program.addExpr(.{
             .op = try self.opId("const"),
-            .ty = meta.Type{ .primitive = kind },
+            .ty = try self.intern(.{ .primitive = kind }),
             .payload = .{ .const_value = value },
         });
+    }
+
+    /// Intern a parsed `meta.Type` into the pool (hir.md §3.8).
+    fn intern(self: *Parser, ty: meta.Type) ParseError!hir.HIRTypeId {
+        return self.program.intern(ty);
     }
 
     /// A literal: string, bool, void, or a typed numeric.
@@ -703,7 +708,7 @@ pub const Parser = struct {
         if (std.mem.eql(u8, w, "match")) return self.parseMatch();
         if (std.mem.eql(u8, w, "call")) return self.parseCall();
         if (std.mem.eql(u8, w, "panic")) {
-            return self.program.addExpr(.{ .op = try self.opId("panic"), .ty = meta.Type{ .primitive = .never } });
+            return self.program.addExpr(.{ .op = try self.opId("panic"), .ty = try self.intern(.{ .primitive = .never }) });
         }
         if (std.mem.eql(u8, w, "fnref")) return self.parseFnRef();
         if (std.mem.eql(u8, w, "module")) return self.parseModuleConst();
@@ -770,7 +775,7 @@ pub const Parser = struct {
             ty = try self.opResultType(name, desc, ops.items);
         }
         const operands = try self.program.addOperands(ops.items);
-        return self.program.addExpr(.{ .op = op, .ty = ty, .operands = operands });
+        return self.program.addExpr(.{ .op = op, .ty = try self.intern(ty), .operands = operands });
     }
 
     /// A member name (field / variant) or a numeric tuple position.
@@ -799,7 +804,7 @@ pub const Parser = struct {
             const decl = self.ctxDecl(ann.named.id) orelse return self.fail("struct type outside serialization context");
             if (decl != .struct_) return self.fail("struct_make result type is not a struct");
             if (ops.len != decl.struct_.fields.len) return self.fail("struct_make operand count does not match the struct fields");
-            return self.program.addExpr(.{ .op = op, .ty = ann, .operands = try self.program.addOperands(ops) });
+            return self.program.addExpr(.{ .op = op, .ty = try self.intern(ann), .operands = try self.program.addOperands(ops) });
         }
         if (std.mem.eql(u8, name, "variant_make")) {
             const vname = member orelse return self.fail("variant_make needs a variant name");
@@ -812,11 +817,11 @@ pub const Parser = struct {
             }
             const tg = tag orelse return self.fail("unknown variant name");
             if (ops.len != decl.union_.variants[tg].payloads.len) return self.fail("variant_make operand count does not match the variant payload");
-            return self.program.addExpr(.{ .op = op, .ty = ann, .operands = try self.program.addOperands(ops), .payload = .{ .tag = tg } });
+            return self.program.addExpr(.{ .op = op, .ty = try self.intern(ann), .operands = try self.program.addOperands(ops), .payload = .{ .tag = tg } });
         }
         // field_get: the member resolves against the operand's base type.
         const mname = member orelse return self.fail("field_get needs a member name");
-        const base = self.program.node(ops[0]).ty;
+        const base = self.program.typeOf(self.program.node(ops[0]).ty);
         var field: u32 = 0;
         switch (base) {
             .named => |bn| {
@@ -835,7 +840,7 @@ pub const Parser = struct {
             },
             else => return self.fail("field_get base is not a struct or tuple"),
         }
-        return self.program.addExpr(.{ .op = op, .ty = ann, .operands = try self.program.addOperands(ops), .payload = .{ .field = field } });
+        return self.program.addExpr(.{ .op = op, .ty = try self.intern(ann), .operands = try self.program.addOperands(ops), .payload = .{ .field = field } });
     }
 
     /// Result type derived from opcode + operands (used when the node is
@@ -850,21 +855,21 @@ pub const Parser = struct {
         }
         if (std.mem.eql(u8, name, "seq")) {
             if (ops.len == 0) return self.fail("seq needs at least one operand");
-            return p.node(ops[ops.len - 1]).ty;
+            return p.typeOf(p.node(ops[ops.len - 1]).ty);
         }
         if (std.mem.eql(u8, name, "drop")) return meta.Type{ .primitive = .void };
         if (std.mem.eql(u8, name, "move") or std.mem.eql(u8, name, "borrow")) {
-            return p.node(ops[0]).ty;
+            return p.typeOf(p.node(ops[0]).ty);
         }
         if (std.mem.eql(u8, name, "any_pack")) return meta.Type{ .primitive = .any };
         if (std.mem.eql(u8, name, "tuple_make")) {
             const elems = try self.arena.alloc(meta.Type, ops.len);
-            for (ops, 0..) |o, i| elems[i] = p.node(o).ty;
+            for (ops, 0..) |o, i| elems[i] = p.typeOf(p.node(o).ty);
             return .{ .tuple = elems };
         }
         if (std.mem.eql(u8, name, "list_make")) {
             const ptr = try self.arena.create(meta.Type);
-            ptr.* = p.node(ops[0]).ty;
+            ptr.* = p.typeOf(p.node(ops[0]).ty);
             return .{ .list = ptr };
         }
         return self.fail("op needs a result-type annotation");
@@ -886,7 +891,7 @@ pub const Parser = struct {
             if (id == self.ctx.funcs.len) return self.fail("unknown function key");
             return self.program.addExpr(.{
                 .op = try self.opId("fn_ref"),
-                .ty = try self.optionalTypeAnnotation(self.ctx.funcs[id].type_),
+                .ty = try self.intern(try self.optionalTypeAnnotation(self.ctx.funcs[id].type_)),
                 .payload = .{ .func = .{ .func = @intCast(id) } },
             });
         }
@@ -899,7 +904,7 @@ pub const Parser = struct {
         if (id == self.ctx.hosts.len) return self.fail("unknown host key");
         return self.program.addExpr(.{
             .op = try self.opId("fn_ref"),
-            .ty = try self.optionalTypeAnnotation(self.ctx.hosts[id].type_),
+            .ty = try self.intern(try self.optionalTypeAnnotation(self.ctx.hosts[id].type_)),
             .payload = .{ .func = .{ .host = @intCast(id) } },
         });
     }
@@ -931,7 +936,7 @@ pub const Parser = struct {
         if (id == self.ctx.consts.len) return self.fail("unknown module const key");
         return self.program.addExpr(.{
             .op = try self.opId("module_const"),
-            .ty = self.ctx.consts[id].type_,
+            .ty = try self.intern(self.ctx.consts[id].type_),
             .payload = .{ .module_const = @intCast(id) },
         });
     }
@@ -998,7 +1003,7 @@ pub const Parser = struct {
         const after_init_pos = self.pos;
         const after_init_line = self.line;
         const after_init_col = self.col;
-        const init_ty = self.program.node(init_expr).ty;
+        const init_ty = self.program.typeOf(self.program.node(init_expr).ty);
         // Rewind: parse the pattern now that the scrutinee type is known.
         self.pos = pat_start;
         self.line = pat_line;
@@ -1116,11 +1121,11 @@ pub const Parser = struct {
         const region = try self.program.addRegion(params.items, body, null);
         const regions = try self.program.addRegions(&.{region});
         const ret_ptr = try self.arena.create(meta.Type);
-        ret_ptr.* = ret_ann orelse self.program.node(body).ty;
+        ret_ptr.* = ret_ann orelse self.program.typeOf(self.program.node(body).ty);
         const fn_ty = meta.Type{ .function = .{ .params = try fn_params.toOwnedSlice(self.arena), .ret = ret_ptr } };
         return self.program.addExpr(.{
             .op = try self.opId("lambda"),
-            .ty = fn_ty,
+            .ty = try self.intern(fn_ty),
             .regions = regions,
         });
     }
@@ -1153,7 +1158,7 @@ pub const Parser = struct {
         const operands = try self.program.addOperands(&.{cond});
         return self.program.addExpr(.{
             .op = op,
-            .ty = unifyJoin(self.program.node(then_body).ty, self.program.node(else_root).ty),
+            .ty = try self.intern(unifyJoin(self.program.typeOf(self.program.node(then_body).ty), self.program.typeOf(self.program.node(else_root).ty))),
             .operands = operands,
             .regions = regions,
         });
@@ -1163,7 +1168,7 @@ pub const Parser = struct {
     /// arm is its own brace block, so no separator is needed.
     fn parseMatch(self: *Parser) ParseError!hir.ExprId {
         const scrutinee = try self.parseExpr();
-        const scrutinee_ty = self.program.node(scrutinee).ty;
+        const scrutinee_ty = self.program.typeOf(self.program.node(scrutinee).ty);
         try self.expectByte('{');
         var arm_regions: std.ArrayList(hir.RegionId) = .empty;
         var first_body: ?hir.ExprId = null;
@@ -1334,7 +1339,7 @@ pub const Parser = struct {
         const bid = try self.program.addBinder(ty, .value);
         try self.declare(no, bid);
         try params.append(self.arena, bid);
-        return self.program.addPattern(.{ .type_test = .{ .ty = ty, .bind = bid } });
+        return self.program.addPattern(.{ .type_test = .{ .ty = try self.intern(ty), .bind = bid } });
     }
 
     /// The discriminant (decl index) of variant `name` in a union decl.
@@ -1420,12 +1425,12 @@ pub const Parser = struct {
         var all: std.ArrayList(hir.ExprId) = .empty;
         try all.append(self.arena, callee);
         try all.appendSlice(self.arena, args.items);
-        const callee_ty = self.program.node(callee).ty;
+        const callee_ty = self.program.typeOf(self.program.node(callee).ty);
         if (callee_ty != .function) return self.fail("call callee is not a function");
         const operands = try self.program.addOperands(all.items);
         return self.program.addExpr(.{
             .op = try self.opId("call"),
-            .ty = callee_ty.function.ret.*,
+            .ty = try self.intern(callee_ty.function.ret.*),
             .operands = operands,
         });
     }

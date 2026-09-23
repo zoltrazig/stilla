@@ -109,9 +109,9 @@ fn registerScope(an: *hir_effects.Analysis, rid: hir.RegionId, fe: hir.FullExprI
     for (pr.params(rid)) |bid| {
         const b = pr.binder(bid);
         if (b.mode == .borrow) continue;
-        const cap = try an.capabilityOf(b.ty) orelse .unique;
+        const cap = try an.capabilityOf(pr.typeOf(b.ty)) orelse .unique;
         if (cap == .copy) continue;
-        _ = try pr.addScopeEndToken(rid, bid, b.ty, fe, counter.*);
+        _ = try pr.addScopeEndToken(rid, bid, pr.typeOf(b.ty), fe, counter.*);
         counter.* += 1;
     }
 }
@@ -178,9 +178,10 @@ fn walk(an: *hir_effects.Analysis, id: hir.ExprId, fe: hir.FullExprId, counter: 
     // temporary last, so its registration_index is the largest among its
     // operands' (destroyed first, as its destruction is registered last).
     if (ctx == .temp and isCreator(name) and pr.viewOf(id) == .owned) {
-        const cap = try an.capabilityOf(n.ty) orelse .unique;
+        const ty = pr.typeOf(n.ty);
+        const cap = try an.capabilityOf(ty) orelse .unique;
         if (cap == .unique) {
-            _ = try pr.addCleanupToken(id, n.ty, fe, counter.*);
+            _ = try pr.addCleanupToken(id, ty, fe, counter.*);
             counter.* += 1;
         }
     }

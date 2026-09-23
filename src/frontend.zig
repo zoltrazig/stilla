@@ -33,7 +33,7 @@ pub const OptimizeConfig = @import("passes/optimize_config.zig").OptimizeConfig;
 pub const setOptimizeByName = @import("passes/optimize_config.zig").setByName;
 pub const optimizeToggleNames = @import("passes/optimize_config.zig").names;
 
-pub const CompileError = error{ OutOfMemory, Diagnostic, InvalidProvider };
+pub const CompileError = error{ OutOfMemory, Diagnostic, InvalidProvider, UnsupportedCleanupType };
 
 /// Map an effect-engine failure onto the frontend's error set
 /// (docs/effects.md §5.7: an invalid provider declaration is rejected,

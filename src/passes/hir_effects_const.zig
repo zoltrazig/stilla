@@ -57,14 +57,15 @@ pub fn checkInitReads(self: *Analysis, c: hir.ConstRecord, root: hir.ExprId, all
 }
 
 pub fn checkTeardownReads(self: *Analysis, c: hir.ConstRecord, allocator: std.mem.Allocator) Error!?[]const u8 {
-    const de = try self.dropEffectOf(c.type_);
+    const cty = self.built.program.typeOf(c.type_);
+    const de = try self.dropEffectOf(cty);
     if (self.eng.isPure(de)) return null;
     const cur = self.initOrderOf(c) orelse return null;
     // Attribute direct reads / calls to the type's own hook body when
     // it has one; nested field hooks fall back to the generic form.
     var origin: ?hir.ExprId = null;
-    if (c.type_ == .named and c.type_.named.id < self.built.types.len) {
-        switch (self.built.types[c.type_.named.id]) {
+    if (cty == .named and cty.named.id < self.built.types.len) {
+        switch (self.built.types[cty.named.id]) {
             .struct_ => |d| if (d.drop) |dn| {
                 if (self.findFuncByName(dn)) |fid| origin = self.built.funcs.items[fid].root;
             },
@@ -77,7 +78,7 @@ pub fn checkTeardownReads(self: *Analysis, c: hir.ConstRecord, allocator: std.me
     // named types the wildcard is the §11.1 "contents unknown" gap,
     // which cannot be attributed to a specific constant — the same
     // position the replaced AST walk took.
-    const reject_unknown = self.typeIsNominal(c.type_);
+    const reject_unknown = self.typeIsNominal(cty);
     return self.checkReadSet(c, cur, de, origin orelse 0, true, reject_unknown, allocator);
 }
 

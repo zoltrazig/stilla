@@ -79,7 +79,7 @@ pub fn computeNeverReturns(self: *Analysis) Error!void {
         @memset(self.never_memo, null);
         for (0..n) |i| {
             const rec = self.built.funcs.items[i];
-            var v = isNeverType(rec.ret);
+            var v = isNeverType(self.built.program.typeOf(rec.ret));
             if (!v) {
                 const regs = self.p().regionsOf(rec.root);
                 if (regs.len > 0) v = try self.exprNeverTree(self.p().region(regs[0]).root);
@@ -137,7 +137,7 @@ pub fn neverMemoAt(self: *Analysis, id: hir.ExprId) bool {
 pub fn exprNeverOfNode(self: *Analysis, id: hir.ExprId) Error!bool {
     const pr = self.p();
     const n = pr.node(id);
-    if (isNeverType(n.ty)) return true;
+    if (isNeverType(pr.typeOf(n.ty))) return true;
     const name = hir.registry.get(n.op).name;
     // A λ value's creation runs no body: it is a normal value.
     if (std.mem.eql(u8, name, "lambda")) return false;
@@ -199,7 +199,7 @@ pub fn callTargetsNever(self: *Analysis, id: hir.ExprId) Error!bool {
 
 pub fn hostNeverReturns(self: *Analysis, hb: hir.HostBindingId) bool {
     if (hb >= self.built.hosts.items.len) return false;
-    return switch (self.built.hosts.items[hb].signature) {
+    return switch (self.built.program.typeOf(self.built.hosts.items[hb].signature)) {
         .function => |f| isNeverType(f.ret.*),
         else => false,
     };

@@ -675,13 +675,15 @@ until stable
 ```
 
 - **实现**：`solveSummaries`（Kosaraju `finishOrder` / `dfsCollect` 排序，
-  `solveComponent` 做 callee-first Kleene / Jacobi 迭代；同 SCC 读 `cur`、已完成
-  读 final），递归 SCC 播种 `may_diverge`。注册表在本轮推导期间固定，单调
-  transfer 与有限高度保证收敛。
-- **调用图构成**：SCC 建在分析实际使用的调用图上——`collectCallees` 为可直接解析
-  的 callee（直接 `fn_ref`、§9.2 局部收窄得到的有限目标集，以及 `drop` 的类型
-  hook）加边，可以是跨模块的调用环。不可证明的未知目标（经参数传递 / 高阶 /
-  逃逸）不进图、取 `Top`。
+  `solveComponent` 做 dependency-first Kleene / Jacobi 迭代；同 SCC 读 `cur`、已完成
+  读 final），递归 SCC 的**函数**成员播种 `may_diverge`。注册表在本轮推导期间固定，
+  单调 transfer 与有限高度保证收敛。函数摘要与 `drop_effect(T)` 已在
+  **一张依赖图**上求解（§11.1）。
+- **调用图构成**：函数 SCC 建在统一依赖图（§11.1）的 `function` 节点上：`collectCallees`
+  为可直接解析的 callee（直接 `fn_ref`、§9.2 局部收窄得到的有限目标集）加边，
+  可以是跨模块的调用环；`drop` 类型的 hook、结构销毁字段与 cleanup token 是
+  `drop_type` 节点及其入/出边，不再是 call graph 的旁挂。不可证明的未知目标
+  （经参数传递 / 高阶 / 逃逸）不进图、取 `Top`。
 - **从 Bottom 迭代本身不能发现发散**：`f → f` 必须额外 seed。**递归 SCC 一律
   保守标 `may_diverge = true`**，只有另有独立终止证明才可取消。
 - **分析状态不属于格**：使用 `Pending` / `Ready(EffectSummary)`；SCC 内部可读
@@ -1075,15 +1077,15 @@ drop_effect(T) -> EffectSummary
   内容销毁未知**，取保守摘要；
 - union 候选 variant 用 `⊔`，实际销毁步骤用 `;`；list 的未知长度须覆盖零元素
   （`Pure`）及所有可能元素销毁序列；
-- 递归类型 → 在类型 SCC 上求 least fixpoint（重入同类型返回格底，见下）；深度
-  超 `max_drop_type_depth` 即回 `Top`。**分析收敛 ≠ 运行时销毁终止**：收敛不
-  授权去掉 `may_diverge`。
+- 递归类型 → 在统一依赖图（见下）的该 `drop_type` SCC 上求 least fixpoint（重入
+  同类型返回格底）；深度超 `max_drop_type_depth` 即回 `Top`。**分析收敛 ≠ 运行时
+  销毁终止**：收敛不授权去掉 `may_diverge`。
 
 **落地形态：**
 
 | 实现 | 状态 | 行为 |
 | --- | --- | --- |
-| `hir_effects.dropEffectOf(ty)` / `dropEffectInner` | **生产路径** | 精确全链，见下 |
+| `hir_effects.dropEffectOf(ty)` / `dropSummary(TypeKey)`；`drop_type` 节点由 `dropNodeTransfer` 求值 | **生产路径** | 精确全链，见下 |
 
 `drop` descriptor 的 `own_effect` 是 `pure`、`transfer = .drop_effect`；
 `Analysis.compute` 的 `.drop_effect` 分支调用**精确的** `dropEffectOf(operand
@@ -1091,25 +1093,65 @@ drop_effect(T) -> EffectSummary
 这是唯一路径：M1b 遗留的极简 `effects.dropEffect`（Copy → `{}`，其余 / null →
 `Top`）已删除（docs/todo.md 第 20 项）。
 
-`dropEffectInner` 的递归：
+`drop_type` 节点的 transfer（`dropStructural`）沿用旧递归的形状：
 
 - Copy 值短路 `{}`；`any` / `hostdata` / 未解析 → `Top`；
 - struct：自身 hook 摘要 `;` Unique 字段按逆声明序递归；
 - union：候选 payload 用 ⊔，实际销毁用 `;`；tuple 逆序；list / box 元素递归；
   opaque → `Release(Host(host_id))`；
-- 命名类型递归按**类型身份截断**：下降中重入同一类型即返回格底 `Pure`。实现
-  论证这与「有限展开的 join」同值（may-摘要幂等），即 least fixpoint，无需显式
-  迭代；**不做 memoization**（被截断时的结果是 under-approximation，不可复用）；
-- 安全网 `max_drop_type_depth = 64`：非正规实例化链超过深度即回 `Top`。
+- 命名类型递归按**类型身份**表达为统一依赖图的 SCC 边：`drop_type` 节点的
+  transfer 不再自带 visiting，而是读子节点（同 SCC 读本轮 in-progress、其余读
+  final）。不在图中的按需查询回退 `dropEffectFree`，在单次下降中重入同一类型即
+  返回格底 `Pure`，**不做 memoization**（被截断时的结果是 under-approximation，
+  不可复用）；
+- 安全网 `max_drop_type_depth = 64`：非正规实例化链超过深度即物化为一个 `Top`
+  sink 节点。
 
-类型摘要与 drop hook 函数摘要**独立求解**：drop hook 是普通函数，其摘要在函数
-SCC（§8.2）中推导；`dropEffectOf` 经 `functionSummary` 读 hook 摘要。**跨层环
-没有专门检测**：hook 的 SCC 尚未求解时 `functionSummary` 返回 `Top`（保守）。
+**统一依赖图（已落地）。** 函数摘要与 `drop_effect(T)` 不再各自在 call-graph SCC /
+类型 SCC 上求解，而在**一张依赖图**上求一次 least fixpoint。节点两种 kind：
 
-**长期演化（未立项）**：函数摘要与 `drop_effect(T)` 各自在 call-graph SCC /
-类型 SCC 上求不动点，本质是同一格上的单调函数。若跨层环成为常见模式，把依赖
-节点统一为 `EffectDependencyNode = Function(FuncId) | DropType(TypeId)`，在一张
-统一 dependency graph 上做 least fixpoint，可消掉回退 `Top` 的精度洞。
+```text
+EffectDependencyNode = Function(FuncId) | DropType(TypeKey)
+```
+
+`TypeKey` 即 canonical `HIRTypeId`（hir.md §3.8，第 25 项），类型身份因此 O(1)
+相等；两种节点携带同一 `Summary`、活在同一个有限乘积格（§5.4）上。四类边：
+
+1. `function → function`：可解析调用与回调契约目标，即既有 `collectCallees`
+   调用图（§8.2）；
+2. `function → drop_type`：函数销毁的每个类型——显式 `drop` 节点 operand 类型
+   **以及 `origin_expr` 落在该函数内的 cleanup token**。这条边此前缺失，跨层环
+   回退 `Top` 正源于此；
+3. `drop_type → function`：类型声明的 `drop` hook 摘要（本节）；
+4. `drop_type → drop_type`：结构性销毁递归——Unique 字段按逆声明序、tuple 元素、
+   list / box 内层、union payload。
+
+`drop_type` 节点的生成受 `max_drop_type_depth` 约束；超界即物化为一个 `Top`
+sink，图因此保持有限，失败关闭的安全网（上）不变。
+
+**单次不动点。** 对合并图做一次 Kosaraju SCC 分解，按依赖优先（callee / 字段在
+先）处理，每 SCC 内做 Kleene / Jacobi 同时更新：`function` 节点的 transfer 是既有
+体摘要 `effectOf ; cleanupEffect`，`drop_type` 节点的 transfer 是
+`dropNodeTransfer` 的结构销毁计算——同 SCC 读本轮 in-progress 值，其余读已完成
+final 值。
+
+**按 kind 播种。** `may_diverge` 只为含**至少一个 `function` 节点**的递归 SCC
+（函数自环、多函数环，或经 `drop_type` 节点成环的函数）的 `function` 成员播种；
+`drop_type` 节点种子为 `pure`（格底），故纯递归类型不会误得 `may_diverge`。
+
+**`never_returns` 不并入。** 它是 greatest fixpoint 的 must 事实，仍在本图之外
+单独求解（§10.1），不并入 least fixpoint。
+
+**不做截断结果的 memoization。** 被类型身份截断的 drop 结果是
+under-approximation，不可复用；每轮 memo 纪律保持不变。
+
+**消费面不变。** 函数侧保留 `summary` / `known` / `cur` / `comp_of`；统一存储另按
+canonical `TypeKey` 索引 `drop_type` 节点（`drop_node_of` + 节点值），
+`dropEffectOf` / `dropSummary(key)` 经它读取。派生查询与 SEG 消费方因此不受影响。
+
+**为何可靠。** 两层本就在同一有限高度格（§5.4）上、transfer 单调；coproduct
+transfer 的最小不动点即两层各自最小不动点的合并，有限高度仍保证收敛。唯一的
+gfp / must 事实 `never_returns` 保持分离。
 
 ### 11.2 full-expression 清理与 observed_effect
 

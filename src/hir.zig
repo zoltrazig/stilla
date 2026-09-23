@@ -26,12 +26,15 @@
 //! Documented layout choices where the target schema (hir.md §3) leaves a
 //! degree of freedom:
 //!
-//! - **Types are `meta.Type` values, inline** (`ExprNode.ty`, `Binder.ty`).
-//!   The thin canonical `HIRTypeId` table of hir.md §3.8 is a *Target*
-//!   form (SEG needs O(1) type equality) and is deliberately absent in
-//!   M1a — no second type world (meta.Type stays the ground truth that
-//!   emits to AIR/LLIR). `meta.TypeId` remains only the nominal-declaration
-//!   id inside `meta.Type.named`.
+//! - **Types: IR fields carry canonical `HIRTypeId`** (`ExprNode.ty`,
+//!   `Binder.ty`, `CleanupToken.ty`, `Pattern.TypeTestPattern.ty`,
+//!   `FuncRecord.params` / `ret`, `ConstRecord.type_`,
+//!   `HostRecord.signature`), a dense id into `Program.type_pool`
+//!   (hir.md §3.8); construct via `Program.intern`, read via
+//!   `Program.typeOf`. There is no second type world: `meta.Type` stays
+//!   the ground truth that emits to AIR/LLIR and the cross-`Program`
+//!   comparison basis, and `meta.TypeId` remains only the
+//!   nominal-declaration id inside `meta.Type.named`.
 //! - **Op-specific data rides a typed `ExprNode.payload`** (constants,
 //!   `local` binder ids, resolved `fn_ref`/`module_const` references,
 //!   field indices, variant tags). `ExprNode` stays a generic node — this
@@ -66,6 +69,8 @@ pub const RegionId = u32;
 pub const BinderId = u32;
 pub const PatternId = u32;
 pub const ScopeId = u32;
+/// Dense id into `Program`'s canonical type pool (hir.md §3.8).
+pub const HIRTypeId = u32;
 pub const FullExprId = u32;
 pub const SemanticInfoId = u32;
 pub const SourceOriginId = u32;
@@ -144,7 +149,7 @@ pub const BinderMode = enum {
 };
 
 pub const Binder = struct {
-    ty: meta.Type,
+    ty: HIRTypeId,
     mode: BinderMode = .value,
     // hir.md §3.4 `source` (diagnostic binding ref) arrives with the
     // AST builder.
@@ -167,9 +172,10 @@ pub const Region = struct {
 
 pub const ExprNode = struct {
     op: OpId,
-    /// The monomorphic result type — an inline `meta.Type` (see header:
-    /// no HIR type interner in M1a, hir.md §3.8).
-    ty: meta.Type,
+    /// The monomorphic result type — a canonical `HIRTypeId` into the
+    /// owning `Program`'s type pool (hir.md §3.8). Resolve with
+    /// `Program.typeOf`.
+    ty: HIRTypeId,
     /// Operands: range into the expr buffer, source order (LTR).
     operands: Range = .{},
     /// Child regions: range into the region buffer.
@@ -270,7 +276,7 @@ pub const FullExpr = struct {};
 /// every path (conservative may-drop, docs/effects.md §11.2).
 pub const CleanupToken = struct {
     origin_expr: ExprId,
-    ty: meta.Type,
+    ty: HIRTypeId,
     full_expr: FullExprId,
     registration_index: u32,
     kind: Kind = .full_expression,
@@ -328,7 +334,7 @@ pub const Pattern = union(enum) {
     };
 
     pub const TypeTestPattern = struct {
-        ty: meta.Type,
+        ty: HIRTypeId,
         bind: BinderId,
     };
 };
@@ -902,6 +908,13 @@ pub const Program = struct {
     /// Dedupe map for `(ownership_view, effect state)` pairs so nodes
     /// with equal annotations share one SemanticInfoId.
     sema_map: std.HashMapUnmanaged(SemaKey, SemanticInfoId, SemaKeyCtx, std.hash_map.default_max_load_percentage) = .empty,
+    /// Canonical type pool (hir.md §3.8): `HIRTypeId` indexes this dense,
+    /// insertion-ordered list. Every HIR-node type interns here; equal
+    /// structural types share one id so type equality is O(1).
+    type_pool: std.ArrayList(meta.Type) = .empty,
+    /// Hash-cons map: a structural hash/equality lookup from `meta.Type`
+    /// to its `HIRTypeId` in `type_pool`.
+    type_map: std.HashMapUnmanaged(meta.Type, HIRTypeId, TypeCtx, std.hash_map.default_max_load_percentage) = .empty,
 
     pub const SemaKey = struct {
         view: OwnershipView,
@@ -933,6 +946,23 @@ pub const Program = struct {
         }
     };
 
+    pub const TypeCtx = struct {
+        pub fn hash(_: TypeCtx, k: meta.Type) u64 {
+            var h = std.hash.Wyhash.init(0);
+            meta.hashType(&h, k);
+            return h.final();
+        }
+        pub fn eql(_: TypeCtx, a: meta.Type, b: meta.Type) bool {
+            return meta.Type.eql(a, b);
+        }
+    };
+
+    /// `internType` errors: allocation failure, or a `.cleanup` token
+    /// occurring anywhere in the type tree — a CFG-only
+    /// compiler-internal value (air.md §6.4) that never belongs on an
+    /// HIR node.
+    pub const InternTypeError = std.mem.Allocator.Error || error{UnsupportedCleanupType};
+
     /// Seed the default entries so id 0 is always valid: the default
     /// (owned, pending) semantic info and the default full expression.
     /// Nodes built without explicit annotation therefore belong to FE 0
@@ -952,6 +982,63 @@ pub const Program = struct {
     }
 
     // No deinit: everything is arena-owned.
+
+    /// Whether a `.cleanup` token occurs anywhere in `ty`'s tree.
+    /// `.cleanup` is CFG-only (air.md §6.4) and must never be reachable
+    /// from an interned HIR type, so the rejection covers nested
+    /// occurrences too, not just a top-level tag.
+    fn typeContainsCleanup(ty: meta.Type) bool {
+        return switch (ty) {
+            .cleanup => true,
+            .list, .box => |inner| typeContainsCleanup(inner.*),
+            .tuple => |elems| blk: {
+                for (elems) |e| {
+                    if (typeContainsCleanup(e)) break :blk true;
+                }
+                break :blk false;
+            },
+            .function => |f| blk: {
+                for (f.params) |p| {
+                    if (typeContainsCleanup(p.type_)) break :blk true;
+                }
+                break :blk typeContainsCleanup(f.ret.*);
+            },
+            .named => |n| blk: {
+                for (n.args) |a| {
+                    if (typeContainsCleanup(a)) break :blk true;
+                }
+                break :blk false;
+            },
+            .primitive, .param, .module => false,
+        };
+    }
+
+    /// Canonicalize `ty` (hir.md §3.8): return the `HIRTypeId` of an
+    /// equal type, appending to the pool on first sight. A `.cleanup`
+    /// token anywhere in `ty` is rejected rather than interned.
+    pub fn internType(self: *Program, allocator: std.mem.Allocator, ty: meta.Type) InternTypeError!HIRTypeId {
+        if (typeContainsCleanup(ty)) return error.UnsupportedCleanupType;
+        if (self.type_map.get(ty)) |id| return id;
+        try self.type_pool.append(allocator, ty);
+        const id: HIRTypeId = @intCast(self.type_pool.items.len - 1);
+        self.type_map.put(allocator, ty, id) catch |e| {
+            _ = self.type_pool.pop();
+            return e;
+        };
+        return id;
+    }
+
+    /// The type behind a pooled id. Ids are insertion-ordered and stable.
+    pub fn typeOf(self: *const Program, id: HIRTypeId) meta.Type {
+        std.debug.assert(id < self.type_pool.items.len);
+        return self.type_pool.items[id];
+    }
+
+    /// `internType` for an HIR type, propagating the allocator failure
+    /// or the `.cleanup` rejection (including any nested `.cleanup`).
+    pub fn intern(self: *Program, ty: meta.Type) InternTypeError!HIRTypeId {
+        return self.internType(self.arena, ty);
+    }
 
     /// Append helpers — each returns a fresh dense id or a Range into the
     /// corresponding flat buffer. Ids survive any later growth; borrowed
@@ -974,7 +1061,7 @@ pub const Program = struct {
     }
 
     pub fn addBinder(self: *Program, ty: meta.Type, mode: BinderMode) !BinderId {
-        try self.binders.append(self.arena, .{ .ty = ty, .mode = mode });
+        try self.binders.append(self.arena, .{ .ty = try self.intern(ty), .mode = mode });
         return @intCast(self.binders.items.len - 1);
     }
 
@@ -1000,7 +1087,7 @@ pub const Program = struct {
     pub fn addCleanupToken(self: *Program, origin: ExprId, ty: meta.Type, full_expr: FullExprId, registration_index: u32) !u32 {
         try self.cleanup_tokens.append(self.arena, .{
             .origin_expr = origin,
-            .ty = ty,
+            .ty = try self.intern(ty),
             .full_expr = full_expr,
             .registration_index = registration_index,
             .kind = .full_expression,
@@ -1023,7 +1110,7 @@ pub const Program = struct {
     ) !u32 {
         try self.cleanup_tokens.append(self.arena, .{
             .origin_expr = self.regions.items[rid].root,
-            .ty = ty,
+            .ty = try self.intern(ty),
             .full_expr = full_expr,
             .registration_index = registration_index,
             .kind = .{ .scope_end = .{ .region = rid, .binder = bid } },
@@ -1235,15 +1322,28 @@ pub const FuncKind = enum {
 /// One built function: its qualified cfg-style name, kind, owning
 /// module (index into `BuiltProgram.modules`), signature, body root,
 /// and source span of the declaration.
+/// One function parameter (hir.md §3.8): the name/mode/span plus the
+/// canonical interned type. Resolve with `FuncParam.resolve`.
+pub const FuncParam = struct {
+    span: meta.Span,
+    name: meta.Ident,
+    mode: meta.ParamMode,
+    ty: HIRTypeId,
+
+    pub fn resolve(self: FuncParam, p: *const Program) meta.Param {
+        return .{ .span = self.span, .name = self.name, .mode = self.mode, .type_ = p.typeOf(self.ty) };
+    }
+};
+
 pub const FuncRecord = struct {
     name: []const u8,
     kind: FuncKind,
     module: u32,
     /// Function type: params (name/mode/type) + return type. Types are
-    /// resolved `meta.Type`s; names are the written param names (used by
+    /// canonical `HIRTypeId`s; names are the written param names (used by
     /// the builder for lookup only).
-    params: []meta.Param,
-    ret: meta.Type,
+    params: []FuncParam,
+    ret: HIRTypeId,
     /// The body: a `lambda` node whose region params are the function's
     /// params (id 0.. are dense in this program).
     root: ExprId,
@@ -1259,6 +1359,16 @@ pub const FuncRecord = struct {
     /// first, hoisted records as discovered), so S5 re-orders a
     /// module's records by this field to match the direct lowering.
     order: u32 = 0,
+
+    /// Resolve the record's function type as a `meta.Type` (the
+    /// cross-`Program` ground truth), allocating into `allocator`.
+    pub fn signature(self: *const FuncRecord, p: *const Program, allocator: std.mem.Allocator) std.mem.Allocator.Error!meta.Type {
+        const params = try allocator.alloc(meta.Param, self.params.len);
+        for (self.params, 0..) |fp, i| params[i] = fp.resolve(p);
+        const ret = try allocator.create(meta.Type);
+        ret.* = p.typeOf(self.ret);
+        return .{ .function = .{ .params = params, .ret = ret } };
+    }
 };
 
 /// One module constant member: identity (name, owning module), resolved
@@ -1268,7 +1378,7 @@ pub const FuncRecord = struct {
 pub const ConstRecord = struct {
     name: []const u8,
     module: u32,
-    type_: meta.Type,
+    type_: HIRTypeId,
     /// Index of this module's const in `BuiltProgram.consts` (dense).
     key: []const u8, // stable key for the text refs dictionary
     /// Non-null when the const has a Stilla initializer expression
@@ -1316,19 +1426,17 @@ pub const BuiltProgram = struct {
     /// each record's return type, and `consts`/`hosts`/`types` come from
     /// the frozen tables.
     pub fn serCtx(self: *const BuiltProgram) !SerCtx {
-        const rets = try self.arena.alloc(meta.Type, self.funcs.items.len);
-        for (self.funcs.items, 0..) |f, i| rets[i] = f.ret;
         var funcs = std.ArrayList(SerCtx.FuncDecl).empty;
-        for (self.funcs.items, 0..) |f, i| {
-            try funcs.append(self.arena, .{ .key = f.name, .type_ = .{ .function = .{ .params = f.params, .ret = &rets[i] } } });
+        for (self.funcs.items) |*f| {
+            try funcs.append(self.arena, .{ .key = f.name, .type_ = try f.signature(&self.program, self.arena) });
         }
         var consts = std.ArrayList(SerCtx.ConstDecl).empty;
         for (self.consts.items) |c| {
-            try consts.append(self.arena, .{ .key = c.key, .type_ = c.type_ });
+            try consts.append(self.arena, .{ .key = c.key, .type_ = self.program.typeOf(c.type_) });
         }
         var hosts = std.ArrayList(SerCtx.HostDecl).empty;
         for (self.hosts.items) |h| {
-            try hosts.append(self.arena, .{ .key = h.key, .type_ = h.signature });
+            try hosts.append(self.arena, .{ .key = h.key, .type_ = self.program.typeOf(h.signature) });
         }
         return .{
             .types = self.types,
@@ -1345,7 +1453,7 @@ pub const BuiltProgram = struct {
 pub const HostRecord = struct {
     module: u32,
     name: []const u8,
-    signature: meta.Type,
+    signature: HIRTypeId,
     key: []const u8,
 };
 
@@ -1392,18 +1500,18 @@ test "handles are fresh and flat ranges stay ordered across growth" {
 
     // Two operand ranges, interleaved with enough appends to force
     // ArrayList reallocation several times over.
-    const a0 = try p.addExpr(.{ .op = opId("const").?, .ty = ty_int, .payload = .{ .const_value = .{ .int = 1 } } });
-    const a1 = try p.addExpr(.{ .op = opId("const").?, .ty = ty_int, .payload = .{ .const_value = .{ .int = 2 } } });
+    const a0 = try p.addExpr(.{ .op = opId("const").?, .ty = try p.intern(ty_int), .payload = .{ .const_value = .{ .int = 1 } } });
+    const a1 = try p.addExpr(.{ .op = opId("const").?, .ty = try p.intern(ty_int), .payload = .{ .const_value = .{ .int = 2 } } });
     const r_a = try p.addOperands(&.{ a0, a1 });
     try t.expectEqual(@as(usize, 2), r_a.len);
 
     var i: u32 = 0;
     while (i < 60) : (i += 1) {
-        const c = try p.addExpr(.{ .op = opId("const").?, .ty = ty_int, .payload = .{ .const_value = .{ .int = 0 } } });
+        const c = try p.addExpr(.{ .op = opId("const").?, .ty = try p.intern(ty_int), .payload = .{ .const_value = .{ .int = 0 } } });
         _ = try p.addOperands(&.{c});
     }
 
-    const b0 = try p.addExpr(.{ .op = opId("const").?, .ty = ty_bool, .payload = .{ .const_value = .{ .bool = true } } });
+    const b0 = try p.addExpr(.{ .op = opId("const").?, .ty = try p.intern(ty_bool), .payload = .{ .const_value = .{ .bool = true } } });
     const r_b = try p.addOperands(&.{b0});
     try t.expectEqual(@as(usize, 1), r_b.len);
 
@@ -1418,7 +1526,7 @@ test "handles are fresh and flat ranges stay ordered across growth" {
     try t.expect(r_a.start + r_a.len <= r_b.start);
     // The accessor re-derives the same slice after growth, through a
     // node whose `operands` range addresses r_a.
-    const seq_id = try p.addExpr(.{ .op = opId("seq").?, .ty = ty_int, .operands = r_a });
+    const seq_id = try p.addExpr(.{ .op = opId("seq").?, .ty = try p.intern(ty_int), .operands = r_a });
     const ops_a = p.operands(seq_id);
     try t.expectEqual(@as(usize, 2), ops_a.len);
     try t.expectEqual(a0, ops_a[0]);
@@ -1434,14 +1542,14 @@ test "let keeps its init outside the binder region" {
     // the let node; the region carries x as its only param and the body
     // as root.
     const b_x = try p.addBinder(ty_int, .value);
-    const init = try p.addExpr(.{ .op = opId("const").?, .ty = ty_int, .payload = .{ .const_value = .{ .int = 42 } } });
-    const body = try p.addExpr(.{ .op = opId("local").?, .ty = ty_int, .payload = .{ .binder = b_x } });
+    const init = try p.addExpr(.{ .op = opId("const").?, .ty = try p.intern(ty_int), .payload = .{ .const_value = .{ .int = 42 } } });
+    const body = try p.addExpr(.{ .op = opId("local").?, .ty = try p.intern(ty_int), .payload = .{ .binder = b_x } });
     const r_let = try p.addRegion(&.{b_x}, body, null);
     const region_range = try p.addRegions(&.{r_let});
     const operands = try p.addOperands(&.{init});
     const let_id = try p.addExpr(.{
         .op = opId("let").?,
-        .ty = ty_int,
+        .ty = try p.intern(ty_int),
         .operands = operands,
         .regions = region_range,
     });
@@ -1470,20 +1578,20 @@ test "payloads: literal, local binder, resolved fn_ref and module_const" {
     defer arena.deinit();
     var p = try Program.init(arena.allocator());
 
-    const lit = try p.addExpr(.{ .op = opId("const").?, .ty = ty_int, .payload = .{ .const_value = .{ .int = -7 } } });
+    const lit = try p.addExpr(.{ .op = opId("const").?, .ty = try p.intern(ty_int), .payload = .{ .const_value = .{ .int = -7 } } });
     try t.expectEqual(@as(i64, -7), p.node(lit).payload.const_value.int);
 
     const b0 = try p.addBinder(ty_int, .value);
-    const local = try p.addExpr(.{ .op = opId("local").?, .ty = ty_int, .payload = .{ .binder = b0 } });
+    const local = try p.addExpr(.{ .op = opId("local").?, .ty = try p.intern(ty_int), .payload = .{ .binder = b0 } });
     try t.expectEqual(b0, p.node(local).payload.binder);
 
-    const f = try p.addExpr(.{ .op = opId("fn_ref").?, .ty = ty_int, .payload = .{ .func = .{ .func = 7 } } });
+    const f = try p.addExpr(.{ .op = opId("fn_ref").?, .ty = try p.intern(ty_int), .payload = .{ .func = .{ .func = 7 } } });
     try t.expectEqual(@as(FuncId, 7), p.node(f).payload.func.func);
 
-    const h = try p.addExpr(.{ .op = opId("fn_ref").?, .ty = ty_int, .payload = .{ .func = .{ .host = 3 } } });
+    const h = try p.addExpr(.{ .op = opId("fn_ref").?, .ty = try p.intern(ty_int), .payload = .{ .func = .{ .host = 3 } } });
     try t.expectEqual(@as(HostBindingId, 3), p.node(h).payload.func.host);
 
-    const mc = try p.addExpr(.{ .op = opId("module_const").?, .ty = ty_int, .payload = .{ .module_const = 9 } });
+    const mc = try p.addExpr(.{ .op = opId("module_const").?, .ty = try p.intern(ty_int), .payload = .{ .module_const = 9 } });
     try t.expectEqual(@as(ConstId, 9), p.node(mc).payload.module_const);
 }
 
@@ -1498,7 +1606,7 @@ test "pattern binding leaves reference their arm region's params" {
     const b_v = try p.addBinder(ty_int, .value);
     const payload = try p.addPattern(.{ .bind = b_v });
     const some = try p.addPattern(.{ .variant = .{ .tag = 0, .payload = payload } });
-    const body = try p.addExpr(.{ .op = opId("local").?, .ty = ty_int, .payload = .{ .binder = b_v } });
+    const body = try p.addExpr(.{ .op = opId("local").?, .ty = try p.intern(ty_int), .payload = .{ .binder = b_v } });
     const arm = try p.addRegion(&.{b_v}, body, some);
 
     const params = p.params(arm);
@@ -1519,20 +1627,20 @@ test "semantic infos default to owned; each view is recorded" {
     const borrowed = try p.addSemanticInfo(.{ .ownership_view = .borrowed });
     const destruction = try p.addSemanticInfo(.{ .ownership_view = .destruction_view });
 
-    const plain = try p.addExpr(.{ .op = opId("local").?, .ty = ty_int, .payload = .{ .binder = b } });
+    const plain = try p.addExpr(.{ .op = opId("local").?, .ty = try p.intern(ty_int), .payload = .{ .binder = b } });
     try t.expectEqual(.owned, p.viewOf(plain));
 
-    const br = try p.addExpr(.{ .op = opId("local").?, .ty = ty_int, .payload = .{ .binder = b }, .sema = borrowed });
+    const br = try p.addExpr(.{ .op = opId("local").?, .ty = try p.intern(ty_int), .payload = .{ .binder = b }, .sema = borrowed });
     try t.expectEqual(.borrowed, p.viewOf(br));
 
-    const dv = try p.addExpr(.{ .op = opId("local").?, .ty = ty_int, .payload = .{ .binder = b }, .sema = destruction });
+    const dv = try p.addExpr(.{ .op = opId("local").?, .ty = try p.intern(ty_int), .payload = .{ .binder = b }, .sema = destruction });
     try t.expectEqual(.destruction_view, p.viewOf(dv));
 
     try t.expect(borrowed != destruction and plain != br);
     // Full-expression ids work the same way: 0 is the seeded default.
     const fe = try p.addFullExpr();
     try t.expectEqual(@as(usize, 2), p.full_exprs.items.len);
-    const in_fe = try p.addExpr(.{ .op = opId("local").?, .ty = ty_int, .payload = .{ .binder = b }, .full_expr = fe });
+    const in_fe = try p.addExpr(.{ .op = opId("local").?, .ty = try p.intern(ty_int), .payload = .{ .binder = b }, .full_expr = fe });
     try t.expectEqual(fe, p.node(in_fe).full_expr);
     try t.expectEqual(@as(FullExprId, 0), p.node(plain).full_expr);
 
@@ -1647,7 +1755,7 @@ test "origins: spans intern, share ids, and resolve through originOf" {
     try t.expectEqual(@as(usize, 1), p.origins.items.len);
 
     const b = try p.addBinder(ty_int, .value);
-    const plain = try p.addExpr(.{ .op = opId("local").?, .ty = ty_int, .payload = .{ .binder = b } });
+    const plain = try p.addExpr(.{ .op = opId("local").?, .ty = try p.intern(ty_int), .payload = .{ .binder = b } });
     try t.expectEqual(no_origin, p.node(plain).origin);
     try t.expect(p.originOf(plain) == null); // synthetic = no span
 
@@ -1663,7 +1771,7 @@ test "origins: spans intern, share ids, and resolve through originOf" {
     try t.expect(o1 != o2 and o2 != o3 and o1 != o3);
     try t.expectEqual(@as(usize, 4), p.origins.items.len);
 
-    const located = try p.addExpr(.{ .op = opId("local").?, .ty = ty_int, .payload = .{ .binder = b }, .origin = o1 });
+    const located = try p.addExpr(.{ .op = opId("local").?, .ty = try p.intern(ty_int), .payload = .{ .binder = b }, .origin = o1 });
     try t.expectEqual(s1, p.originOf(located).?);
     try t.expectEqual(@as(meta.SourceId, 7), p.originOf(located).?.source);
 }
@@ -1679,4 +1787,113 @@ test "text passes are analyzed (forces hir_print/hir_parse analysis in test buil
     // The parsed tree is structurally valid; hir_validate's own tests
     // below only run because this reference forces the file's analysis.
     try std.testing.expect((try validate_text(&p.program, p.root, p.arena.allocator())) == null);
+}
+
+test "type table: interning is hash-consing and insertion-ordered" {
+    var arena = std.heap.ArenaAllocator.init(t.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var p = try Program.init(a);
+
+    const i32_id = try p.internType(a, ty_int);
+    try t.expectEqual(@as(HIRTypeId, 0), i32_id);
+    try t.expectEqual(@as(usize, 1), p.type_pool.items.len);
+    // Same structural type twice: same id, no pool growth.
+    try t.expectEqual(i32_id, try p.internType(a, ty_int));
+    try t.expectEqual(@as(usize, 1), p.type_pool.items.len);
+
+    const bool_id = try p.internType(a, ty_bool);
+    try t.expectEqual(@as(HIRTypeId, 1), bool_id);
+    try t.expect(bool_id != i32_id);
+    try t.expectEqual(@as(usize, 2), p.type_pool.items.len);
+
+    // Every interned id round-trips through typeOf, structurally.
+    var id: HIRTypeId = 0;
+    while (id < p.type_pool.items.len) : (id += 1) {
+        try t.expect(meta.Type.eql(p.typeOf(id), p.type_pool.items[id]));
+    }
+}
+
+test "type table: independently built equal types share an id" {
+    var arena = std.heap.ArenaAllocator.init(t.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var p = try Program.init(a);
+
+    // Two separately allocated `list(int32)` values compare equal.
+    const inner_a = try a.create(meta.Type);
+    inner_a.* = ty_int;
+    const inner_b = try a.create(meta.Type);
+    inner_b.* = ty_int;
+    try t.expect(inner_a != inner_b);
+    const la = try p.internType(a, .{ .list = inner_a });
+    const lb = try p.internType(a, .{ .list = inner_b });
+    try t.expectEqual(la, lb);
+    try t.expectEqual(@as(usize, 1), p.type_pool.items.len);
+
+    // Two separately allocated `named` args with equal content share.
+    const args_a = try a.alloc(meta.Type, 2);
+    args_a[0] = ty_int;
+    args_a[1] = ty_bool;
+    const args_b = try a.alloc(meta.Type, 2);
+    args_b[0] = ty_int;
+    args_b[1] = ty_bool;
+    const na = try p.internType(a, .{ .named = .{ .id = 5, .args = args_a } });
+    const nb = try p.internType(a, .{ .named = .{ .id = 5, .args = args_b } });
+    try t.expectEqual(na, nb);
+    try t.expectEqual(@as(usize, 2), p.type_pool.items.len);
+
+    // A different declaration id is a different type.
+    const nc = try p.internType(a, .{ .named = .{ .id = 6, .args = args_b } });
+    try t.expect(nc != na);
+
+    // `list(int32)` vs `list(int64)`.
+    const inner_i64 = try a.create(meta.Type);
+    inner_i64.* = .{ .primitive = .int64 };
+    const l64 = try p.internType(a, .{ .list = inner_i64 });
+    try t.expect(l64 != la);
+}
+
+test "type table: nested children intern and .cleanup is rejected" {
+    var arena = std.heap.ArenaAllocator.init(t.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var p = try Program.init(a);
+
+    // `.cleanup` is CFG-only; interning must refuse it.
+    try t.expectError(error.UnsupportedCleanupType, p.internType(a, .cleanup));
+    try t.expectEqual(@as(usize, 0), p.type_pool.items.len);
+
+    // The guard is recursive: a nested `.cleanup` is rejected too, and
+    // must leave the pool unchanged.
+    const cleanup_inner = try a.create(meta.Type);
+    cleanup_inner.* = .cleanup;
+    try t.expectError(error.UnsupportedCleanupType, p.internType(a, .{ .list = cleanup_inner }));
+    try t.expectEqual(@as(usize, 0), p.type_pool.items.len);
+
+    // A function type with a param and nested tuple/box children.
+    const span = meta.Span.init(0, 0, 0);
+    const params = try a.alloc(meta.Param, 1);
+    params[0] = .{ .span = span, .name = .{ .span = span, .text = "x" }, .mode = .plain, .type_ = ty_int };
+    const ret = try a.create(meta.Type);
+    ret.* = ty_bool;
+    const fa = try p.internType(a, .{ .function = .{ .params = params, .ret = ret } });
+
+    // An independently rebuilt equal function interns to the same id.
+    const params2 = try a.alloc(meta.Param, 1);
+    params2[0] = .{ .span = span, .name = .{ .span = span, .text = "x" }, .mode = .plain, .type_ = ty_int };
+    const ret2 = try a.create(meta.Type);
+    ret2.* = ty_bool;
+    const fb = try p.internType(a, .{ .function = .{ .params = params2, .ret = ret2 } });
+    try t.expectEqual(fa, fb);
+
+    // Nested box(tuple(int32, int64)) hashes/compares through both children.
+    const elems = try a.alloc(meta.Type, 2);
+    elems[0] = ty_int;
+    elems[1] = .{ .primitive = .int64 };
+    const box_inner = try a.create(meta.Type);
+    box_inner.* = .{ .tuple = elems };
+    const boxed = try p.internType(a, .{ .box = box_inner });
+    try t.expectEqual(@as(usize, 2), p.type_pool.items.len);
+    try t.expect(meta.Type.eql(p.typeOf(boxed), .{ .box = box_inner }));
 }

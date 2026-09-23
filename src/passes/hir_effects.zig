@@ -143,6 +143,18 @@ pub const Analysis = struct {
     solving: ?u32,
     /// The in-progress approximation for the SCC in `solving`.
     cur: []Summary,
+    /// Unified dependency-graph nodes (docs/effects.md §11.1): ids
+    /// `0..F-1` are functions, `F` is the reserved `Top` sink, and
+    /// `F+1..` are `drop_type` nodes keyed by canonical `HIRTypeId`.
+    /// `drop_node_of` maps a type key to its node; `drop_key_of_node`
+    /// is the inverse (only meaningful at `>= F+1`; placeholders
+    /// elsewhere). `summary` / `known` / `cur` / `comp_of` grow to the
+    /// full node count when the graph is solved.
+    drop_node_of: std.AutoHashMapUnmanaged(hir.HIRTypeId, u32) = .empty,
+    drop_key_of_node: std.ArrayList(hir.HIRTypeId) = .empty,
+    /// The reserved `Top`-summary sink materialized when a drop-type
+    /// descent exceeds the depth safety net.
+    top_sink_node: u32 = 0,
     /// Binder → its `let` initializer (docs/effects.md §9.2): the local
     /// fn-ref propagation index. `hir.no_expr` for every binder that is
     /// not bound by a plain single-identifier `let` — a function / λ
@@ -449,7 +461,7 @@ pub const Analysis = struct {
                 var acc = d.own_effect;
                 const ops = pr.operands(id);
                 if (ops.len > 0) {
-                    acc = try self.eng.sequence(acc, try self.dropEffectOf(pr.node(ops[0]).ty));
+                    acc = try self.eng.sequence(acc, try self.dropEffectOf(pr.typeOf(pr.node(ops[0]).ty)));
                     acc = try self.eng.sequence(acc, try self.effectOf(ops[0]));
                 }
                 return acc;
@@ -480,7 +492,7 @@ pub const Analysis = struct {
         const pr = self.p();
         const ops = pr.operands(id);
         if (ops.len == 0) return self.eng.top();
-        return switch (pr.node(ops[0]).ty) {
+        return switch (pr.typeOf(pr.node(ops[0]).ty)) {
             .named, .tuple => effects.pure,
             // A list index read lowers to a bounds-checked `read_index`
             // and may trap (docs/effects.md §14 hidden-operation audit).
@@ -511,6 +523,8 @@ pub const Analysis = struct {
     pub const targetCallBound = hir_effects_summary.targetCallBound;
     pub const callbackBound = hir_effects_summary.callbackBound;
     pub const functionSummary = hir_effects_summary.functionSummary;
+    pub const nodeValue = hir_effects_summary.nodeValue;
+    pub const nodeTransfer = hir_effects_summary.nodeTransfer;
     pub const solveSummaries = hir_effects_summary.solveSummaries;
     pub const collectCallees = hir_effects_summary.collectCallees;
     pub const collectCallableTarget = hir_effects_summary.collectCallableTarget;
@@ -528,8 +542,12 @@ pub const Analysis = struct {
     pub const callTargetsNever = hir_effects_never.callTargetsNever;
     pub const hostNeverReturns = hir_effects_never.hostNeverReturns;
     pub const dropEffectOf = hir_effects_drop.dropEffectOf;
-    pub const dropEffectInner = hir_effects_drop.dropEffectInner;
-    pub const collectTypeHooks = hir_effects_drop.collectTypeHooks;
+    pub const dropEffectFree = hir_effects_drop.dropEffectFree;
+    pub const dropSummary = hir_effects_drop.dropSummary;
+    pub const dropNodeTransfer = hir_effects_drop.dropNodeTransfer;
+    pub const addDropNode = hir_effects_drop.addDropNode;
+    pub const collectFunctionDrops = hir_effects_drop.collectFunctionDrops;
+    pub const collectConstDrops = hir_effects_drop.collectConstDrops;
     pub const checkModuleDependencies = hir_effects_const.checkModuleDependencies;
     pub const checkInitReads = hir_effects_const.checkInitReads;
     pub const checkTeardownReads = hir_effects_const.checkTeardownReads;
@@ -913,6 +931,62 @@ test "hir_effects: drop_effect walks the field/hook chain (teardown closed over 
     try testing.expect((try an.checkModuleDependencies(testing.allocator)) == null);
 }
 
+test "hir_effects: a cross-layer hook/fn/type cycle resolves precisely" {
+    // `f` destroys a `Token` (cleanup token edge `f → drop_type(Token)`),
+    // whose hook calls `f` (`drop_type → function`). Before the unified
+    // graph the missing cleanup-token edge left `f` outside the hook's
+    // SCC, so it could be solved first and fall back to `Top`; now all
+    // three nodes share one SCC and reach the least fixpoint.
+    var f = try build("app", &.{.{
+        "app",
+        \\struct Token {
+        \\    id: int32;
+        \\    drop(t) { f(t.id); }
+        \\}
+        \\fn f(id: int32) -> int32 {
+        \\    let t = Token { id: id };
+        \\    0
+        \\}
+    }});
+    defer f.deinit();
+    var an = try Analysis.init(f.arena.allocator(), f.built, .{ .graph = f.graph });
+    try an.analyze();
+    const fsum = try an.functionSummary(funcId(&f, "app.f").?);
+    // The cycle is a genuine function recursion, so the SCC is seeded
+    // `may_diverge`; crucially the result is the precise `Diverge`, not
+    // the full `Top` the cross-layer fallback used to publish.
+    try testing.expect(!fsum.eql(effects.top));
+    try testing.expect(fsum.eql(effects.may_diverge));
+    try testing.expect((try an.validate(testing.allocator)) == null);
+}
+
+test "hir_effects: a purely recursive drop type does not acquire may_diverge" {
+    // `T` reaches itself through `box[T]`, so its two drop nodes form a
+    // recursive SCC. No function participates, so the SCC is seeded
+    // `pure` by kind: a recursive *type* must not be conflated with a
+    // recursive *function* (docs/effects.md §11.1 按 kind 播种).
+    var f = try build("app", &.{.{
+        "app",
+        \\struct T {
+        \\    id: int32;
+        \\    next: box[T];
+        \\    drop(t) { let x = t.id; }
+        \\}
+        \\fn consume(move t: T) -> int32 { 0 }
+    }});
+    defer f.deinit();
+    var an = try Analysis.init(f.arena.allocator(), f.built, .{ .graph = f.graph });
+    try an.analyze();
+    const t_ty = findStructTy(&f, "T") orelse return error.TestUnexpectedResult;
+    const d = try an.dropEffectOf(t_ty);
+    try testing.expect(!d.may_diverge);
+    try testing.expect(effects.isPure(d));
+    // The type-keyed accessor records the same interned summary.
+    const key = try f.built.program.intern(t_ty);
+    try testing.expect((try an.dropSummary(key)).eql(d));
+    try testing.expect((try an.validate(testing.allocator)) == null);
+}
+
 fn findStructTy(f: *Fixture, name: []const u8) ?meta.Type {
     for (f.built.types, 0..) |d, i| {
         const dname = switch (d) {
@@ -1096,7 +1170,7 @@ test "hir_effects: a trapping division is never discardable" {
     try testing.expect((try an.validate(testing.allocator)) == null);
 }
 
-test "hir_effects: a Copy result with hidden Unique cleanup is not discardable" {
+test "hir_effects: a Copy result with a scoped Unique destructor is resolved precisely" {
     var f = try build("app", &.{.{
         "app",
         \\struct Token {
@@ -1114,24 +1188,29 @@ test "hir_effects: a Copy result with hidden Unique cleanup is not discardable" 
     defer f.deinit();
     var an = try Analysis.init(f.arena.allocator(), f.built, .{ .graph = f.graph });
     try an.analyze();
-    // The function returns a Copy value but binds a Unique local: its
-    // normal-exit cleanup is unmodelled, so the summary is Top.
-    try testing.expect((try an.functionSummary(funcId(&f, "app.inner").?)).eql(effects.top));
-    // A call to it inherits that Top: not discardable, not floatable,
-    // not SEG-safe, even though the result type is Copy.
+    // Before the unified dependency graph the cleanup-token edge
+    // `inner → Token` was missing, so `inner` could be solved before the
+    // hook's SCC and fall back to `Top`. The extra edge closes the
+    // cross-layer cycle and the reading destructor gives a precise,
+    // purely-reading summary.
+    const inner = try an.functionSummary(funcId(&f, "app.inner").?);
+    try testing.expect(!inner.eql(effects.top));
+    try testing.expect(effects.isTotal(inner));
+    try testing.expect(effects.isPure(inner));
+    // A call to it is therefore discardable / floatable / SEG-safe: the
+    // Copy result carries no observable destructor.
+    var found = false;
     for (f.built.program.exprs.items, 0..) |e, i| {
         if (!std.mem.eql(u8, hir.registry.get(e.op).name, "call")) continue;
         const id: hir.ExprId = @intCast(i);
-        const s = an.readySummary(id) orelse continue;
-        if (!s.eql(effects.top)) continue;
-        try testing.expect(!(try an.isDiscardable(id)));
-        try testing.expect(!(try an.canFloatAsTree(id)));
-        try testing.expect(!(try an.isSegSafe(id)));
-        try testing.expect(!(try an.isIntrinsicallySpeculatable(id)));
-        try testing.expect((try an.validate(testing.allocator)) == null);
-        return;
+        try testing.expect(try an.isDiscardable(id));
+        try testing.expect(try an.canFloatAsTree(id));
+        try testing.expect(try an.isSegSafe(id));
+        try testing.expect(try an.isIntrinsicallySpeculatable(id));
+        found = true;
     }
-    return error.TestUnexpectedResult;
+    try testing.expect(found);
+    try testing.expect((try an.validate(testing.allocator)) == null);
 }
 
 test "hir_effects: Q blocks duplication but not discard" {
@@ -1993,7 +2072,7 @@ test "hir_effects: a discarded Unique temporary is discardable through its model
     try an.analyze();
     var found = false;
     for (f.built.program.exprs.items, 0..) |e, i| {
-        const cap = (try an.capabilityOf(e.ty)) orelse .unique;
+        const cap = (try an.capabilityOf(f.built.program.typeOf(e.ty))) orelse .unique;
         if (cap != .unique) continue;
         if (!std.mem.eql(u8, hir.registry.get(e.op).name, "struct_make")) continue;
         const id: hir.ExprId = @intCast(i);
@@ -2036,7 +2115,7 @@ test "hir_effects: an observable destructor keeps a discarded temporary non-disc
     try an.analyze();
     var found = false;
     for (f.built.program.exprs.items, 0..) |e, i| {
-        const cap = (try an.capabilityOf(e.ty)) orelse .unique;
+        const cap = (try an.capabilityOf(f.built.program.typeOf(e.ty))) orelse .unique;
         if (cap != .unique) continue;
         if (!std.mem.eql(u8, hir.registry.get(e.op).name, "struct_make")) continue;
         const id: hir.ExprId = @intCast(i);
@@ -2068,7 +2147,7 @@ test "hir_effects: an unmodelled program's empty footprint never proves safety" 
     try an.analyze();
     for (f.built.program.exprs.items, 0..) |e, i| {
         if (e.op != call_op) continue;
-        const cap = (try an.capabilityOf(e.ty)) orelse .unique;
+        const cap = (try an.capabilityOf(f.built.program.typeOf(e.ty))) orelse .unique;
         if (cap != .unique) continue;
         const id: hir.ExprId = @intCast(i);
         try testing.expect((try an.cleanupEffect(id)) == null);
@@ -2101,7 +2180,7 @@ test "hir_effects: cleanup tokens satisfy their origin/type/FE invariants" {
             .full_expression => {
                 // A registered temporary is never a binder read or an
                 // explicit transfer, and its type is the node's own.
-                try testing.expect(meta.Type.eql(pr.node(tk.origin_expr).ty, tk.ty));
+                try testing.expect(pr.node(tk.origin_expr).ty == tk.ty);
                 const name = hir.registry.get(pr.node(tk.origin_expr).op).name;
                 try testing.expect(!std.mem.eql(u8, name, "local"));
                 try testing.expect(!std.mem.eql(u8, name, "move"));
@@ -2110,7 +2189,7 @@ test "hir_effects: cleanup tokens satisfy their origin/type/FE invariants" {
             .scope_end => |se| {
                 // The anchor is the region root; the token's type is the
                 // destroyed binding's.
-                try testing.expect(meta.Type.eql(pr.binder(se.binder).ty, tk.ty));
+                try testing.expect(pr.binder(se.binder).ty == tk.ty);
                 try testing.expectEqual(pr.region(se.region).root, tk.origin_expr);
             },
         }
@@ -2161,7 +2240,7 @@ test "hir_effects: a scoped Unique binding's end-of-scope destructor enters obse
         if (params.len != 1) continue;
         const b = pr.binder(params[0]);
         if (b.mode == .borrow) continue;
-        const cap = (try an.capabilityOf(b.ty)) orelse .unique;
+        const cap = (try an.capabilityOf(f.built.program.typeOf(b.ty))) orelse .unique;
         if (cap == .copy) continue;
         let_id = @intCast(i);
         bind = params[0];
@@ -2224,7 +2303,7 @@ test "hir_effects: a purely-reading scope-end destructor makes the footprint dis
         if (params.len != 1) continue;
         const b = pr.binder(params[0]);
         if (b.mode == .borrow) continue;
-        const cap = (try an.capabilityOf(b.ty)) orelse .unique;
+        const cap = (try an.capabilityOf(f.built.program.typeOf(b.ty))) orelse .unique;
         if (cap == .copy) continue; // the Unique binding, not the Copy one
         const id: hir.ExprId = @intCast(i);
         try testing.expect(try an.cleanupDiscardable(id));
@@ -2323,12 +2402,12 @@ test "hir_effects: a list_make index read in range is trap-free, out of range st
     const inner = try a.create(meta.Type);
     inner.* = i32ty;
     const list_ty = meta.Type{ .list = inner };
-    const c0 = try built.program.addExpr(.{ .op = hir.opId("const").?, .ty = i32ty, .payload = .{ .const_value = .{ .int = 10 } } });
-    const c1 = try built.program.addExpr(.{ .op = hir.opId("const").?, .ty = i32ty, .payload = .{ .const_value = .{ .int = 20 } } });
-    const lm = try built.program.addExpr(.{ .op = hir.opId("list_make").?, .ty = list_ty, .operands = try built.program.addOperands(&.{ c0, c1 }) });
-    const in_range = try built.program.addExpr(.{ .op = hir.opId("field_get").?, .ty = i32ty, .operands = try built.program.addOperands(&.{lm}), .payload = .{ .field = 1 } });
-    const oob = try built.program.addExpr(.{ .op = hir.opId("field_get").?, .ty = i32ty, .operands = try built.program.addOperands(&.{lm}), .payload = .{ .field = 2 } });
-    const not_ctor = try built.program.addExpr(.{ .op = hir.opId("field_get").?, .ty = i32ty, .operands = try built.program.addOperands(&.{c0}), .payload = .{ .field = 0 } });
+    const c0 = try built.program.addExpr(.{ .op = hir.opId("const").?, .ty = try built.program.intern(i32ty), .payload = .{ .const_value = .{ .int = 10 } } });
+    const c1 = try built.program.addExpr(.{ .op = hir.opId("const").?, .ty = try built.program.intern(i32ty), .payload = .{ .const_value = .{ .int = 20 } } });
+    const lm = try built.program.addExpr(.{ .op = hir.opId("list_make").?, .ty = try built.program.intern(list_ty), .operands = try built.program.addOperands(&.{ c0, c1 }) });
+    const in_range = try built.program.addExpr(.{ .op = hir.opId("field_get").?, .ty = try built.program.intern(i32ty), .operands = try built.program.addOperands(&.{lm}), .payload = .{ .field = 1 } });
+    const oob = try built.program.addExpr(.{ .op = hir.opId("field_get").?, .ty = try built.program.intern(i32ty), .operands = try built.program.addOperands(&.{lm}), .payload = .{ .field = 2 } });
+    const not_ctor = try built.program.addExpr(.{ .op = hir.opId("field_get").?, .ty = try built.program.intern(i32ty), .operands = try built.program.addOperands(&.{c0}), .payload = .{ .field = 0 } });
     var an = try Analysis.init(a, &built, .{});
     // The statically-known `list_make` length proves the in-range read
     // cannot trap (the bounds proof the projection rule consumes).

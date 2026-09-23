@@ -5,16 +5,97 @@
 「近期」内各项的先后是**建议顺序**，不是串行依赖；每项单独列出前置
 依赖。设计细节仍在两篇文档正文，本文件只记范围、依赖与验收。
 已完成的历史条目按原编号归档于「已完成」节，供跨文档交叉引用；
-「近期」当前为空——原第 23 项已落地；新增项一律从第 25 项续起、追加到队尾。
+「近期」自第 25 项起续编号、追加到队尾。
 
 ## 近期（建议顺序）
 
-（空——全部清单项已落地；新工作从第 25 项编号续起，见文首。）
+- [ ] **27. 函数摘要增量失效**（[effects.md](effects.md) §8.3）
+  - 现状：摘要每次全量重算；`EffectEnvironmentFingerprint`（「已完成」第 2 项）
+    已落地，但 phase-2/3 结果未缓存。
+  - 范围：持久化依赖图 + 每函数 generation / dirty 的 `SummaryCache`；
+    `solveSummaries` 只对脏函数所在 SCC 联合重解（从种子起，不并到旧摘要上）；
+    `functionSummary` 拦截过期读并在 interned id 相等时短路；改写者在
+    `Analysis.init` 跨阶段标脏所属函数。
+  - 依赖：第 26 项与已落地的 `EffectEnvironmentFingerprint`。
+  - 验收：与今日输出逐字一致（四组合差分、SEG budget 均不变）；可度量的
+    fixpoint 次数下降。
 
-## 已完成（归档，原「近期」第 1–24 项）
+- [ ] **28. SEG 的 associativity / commutativity 全搜索**（[hir.md](hir.md) §8）
+  - 现状：结构相等的 CSE sharing 已落地（「已完成」第 10 项），但没有
+    assoc / comm 重结合搜索。
+  - 范围：`isAssociativeInt`；展平交换-结合链、规范化操作数序、经 class 成员
+    合成重分组；振荡护栏；新增 `Rules` / `Stats` / `Config.egraph_ac_search`；
+    处理与 cost model 的交互。
+  - 依赖：无。
+  - 验收：`(a+b)+c` 与 `a+(b+c)` 归入同一 e-class；extraction 取规范 / 最小
+    cost 形态；有界轮内收敛；新 probe 实际触发该规则。
+
+## 已完成（归档，原「近期」第 1–26 项）
 
 > 以下条目均已落地，按完成时的编号保留，供 [effects.md](effects.md) 等正文
-> 交叉引用；「近期」当前为空，新工作从第 25 项编号续起。
+> 交叉引用；新工作从第 27 项编号续起。
+
+- [x] **26. 统一 `EffectDependencyNode`**（[effects.md](effects.md) §11.1）
+  - 现状：函数摘要 SCC 层与 drop-type 层是两张依赖图，跨层环（hook→fn→type）
+    回退 `Top`。
+  - 范围：合并为一张依赖图，节点 kind `Function(FuncId) | DropType(TypeKey)`，
+    四类边（fn→fn、fn→drop_type 含 cleanup token、drop_type→fn hook、
+    drop_type→drop_type 字段）；设深度上界，跑一次 dependency-first fixpoint，
+    每 kind 有 `may_diverge` 种子；不合并 `never_returns` 的 greatest fixpoint。
+  - 依赖：第 25 项。
+  - 验收：跨层环（hook→fn→type）不再回退 `Top`；纯递归类型不误得
+    `may_diverge`；失败关闭的安全网保留；新增跨层环 probe。
+  - 已完成：`Analysis` 的 `summary` / `known` / `cur` / `comp_of` 扩为统一节点数组
+    （`0..F-1` 函数、`F` 保留 `Top` sink、`F+1..` 按 canonical `HIRTypeId` 索引的
+    `drop_type`，`drop_node_of` 正查 / `drop_key_of_node` 反查）；`solveSummaries`
+    一次构图（四类边）后单次 Kosaraju，`solveComponent` 对 union 做 Kleene /
+    Jacobi；`nodeTransfer` 分派函数体摘要与 `dropNodeTransfer`，`dropStructural`
+    逐字段读子节点的统一值（同 SCC in-progress），非图内类型回退
+    `dropEffectFree`；`max_drop_type_depth` 超界物化 `Top` sink。播种按 kind：
+    递归 SCC 的 `function` 成员 `may_diverge`，`drop_type` 恒 `pure`。函数侧
+    `functionSummary` / 派生查询与 SEG 消费面逐字不变；`drop` descriptor 与
+    teardown 检查经 `dropEffectOf` / `dropSummary(key)` 读统一存储。
+    `never_returns` 保持独立 gfp。测试：重写「Copy 结果 + 隐藏 Unique 清理」为
+    **精确**断言（读 hook 使 `inner` 由 `Top` 变 `pure`，调用可 discardable /
+    float / SEG-safe）；新增跨层环 `hook→fn→type` 白盒（解出精确 `Diverge`，不再
+    `Top`）与纯递归类型 `box[T]` 白盒（不误得 `may_diverge`，`dropSummary` 与
+    `dropEffectOf` 一致）。跨层环 probe 已补：`probes/cross_layer_drop_cycle.st`
+    是可运行语料成员（hook 仅在 `t.id > 0` 时递归，输出确定），
+    `probes/cases/cross_layer_drop_cycle_{app,host}.st` 是黑盒可观测 fixture；
+    `hir_seg_tests.zig` 的黑盒断言证明精确摘要解锁 `reorder`（旧的保守 `Top`
+    的 wildcard access 会被 `orderCompatible` 拒绝），即精度增益可观测。
+
+- [x] **25. HIRTypeId canonical 表（完整迁移）**（[hir.md](hir.md) §3.1、§3.8、
+      §7.3）
+  - 现状：HIR 直接内联 `meta.Type`，无 canonical 表；SEG 的类型相等与摘要
+    interning 只能深比较 / 深散列（§3.8 原列为 Target）。
+  - 范围：`hir.Program` 新增 content-addressed `HIRTypeId` 表（值池 +
+    结构哈希 map，`meta.Type.eql` 碰撞相等，深 `hashType` 从
+    `hir_egraph_rules.zig` 提到共享位置）；IR 自有类型字段整体迁移为
+    `HIRTypeId` 并在构造点 intern，读者经 `Program.typeOf` 解析，不引入第二个
+    类型世界；`meta.Type` 保留为跨 `Program` ground truth；SEG 的
+    hash-consing / pattern 相等 / 摘要 interning 键接上 `HIRTypeId`。
+  - 依赖：无（第 26 / 27 项的基础）。
+  - 验收：HIR 内部类型身份统一为 `HIRTypeId`；全语料 `--simplify`×`--seg`
+    四组合解释器差分逐字不变；`--emit-hir` 全语料往返闭合；`zig build
+    -fincremental test` 全绿。
+  - 已完成：`Program` 的 content-addressed 表落地（`type_pool` 值池 +
+    结构哈希 `type_map`，`TypeCtx.eql` = `meta.Type.eql` 碰撞相等；深
+    `hashType` 从 `hir_egraph_rules.zig` 提到 `meta.zig` 共享）；IR 自有类型
+    字段（`ExprNode.ty`、`Binder.ty`、`CleanupToken.ty`、
+    `Pattern.TypeTestPattern.ty`、`FuncRecord.params` / `ret`、
+    `ConstRecord.type_`、`HostRecord.signature`）整体迁移为 `HIRTypeId`，构造
+    点经 `Program.intern` intern，读者经 `Program.typeOf` 解析回 `meta.Type`
+    （不引入第二个类型世界）；`alphaEq` / 打印 / 解析按 §3.8 跨 `Program` 规则
+    解析回 `meta.Type` 再比；SEG 的 e-node hash-consing / pattern 相等 / 摘要
+    interning 用 O(1) `HIRTypeId` 相等。硬化：`.cleanup`（含嵌套）在
+    `internType` 被拒绝并作为 `InternTypeError` 沿 `intern` 传播（取代原
+    `unreachable`）；`internType` 先 append 值池、`type_map.put` 失败即回滚
+    值池（原子）；递归 `typeContainsCleanup` 守卫覆盖 list / box / tuple /
+    function / named。验收：`zig build -fincremental test` 全绿（Debug
+    1256/1256），ReleaseSafe 同绿（1256/1256）；全语料 `--simplify` × `--seg`
+    四组合解释器差分逐字不变；`--emit-hir` 全语料往返闭合；SEG budget 基线与
+    迁移前逐项相同。
 
 - [x] **23. 覆盖 e-graph 的 SEG 统计与预算**（`hir_seg.zig` 的
       `Stats`；`hir_seg_tests.zig` 的 `SEG budget`）
@@ -769,11 +850,13 @@
 
 - [ ] 统一 `EffectDependencyNode`（Function ∪ DropType）单图 fixpoint，
       消掉跨层环回退 `Top` 的精度洞（[effects.md](effects.md) §11.1）。
+      **已提升为「近期」：** 作为第 26 项落地。
 - **已提升为「近期」：** 真正的 slotted e-graph / extraction 拆为第 21–23 项
       （e-graph 本体、cost model + extraction、覆盖 e-graph 的统计与预算）；v1
       原位树重写器是其前身。
-- [ ] `HIRTypeId` canonical 表（[hir.md](hir.md) §3.8 Target）：为 SEG 的 O(1)
+- [ ] `HIRTypeId` canonical 表（[hir.md](hir.md) §3.8）：为 SEG 的 O(1)
       类型相等与摘要 interning 给 `meta.Type` 加一张 canonical 表。
+      **已提升为「近期」：** 作为第 25 项完整迁移落地。
 - [x] source span side table（[hir.md](hir.md) §3.2）：已落地——`Program.origins`
       + `origin_map` interning，builder 从 AST span 填充 `ExprNode.origin`；
       `Program.originOf` 查询，validator 拒越界 id。合成节点保持 0，克隆继承。
@@ -782,6 +865,7 @@
       完成（[hir.md](hir.md) §2.3 远期边界；未立项）。
 - [ ] SEG 的 associativity / commutativity 搜索（正文列为 SEG 之外的
       方向，未立项；结构相等的 CSE sharing 已落地（见「已完成」第 10 项））。
+      **已提升为「近期」：** 作为第 28 项落地。
 - [ ] effect 域间层级 / alias 例外表（[effects.md](effects.md) §5.6 Target）：
       现只有 `stable` 域集合与显式 `disjoint` 对，域内层级 / alias 例外未建模；
       与「待决」的 overlap/disjoint 具体条目是同一方向的精度补全。
@@ -789,7 +873,7 @@
 - [ ] 函数摘要的增量失效：标脏 / 世代号 / 依赖传播（[effects.md](effects.md)
       §8.3）。现为全量重算；触发条件是「缓存 phase-2/3 结果」——
       `EffectEnvironmentFingerprint`（「已完成」第 2 项）是已落地的先决条件，本项
-      是其剩余部分。
+      是其剩余部分。**已提升为「近期」：** 作为第 27 项落地。
 - [ ] `canMove` / `MovementContext` 暴露（[effects.md](effects.md) §10.5）：需先
       建模移动路径上的 FE / lifetime / 清理注册变化事实；在第一个需要 code motion
       的重写出现前，暴露恒 false 的入口无意义。

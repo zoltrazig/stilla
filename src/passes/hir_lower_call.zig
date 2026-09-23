@@ -52,14 +52,14 @@ pub fn call(c: *Ctx, fs: *FuncState, id: hir.ExprId) LowerError!?*cfg.Value {
                 var args = std.ArrayList(*cfg.Value).empty;
                 for (rec.params, ops[1..]) |p, arg_id| {
                     const v = (try hir_lower_expr.expr(c, fs, arg_id)) orelse return null;
-                    const arg = try cfg_lower_call.lowerCallArg(self, fs, v, p.mode, p.type_);
+                    const arg = try cfg_lower_call.lowerCallArg(self, fs, v, p.mode, c.built.program.typeOf(p.ty));
                     // A void-typed argument carries no observable value:
                     // it emits no operand (the phantom must never reach
                     // the text form, cfg-lowering.md Pass 4.1).
                     if (arg.type_ == .primitive and arg.type_.primitive == .void) continue;
                     try args.append(self.arena, arg);
                 }
-                return cfg_lower_call.emitCall(self, fs, no_span, .{ .direct = .{ .name = rec.name } }, args.items, n.ty);
+                return cfg_lower_call.emitCall(self, fs, no_span, .{ .direct = .{ .name = rec.name } }, args.items, c.built.program.typeOf(n.ty));
             },
             // A first-class intrinsic wrapper in callee position: a
             // value call over the wrapper's `fn_ref` (its body forwards
@@ -127,7 +127,7 @@ fn hostCall(c: *Ctx, fs: *FuncState, id: hir.ExprId, callee_node: hir.ExprNode, 
 
     // The signature: the `fn_ref` node's stored function type (already
     // the call's specialization when the source used `::[...]`).
-    const sig_fn = callee_node.ty.function;
+    const sig_fn = c.built.program.typeOf(callee_node.ty).function;
     // Effective modes: move when the argument is a `move` node (the
     // checker's rule, recorded structurally by the builder).
     var eff_params = std.ArrayList(meta.Param).empty;

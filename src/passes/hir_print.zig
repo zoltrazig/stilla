@@ -389,6 +389,7 @@ fn constNo(numbers: *const RefNumbers, id: hir.ConstId) !u32 {
 /// an if there must be parenthesized so the `else` binds correctly.
 fn printExpr(p: *Printer, program: *const hir.Program, id: hir.ExprId, numbers: *const RefNumbers, _: bool) PrintError!void {
     const n = program.node(id);
+    const nty = program.typeOf(n.ty);
     // A chain-reached value leaf (a module access path through
     // module-valued members, hir.md §7.4) has no text form carrying the
     // hop identities — printing errors, never silently drops the hops.
@@ -401,7 +402,7 @@ fn printExpr(p: *Printer, program: *const hir.Program, id: hir.ExprId, numbers: 
         return;
     }
     if (std.mem.eql(u8, op_name, "const")) {
-        try p.printConstValue(n.payload.const_value, n.ty);
+        try p.printConstValue(n.payload.const_value, nty);
         return;
     }
     if (std.mem.eql(u8, op_name, "fn_ref")) {
@@ -413,12 +414,12 @@ fn printExpr(p: *Printer, program: *const hir.Program, id: hir.ExprId, numbers: 
             .func => |f| {
                 try p.printFmt("fnref F{d}", .{try refNo(numbers, f)});
                 if (f >= p.ctx.funcs.len) return PrintError.NotSerializable;
-                if (!meta.Type.eql(n.ty, p.ctx.funcs[f].type_)) try printTypeAnnotation(p, n.ty);
+                if (!meta.Type.eql(nty, p.ctx.funcs[f].type_)) try printTypeAnnotation(p, nty);
             },
             .host => |h| {
                 try p.printFmt("fnref H{d}", .{try hostNo(numbers, h)});
                 if (h >= p.ctx.hosts.len) return PrintError.NotSerializable;
-                if (!meta.Type.eql(n.ty, p.ctx.hosts[h].type_)) try printTypeAnnotation(p, n.ty);
+                if (!meta.Type.eql(nty, p.ctx.hosts[h].type_)) try printTypeAnnotation(p, nty);
             },
         }
         return;
@@ -443,7 +444,7 @@ fn printExpr(p: *Printer, program: *const hir.Program, id: hir.ExprId, numbers: 
             // §5.2). The parser recovers the type by parsing the init
             // first, so the pattern carries no type annotation itself.
             var cursor: usize = 0;
-            try printPattern(p, program, pid, program.node(ops[0]).ty, binders, &cursor, numbers);
+            try printPattern(p, program, pid, program.typeOf(program.node(ops[0]).ty), binders, &cursor, numbers);
         } else {
             // A pattern-less let region carries exactly one binder.
             if (binders.len != 1) return PrintError.NotSerializable;
@@ -451,7 +452,7 @@ fn printExpr(p: *Printer, program: *const hir.Program, id: hir.ExprId, numbers: 
             const b = program.binder(bid);
             const no = try p.num(bid);
             try p.printFmt("B{d}: ", .{no});
-            try p.printType(b.ty);
+            try p.printType(program.typeOf(b.ty));
             try printMode(p, b.mode);
         }
         try p.put(" = ");
@@ -475,16 +476,16 @@ fn printExpr(p: *Printer, program: *const hir.Program, id: hir.ExprId, numbers: 
             const b = program.binder(bid);
             const no = try p.num(bid);
             try p.printFmt("B{d}: ", .{no});
-            try p.printType(b.ty);
+            try p.printType(program.typeOf(b.ty));
             try printMode(p, b.mode);
         }
         try p.put(")");
         // The body fixes the return type; print it explicitly only when
         // the lambda's declared return differs (a `never` body under a
         // non-`never` declared return, hir.md §4.4).
-        if (n.ty == .function and !meta.Type.eql(n.ty.function.ret.*, program.node(r.root).ty)) {
+        if (nty == .function and !meta.Type.eql(nty.function.ret.*, program.typeOf(program.node(r.root).ty))) {
             try p.put(" -> ");
-            try p.printType(n.ty.function.ret.*);
+            try p.printType(nty.function.ret.*);
         }
         try p.put(" {");
         p.pushIndent();
@@ -525,7 +526,7 @@ fn printExpr(p: *Printer, program: *const hir.Program, id: hir.ExprId, numbers: 
     }
     if (std.mem.eql(u8, op_name, "match")) {
         const ops = program.operands(id);
-        const scrutinee_ty = program.node(ops[0]).ty;
+        const scrutinee_ty = program.typeOf(program.node(ops[0]).ty);
         try p.put("match ");
         try printBeforeBrace(p, program, ops[0], numbers);
         try p.put(" {");
@@ -552,30 +553,30 @@ fn printExpr(p: *Printer, program: *const hir.Program, id: hir.ExprId, numbers: 
         try p.put("struct_make(");
         try printOperandList(p, program, id, numbers);
         try p.put(") : ");
-        try p.printType(n.ty);
+        try p.printType(nty);
         return;
     }
     if (std.mem.eql(u8, op_name, "variant_make")) {
         const tag = n.payload.tag;
         try p.put("variant_make[");
-        try printVariantName(p, n.ty, tag);
+        try printVariantName(p, nty, tag);
         try p.put("](");
         try printOperandList(p, program, id, numbers);
         try p.put(") : ");
-        try p.printType(n.ty);
+        try p.printType(nty);
         return;
     }
     if (std.mem.eql(u8, op_name, "field_get")) {
         // The member index is meaningless without its base, so the text
         // resolves it from the operand's type (struct field name or
         // tuple position); the result type stays explicit.
-        const base = program.node(program.operands(id)[0]).ty;
+        const base = program.typeOf(program.node(program.operands(id)[0]).ty);
         try p.put("field_get[");
         try printMemberName(p, base, n.payload.field);
         try p.put("](");
         try printOperandList(p, program, id, numbers);
         try p.put(") : ");
-        try p.printType(n.ty);
+        try p.printType(nty);
         return;
     }
     // Generic eager op form.
@@ -588,7 +589,7 @@ fn printExpr(p: *Printer, program: *const hir.Program, id: hir.ExprId, numbers: 
     // Result-type annotation for ops whose type is not self-determined.
     if (needsAnnotation(op_name, program.operands(id).len)) {
         try p.put(": ");
-        try p.printType(n.ty);
+        try p.printType(nty);
     }
 }
 
@@ -826,7 +827,7 @@ fn printPattern(p: *Printer, program: *const hir.Program, pid: hir.PatternId, su
             }
         },
         .type_test => |tt| {
-            try p.printType(tt.ty);
+            try p.printType(program.typeOf(tt.ty));
             try p.put(" ");
             const no = try p.num(tt.bind);
             try p.printFmt("B{d}", .{no});
@@ -985,7 +986,7 @@ fn patternEq(pa: hir.PatternId, pb: hir.PatternId, a: *const hir.Program, b: *co
         },
         .type_test => |ta| switch (y) {
             .type_test => |tb| {
-                if (!meta.Type.eql(ta.ty, tb.ty)) return false;
+                if (!meta.Type.eql(a.typeOf(ta.ty), b.typeOf(tb.ty))) return false;
                 return (mapGet(map, ta.bind) orelse return false) == tb.bind;
             },
             else => false,
@@ -997,7 +998,7 @@ fn exprEq(a: *const hir.Program, aid: hir.ExprId, b: *const hir.Program, bid: hi
     const na = a.node(aid);
     const nb = b.node(bid);
     if (na.op != nb.op) return false;
-    if (!meta.Type.eql(na.ty, nb.ty)) return false;
+    if (!meta.Type.eql(a.typeOf(na.ty), b.typeOf(nb.ty))) return false;
     if (!payloadEq(na.payload, nb.payload, map)) return false;
     const a_ops = a.operands(aid);
     const b_ops = b.operands(bid);
@@ -1268,12 +1269,12 @@ test "printer determinism over constructed programs (S1 structures)" {
     defer arena.deinit();
     var p = try hir.Program.init(arena.allocator());
     const b_x = try p.addBinder(meta.Type{ .primitive = .int32 }, .value);
-    const init = try p.addExpr(.{ .op = hir.opId("const").?, .ty = meta.Type{ .primitive = .int32 }, .payload = .{ .const_value = .{ .int = 42 } } });
-    const body = try p.addExpr(.{ .op = hir.opId("local").?, .ty = meta.Type{ .primitive = .int32 }, .payload = .{ .binder = b_x } });
+    const init = try p.addExpr(.{ .op = hir.opId("const").?, .ty = try p.intern(.{ .primitive = .int32 }), .payload = .{ .const_value = .{ .int = 42 } } });
+    const body = try p.addExpr(.{ .op = hir.opId("local").?, .ty = try p.intern(.{ .primitive = .int32 }), .payload = .{ .binder = b_x } });
     const region = try p.addRegion(&.{b_x}, body, null);
     const regions = try p.addRegions(&.{region});
     const operands = try p.addOperands(&.{init});
-    const let_id = try p.addExpr(.{ .op = hir.opId("let").?, .ty = meta.Type{ .primitive = .int32 }, .operands = operands, .regions = regions });
+    const let_id = try p.addExpr(.{ .op = hir.opId("let").?, .ty = try p.intern(.{ .primitive = .int32 }), .operands = operands, .regions = regions });
     const out = try print(&p, let_id, arena.allocator(), .{});
     try t.expectEqualStrings("let B0: i32 = 42i32 {\n  %B0\n}", out);
     // And it round-trips.

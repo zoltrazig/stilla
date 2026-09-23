@@ -109,6 +109,14 @@ The detailed probes cover the source-reachable operation/type matrix:
   block end), an owned Unique `move` parameter destroyed at normal exit,
   and a discarded Unique statement whose destructor stays at the statement
   when selective ANF materializes it into a synthesized `let`
+- `cross_layer_drop_cycle.st`: the unified `EffectDependencyNode` graph
+  ([effects.md](effects.md) §11.1). `T`'s `drop` hook calls `f`, and `f`'s
+  body destroys a `T` through a cleanup token, so the dependency graph
+  carries the cross-layer cycle `f → drop_type(T) → hook → f`. Before
+  unification the missing cleanup-token edge let `f` fall back to `Top`;
+  the unified fixpoint resolves the SCC to a precise `Diverge`. The hook
+  recurses only while `t.id > 0`, so `main` runs the cycle and prints a
+  fixed value.
 
 Every `probes/*.st` file is enumerated at test time by
 `src/probe_corpus.zig`, so a new probe automatically joins the HIR build
@@ -155,6 +163,17 @@ inlining a whole Stilla program in a test body.
   The same probe is the acceptance that a second lattice instance changes
   the produced AIR (todo.md 24; `frontend_pass_smoke_tests.zig`,
   `hir_seg_tests.zig`).
+- `cross_layer_drop_cycle_{app,host}.st`: the cross-layer cycle's
+  precision gain made observable ([effects.md](effects.md) §11.1). `host`
+  declares two sibling host reads (host(2) / host(3)); the app makes `f`
+  both a member of the cycle `f → drop_type(T) → hook → f` and a host(2)
+  reader, so its exact summary is `read(host2) + MayDiverge` where the old
+  cross-layer fallback had `Top`. `h` writes the reads as
+  `peek + read`; under `example_hierarchy` the `reorder` rule swaps them
+  (the precise summary commutes with the sibling read) while the flat
+  provider refuses, and a `Top` operand's wildcard accesses would be
+  refused even by the hierarchy instance. `hir_seg_tests.zig` pins both
+  the precise summary and the fired rewrite.
 
 Some LLIR instructions have no one-to-one source construct. `spill_take`,
 `spill_put`, `result_take`, argument-window instructions, `jal`/`jalr`/`jr`,

@@ -201,7 +201,7 @@ const Validator = struct {
                 .full_expression => {
                     // The anchor is the value-producing node: its own
                     // type is the destroyed value's type.
-                    if (!meta.Type.eql(n.ty, tk.ty)) {
+                    if (n.ty != tk.ty) {
                         return self.fail("cleanup token for origin expr {d} carries a type that disagrees with the node", .{tk.origin_expr});
                     }
                     // Node-level FE boundary (hir.md §5.6): a token's
@@ -229,7 +229,7 @@ const Validator = struct {
                     if (r.root != tk.origin_expr) {
                         return self.fail("scope-end cleanup token for binder {d} is not anchored at its region root", .{se.binder});
                     }
-                    if (!meta.Type.eql(self.program.binders.items[se.binder].ty, tk.ty)) {
+                    if (self.program.binders.items[se.binder].ty != tk.ty) {
                         return self.fail("scope-end cleanup token for binder {d} carries a type that disagrees with the binder", .{se.binder});
                     }
                     var in_params = false;
@@ -637,11 +637,11 @@ test "fn_ref with a resolved function payload validates" {
     var p = (try fresh(arena.allocator())).prog;
     // `.func` on `fn_ref` is the correct pairing and validates (no
     // serialization context needed at the structural level).
-    const ok = try p.addExpr(.{ .op = hir.opId("fn_ref").?, .ty = ty_int, .payload = .{ .func = .{ .func = 0 } } });
+    const ok = try p.addExpr(.{ .op = hir.opId("fn_ref").?, .ty = try p.intern(ty_int), .payload = .{ .func = .{ .func = 0 } } });
     const m_ok = try validate(&p, ok, arena.allocator());
     try t.expect(m_ok == null);
     // `.func` on `const` is a pairing mismatch and is rejected.
-    const bad = try p.addExpr(.{ .op = op_const, .ty = ty_int, .payload = .{ .func = .{ .func = 0 } } });
+    const bad = try p.addExpr(.{ .op = op_const, .ty = try p.intern(ty_int), .payload = .{ .func = .{ .func = 0 } } });
     const m_bad = try validate(&p, bad, arena.allocator());
     const msg = m_bad orelse return error.TestUnexpectedResult;
     try t.expect(std.mem.indexOf(u8, msg, "payload") != null);
@@ -659,18 +659,18 @@ test "sibling arm regions cannot see each other's binders" {
     defer arena.deinit();
     var p = (try fresh(arena.allocator())).prog;
     const b1 = try p.addBinder(ty_int, .value);
-    const arm1_root = try p.addExpr(.{ .op = op_const, .ty = ty_int, .payload = .{ .const_value = .{ .int = 1 } } });
+    const arm1_root = try p.addExpr(.{ .op = op_const, .ty = try p.intern(ty_int), .payload = .{ .const_value = .{ .int = 1 } } });
     const arm1_pat = try p.addPattern(.{ .bind = b1 });
     const arm1 = try p.addRegion(&.{b1}, arm1_root, arm1_pat);
     // Arm 2 (patternless) tries to reference arm 1's binder: the search
     // walks out of arm 2, past the match (not a boundary) and finds no
     // enclosing region declaring b1 — rejected.
-    const leak = try p.addExpr(.{ .op = op_local, .ty = ty_int, .payload = .{ .binder = b1 } });
+    const leak = try p.addExpr(.{ .op = op_local, .ty = try p.intern(ty_int), .payload = .{ .binder = b1 } });
     const arm2 = try p.addRegion(&.{}, leak, null);
-    const scrutinee = try p.addExpr(.{ .op = op_const, .ty = ty_bool, .payload = .{ .const_value = .{ .bool = true } } });
+    const scrutinee = try p.addExpr(.{ .op = op_const, .ty = try p.intern(ty_bool), .payload = .{ .const_value = .{ .bool = true } } });
     const operands = try p.addOperands(&.{scrutinee});
     const regions = try p.addRegions(&.{ arm1, arm2 });
-    const root = try p.addExpr(.{ .op = op_match, .ty = ty_int, .operands = operands, .regions = regions });
+    const root = try p.addExpr(.{ .op = op_match, .ty = try p.intern(ty_int), .operands = operands, .regions = regions });
     const m = try validate(&p, root, arena.allocator());
     const msg = m orelse return error.TestUnexpectedResult;
     try t.expect(std.mem.indexOf(u8, msg, "not in scope") != null);
@@ -682,14 +682,14 @@ test "shared operands (DAG) and self-cycles are rejected" {
     var p = (try fresh(arena.allocator())).prog;
 
     // Same child twice in one operand list: a shared subtree.
-    const c = try p.addExpr(.{ .op = op_const, .ty = ty_int, .payload = .{ .const_value = .{ .int = 1 } } });
+    const c = try p.addExpr(.{ .op = op_const, .ty = try p.intern(ty_int), .payload = .{ .const_value = .{ .int = 1 } } });
     const dup_ops = try p.addOperands(&.{ c, c });
-    const seq1 = try p.addExpr(.{ .op = op_seq, .ty = ty_int, .operands = dup_ops });
+    const seq1 = try p.addExpr(.{ .op = op_seq, .ty = try p.intern(ty_int), .operands = dup_ops });
     const m1 = try validate(&p, seq1, arena.allocator());
     try t.expect(m1 != null);
 
     // Self-reference: mutate the node to list itself as an operand.
-    const self_seq = try p.addExpr(.{ .op = op_seq, .ty = ty_int });
+    const self_seq = try p.addExpr(.{ .op = op_seq, .ty = try p.intern(ty_int) });
     const self_ops = try p.addOperands(&.{self_seq});
     p.exprs.items[self_seq].operands = self_ops;
     const m2 = try validate(&p, self_seq, arena.allocator());
@@ -701,18 +701,18 @@ test "a region with two owning exprs is rejected" {
     var arena = std.heap.ArenaAllocator.init(t.allocator);
     defer arena.deinit();
     var p = (try fresh(arena.allocator())).prog;
-    const r0 = try p.addRegion(&.{}, try p.addExpr(.{ .op = op_const, .ty = ty_int, .payload = .{ .const_value = .{ .int = 1 } } }), null);
-    const r1 = try p.addRegion(&.{}, try p.addExpr(.{ .op = op_const, .ty = ty_int, .payload = .{ .const_value = .{ .int = 2 } } }), null);
+    const r0 = try p.addRegion(&.{}, try p.addExpr(.{ .op = op_const, .ty = try p.intern(ty_int), .payload = .{ .const_value = .{ .int = 1 } } }), null);
+    const r1 = try p.addRegion(&.{}, try p.addExpr(.{ .op = op_const, .ty = try p.intern(ty_int), .payload = .{ .const_value = .{ .int = 2 } } }), null);
     const shared = try p.addRegions(&.{ r0, r1 });
-    const cond = try p.addExpr(.{ .op = op_const, .ty = ty_bool, .payload = .{ .const_value = .{ .bool = true } } });
+    const cond = try p.addExpr(.{ .op = op_const, .ty = try p.intern(ty_bool), .payload = .{ .const_value = .{ .bool = true } } });
     const op_a = try p.addOperands(&.{cond});
     // Two `if` nodes whose region slices address the same two regions.
-    const if_a = try p.addExpr(.{ .op = op_if, .ty = ty_int, .operands = op_a, .regions = shared });
-    const cond2 = try p.addExpr(.{ .op = op_const, .ty = ty_bool, .payload = .{ .const_value = .{ .bool = false } } });
+    const if_a = try p.addExpr(.{ .op = op_if, .ty = try p.intern(ty_int), .operands = op_a, .regions = shared });
+    const cond2 = try p.addExpr(.{ .op = op_const, .ty = try p.intern(ty_bool), .payload = .{ .const_value = .{ .bool = false } } });
     const op_b = try p.addOperands(&.{cond2});
-    const if_b = try p.addExpr(.{ .op = op_if, .ty = ty_int, .operands = op_b, .regions = shared });
+    const if_b = try p.addExpr(.{ .op = op_if, .ty = try p.intern(ty_int), .operands = op_b, .regions = shared });
     const body = try p.addOperands(&.{ if_a, if_b });
-    const seq_id = try p.addExpr(.{ .op = op_seq, .ty = ty_int, .operands = body });
+    const seq_id = try p.addExpr(.{ .op = op_seq, .ty = try p.intern(ty_int), .operands = body });
     const m = try validate(&p, seq_id, arena.allocator());
     const msg = m orelse return error.TestUnexpectedResult;
     try t.expect(std.mem.indexOf(u8, msg, "more than one owning") != null);
@@ -724,10 +724,10 @@ test "a BinderId is a param of at most one region" {
     var p = (try fresh(arena.allocator())).prog;
     const b = try p.addBinder(ty_int, .value);
     // Duplicate binder in a single region's params.
-    const reg = try p.addRegion(&.{ b, b }, try p.addExpr(.{ .op = op_const, .ty = ty_int, .payload = .{ .const_value = .{ .int = 0 } } }), null);
+    const reg = try p.addRegion(&.{ b, b }, try p.addExpr(.{ .op = op_const, .ty = try p.intern(ty_int), .payload = .{ .const_value = .{ .int = 0 } } }), null);
     const regions = try p.addRegions(&.{reg});
     const fn_ty = meta.Type{ .primitive = .int32 };
-    const lam = try p.addExpr(.{ .op = op_lambda, .ty = fn_ty, .regions = regions });
+    const lam = try p.addExpr(.{ .op = op_lambda, .ty = try p.intern(fn_ty), .regions = regions });
     const m = try validate(&p, lam, arena.allocator());
     const msg = m orelse return error.TestUnexpectedResult;
     try t.expect(std.mem.indexOf(u8, msg, "more than one region") != null);
@@ -738,15 +738,15 @@ test "let init exclusion is structural: init cannot see its own binder" {
     defer arena.deinit();
     var p = (try fresh(arena.allocator())).prog;
     const b_x = try p.addBinder(ty_int, .value);
-    const body = try p.addExpr(.{ .op = op_const, .ty = ty_int, .payload = .{ .const_value = .{ .int = 0 } } });
+    const body = try p.addExpr(.{ .op = op_const, .ty = try p.intern(ty_int), .payload = .{ .const_value = .{ .int = 0 } } });
     const reg = try p.addRegion(&.{b_x}, body, null);
     const regions = try p.addRegions(&.{reg});
     // Init references the binder the let is about to introduce. The init
     // operand is walked in the outer context (here: none), so the
     // reference cannot resolve.
-    const bad_init = try p.addExpr(.{ .op = op_local, .ty = ty_int, .payload = .{ .binder = b_x } });
+    const bad_init = try p.addExpr(.{ .op = op_local, .ty = try p.intern(ty_int), .payload = .{ .binder = b_x } });
     const operands = try p.addOperands(&.{bad_init});
-    const let_id = try p.addExpr(.{ .op = op_let, .ty = ty_int, .operands = operands, .regions = regions });
+    const let_id = try p.addExpr(.{ .op = op_let, .ty = try p.intern(ty_int), .operands = operands, .regions = regions });
     const m = try validate(&p, let_id, arena.allocator());
     const msg = m orelse return error.TestUnexpectedResult;
     try t.expect(std.mem.indexOf(u8, msg, "not in scope") != null);
@@ -761,16 +761,16 @@ test "out-of-range expr ids and operand/region ranges are rejected" {
     try t.expect(m1 != null);
     // An operand id that names no expr.
     const ops = try p.addOperands(&.{999});
-    const seq_id = try p.addExpr(.{ .op = op_seq, .ty = ty_int, .operands = ops });
+    const seq_id = try p.addExpr(.{ .op = op_seq, .ty = try p.intern(ty_int), .operands = ops });
     const m2 = try validate(&p, seq_id, arena.allocator());
     const msg2 = m2 orelse return error.TestUnexpectedResult;
     try t.expect(std.mem.indexOf(u8, msg2, "out of range") != null);
     // A node whose region range runs past the region buffer.
     const regs = try p.addRegions(&.{});
     _ = regs;
-    const r0 = try p.addRegion(&.{}, try p.addExpr(.{ .op = op_const, .ty = ty_int, .payload = .{ .const_value = .{ .int = 1 } } }), null);
+    const r0 = try p.addRegion(&.{}, try p.addExpr(.{ .op = op_const, .ty = try p.intern(ty_int), .payload = .{ .const_value = .{ .int = 1 } } }), null);
     const ok_regs = try p.addRegions(&.{r0});
-    const lam = try p.addExpr(.{ .op = op_lambda, .ty = ty_int, .regions = ok_regs });
+    const lam = try p.addExpr(.{ .op = op_lambda, .ty = try p.intern(ty_int), .regions = ok_regs });
     p.exprs.items[lam].regions = .{ .start = 100, .len = 0 };
     const m3 = try validate(&p, lam, arena.allocator());
     const msg3 = m3 orelse return error.TestUnexpectedResult;
@@ -782,27 +782,27 @@ test "payload/op pairing and descriptor arity are enforced" {
     defer arena.deinit();
     var p = (try fresh(arena.allocator())).prog;
     // local with a const payload.
-    const bad_payload = try p.addExpr(.{ .op = op_local, .ty = ty_int, .payload = .{ .const_value = .{ .int = 1 } } });
+    const bad_payload = try p.addExpr(.{ .op = op_local, .ty = try p.intern(ty_int), .payload = .{ .const_value = .{ .int = 1 } } });
     const m1 = try validate(&p, bad_payload, arena.allocator());
     try t.expect(m1 != null);
     // const with one operand (shape allows none).
-    const c = try p.addExpr(.{ .op = op_const, .ty = ty_int, .payload = .{ .const_value = .{ .int = 1 } } });
+    const c = try p.addExpr(.{ .op = op_const, .ty = try p.intern(ty_int), .payload = .{ .const_value = .{ .int = 1 } } });
     const ops = try p.addOperands(&.{c});
-    const const_w_ops = try p.addExpr(.{ .op = op_const, .ty = ty_int, .operands = ops });
+    const const_w_ops = try p.addExpr(.{ .op = op_const, .ty = try p.intern(ty_int), .operands = ops });
     const m2 = try validate(&p, const_w_ops, arena.allocator());
     try t.expect(m2 != null);
     // let with no init operand (shape requires one).
-    const body = try p.addExpr(.{ .op = op_const, .ty = ty_int, .payload = .{ .const_value = .{ .int = 0 } } });
+    const body = try p.addExpr(.{ .op = op_const, .ty = try p.intern(ty_int), .payload = .{ .const_value = .{ .int = 0 } } });
     const reg = try p.addRegion(&.{}, body, null);
     const regs = try p.addRegions(&.{reg});
-    const no_init = try p.addExpr(.{ .op = op_let, .ty = ty_int, .regions = regs });
+    const no_init = try p.addExpr(.{ .op = op_let, .ty = try p.intern(ty_int), .regions = regs });
     const m3 = try validate(&p, no_init, arena.allocator());
     try t.expect(m3 != null);
     // if with only one region (shape requires two).
-    const cond = try p.addExpr(.{ .op = op_const, .ty = ty_bool, .payload = .{ .const_value = .{ .bool = true } } });
+    const cond = try p.addExpr(.{ .op = op_const, .ty = try p.intern(ty_bool), .payload = .{ .const_value = .{ .bool = true } } });
     const op_a = try p.addOperands(&.{cond});
     const one_reg = try p.addRegions(&.{reg});
-    const if_one = try p.addExpr(.{ .op = op_if, .ty = ty_int, .operands = op_a, .regions = one_reg });
+    const if_one = try p.addExpr(.{ .op = op_if, .ty = try p.intern(ty_int), .operands = op_a, .regions = one_reg });
     const m4 = try validate(&p, if_one, arena.allocator());
     try t.expect(m4 != null);
 }
@@ -811,14 +811,14 @@ test "out-of-range full_expr and sema ids are rejected" {
     var arena = std.heap.ArenaAllocator.init(t.allocator);
     defer arena.deinit();
     var p = (try fresh(arena.allocator())).prog;
-    const bad_fe = try p.addExpr(.{ .op = op_const, .ty = ty_int, .payload = .{ .const_value = .{ .int = 1 } }, .full_expr = 3 });
+    const bad_fe = try p.addExpr(.{ .op = op_const, .ty = try p.intern(ty_int), .payload = .{ .const_value = .{ .int = 1 } }, .full_expr = 3 });
     const m1 = try validate(&p, bad_fe, arena.allocator());
     try t.expect(m1 != null);
-    const bad_sema = try p.addExpr(.{ .op = op_const, .ty = ty_int, .payload = .{ .const_value = .{ .int = 1 } }, .sema = 3 });
+    const bad_sema = try p.addExpr(.{ .op = op_const, .ty = try p.intern(ty_int), .payload = .{ .const_value = .{ .int = 1 } }, .sema = 3 });
     const m2 = try validate(&p, bad_sema, arena.allocator());
     try t.expect(m2 != null);
     // The seeded ids (0 = default FE / owned view) are in range.
-    const ok = try p.addExpr(.{ .op = op_const, .ty = ty_int, .payload = .{ .const_value = .{ .int = 1 } } });
+    const ok = try p.addExpr(.{ .op = op_const, .ty = try p.intern(ty_int), .payload = .{ .const_value = .{ .int = 1 } } });
     const m3 = try validate(&p, ok, arena.allocator());
     try t.expect(m3 == null);
 }
@@ -828,16 +828,16 @@ test "out-of-range origin ids are rejected; absent origins validate" {
     defer arena.deinit();
     var p = (try fresh(arena.allocator())).prog;
     // A nonzero origin naming no span in the table is rejected...
-    const bad_origin = try p.addExpr(.{ .op = op_const, .ty = ty_int, .payload = .{ .const_value = .{ .int = 1 } }, .origin = 42 });
+    const bad_origin = try p.addExpr(.{ .op = op_const, .ty = try p.intern(ty_int), .payload = .{ .const_value = .{ .int = 1 } }, .origin = 42 });
     const m1 = try validate(&p, bad_origin, arena.allocator());
     try t.expect(m1 != null);
     // ...an interned one is accepted...
     _ = try p.addOrigin(meta.Span.init(0, 3, 9));
-    const good_origin = try p.addExpr(.{ .op = op_const, .ty = ty_int, .payload = .{ .const_value = .{ .int = 2 } }, .origin = 1 });
+    const good_origin = try p.addExpr(.{ .op = op_const, .ty = try p.intern(ty_int), .payload = .{ .const_value = .{ .int = 2 } }, .origin = 1 });
     const m2 = try validate(&p, good_origin, arena.allocator());
     try t.expect(m2 == null);
     // ...and an absent one stays valid.
-    const no_span = try p.addExpr(.{ .op = op_const, .ty = ty_int, .payload = .{ .const_value = .{ .int = 3 } } });
+    const no_span = try p.addExpr(.{ .op = op_const, .ty = try p.intern(ty_int), .payload = .{ .const_value = .{ .int = 3 } } });
     const m3 = try validate(&p, no_span, arena.allocator());
     try t.expect(m3 == null);
 }
@@ -846,23 +846,23 @@ test "arm pattern bindings must biject onto the arm region params" {
     var arena = std.heap.ArenaAllocator.init(t.allocator);
     defer arena.deinit();
     var p = (try fresh(arena.allocator())).prog;
-    const scrutinee = try p.addExpr(.{ .op = op_const, .ty = ty_bool, .payload = .{ .const_value = .{ .bool = true } } });
+    const scrutinee = try p.addExpr(.{ .op = op_const, .ty = try p.intern(ty_bool), .payload = .{ .const_value = .{ .bool = true } } });
     const operands = try p.addOperands(&.{scrutinee});
 
     // Leaf names a binder the arm region does not declare.
     const b_a = try p.addBinder(ty_int, .value);
     const b_other = try p.addBinder(ty_int, .value);
     const pat_other = try p.addPattern(.{ .bind = b_other });
-    const arm1 = try p.addRegion(&.{b_a}, try p.addExpr(.{ .op = op_const, .ty = ty_int, .payload = .{ .const_value = .{ .int = 1 } } }), pat_other);
-    const m1 = try validate(&p, try p.addExpr(.{ .op = op_match, .ty = ty_int, .operands = operands, .regions = try p.addRegions(&.{arm1}) }), arena.allocator());
+    const arm1 = try p.addRegion(&.{b_a}, try p.addExpr(.{ .op = op_const, .ty = try p.intern(ty_int), .payload = .{ .const_value = .{ .int = 1 } } }), pat_other);
+    const m1 = try validate(&p, try p.addExpr(.{ .op = op_match, .ty = try p.intern(ty_int), .operands = operands, .regions = try p.addRegions(&.{arm1}) }), arena.allocator());
     const msg1 = m1 orelse return error.TestUnexpectedResult;
     try t.expect(std.mem.indexOf(u8, msg1, "not one of its params") != null);
 
     // Params without a pattern (arm body has no `=>` yet declares binds).
     const b2 = try p.addBinder(ty_int, .value);
-    const arm2 = try p.addRegion(&.{b2}, try p.addExpr(.{ .op = op_const, .ty = ty_int, .payload = .{ .const_value = .{ .int = 0 } } }), null);
-    const ops2 = try p.addOperands(&.{try p.addExpr(.{ .op = op_const, .ty = ty_bool, .payload = .{ .const_value = .{ .bool = false } } })});
-    const m2 = try validate(&p, try p.addExpr(.{ .op = op_match, .ty = ty_int, .operands = ops2, .regions = try p.addRegions(&.{arm2}) }), arena.allocator());
+    const arm2 = try p.addRegion(&.{b2}, try p.addExpr(.{ .op = op_const, .ty = try p.intern(ty_int), .payload = .{ .const_value = .{ .int = 0 } } }), null);
+    const ops2 = try p.addOperands(&.{try p.addExpr(.{ .op = op_const, .ty = try p.intern(ty_bool), .payload = .{ .const_value = .{ .bool = false } } })});
+    const m2 = try validate(&p, try p.addExpr(.{ .op = op_match, .ty = try p.intern(ty_int), .operands = ops2, .regions = try p.addRegions(&.{arm2}) }), arena.allocator());
     const msg2 = m2 orelse return error.TestUnexpectedResult;
     try t.expect(std.mem.indexOf(u8, msg2, "no pattern") != null);
 }
@@ -875,8 +875,8 @@ test "patterns appear only on match arms; pattern cycles are rejected" {
     // A λ region carrying a pattern.
     const b = try p.addBinder(ty_int, .value);
     const pat = try p.addPattern(.{ .bind = b });
-    const lam_reg = try p.addRegion(&.{b}, try p.addExpr(.{ .op = op_const, .ty = ty_int, .payload = .{ .const_value = .{ .int = 0 } } }), pat);
-    const m1 = try validate(&p, try p.addExpr(.{ .op = op_lambda, .ty = ty_int, .regions = try p.addRegions(&.{lam_reg}) }), arena.allocator());
+    const lam_reg = try p.addRegion(&.{b}, try p.addExpr(.{ .op = op_const, .ty = try p.intern(ty_int), .payload = .{ .const_value = .{ .int = 0 } } }), pat);
+    const m1 = try validate(&p, try p.addExpr(.{ .op = op_lambda, .ty = try p.intern(ty_int), .regions = try p.addRegions(&.{lam_reg}) }), arena.allocator());
     const msg1 = m1 orelse return error.TestUnexpectedResult;
     try t.expect(std.mem.indexOf(u8, msg1, "only match arms") != null);
 
@@ -886,10 +886,10 @@ test "patterns appear only on match arms; pattern cycles are rejected" {
     const self_slice = try arena.allocator().alloc(hir.PatternId, 1);
     self_slice[0] = self_pat;
     q.patterns.items[self_pat] = .{ .tuple = self_slice };
-    const scrutinee = try q.addExpr(.{ .op = op_const, .ty = ty_bool, .payload = .{ .const_value = .{ .bool = true } } });
+    const scrutinee = try q.addExpr(.{ .op = op_const, .ty = try q.intern(ty_bool), .payload = .{ .const_value = .{ .bool = true } } });
     const operands = try q.addOperands(&.{scrutinee});
-    const arm = try q.addRegion(&.{}, try q.addExpr(.{ .op = op_const, .ty = ty_int, .payload = .{ .const_value = .{ .int = 1 } } }), self_pat);
-    const m2 = try validate(&q, try q.addExpr(.{ .op = op_match, .ty = ty_int, .operands = operands, .regions = try q.addRegions(&.{arm}) }), arena.allocator());
+    const arm = try q.addRegion(&.{}, try q.addExpr(.{ .op = op_const, .ty = try q.intern(ty_int), .payload = .{ .const_value = .{ .int = 1 } } }), self_pat);
+    const m2 = try validate(&q, try q.addExpr(.{ .op = op_match, .ty = try q.intern(ty_int), .operands = operands, .regions = try q.addRegions(&.{arm}) }), arena.allocator());
     const msg2 = m2 orelse return error.TestUnexpectedResult;
     try t.expect(std.mem.indexOf(u8, msg2, "pattern cycle") != null);
 }
@@ -900,21 +900,21 @@ test "let and if regions carry the documented param counts" {
     var p = (try fresh(arena.allocator())).prog;
 
     // let region with zero params.
-    const b0 = try p.addExpr(.{ .op = op_const, .ty = ty_int, .payload = .{ .const_value = .{ .int = 0 } } });
+    const b0 = try p.addExpr(.{ .op = op_const, .ty = try p.intern(ty_int), .payload = .{ .const_value = .{ .int = 0 } } });
     const init_ops = try p.addOperands(&.{b0});
     const reg0 = try p.addRegion(&.{}, b0, null);
-    const let_id = try p.addExpr(.{ .op = op_let, .ty = ty_int, .operands = init_ops, .regions = try p.addRegions(&.{reg0}) });
+    const let_id = try p.addExpr(.{ .op = op_let, .ty = try p.intern(ty_int), .operands = init_ops, .regions = try p.addRegions(&.{reg0}) });
     const m1 = try validate(&p, let_id, arena.allocator());
     const msg1 = m1 orelse return error.TestUnexpectedResult;
     try t.expect(std.mem.indexOf(u8, msg1, "exactly one binder") != null);
 
     // if region carrying a binder.
     const b_x = try p.addBinder(ty_int, .value);
-    const cond = try p.addExpr(.{ .op = op_const, .ty = ty_bool, .payload = .{ .const_value = .{ .bool = true } } });
+    const cond = try p.addExpr(.{ .op = op_const, .ty = try p.intern(ty_bool), .payload = .{ .const_value = .{ .bool = true } } });
     const cond_ops = try p.addOperands(&.{cond});
     const then_reg = try p.addRegion(&.{b_x}, b0, null);
     const else_reg = try p.addRegion(&.{}, b0, null);
-    const if_id = try p.addExpr(.{ .op = op_if, .ty = ty_int, .operands = cond_ops, .regions = try p.addRegions(&.{ then_reg, else_reg }) });
+    const if_id = try p.addExpr(.{ .op = op_if, .ty = try p.intern(ty_int), .operands = cond_ops, .regions = try p.addRegions(&.{ then_reg, else_reg }) });
     const m2 = try validate(&p, if_id, arena.allocator());
     const msg2 = m2 orelse return error.TestUnexpectedResult;
     try t.expect(std.mem.indexOf(u8, msg2, "must not carry binders") != null);
@@ -930,13 +930,13 @@ test "the returned violation message is caller-owned (allocated from the caller'
     defer arena.deinit();
     var p = (try fresh(arena.allocator())).prog;
     // A const with a `.func` payload: rejected with a payload message.
-    _ = try p.addExpr(.{ .op = op_const, .ty = ty_int, .payload = .{ .func = .{ .func = 0 } } });
+    _ = try p.addExpr(.{ .op = op_const, .ty = try p.intern(ty_int), .payload = .{ .func = .{ .func = 0 } } });
     const m = (try validate(&p, 0, t.allocator)) orelse return error.TestUnexpectedResult;
     defer t.allocator.free(m);
     try t.expect(std.mem.indexOf(u8, m, "payload") != null);
     // A valid program yields null and no allocation survives.
     var q = (try fresh(arena.allocator())).prog;
-    const ok = try q.addExpr(.{ .op = op_const, .ty = ty_int, .payload = .{ .const_value = .{ .int = 1 } } });
+    const ok = try q.addExpr(.{ .op = op_const, .ty = try q.intern(ty_int), .payload = .{ .const_value = .{ .int = 1 } } });
     try t.expect((try validate(&q, ok, t.allocator)) == null);
 }
 

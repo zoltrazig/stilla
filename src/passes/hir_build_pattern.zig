@@ -44,9 +44,9 @@ pub fn buildPattern(
                 }
                 const bid = try b.built.program.addBinder(test_ty, leafMode(b, info, test_ty, consuming));
                 try leaves.append(b.arena, bid);
-                return b.built.program.addPattern(.{ .type_test = .{ .ty = test_ty, .bind = bid } });
+                return b.built.program.addPattern(.{ .type_test = .{ .ty = try b.internTy(test_ty), .bind = bid } });
             }
-            return b.built.program.addPattern(.{ .type_test = .{ .ty = test_ty, .bind = no_binder } });
+            return b.built.program.addPattern(.{ .type_test = .{ .ty = try b.internTy(test_ty), .bind = no_binder } });
         },
         .path => |pp| switch (pp.tail) {
             .none => {

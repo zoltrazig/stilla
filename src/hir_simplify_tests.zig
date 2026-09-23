@@ -626,7 +626,7 @@ test "M2b: ANF remaps the cleanup token of a hoisted Unique parent" {
         // Relative destruction order (registration_index) and type are
         // preserved by the remap.
         try testing.expectEqual(reg_before, tk.registration_index);
-        try testing.expect(meta.Type.eql(ty_before, tk.ty));
+        try testing.expect(ty_before == tk.ty);
     }
     try testing.expect(moved);
     // No live token still names the overwritten node, and no token names

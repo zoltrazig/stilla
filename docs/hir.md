@@ -12,7 +12,7 @@
 >   （hir_simplify.zig，`hir` 门，`--opt hir`，默认关）；SEG（hir_seg.zig 的
 >   island 驱动与 hir_egraph.zig 的 slotted e-graph arena，`seg` 门可执行文件
 >   默认开、库默认关）。
-> - **设计已定但未实现**（§11、[todo.md](todo.md)）：HIRTypeId canonical 表。
+> - **设计已定但未实现**（§11、[todo.md](todo.md)）：PRE（跨语句 / 分支的共享）。
 > - **阅读约定**：数据结构以 hir.zig 的落地形态为准；标 **Target** 的段落是
 >   设计意图，不是现状。
 
@@ -152,7 +152,7 @@ HIR 落在 checker 与 CFG lowering 之间，是**兼容边界**，不是对两�
 | 概念 | 形态 | 作用 |
 | --- | --- | --- |
 | 句柄 | 稠密 u32 索引 | `ExprId RegionId BinderId PatternId ScopeId FullExprId SemanticInfoId SourceOriginId AttrSetId OpId FuncId HostBindingId ConstId` |
-| 类型 | 内联 `meta.Type` | `ExprNode.ty` / `Binder.ty`；无独立 HIR TypeId（§3.8） |
+| 类型 | canonical `HIRTypeId` | IR 字段（`ExprNode.ty` / `Binder.ty` 等）持稠密结构 id；`Program` 的 content-addressed 表按结构哈希去重，`meta.Type` 仍是跨 `Program` ground truth（§3.8） |
 | 名字 / span | 仅 side table | 不参与结构比较；source span 落在 `origins` side table（§3.2），builder 从 AST 填充 |
 | 容器 | arena + 扁平缓冲 | `exprs / regions / binders / patterns / scopes / full_exprs / semantic_infos` + `expr_buffer / region_buffer / binder_buffer` |
 | 节点 | `ExprNode` | 极小：op / ty / operands / regions / attrs / sema / full_expr / origin / payload / access_hops |
@@ -174,6 +174,8 @@ hir.Program
  ├─ full_exprs:     Arena<FullExpr>
  ├─ semantic_infos: Arena<SemanticInfo>
  ├─ origins:        Arena<meta.Span>        // ExprNode.origin 的 span 表
+ ├─ type_pool:      ArrayList<meta.Type>   // HIRTypeId 值池（id = 下标）
+ ├─ type_map:       结构哈希 → HIRTypeId     // canonical 类型 interning 表
  ├─ effect_interner: effects.Interner
  ├─ sema_map:       (view, state) → SemanticInfoId interning 表
  └─ origin_map:     Span → SourceOriginId interning 表
@@ -197,7 +199,7 @@ hir.BuiltProgram
 ```text
 ExprNode {
     op:         OpId,
-    ty:         meta.Type,          // 类型内联，无第二个类型世界
+    ty:         HIRTypeId,          // canonical 结构类型 id（§3.8）
     operands:   Range,             // expr_buffer 切片
     regions:    Range,             // region_buffer 切片
     attrs:      AttrSetId,         // v1 哨兵 0
@@ -227,7 +229,7 @@ Region {
 }
 
 Binder {
-    ty:     meta.Type,
+    ty:     HIRTypeId,
     mode:   BinderMode,
 }
 
@@ -310,15 +312,35 @@ SemanticInfo {
 - 结构 = 求值次数：计数只由树结构与顺序决定；pass 可按 `ExprId` 自由缓存。
   结构共享**不是**运行时 memoization——共享节点每出现一次仍按位置求值一次。
 
-### 3.8 TypeId 与常量（Target）
+### 3.8 TypeId 与常量
 
-- 落地形态：monomorphic HIR 直接内联 `meta.Type`；名义类型走 moduleinfo
-  intern 的 `meta.TypeId`，结构类型（list / box / tuple / function）是
-  `meta.Type` 结构值。**不引入第二个类型世界**，`meta.Type` 是发射到 AIR/LLIR 的
-  唯一 ground truth。
-- **Target**：若 SEG 需要 O(1) 类型相等与摘要 interning，对 `meta.Type` 加一张
-  **薄 canonical 表**（`intern(meta.Type) → HIRTypeId`，结构哈希去重）。该表
-  **当前不存在**；`meta.Type` 中 CFG 层专属 tag（如 `cleanup`）不进表。
+- **落地形态**：HIR 内部类型身份是稠密的 canonical `HIRTypeId = u32`，按插入序
+  分配，**只在单个 `hir.Program` 内稳定**。`Program` 持一张 content-addressed
+  表：值池 `std.ArrayList(meta.Type)` 按下标索引，配一张以结构哈希为键、
+  `meta.Type.eql` 为碰撞相等的 map；`Program.internType(ty)` 返回 id，
+  `Program.typeOf(id)` 取回 `meta.Type`。表与值池 arena 所有、每编译会话一张、
+  不 deinit（与 `Program` 其余 side table 一致）。
+- **结构哈希**：复用现有深 `hashType`（现居 `hir_egraph_rules.zig`，本项提到共享
+  位置），并按 `SemaKeyCtx`（`hir.zig`）/ `AccessSetCtx`（`effects_lattice.zig`）
+  的模式提供自定义 hash context——`meta.Type` 是带 padding 与指针 / 切片字段的
+  union，不能走默认字节散列。
+- **覆盖范围**：`meta.Type` 中能出现在 HIR 节点上的全部 tag——`primitive` /
+  `named` / `param` / `module` / `list` / `box` / `tuple` / `function`。CFG 层
+  专属的 `.cleanup` **不进表**。`named.id` 仍是名义声明 interner 的
+  `meta.TypeId`，`HIRTypeId` 是其外层**结构** id，两者不混同。
+- **完整迁移**：IR 自有的类型字段一律改为 `HIRTypeId`，并在构造点 intern——
+  `ExprNode.ty`、`Binder.ty`、`CleanupToken.ty`、`Pattern.TypeTestPattern.ty`、
+  `FuncRecord.params` / `ret`、`ConstRecord.type_`、`HostRecord.signature`、
+  region 参数类型；读者经 `Program.typeOf` 解析回 `meta.Type`。**不引入第二个
+  类型世界**：不存在 `meta.Type` 与 `HIRTypeId` 并存的平行真相；`meta.Type` 仍是
+  发射到 AIR/LLIR 的唯一 ground truth。
+- **跨 `Program` 规则**：canonical id 按 `Program` 分配，**跨 `Program` 不稳定**。
+  `alphaEq` 与打印 / 解析 round-trip 比较两个 `Program`，必须把 id 解析回
+  `meta.Type` 再比（或比结构哈希 + 形状）；`meta.Type` / canonical 文本是跨
+  `Program` 的 ground truth。这是本迁移的主要正确性风险点。
+- **SEG**：e-node hash-consing 与 pattern 相等用 O(1) `HIRTypeId` 相等；节点散列
+  折叠 id（或其结构哈希）而非每次深散列类型；按类型键的摘要 interning 以
+  `HIRTypeId` 为键（第 26 项 drop-type 依赖节点的前置条件）。
 - 概念上的 canonical 类型词汇（用于阅读，不是落地 enum）：
   `Primitive | NominalStruct | NominalUnion | Opaque | List | Box | Tuple | Fn |
   Any | HostData | Never`。
@@ -919,7 +941,7 @@ add.f32  add.f64            // IEEE 754
 ### 7.3 canonical TypeId 与 alias 展开
 
 alias 在进 SEG **之前**彻底展开：SEG 中不出现 `UserId` 与 `int32` 并存。
-泛型特化后 `Option[int32]` 直接有一个 canonical 类型值（§3.8）。
+泛型特化后 `Option[int32]` 直接 intern 为一个 canonical `HIRTypeId`（§3.8）。
 
 ### 7.4 模块成员解析为定义 Id
 
@@ -1493,6 +1515,13 @@ cost model（§8.2）：全语料 `rounds` / `unions` / `merges` / `copies` 四�
 **匹配 / 应用**两半（新字段 `egraph_folds_matched` / `egraph_algebra_matched` /
 `egraph_conds_matched` / `egraph_projects_matched`，见 §8.2）：语料的应用计数与
 写回逐项不变，另多打印 rule matches / rule applies 两项聚合（83 / 41）。
+第 26 项新增跨层环 probe（`probes/cross_layer_drop_cycle.st`）：基线变为
+**61 个程序 / 4812 个可达节点 / 2595 个 island 成员 / 92 轮 / 112 次重写 /
+2095 轮外层 saturation（43 union / 334 merges / 89 copies）/ 89 rule matches /
+43 rule applies / 8 ac swaps / 5156 extract cost**；相对新增前（60 / 4780 /
+2585 / 91 / 112 / 2086 / 43 / 334 / 89 / 89 / 43 / 8 / 5143）只随新文件增长
+（+1 程序 / +32 节点 / +10 island / +1 轮 / +9 arena 轮 / +13 cost），
+`rewrites` / `unions` / `merges` / `copies` / rule matches / applies / ac swaps 不变。
 
 落地档映射（历史里程碑编号）：
 
@@ -1504,11 +1533,12 @@ cost model（§8.2）：全语料 `rounds` / `unions` / `merges` / `copies` 四�
 | M2b | 摘要化消费者：函数摘要 SCC least fixpoint、精确 `drop_effect(T)`、module-const 检查、dead-let / selective ANF / `never_returns` 后缀删除 | hir_effects*.zig / hir_simplify.zig |
 
 **尚未实现**（完整清单见 [todo.md](todo.md)）：
-PRE（跨语句 / 分支的共享）；HIRTypeId canonical 表。
+PRE（跨语句 / 分支的共享）。
 
 ## 12. 开放问题
 
 - §3.7 树形禁止 DAG、§8.2 的 per-opcode cost model（权重阶梯 + 确定性
-  tie-break，第 22 项落地）、§3.8 复用 `meta.Type`——取舍已成正文规范。
+  tie-break，第 22 项落地）、§3.8 的 `HIRTypeId` 表复用 `meta.Type` 作跨
+  `Program` ground truth（第 25 项落地）——取舍已成正文规范。
 - 效果模型的开放问题在 [effects.md](effects.md) 定稿。
 - 其余本文级开放点随实现推进（HIR→CFG 的等价门禁暴露表述缺口时）按需补充。

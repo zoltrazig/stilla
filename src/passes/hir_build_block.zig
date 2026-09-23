@@ -40,7 +40,7 @@ fn buildStmts(b: *hir_build.Builder, info: *moduleinfo.ModuleInfo, stmts: []cons
         .expr => |*es| {
             const e = try hir_build_expr.buildExpr(b, info, &es.expr);
             // A diverging statement (never) short-circuits the rest.
-            if (hir_build.isNever(b.built.program.node(e).ty)) return e;
+            if (hir_build.isNever(b.built.program.typeOf(b.built.program.node(e).ty))) return e;
             const rest = try buildStmts(b, info, stmts, i + 1, result);
             return seq2(b, es.span, e, rest);
         },
@@ -162,7 +162,7 @@ fn letChain(
     const init_ty = b.built.program.node(init).ty;
     var ids = std.ArrayList(hir.BinderId).empty;
     for (names) |n| {
-        const ty = n.ty orelse init_ty;
+        const ty: meta.Type = n.ty orelse b.built.program.typeOf(init_ty);
         const mode: hir.BinderMode = if (n.moving) .move else .value;
         const bind = try b.built.program.addBinder(ty, mode);
         try ids.append(b.arena, bind);
@@ -223,7 +223,7 @@ fn buildLet(
     // Destructuring: pattern on the region, leaves as params. The leaf
     // types derive from the scrutinee type and the pattern shape.
     var binder_ids = std.ArrayList(hir.BinderId).empty;
-    const pat_id = try hir_build_pattern.buildPattern(b, info, &ls.pattern, init_ty, moving, &binder_ids);
+    const pat_id = try hir_build_pattern.buildPattern(b, info, &ls.pattern, b.built.program.typeOf(init_ty), moving, &binder_ids);
     try b.pushScope();
     // Names are bound in the same order the pattern's leaves were
     // created; buildPattern recorded them in `binder_ids` (arena order).
@@ -274,7 +274,7 @@ fn buildDropStmt(
     }
     const local = try localNode(b, info, bind, ds.name.span);
     const ops = try b.built.program.addOperands(&.{local});
-    const drop = try b.built.program.addExpr(.{ .op = try b.op(ds.span, "drop"), .ty = .{ .primitive = .void }, .operands = ops, .origin = try b.origin(ds.span) });
+    const drop = try b.built.program.addExpr(.{ .op = try b.op(ds.span, "drop"), .ty = try b.internTy(.{ .primitive = .void }), .operands = ops, .origin = try b.origin(ds.span) });
     const rest = try buildStmts(b, info, stmts, i + 1, result);
     return seq2(b, ds.span, drop, rest);
 }
@@ -283,7 +283,7 @@ fn buildDropStmt(
 /// span, or null for synthesized reads (no source position).
 pub fn localNode(b: *hir_build.Builder, info: *moduleinfo.ModuleInfo, bind: hir.BinderId, span: ?meta.Span) hir_build.BuildError!hir.ExprId {
     const ty = b.built.program.binders.items[bind].ty;
-    return b.built.program.addExpr(.{ .op = try b.op(span orelse meta.Span.init(0, 0, 0), "local"), .ty = ty, .payload = .{ .binder = bind }, .sema = try viewOf(b, info, ty, bind, .read), .origin = if (span) |s| try b.origin(s) else hir.no_origin });
+    return b.built.program.addExpr(.{ .op = try b.op(span orelse meta.Span.init(0, 0, 0), "local"), .ty = ty, .payload = .{ .binder = bind }, .sema = try viewOf(b, info, b.built.program.typeOf(ty), bind, .read), .origin = if (span) |s| try b.origin(s) else hir.no_origin });
 }
 
 /// A binder's created-state view: params arrive owned (except borrow

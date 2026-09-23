@@ -5,7 +5,6 @@
 //! every consumer; the docs live with each method body.
 
 const std = @import("std");
-const meta = @import("stilla").meta;
 const hir = @import("stilla").hir;
 const effects = @import("stilla").effects;
 const hir_effects = @import("hir_effects.zig");
@@ -20,7 +19,6 @@ const max_indirect_steps = hir_effects.max_indirect_steps;
 const lambda_op = hir_effects.lambda_op;
 const fn_ref_op = hir_effects.fn_ref_op;
 const call_op = hir_effects.call_op;
-const drop_op = hir_effects.drop_op;
 const local_op = hir_effects.local_op;
 const if_op = hir_effects.if_op;
 const match_op = hir_effects.match_op;
@@ -41,12 +39,13 @@ fn targetEq(a: ResolvedTarget, b: ResolvedTarget) bool {
     };
 }
 
-/// Kosaraju pass 1: DFS finishing order over the caller→callee graph.
-fn finishOrder(arena: std.mem.Allocator, adj: []const std.ArrayList(hir.FuncId)) Error![]hir.FuncId {
+/// Kosaraju pass 1: DFS finishing order over the unified
+/// node→dependency graph (`adj[u]` are the nodes `u` depends on).
+fn finishOrder(arena: std.mem.Allocator, adj: []const std.ArrayList(u32)) Error![]u32 {
     const n = adj.len;
     const visited = try arena.alloc(bool, n);
     @memset(visited, false);
-    var order = std.ArrayList(hir.FuncId).empty;
+    var order = std.ArrayList(u32).empty;
     var stack = std.ArrayList(struct { u32, usize }).empty;
     for (0..n) |s| {
         if (visited[s]) continue;
@@ -54,7 +53,7 @@ fn finishOrder(arena: std.mem.Allocator, adj: []const std.ArrayList(hir.FuncId))
         try stack.append(arena, .{ @intCast(s), 0 });
         while (stack.items.len > 0) {
             const top = &stack.items[stack.items.len - 1];
-            const v: hir.FuncId = top[0];
+            const v: u32 = top[0];
             if (top[1] < adj[v].items.len) {
                 const w = adj[v].items[top[1]];
                 top[1] += 1;
@@ -74,12 +73,12 @@ fn finishOrder(arena: std.mem.Allocator, adj: []const std.ArrayList(hir.FuncId))
 /// Kosaraju pass 2: one DFS tree on the reversed graph is one SCC.
 fn dfsCollect(
     arena: std.mem.Allocator,
-    radj: []const std.ArrayList(hir.FuncId),
-    start: hir.FuncId,
+    radj: []const std.ArrayList(u32),
+    start: u32,
     seen: []bool,
-    out: *std.ArrayList(hir.FuncId),
+    out: *std.ArrayList(u32),
 ) Error!void {
-    var stack = std.ArrayList(hir.FuncId).empty;
+    var stack = std.ArrayList(u32).empty;
     try stack.append(arena, start);
     seen[start] = true;
     while (stack.pop()) |v| {
@@ -317,55 +316,103 @@ pub fn callbackBound(self: *Analysis, arg: hir.ExprId) Error!?Summary {
 // Function summaries
 // -----------------------------------------------------------------
 
+/// The finalized (or in-progress) unified-node value. While its SCC is
+/// being solved a member reads the in-progress approximation; every
+/// other node reads the finalized value. An unknown node is `Top`
+/// (docs/effects.md §8.2/§11.1).
+pub fn nodeValue(self: *Analysis, node: u32) Summary {
+    if (self.solving) |s| {
+        if (self.comp_of[node] == s) return self.cur[node];
+    }
+    if (!self.known[node]) return self.eng.top();
+    return self.summary[node];
+}
+
 /// A finalized (or in-progress) function summary. `Top` for an
-/// out-of-range id (missing body). While its SCC is being solved a
-/// member reads the in-progress approximation; every other id reads
-/// the finalized value (docs/effects.md §8.2).
+/// out-of-range id (missing body); otherwise the function node's
+/// unified value. The function-level surface every existing consumer
+/// (SEG, simplify, derived queries, module-const checks) reads.
 pub fn functionSummary(self: *Analysis, fid: hir.FuncId) Error!Summary {
     if (fid >= self.built.funcs.items.len) return self.eng.top();
-    if (self.solving) |s| {
-        if (self.comp_of[fid] == s) return self.cur[fid];
-    }
-    if (!self.known[fid]) return self.eng.top();
-    return self.summary[fid];
+    return self.nodeValue(fid);
 }
 
 // -----------------------------------------------------------------
-// Function-summary SCC least fixpoint (docs/effects.md §8.2)
+// Unified dependency graph least fixpoint (docs/effects.md §8.2/§11.1)
 // -----------------------------------------------------------------
 
-/// Solve the whole program's function summaries.
-///
-/// The call graph is built over the analysis' actual targets: a `call`
-/// whose callee operand is a resolved `fn_ref` to a function record.
-/// Indirect / host / unknown targets do not enter the graph (`Top`,
-/// §9.1). SCCs are then processed callee-first, each solved by Kleene
-/// iteration from `Bottom`; a recursive SCC is seeded `Diverge`
-/// (§8.2 "从 Bottom 迭代本身不能发现发散"). Rounds use a simultaneous
-/// update (`next[f]` computed from one approximation, then assigned),
-/// so the iteration is monotone and converges on the finite lattice.
+/// The transfer of one unified node: a function's body summary
+/// (`effectOf ; cleanupEffect`), a `drop_type`'s structural drop effect,
+/// or the reserved `Top` sink.
+pub fn nodeTransfer(self: *Analysis, node: u32) Error!Summary {
+    if (node == self.top_sink_node) return self.eng.top();
+    if (node < self.built.funcs.items.len) return self.recordBodySummary(self.built.funcs.items[node]);
+    return self.dropNodeTransfer(node);
+}
+
+/// Solve the whole program's effect summaries on one dependency graph
+/// (docs/effects.md §11.1). Nodes `0..F-1` are functions, `F` the `Top`
+/// sink, `F+1..` `drop_type` nodes keyed by canonical `HIRTypeId`; the
+/// four edge kinds are built once and kept for the SCC pass. A single
+/// Kosaraju decomposition is processed dependency-first; each SCC runs
+/// a Kleene/Jacobi simultaneous update over the union. `function →
+/// drop_type` edges — previously missing for implicit cleanup — close
+/// the cross-layer cycle (`hook → fn → type`) that used to fall back to
+/// `Top`.
 pub fn solveSummaries(self: *Analysis) Error!void {
-    const n = self.built.funcs.items.len;
+    const fn_count = self.built.funcs.items.len;
     self.solving = null;
     @memset(self.memo, null);
-    @memset(self.known, false);
+    self.drop_node_of.clearRetainingCapacity();
+    self.drop_key_of_node.clearRetainingCapacity();
+
+    // Nodes 0..F-1 are functions, F the reserved Top sink. One adjacency
+    // list per node, and the inverse type-key table grows in lockstep.
+    var adj = std.ArrayList(std.ArrayList(u32)).empty;
+    for (0..fn_count + 1) |_| {
+        try adj.append(self.arena, .empty);
+        try self.drop_key_of_node.append(self.arena, 0);
+    }
+    self.top_sink_node = @intCast(fn_count);
+
+    // 1. function → function and function → drop_type.
+    for (0..fn_count) |i| {
+        const f: hir.FuncId = @intCast(i);
+        try self.collectCallees(f, &adj.items[i]);
+        try self.collectFunctionDrops(f, &adj, @intCast(i));
+    }
+
+    // 2. Drop-type roots outside function bodies: a constant's declared
+    //    type (teardown), its initializer's explicit drops, and every
+    //    registered cleanup token (const initializers included).
+    for (self.built.consts.items) |c| {
+        if (c.init) |root| try self.collectConstDrops(root, &adj);
+        _ = try self.addDropNode(&adj, self.p().typeOf(c.type_), 0);
+    }
+    for (self.p().cleanup_tokens.items) |tk| {
+        _ = try self.addDropNode(&adj, self.p().typeOf(tk.ty), 0);
+    }
+
+    // 3. Node storage sized to the whole graph.
+    const n = adj.items.len;
+    self.summary = try self.arena.alloc(Summary, n);
     @memset(self.summary, effects.pure);
-    if (n == 0) return;
+    self.known = try self.arena.alloc(bool, n);
+    @memset(self.known, false);
+    self.cur = try self.arena.alloc(Summary, n);
+    @memset(self.cur, effects.pure);
+    self.comp_of = try self.arena.alloc(u32, n);
+    @memset(self.comp_of, 0);
 
-    // 1. Call graph (callee ids, deduplicated per caller).
-    const adj = try self.arena.alloc(std.ArrayList(hir.FuncId), n);
-    for (adj) |*a| a.* = .empty;
-    for (0..n) |i| try self.collectCallees(@intCast(i), &adj[i]);
-
-    // 2. SCCs by Kosaraju: finish order on G, then DFS on G^T in
+    // 4. SCCs by Kosaraju: finish order on G, then DFS on G^T in
     //    reverse finish order.
-    var radj = try self.arena.alloc(std.ArrayList(hir.FuncId), n);
+    var radj = try self.arena.alloc(std.ArrayList(u32), n);
     for (radj) |*a| a.* = .empty;
     for (0..n) |u| {
-        for (adj[u].items) |v| try radj[v].append(self.arena, @intCast(u));
+        for (adj.items[u].items) |v| try radj[v].append(self.arena, @intCast(u));
     }
-    const order = try finishOrder(self.arena, adj);
-    var comps = std.ArrayList(std.ArrayList(hir.FuncId)).empty;
+    const order = try finishOrder(self.arena, adj.items);
+    var comps = std.ArrayList(std.ArrayList(u32)).empty;
     const seen = try self.arena.alloc(bool, n);
     @memset(seen, false);
     var i = order.len;
@@ -373,20 +420,19 @@ pub fn solveSummaries(self: *Analysis) Error!void {
         i -= 1;
         const v = order[i];
         if (seen[v]) continue;
-        var comp = std.ArrayList(hir.FuncId).empty;
+        var comp = std.ArrayList(u32).empty;
         try dfsCollect(self.arena, radj, v, seen, &comp);
         const cid: u32 = @intCast(comps.items.len);
         for (comp.items) |m| self.comp_of[m] = cid;
         try comps.append(self.arena, comp);
     }
 
-    // 3. Process components callee-first. Kosaraju's second pass
-    //    discovers source SCCs of G (uncalled roots) first, i.e.
-    //    callers before callees; reverse that.
+    // 5. Process components dependency-first. Kosaraju's second pass
+    //    discovers source SCCs of G first; reverse that.
     var c = comps.items.len;
     while (c > 0) {
         c -= 1;
-        try self.solveComponent(comps.items[c].items, adj);
+        try self.solveComponent(comps.items[c].items, adj.items);
     }
 }
 
@@ -396,7 +442,7 @@ pub fn solveSummaries(self: *Analysis) Error!void {
 /// see exactly the target set the summaries consume (`callBound`),
 /// otherwise a recursion that runs through a `let`-bound fn-ref would
 /// miss the SCC `Diverge` seed (docs/effects.md §8.2).
-pub fn collectCallees(self: *Analysis, fid: hir.FuncId, out: *std.ArrayList(hir.FuncId)) Error!void {
+pub fn collectCallees(self: *Analysis, fid: hir.FuncId, out: *std.ArrayList(u32)) Error!void {
     const pr = self.p();
     var work = std.ArrayList(hir.ExprId).empty;
     defer work.deinit(self.arena);
@@ -410,7 +456,7 @@ pub fn collectCallees(self: *Analysis, fid: hir.FuncId, out: *std.ArrayList(hir.
                 defer targets.deinit(self.arena);
                 if (try self.resolveTargets(ops[0], &targets)) {
                     for (targets.items) |t| switch (t) {
-                        .func => |target| if (target < self.built.funcs.items.len and !std.mem.containsAtLeastScalar(hir.FuncId, out.items, 1, target)) {
+                        .func => |target| if (target < self.built.funcs.items.len and !std.mem.containsAtLeastScalar(u32, out.items, 1, target)) {
                             try out.append(self.arena, target);
                         },
                         // A host call with a callback contract
@@ -433,14 +479,6 @@ pub fn collectCallees(self: *Analysis, fid: hir.FuncId, out: *std.ArrayList(hir.
                 }
             }
         }
-        if (node.op == drop_op) {
-            const ops = pr.operands(id);
-            if (ops.len > 0) {
-                var vids = std.ArrayList(meta.Type).empty;
-                defer vids.deinit(self.arena);
-                try self.collectTypeHooks(pr.node(ops[0]).ty, &vids, out);
-            }
-        }
         for (pr.operands(id)) |op| try work.append(self.arena, op);
         for (pr.regionsOf(id)) |r| try work.append(self.arena, pr.region(r).root);
     }
@@ -450,56 +488,67 @@ pub fn collectCallees(self: *Analysis, fid: hir.FuncId, out: *std.ArrayList(hir.
 /// contract's instantiated callback) so they become edges of this
 /// body's call graph — resolved through the same local narrowing as
 /// any other indirect value.
-pub fn collectCallableTarget(self: *Analysis, arg: hir.ExprId, out: *std.ArrayList(hir.FuncId)) Error!void {
+pub fn collectCallableTarget(self: *Analysis, arg: hir.ExprId, out: *std.ArrayList(u32)) Error!void {
     var targets = std.ArrayList(ResolvedTarget).empty;
     defer targets.deinit(self.arena);
     if (!try self.resolveTargets(arg, &targets)) return;
     for (targets.items) |t| switch (t) {
-        .func => |target| if (target < self.built.funcs.items.len and !std.mem.containsAtLeastScalar(hir.FuncId, out.items, 1, target)) {
+        .func => |target| if (target < self.built.funcs.items.len and !std.mem.containsAtLeastScalar(u32, out.items, 1, target)) {
             try out.append(self.arena, target);
         },
         .host => {},
     };
 }
 
-/// Solve one SCC to its least fixpoint from `Bottom`, with the
-/// `Diverge` seed for a recursive component, then finalize.
-pub fn solveComponent(self: *Analysis, comp: []const hir.FuncId, adj: []const std.ArrayList(hir.FuncId)) Error!void {
+/// Solve one SCC to its least fixpoint from `Bottom`, then finalize.
+/// `may_diverge` is seeded only on the **function** members of a
+/// recursive component (a cycle or self-loop containing at least one
+/// function); `drop_type` nodes seed `pure`, so a purely recursive type
+/// never acquires `may_diverge` (docs/effects.md §11.1).
+pub fn solveComponent(self: *Analysis, comp: []const u32, adj: []const std.ArrayList(u32)) Error!void {
+    const fn_count = self.built.funcs.items.len;
     var recursive = comp.len > 1;
     if (!recursive) {
         for (adj[comp[0]].items) |t| {
             if (t == comp[0]) recursive = true;
         }
     }
-    const seed: Summary = if (recursive) effects.may_diverge else effects.pure;
+    var has_function = false;
+    for (comp) |node| {
+        if (node < fn_count) has_function = true;
+    }
+    const func_recursive = recursive and has_function;
     const cid = self.comp_of[comp[0]];
     self.solving = cid;
     defer self.solving = null;
-    for (comp) |f| self.cur[f] = seed;
+    for (comp) |node| {
+        self.cur[node] = if (func_recursive and node < fn_count) effects.may_diverge else effects.pure;
+    }
 
     const next = try self.arena.alloc(Summary, comp.len);
     while (true) {
         // A round is a simultaneous (Jacobi) update: the memo is
-        // cleared so every body summary is derived from the same
-        // `cur` approximation, all `next` values are computed, and
-        // only then is `cur` reassigned.
+        // cleared so every transfer is derived from the same `cur`
+        // approximation, all `next` values are computed, and only then
+        // is `cur` reassigned.
         @memset(self.memo, null);
-        for (comp, 0..) |f, k| {
-            const body = try self.recordBodySummary(self.built.funcs.items[f]);
+        for (comp, 0..) |node, k| {
+            const body = try self.nodeTransfer(node);
+            const seed: Summary = if (func_recursive and node < fn_count) effects.may_diverge else effects.pure;
             next[k] = try self.eng.join(seed, body);
         }
         var changed = false;
-        for (comp, 0..) |f, k| {
-            if (!self.eng.eql(next[k], self.cur[f])) {
-                self.cur[f] = next[k];
+        for (comp, 0..) |node, k| {
+            if (!self.eng.eql(next[k], self.cur[node])) {
+                self.cur[node] = next[k];
                 changed = true;
             }
         }
         if (!changed) break;
     }
-    for (comp) |f| {
-        self.summary[f] = self.cur[f];
-        self.known[f] = true;
+    for (comp) |node| {
+        self.summary[node] = self.cur[node];
+        self.known[node] = true;
     }
 }
 

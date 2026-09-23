@@ -48,13 +48,13 @@ fn buildPathValue(b: *hir_build.Builder, info: *moduleinfo.ModuleInfo, e: *const
     if (b.lookup(path[0].text)) |bind| {
         const bind_ty = b.built.program.binders.items[bind].ty;
         var cur = try hir_build_block.localNode(b, info, bind, path[0].span);
-        var cur_ty = bind_ty;
+        var cur_ty = b.built.program.typeOf(bind_ty);
         for (path[1..], 0..) |seg, i| {
             // Only the final read of the chain carries the path's
             // annotation (see fieldRead).
             const ann_e: ?*const ast.Expr = if (i == path.len - 2) e else null;
             cur = try hir_build_expr.fieldRead(b, info, ann_e, seg.span, cur, cur_ty, seg.text);
-            cur_ty = b.built.program.node(cur).ty;
+            cur_ty = b.built.program.typeOf(b.built.program.node(cur).ty);
         }
         return cur;
     }
@@ -148,11 +148,11 @@ fn buildStructConstruct(b: *hir_build.Builder, info: *moduleinfo.ModuleInfo, e: 
     if (!permuted) {
         for (written.items, written_idx.items) |v, idx| decl_reads[idx] = v;
         const ops = try b.built.program.addOperands(decl_reads);
-        struct_node = try b.built.program.addExpr(.{ .op = try b.op(p.span, "struct_make"), .ty = value_ty, .operands = ops, .origin = try b.origin(p.span) });
+        struct_node = try b.built.program.addExpr(.{ .op = try b.op(p.span, "struct_make"), .ty = try b.internTy(value_ty), .operands = ops, .origin = try b.origin(p.span) });
     } else {
         const temps = try b.arena.alloc(hir.BinderId, written.items.len);
         for (written.items, 0..) |v, w| {
-            temps[w] = try b.built.program.addBinder(b.built.program.node(v).ty, .value);
+            temps[w] = try b.built.program.addBinder(b.built.program.typeOf(b.built.program.node(v).ty), .value);
         }
         for (written_idx.items, 0..) |idx, wpos| {
             // The decl-order reads are synthesized (no source position).
@@ -160,7 +160,7 @@ fn buildStructConstruct(b: *hir_build.Builder, info: *moduleinfo.ModuleInfo, e: 
             decl_reads[idx] = read;
         }
         const ops = try b.built.program.addOperands(decl_reads);
-        struct_node = try b.built.program.addExpr(.{ .op = try b.op(p.span, "struct_make"), .ty = value_ty, .operands = ops, .origin = try b.origin(p.span) });
+        struct_node = try b.built.program.addExpr(.{ .op = try b.op(p.span, "struct_make"), .ty = try b.internTy(value_ty), .operands = ops, .origin = try b.origin(p.span) });
         // Wrap in temp-let regions, innermost bound last (written order
         // preserved: each temp's region contains the later-written ones).
         var wi: usize = written.items.len;
@@ -191,5 +191,5 @@ fn buildVariantConstruct(b: *hir_build.Builder, info: *moduleinfo.ModuleInfo, e:
             return b.fail(p.span, "unknown union type '{s}'", .{name});
         result_ty = .{ .named = .{ .id = tid, .args = &.{} } };
     }
-    return b.built.program.addExpr(.{ .op = try b.op(p.span, "variant_make"), .ty = result_ty, .operands = ops, .payload = .{ .tag = tag }, .origin = try b.origin(p.span) });
+    return b.built.program.addExpr(.{ .op = try b.op(p.span, "variant_make"), .ty = try b.internTy(result_ty), .operands = ops, .payload = .{ .tag = tag }, .origin = try b.origin(p.span) });
 }

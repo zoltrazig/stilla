@@ -81,7 +81,7 @@ pub fn operandUseOf(self: *Analysis, id: hir.ExprId, index: usize) Error!effects
 pub fn capabilityUse(self: *Analysis, op: hir.ExprId) Error!effects.OperandUse {
     const pr = self.p();
     if (pr.viewOf(op) == .borrowed) return .borrow;
-    const cap = try self.capabilityOf(pr.node(op).ty) orelse return .consume;
+    const cap = try self.capabilityOf(pr.typeOf(pr.node(op).ty)) orelse return .consume;
     return if (cap == .unique) .consume else .read;
 }
 
@@ -91,7 +91,7 @@ pub fn callArgUse(self: *Analysis, call_id: hir.ExprId, index: usize) Error!effe
     if (ops.len == 0 or index >= ops.len) return .consume;
     const arg = ops[index];
     if (pr.viewOf(arg) == .borrowed) return .borrow;
-    const cty = pr.node(ops[0]).ty;
+    const cty = pr.typeOf(pr.node(ops[0]).ty);
     if (cty == .function) {
         const params = cty.function.params;
         const pi = index - 1;
@@ -132,7 +132,7 @@ pub fn cleanupFree(self: *Analysis, id: hir.ExprId) Error!bool {
         // view points at would wrongly mark every drop-hook body
         // (which reads fields of a borrowed, Unique value) unclean.
         if (pr.viewOf(cur) == .owned) {
-            const cap = try self.capabilityOf(n.ty) orelse return false;
+            const cap = try self.capabilityOf(pr.typeOf(n.ty)) orelse return false;
             if (cap != .copy) return false;
         }
         const d = hir.registry.get(n.op);
@@ -158,7 +158,7 @@ pub fn regionOwnsUnique(self: *Analysis, reg_id: hir.RegionId) Error!bool {
     for (pr.params(reg_id)) |bid| {
         const b = pr.binder(bid);
         if (b.mode == .borrow) continue;
-        const cap = try self.capabilityOf(b.ty) orelse return true;
+        const cap = try self.capabilityOf(pr.typeOf(b.ty)) orelse return true;
         if (cap != .copy) return true;
     }
     return false;
@@ -250,7 +250,7 @@ pub fn cleanupEffect(self: *Analysis, id: hir.ExprId) Error!?Summary {
         i -= 1;
         const tk = pr.cleanup_tokens.items[i];
         if (!in_subtree.contains(tk.origin_expr)) continue;
-        const drop = try self.dropEffectOf(tk.ty);
+        const drop = try self.dropEffectOf(pr.typeOf(tk.ty));
         acc = if (acc) |a| try self.eng.sequence(a, drop) else drop;
     }
     return acc orelse effects.pure;
@@ -316,7 +316,7 @@ pub fn isDuplicable(self: *Analysis, id: hir.ExprId) Error!bool {
     const s = self.readySummary(id) orelse return false;
     if (s.nondeterministic) return false;
     if (!try self.isDiscardable(id)) return false;
-    const cap = try self.capabilityOf(self.p().node(id).ty) orelse return false;
+    const cap = try self.capabilityOf(self.p().typeOf(self.p().node(id).ty)) orelse return false;
     if (cap != .copy) return false;
     return self.ownershipGate(id);
 }
@@ -330,7 +330,7 @@ pub fn isSegSafe(self: *Analysis, id: hir.ExprId) Error!bool {
     if (!self.eng.isTotal(s)) return false;
     if (!self.eng.isObservableEffectFree(s)) return false;
     if (s.nondeterministic) return false;
-    const cap = try self.capabilityOf(self.p().node(id).ty) orelse return false;
+    const cap = try self.capabilityOf(self.p().typeOf(self.p().node(id).ty)) orelse return false;
     if (cap != .copy) return false;
     if (!try self.cleanupFree(id)) return false;
     return self.ownershipGate(id);
@@ -433,11 +433,11 @@ pub fn canMaterializeOperand(self: *Analysis, parent: hir.ExprId, slot: u32) Err
     const is_seq = hir.registry.get(pr.node(parent).op).class == .seq;
     if (is_seq) {
         for (ops[0..k]) |op| {
-            const cap = try self.capabilityOf(pr.node(op).ty) orelse return false;
+            const cap = try self.capabilityOf(pr.typeOf(pr.node(op).ty)) orelse return false;
             if (cap != .copy) return false;
         }
     }
-    const cap = try self.capabilityOf(pr.node(ops[k]).ty) orelse return false;
+    const cap = try self.capabilityOf(pr.typeOf(pr.node(ops[k]).ty)) orelse return false;
     if (cap == .copy) return true;
     if (try self.operandUseOf(parent, k) == .consume) return true;
     return is_seq and k + 1 < ops.len;

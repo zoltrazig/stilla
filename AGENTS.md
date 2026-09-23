@@ -18,6 +18,8 @@ Zig implementation of the Stilla v1.3 runtime and Stilla-to-CFG-AIR compiler. Us
 
 ## Testing
 
+- Work narrow, then wide: run the affected suite with `-Dtest-filter=<name>` (repeatable) first, and only run the full `zig build -fincremental test` once it passes.
+- Always redirect the full run so its output survives for inspection: `zig build -fincremental test > /tmp/stilla-test.log 2>&1`, then grep the log for failures instead of re-running (Zig prints `error:`/`FAIL` lines and a summary count).
 - `zig test src/lex_tests.zig` works standalone (it only pulls in `lex.zig` and `ast.zig`). Most other `*_tests.zig` files fail standalone: they transitively import `src/passes/*` and `src/parse/*` files whose `@import("stilla")` self-import and embedded `stilla_std_sources` module exist only under `build.zig`'s module wiring (`--dep` cannot attach to the main module from the CLI). Run those through `zig build test`.
 - Add every new `*_tests.zig` to the `test {}` block in `root.zig` (alongside `std.testing.refAllDecls(@This())`) so it runs under `zig build test`.
 - Put white-box tests in the owning module's `test {}` blocks. Put black-box or cross-module tests in the matching `*_tests.zig` file and import it from `root.zig`.

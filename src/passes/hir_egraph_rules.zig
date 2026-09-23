@@ -7,45 +7,9 @@ const std = @import("std");
 const meta = @import("stilla").meta;
 const hir = @import("stilla").hir;
 
-pub fn hashType(h: *std.hash.Wyhash, ty: meta.Type) void {
-    switch (ty) {
-        .primitive => |k| {
-            h.update(&[_]u8{1});
-            h.update(std.mem.asBytes(&@as(u32, @intFromEnum(k))));
-        },
-        .named => |n| {
-            h.update(&[_]u8{2});
-            h.update(std.mem.asBytes(&n.id));
-            for (n.args) |a| hashType(h, a);
-        },
-        .param => |p| {
-            h.update(&[_]u8{3});
-            h.update(p);
-        },
-        .module => h.update(&[_]u8{4}),
-        .list => |inner| {
-            h.update(&[_]u8{5});
-            hashType(h, inner.*);
-        },
-        .box => |inner| {
-            h.update(&[_]u8{6});
-            hashType(h, inner.*);
-        },
-        .tuple => |elems| {
-            h.update(&[_]u8{7});
-            for (elems) |e| hashType(h, e);
-        },
-        .function => |f| {
-            h.update(&[_]u8{8});
-            for (f.params) |p| {
-                h.update(std.mem.asBytes(&@as(u32, @intFromEnum(p.mode))));
-                hashType(h, p.type_);
-            }
-            hashType(h, f.ret.*);
-        },
-        .cleanup => h.update(&[_]u8{9}),
-    }
-}
+/// Re-exported from `meta` (hir.md §3.8); kept as a file-scope alias so
+/// the e-graph driver's imports are unchanged.
+pub const hashType = meta.hashType;
 
 pub fn hashConst(h: *std.hash.Wyhash, c: meta.ConstValue) void {
     switch (c) {

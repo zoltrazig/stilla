@@ -25,7 +25,7 @@
 //!   and records priority 1, so the rewritten shape is what extraction
 //!   emits. Competing rule proposals are resolved by the lowest e-node
 //!   index, which keeps saturation order-independent and idempotent.
-//! - **e-nodes** — hash-consed on `(op, structural type hash, payload,
+//! - **e-nodes** — hash-consed on `(op, canonical type id, payload,
 //!   operand classes, region terms, access hops)`. The hash is the key;
 //!   `nodeEql` is the structural comparison that turns a hash collision
 //!   into a *merge*. `rebuild` re-canonicalizes every e-node and re-runs
@@ -79,7 +79,7 @@ const hir = @import("stilla").hir;
 const hir_effects = @import("hir_effects.zig");
 const hir_egraph_rules = @import("hir_egraph_rules.zig");
 
-pub const Error = std.mem.Allocator.Error;
+pub const Error = hir.Program.InternTypeError;
 
 /// A binder slot: the e-graph's canonical binder reference (see the file
 /// header). Slots are dense, island-scoped, and assigned on first
@@ -246,7 +246,10 @@ const RegionTerm = struct {
 /// `Slot`, not a `BinderId`.
 const ENode = struct {
     op: hir.OpId,
-    ty: meta.Type,
+    /// The node's canonical HIR type id (hir.md §3.8). Equality / hashing
+    /// are O(1) on the id; the arena's own `Program` is the interning
+    /// authority, so equal structural types always share this id.
+    ty: hir.HIRTypeId,
     payload: hir.Payload,
     /// Operand classes. Mutable: `rebuild` re-canonicalizes them in place
     /// after a union.
@@ -413,7 +416,7 @@ pub const Island = struct {
         return nid;
     }
 
-    fn addConstNode(self: *Island, ty: meta.Type, value: meta.ConstValue) Error!NodeId {
+    fn addConstNode(self: *Island, ty: hir.HIRTypeId, value: meta.ConstValue) Error!NodeId {
         return self.addNode(.{
             .op = hir.opId("const").?,
             .ty = ty,
@@ -453,7 +456,7 @@ pub const Island = struct {
         const x = self.nodes.items[a];
         const y = self.nodes.items[b];
         if (x.op != y.op) return false;
-        if (!meta.Type.eql(x.ty, y.ty)) return false;
+        if (x.ty != y.ty) return false;
         if (!payloadEql(x.payload, y.payload)) return false;
         if (!hopsEql(x.access_hops, y.access_hops)) return false;
         if (x.operands.len != y.operands.len) return false;
@@ -479,7 +482,10 @@ pub const Island = struct {
         const n = self.nodes.items[nid];
         var h = std.hash.Wyhash.init(0);
         h.update(std.mem.asBytes(&n.op));
-        hashType(&h, n.ty);
+        // The canonical type id is the whole identity of the type slot:
+        // equal ids ⇒ equal types (interning), matching `nodeEql`'s O(1)
+        // id comparison without ever touching the structural type.
+        h.update(std.mem.asBytes(&n.ty));
         hashPayload(&h, n.payload);
         hashHops(&h, n.access_hops);
         for (n.operands) |r| {
@@ -531,7 +537,7 @@ pub const Island = struct {
             },
             .type_test => |tt| {
                 h.update(&[_]u8{8});
-                hashType(h, tt.ty);
+                h.update(std.mem.asBytes(&tt.ty));
                 const s = self.binder_slot.get(tt.bind) orelse std.math.maxInt(Slot);
                 h.update(std.mem.asBytes(&s));
             },
@@ -598,7 +604,7 @@ pub const Island = struct {
                 else => false,
             },
             .type_test => |ta| return switch (y) {
-                .type_test => |tb| meta.Type.eql(ta.ty, tb.ty) and
+                .type_test => |tb| ta.ty == tb.ty and
                     self.slotOfBinder(ta.bind) == self.slotOfBinder(tb.bind),
                 else => false,
             },
@@ -1156,16 +1162,16 @@ pub const Island = struct {
         const plan = try self.materialization(n);
         var init_ids: []hir.ExprId = &.{};
         var binders: []hir.BinderId = &.{};
-        var init_ty: []meta.Type = &.{};
+        var init_ty: []hir.HIRTypeId = &.{};
         if (plan) |p| {
             init_ids = try self.arena.alloc(hir.ExprId, p.classes.len);
             binders = try self.arena.alloc(hir.BinderId, p.classes.len);
-            init_ty = try self.arena.alloc(meta.Type, p.classes.len);
+            init_ty = try self.arena.alloc(hir.HIRTypeId, p.classes.len);
             for (p.classes, 0..) |c, t| {
                 const pnode = self.nodes.items[self.chosen(c)];
                 init_ty[t] = pnode.ty;
                 init_ids[t] = try self.copyClass(c, overlay);
-                binders[t] = try self.pr.addBinder(pnode.ty, .value);
+                binders[t] = try self.pr.addBinder(self.pr.typeOf(pnode.ty), .value);
             }
         }
 
@@ -1211,7 +1217,7 @@ pub const Island = struct {
         for (rt.params, 0..) |slot, i| {
             saved[i] = overlay.get(slot);
             const b = self.pr.binder(orig_params[i]);
-            fresh[i] = try self.pr.addBinder(b.ty, b.mode);
+            fresh[i] = try self.pr.addBinder(self.pr.typeOf(b.ty), b.mode);
             try overlay.put(self.arena, slot, fresh[i]);
         }
         const body = try self.copyClass(rt.body, overlay);
@@ -1292,7 +1298,7 @@ pub const Island = struct {
         });
     }
 
-    fn addLocalNode(self: *Island, binder: hir.BinderId, ty: meta.Type, fe: hir.FullExprId) Error!hir.ExprId {
+    fn addLocalNode(self: *Island, binder: hir.BinderId, ty: hir.HIRTypeId, fe: hir.FullExprId) Error!hir.ExprId {
         return self.pr.addExpr(.{
             .op = hir.opId("local").?,
             .ty = ty,
@@ -1302,7 +1308,7 @@ pub const Island = struct {
         });
     }
 
-    fn makeLet(self: *Island, binder: hir.BinderId, init_id: hir.ExprId, body: hir.ExprId, ty: meta.Type, fe: hir.FullExprId) Error!hir.ExprId {
+    fn makeLet(self: *Island, binder: hir.BinderId, init_id: hir.ExprId, body: hir.ExprId, ty: hir.HIRTypeId, fe: hir.FullExprId) Error!hir.ExprId {
         const rid = try self.pr.addRegion(&.{binder}, body, null);
         const regs = try self.pr.addRegions(&.{rid});
         const opr = try self.pr.addOperands(&.{init_id});
@@ -1377,7 +1383,6 @@ pub fn optimizeIsland(
 // Moved verbatim to hir_egraph_rules.zig (pure, driver-free) and re-exported
 // through the aliases below; the tests keep calling them unqualified.
 
-const hashType = hir_egraph_rules.hashType;
 const hashConst = hir_egraph_rules.hashConst;
 const hashPayload = hir_egraph_rules.hashPayload;
 const hashHops = hir_egraph_rules.hashHops;
@@ -1485,8 +1490,8 @@ fn fixture(ret: meta.Type, text: []const u8) !Fixture {
         .name = "f",
         .kind = .member,
         .module = 0,
-        .params = try a.alloc(meta.Param, 0),
-        .ret = ret,
+        .params = try a.alloc(hir.FuncParam, 0),
+        .ret = try built.program.intern(ret),
         .root = parsed.root,
     });
     const analysis = try a.create(hir_effects.Analysis);

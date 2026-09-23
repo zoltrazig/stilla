@@ -26,9 +26,9 @@ pub fn controlNode(b: *hir_build.Builder, span: meta.Span, op_name: []const u8, 
     const rt = try b.built.program.addRegion(&.{}, then, null);
     const re = try b.built.program.addRegion(&.{}, else_, null);
     const regs = try b.built.program.addRegions(&.{ rt, re });
-    const tty = b.built.program.node(then).ty;
-    const ety = b.built.program.node(else_).ty;
-    return b.built.program.addExpr(.{ .op = try b.op(span, op_name), .ty = unifyJoin(tty, ety), .operands = ops, .regions = regs, .origin = try b.origin(span) });
+    const tty = b.built.program.typeOf(b.built.program.node(then).ty);
+    const ety = b.built.program.typeOf(b.built.program.node(else_).ty);
+    return b.built.program.addExpr(.{ .op = try b.op(span, op_name), .ty = try b.internTy(unifyJoin(tty, ety)), .operands = ops, .regions = regs, .origin = try b.origin(span) });
 }
 
 /// The join type of two branch values: never contributes nothing; equal
@@ -53,7 +53,7 @@ pub fn buildIf(b: *hir_build.Builder, info: *moduleinfo.ModuleInfo, i: *const as
 
 pub fn buildMatch(b: *hir_build.Builder, info: *moduleinfo.ModuleInfo, e: *const ast.Expr, m: *const ast.MatchExpr) hir_build.BuildError!hir.ExprId {
     const scrut = try hir_build_expr.buildExpr(b, info, m.scrutinee);
-    const scrut_ty = b.built.program.node(scrut).ty;
+    const scrut_ty = b.built.program.typeOf(b.built.program.node(scrut).ty);
     const moving = hir_build_block.isMoveExpr(m.scrutinee);
     const ops = try b.built.program.addOperands(&.{scrut});
     // Type-test arms over an 'any' scrutinee — mirror cfg_lower_control's
@@ -92,12 +92,12 @@ pub fn buildMatch(b: *hir_build.Builder, info: *moduleinfo.ModuleInfo, e: *const
         try hir_build_pattern.bindPatternLeaves(b, &arm.pattern, binder_ids.items);
         const body = try hir_build_expr.buildExpr(b, info, arm.body);
         b.popScope();
-        try arm_tys.append(b.arena, b.built.program.node(body).ty);
+        try arm_tys.append(b.arena, b.built.program.typeOf(b.built.program.node(body).ty));
         const rid = try b.built.program.addRegion(binder_ids.items, body, pat_id);
         try reg_ids.append(b.arena, rid);
     }
     const regs = try b.built.program.addRegions(reg_ids.items);
     var jt: meta.Type = .{ .primitive = .void };
     for (arm_tys.items) |t2| jt = unifyJoin(jt, t2);
-    return b.built.program.addExpr(.{ .op = try b.op(m.span, "match"), .ty = b.annotatedType(info, e) orelse jt, .operands = ops, .regions = regs, .origin = try b.origin(m.span) });
+    return b.built.program.addExpr(.{ .op = try b.op(m.span, "match"), .ty = try b.internTy(b.annotatedType(info, e) orelse jt), .operands = ops, .regions = regs, .origin = try b.origin(m.span) });
 }

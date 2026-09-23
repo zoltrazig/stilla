@@ -240,6 +240,50 @@ pub const Type = union(enum) {
     }
 };
 
+/// Feed a structural hash of `ty` into `h` (SEG e-graph node identity,
+/// hir.md §3.8). Equal types hash equal; distinct types may collide. The
+/// byte sequence is canonical and stable — the SEG differentials depend
+/// on it.
+pub fn hashType(h: *std.hash.Wyhash, ty: Type) void {
+    switch (ty) {
+        .primitive => |k| {
+            h.update(&[_]u8{1});
+            h.update(std.mem.asBytes(&@as(u32, @intFromEnum(k))));
+        },
+        .named => |n| {
+            h.update(&[_]u8{2});
+            h.update(std.mem.asBytes(&n.id));
+            for (n.args) |a| hashType(h, a);
+        },
+        .param => |p| {
+            h.update(&[_]u8{3});
+            h.update(p);
+        },
+        .module => h.update(&[_]u8{4}),
+        .list => |inner| {
+            h.update(&[_]u8{5});
+            hashType(h, inner.*);
+        },
+        .box => |inner| {
+            h.update(&[_]u8{6});
+            hashType(h, inner.*);
+        },
+        .tuple => |elems| {
+            h.update(&[_]u8{7});
+            for (elems) |e| hashType(h, e);
+        },
+        .function => |f| {
+            h.update(&[_]u8{8});
+            for (f.params) |p| {
+                h.update(std.mem.asBytes(&@as(u32, @intFromEnum(p.mode))));
+                hashType(h, p.type_);
+            }
+            hashType(h, f.ret.*);
+        },
+        .cleanup => h.update(&[_]u8{9}),
+    }
+}
+
 /// One parameter: `[borrow|move] name: type` (air.md §11). In function
 /// *types* the name is empty.
 pub const Param = struct {

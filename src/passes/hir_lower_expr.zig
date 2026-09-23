@@ -54,7 +54,7 @@ pub fn expr(c: *Ctx, fs: *FuncState, id: hir.ExprId) LowerError!?*cfg.Value {
     // to `never` (docs/effects.md §10.1, docs/hir.md §9). Checked before
     // `dropCreatedRange` so the trap lands right after the call, exactly
     // as the direct never-call emission does.
-    if (cfg_lower_emit.isNever(c.node(id).ty)) {
+    if (cfg_lower_emit.isNever(c.built.program.typeOf(c.node(id).ty))) {
         try cfg_lower_emit.setTerminator(c.self, fs, .{ .trap = {} });
         return null;
     }
@@ -78,6 +78,7 @@ fn typedBase(c: *const Ctx, id: hir.ExprId) []const u8 {
 fn exprInner(c: *Ctx, fs: *FuncState, id: hir.ExprId) LowerError!?*cfg.Value {
     const self = c.self;
     const n = c.node(id);
+    const nty = c.built.program.typeOf(n.ty);
     const name = c.opName(id);
     const ops = c.operands(id);
 
@@ -86,9 +87,9 @@ fn exprInner(c: *Ctx, fs: *FuncState, id: hir.ExprId) LowerError!?*cfg.Value {
         // path's loads replay first, exactly like the direct lowering;
         // the constant value itself needs no base.
         _ = try hopChain(c, fs, id);
-        return switch (n.ty) {
-            .primitive => |p| if (p == .void) cfg_lower_expr.emitVoid(self, fs, no_span) else cfg_lower_expr.emitConst(self, fs, no_span, n.payload.const_value, n.ty),
-            else => cfg_lower_expr.emitConst(self, fs, no_span, n.payload.const_value, n.ty),
+        return switch (nty) {
+            .primitive => |p| if (p == .void) cfg_lower_expr.emitVoid(self, fs, no_span) else cfg_lower_expr.emitConst(self, fs, no_span, n.payload.const_value, nty),
+            else => cfg_lower_expr.emitConst(self, fs, no_span, n.payload.const_value, nty),
         };
     }
     if (is(name, "local")) {
@@ -126,8 +127,8 @@ fn exprInner(c: *Ctx, fs: *FuncState, id: hir.ExprId) LowerError!?*cfg.Value {
         const base = (try expr(c, fs, ops[0])) orelse return null;
         const idx = n.payload.field;
         return switch (base.type_) {
-            .named => cfg_lower_emit.emit(self, fs, no_span, .{ .read_field = .{ .base = base, .index = idx } }, n.ty),
-            .tuple => cfg_lower_emit.emit(self, fs, no_span, .{ .read_tuple = .{ .base = base, .index = idx } }, n.ty),
+            .named => cfg_lower_emit.emit(self, fs, no_span, .{ .read_field = .{ .base = base, .index = idx } }, nty),
+            .tuple => cfg_lower_emit.emit(self, fs, no_span, .{ .read_tuple = .{ .base = base, .index = idx } }, nty),
             else => self.fail(no_span, "cannot access a member of this value", .{}),
         };
     }
@@ -143,7 +144,7 @@ fn exprInner(c: *Ctx, fs: *FuncState, id: hir.ExprId) LowerError!?*cfg.Value {
     if (is(name, "any_cast") or is(name, "num_cast")) {
         const moving = is(c.opName(ops[0]), "move");
         const v = (try expr(c, fs, ops[0])) orelse return null;
-        const target = n.ty;
+        const target = nty;
         const src = v.type_;
         if (src == .primitive and src.primitive == .any) {
             // `any` recovery (Core §11.6.1): an unique target requires a
@@ -180,11 +181,11 @@ fn exprInner(c: *Ctx, fs: *FuncState, id: hir.ExprId) LowerError!?*cfg.Value {
     if (is(base, "neg") or is(base, "abs") or is(base, "clz") or is(base, "popcount")) {
         const v = (try expr(c, fs, ops[0])) orelse return null;
         const op: cfg.Op = if (is(base, "neg")) .{ .neg = v } else if (is(base, "abs")) .{ .abs = v } else if (is(base, "clz")) .{ .clz = v } else .{ .popcount = v };
-        return cfg_lower_emit.emit(self, fs, no_span, op, n.ty);
+        return cfg_lower_emit.emit(self, fs, no_span, op, nty);
     }
     if (is(base, "not")) {
         const v = (try expr(c, fs, ops[0])) orelse return null;
-        return cfg_lower_emit.emit(self, fs, no_span, .{ .not_ = v }, n.ty);
+        return cfg_lower_emit.emit(self, fs, no_span, .{ .not_ = v }, nty);
     }
     const bin: ?[]const u8 = blk: {
         const map = [_]struct { n: []const u8, t: []const u8 }{
@@ -207,7 +208,7 @@ fn exprInner(c: *Ctx, fs: *FuncState, id: hir.ExprId) LowerError!?*cfg.Value {
     if (bin) |tag| {
         const pair = (try operands2.two(c, fs, ops)) orelse return null;
         const op: cfg.Op = if (is(tag, "add")) .{ .add = .{ .a = pair[0], .b = pair[1] } } else if (is(tag, "sub")) .{ .sub = .{ .a = pair[0], .b = pair[1] } } else if (is(tag, "mul")) .{ .mul = .{ .a = pair[0], .b = pair[1] } } else if (is(tag, "div")) .{ .div = .{ .a = pair[0], .b = pair[1] } } else if (is(tag, "rem")) .{ .rem = .{ .a = pair[0], .b = pair[1] } } else if (is(tag, "min")) .{ .min = .{ .a = pair[0], .b = pair[1] } } else if (is(tag, "max")) .{ .max = .{ .a = pair[0], .b = pair[1] } } else if (is(tag, "shl")) .{ .shl = .{ .a = pair[0], .b = pair[1] } } else if (is(tag, "shr")) .{ .shr = .{ .a = pair[0], .b = pair[1] } } else if (is(tag, "bitand")) .{ .bitand = .{ .a = pair[0], .b = pair[1] } } else if (is(tag, "bitor")) .{ .bitor = .{ .a = pair[0], .b = pair[1] } } else if (is(tag, "bitxor")) .{ .bitxor = .{ .a = pair[0], .b = pair[1] } } else if (is(tag, "concat")) .{ .concat = .{ .a = pair[0], .b = pair[1] } } else if (is(tag, "eq")) .{ .eq = .{ .a = pair[0], .b = pair[1] } } else if (is(tag, "ne")) .{ .ne = .{ .a = pair[0], .b = pair[1] } } else if (is(tag, "lt")) .{ .lt = .{ .a = pair[0], .b = pair[1] } } else if (is(tag, "le")) .{ .le = .{ .a = pair[0], .b = pair[1] } } else if (is(tag, "gt")) .{ .gt = .{ .a = pair[0], .b = pair[1] } } else .{ .ge = .{ .a = pair[0], .b = pair[1] } };
-        return cfg_lower_emit.emit(self, fs, no_span, op, n.ty);
+        return cfg_lower_emit.emit(self, fs, no_span, op, nty);
     }
     return self.fail(no_span, "HIR op '{s}' has no CFG lowering", .{name});
 }
@@ -224,6 +225,7 @@ pub fn fnRef(c: *Ctx, fs: *FuncState, id: hir.ExprId, callee_ctx: bool) LowerErr
     const self = c.self;
     const built = c.built;
     const n = c.node(id);
+    const nty = c.built.program.typeOf(n.ty);
     // A leaf reached through module-valued member chains replays them
     // first (the direct lowerPathValue sequence); the final member's
     // load — when there is one — uses the chain's last value as its
@@ -245,7 +247,7 @@ pub fn fnRef(c: *Ctx, fs: *FuncState, id: hir.ExprId, callee_ctx: bool) LowerErr
                     // row is null) or an intrinsic wrapper (its
                     // `{member}.intrinsic.{N}` suffix is not a source
                     // member name), so only true members load below.
-                    return cfg_lower_emit.emit(self, fs, no_span, .{ .fn_ref = rec.name }, n.ty);
+                    return cfg_lower_emit.emit(self, fs, no_span, .{ .fn_ref = rec.name }, nty);
                 },
                 else => return memberValueRef(c, fs, built, rec, base),
             }
@@ -381,7 +383,7 @@ fn letNode(c: *Ctx, fs: *FuncState, id: hir.ExprId) LowerError!?*cfg.Value {
     const init_val = (try expr(c, fs, ops[0])) orelse return null;
     var bound = init_val;
     if (binder_ids.len == 1 and region.pattern == null) {
-        const declared = c.built.program.binder(binder_ids[0]).ty;
+        const declared = c.built.program.typeOf(c.built.program.binder(binder_ids[0]).ty);
         if (declared == .primitive and declared.primitive == .any and !meta.Type.eql(init_val.type_, declared)) {
             if (init_val.ownership == .unique) {
                 cfg_lower_emit.markConsumed(self, fs, init_val);
@@ -437,6 +439,7 @@ fn moveNode(c: *Ctx, fs: *FuncState, id: hir.ExprId) LowerError!?*cfg.Value {
 fn construct(c: *Ctx, fs: *FuncState, id: hir.ExprId) LowerError!?*cfg.Value {
     const self = c.self;
     const n = c.node(id);
+    const nty = c.built.program.typeOf(n.ty);
     const ops = c.operands(id);
     var args = std.ArrayList(*cfg.Value).empty;
     for (ops) |op_id| {
@@ -444,7 +447,7 @@ fn construct(c: *Ctx, fs: *FuncState, id: hir.ExprId) LowerError!?*cfg.Value {
         try args.append(self.arena, v);
     }
     const tag: ?u32 = if (is(c.opName(id), "variant_make")) n.payload.tag else null;
-    const result = try cfg_lower_emit.emit(self, fs, no_span, .{ .construct = .{ .tag = tag, .args = args.items } }, n.ty);
+    const result = try cfg_lower_emit.emit(self, fs, no_span, .{ .construct = .{ .tag = tag, .args = args.items } }, nty);
     for (args.items) |a| {
         if (a.ownership == .unique and !cfg_lower_emit.isConsumed(fs, a)) {
             cfg_lower_emit.markConsumed(self, fs, a);

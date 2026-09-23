@@ -219,6 +219,7 @@ pub fn buildProgram(
         error.Diagnostic => return error.CompileFailed, // never carries a value; the value path below is the norm
         error.OutOfMemory => return error.OutOfMemory,
         error.InvalidProvider => return error.CompileFailed,
+        error.UnsupportedCleanupType => return error.UnsupportedCleanupType,
     };
     const program = &(compilation.program orelse {
         if (out_compilation) |oc| oc.* = compilation;

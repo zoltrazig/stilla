@@ -233,7 +233,9 @@ pub fn rootIsBlockShaped(c: *const Ctx, id: hir.ExprId) bool {
 /// `λ` lowers to, so member functions, instances, hooks, hoisted
 /// lambdas, and intrinsic wrappers share this one path.
 fn lowerFuncRecord(self: *Lowerer, built: *hir.BuiltProgram, info: *moduleinfo.ModuleInfo, rec: *const hir.FuncRecord) LowerError!*cfg.IrFunc {
-    var fs = try cfg_lower_func.newFuncState(self, info, .{ .span = no_span, .text = rec.name }, rec.params, rec.ret);
+    const params = try resolveParams(self, built, rec);
+    const ret = built.program.typeOf(rec.ret);
+    var fs = try cfg_lower_func.newFuncState(self, info, .{ .span = no_span, .text = rec.name }, params, ret);
     const entry = try cfg_lower_emit.newBlock(self, &fs, "entry");
     fs.cur = entry;
     var c = Ctx{ .self = self, .built = built };
@@ -268,7 +270,7 @@ fn lowerFuncRecord(self: *Lowerer, built: *hir.BuiltProgram, info: *moduleinfo.M
             if (cfg_lower_emit.isVoid(local.value.type_)) continue;
             try args.append(self.arena, local.value);
         }
-        const sig = meta.FunctionType{ .params = rec.params, .ret = dupType(self, rec.ret) };
+        const sig = meta.FunctionType{ .params = params, .ret = dupType(self, ret) };
         // The str/hash supported-type constraint applies to the wrapper
         // too — mirror `cfg_lower_intrinsic.intrinsicFnRef`, which checks
         // before synthesizing (Runtime §4.2/§4.9): a wrapper would carry
@@ -300,7 +302,7 @@ fn lowerFuncRecord(self: *Lowerer, built: *hir.BuiltProgram, info: *moduleinfo.M
     // params arrive borrowed; unique params are owned by the binding).
     try fs.scopes.append(self.arena, .{});
     for (binder_ids, 0..) |bid, i| {
-        const p = rec.params[i];
+        const p = params[i];
         const v = fs.values.items[i];
         try bindBinder(&c, &fs, bid, v, p.mode != .borrow and cfg_lower_emit.isUnique(self, &fs, v.type_));
     }
@@ -338,6 +340,13 @@ fn lowerFuncRecord(self: *Lowerer, built: *hir.BuiltProgram, info: *moduleinfo.M
         if (fs.cur != null) try cfg_lower_emit.setTerminator(self, &fs, .{ .ret = null });
     }
     return cfg_lower_validate.finishFunc(self, &fs);
+}
+
+/// Resolve a record's params to `meta.Param`s (arena-owned).
+fn resolveParams(self: *Lowerer, built: *hir.BuiltProgram, rec: *const hir.FuncRecord) LowerError![]meta.Param {
+    const out = try self.arena.alloc(meta.Param, rec.params.len);
+    for (rec.params, 0..) |p, i| out[i] = p.resolve(&built.program);
+    return out;
 }
 
 /// An arena copy of a type (syscall signatures own their ret pointer).

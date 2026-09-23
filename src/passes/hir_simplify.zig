@@ -57,7 +57,7 @@ const hir_effects = @import("hir_effects.zig");
 const rewrite_contract = @import("rewrite_contract.zig");
 const effects = @import("stilla").effects;
 
-pub const Error = std.mem.Allocator.Error;
+pub const Error = hir.Program.InternTypeError;
 
 /// `never` primitive test — the bottom type (Core §13.2).
 fn isNeverTy(t: meta.Type) bool {
@@ -327,8 +327,8 @@ const Rewriter = struct {
                 self.changed = true;
             }
         }
-        if (!isNeverTy(pr.node(id).ty)) {
-            pr.exprs.items[id].ty = .{ .primitive = .never };
+        if (!isNeverTy(pr.typeOf(pr.node(id).ty))) {
+            pr.exprs.items[id].ty = try pr.intern(.{ .primitive = .never });
             self.changed = true;
         }
         try self.markRetire(id);
@@ -383,7 +383,7 @@ const Rewriter = struct {
         // destructor (docs/effects.md §11.2). Block the rewrite unless
         // the binding's destruction is itself discardable in the
         // modelled cleanup model; Copy bindings have no destructor.
-        const bind_ty = pr.binder(bind).ty;
+        const bind_ty = pr.typeOf(pr.binder(bind).ty);
         if (!try rewrite_contract.checkCleanup(dead_let_rule, self.analysis, .{ .binder_destruction = bind_ty })) return false;
         // Legality is the declared rule's derived query alone — no opcode
         // knowledge.
@@ -455,7 +455,7 @@ const Rewriter = struct {
         const arg = ops[k];
         const arg_ty = pr.node(arg).ty;
 
-        const fresh = try pr.addBinder(arg_ty, .value);
+        const fresh = try pr.addBinder(pr.typeOf(arg_ty), .value);
         const local = try pr.addExpr(.{
             .op = hir.opId("local").?,
             .ty = arg_ty,
@@ -814,7 +814,7 @@ test "hir_simplify: a normal-returning callee keeps its suffix" {
 }
 
 fn neverTy(p: *hir.Program, id: hir.ExprId) bool {
-    return switch (p.node(id).ty) {
+    return switch (p.typeOf(p.node(id).ty)) {
         .primitive => |k| k == .never,
         else => false,
     };

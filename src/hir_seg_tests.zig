@@ -275,7 +275,7 @@ test "SEG: a source-level let folds across the full-expression boundary (hir.md 
     try testing.expect(!try an.isSegSafe(try letInit(&b, "app.observable_kept")));
     // The implicit `any` coercion is a type difference, not an effect fact.
     const coerced_let = (try findNode(&b, (try findFunc(&b, "app.coerced_kept")).root, "let")) orelse return error.TestUnexpectedResult;
-    try testing.expect(!pr.node(pr.operands(coerced_let)[0]).ty.eql(pr.binder(pr.params(pr.regionsOf(coerced_let)[0])[0]).ty));
+    try testing.expect(pr.node(pr.operands(coerced_let)[0]).ty != pr.binder(pr.params(pr.regionsOf(coerced_let)[0])[0]).ty);
 
     const stats = try segAll(&b);
     // The three contract positives: the discardable initializer is
@@ -574,7 +574,7 @@ test "SEG: a wrapper/callee function-type mismatch refuses η" {
     // type" gate must then refuse even though the shape is right.
     const f = try findFunc(&b, "eta.via_lambda");
     const ref = (try findNode(&b, f.root, "fn_ref")) orelse return error.TestUnexpectedResult;
-    b.built.program.exprs.items[ref].ty = .{ .primitive = .int32 };
+    b.built.program.exprs.items[ref].ty = try b.built.program.intern(.{ .primitive = .int32 });
     // The corrupted type would fail re-validation, so run the pass alone.
     _ = try hir_seg.optimize(b.arena.allocator(), b.built, .{ .graph = b.graph });
     var targets = std.ArrayListUnmanaged(hir.FuncId).empty;
@@ -989,6 +989,90 @@ test "SEG: the lattice instance changes the AIR — the reorder rule consumes sw
     try testing.expect(!(try writePeekFirst(&b2)));
 }
 
+test "SEG: the cross-layer drop cycle's precise summary unlocks reorder" {
+    // The unified graph closes the cycle `f → drop_type(T) → hook → f`
+    // (docs/effects.md §11.1). The old cross-layer fallback left `f` at
+    // `Top`; the precise fixpoint is `read(host2) + MayDiverge` — which is
+    // exactly what lets the reorder rule order the operand pair, while a
+    // `Top` summary's wildcard accesses are refused by `orderCompatible`.
+    // This pins the precision gain to a rewrite that actually fires.
+    const host = try probe_corpus.read(testing.allocator, "probes/cases", "cross_layer_drop_cycle_host");
+    defer testing.allocator.free(host);
+    const app = try probe_corpus.read(testing.allocator, "probes/cases", "cross_layer_drop_cycle_app");
+    defer testing.allocator.free(app);
+    const texts = [_]struct { []const u8, []const u8 }{
+        .{ "cross_layer_host", host },
+        .{ "app", app },
+    };
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const s_read = try effects.summaryOf(a, &.{.{ .resource = .{ .host = 2 }, .mode = .read }});
+    const s_peek = try effects.summaryOf(a, &.{.{ .resource = .{ .host = 3 }, .mode = .read }});
+    const decls = [_]effects.HostDecl{
+        .{ .key = "cross_layer_host.read", .summary = s_read, .stilla_execution = .forbidden },
+        .{ .key = "cross_layer_host.peek", .summary = s_peek, .stilla_execution = .forbidden },
+    };
+
+    // Analysis: `f`'s cycle summary is precise, never `Top`.
+    {
+        var b = try buildText("app", &texts);
+        defer b.deinit();
+        var an = try hir_effects.Analysis.init(b.arena.allocator(), b.built, .{ .graph = b.graph, .host_decls = &decls });
+        try an.analyze();
+        const fsum = try an.functionSummary(try findFuncId(&b, "app.f"));
+        try testing.expect(!fsum.eql(effects.top));
+        try testing.expect(fsum.may_diverge);
+        try testing.expect(!fsum.accesses.isEmpty());
+        // The precise read+diverge summary commutes with the sibling read
+        // under the hierarchy instance. `Top` cannot — its wildcard
+        // accesses fail `orderCompatible` under any instance — so the
+        // rewrite below is unlocked by the precision, not by the lattice
+        // alone.
+        var eng = try effects.Engine.init(a, &effects.example_hierarchy, .{});
+        try testing.expect(eng.orderCompatible(fsum, s_peek));
+        try testing.expect(!eng.orderCompatible(effects.top, s_peek));
+    }
+
+    // Flat instance: distinct undeclared domains conflict, no reorder.
+    var b_flat = try buildText("app", &texts);
+    defer b_flat.deinit();
+    const flat_stats = try segAllWith(&b_flat, &decls);
+    try testing.expectEqual(@as(usize, 0), flat_stats.reorders);
+
+    // Hierarchy instance: the reorder fires and lands in the AIR.
+    var eng = try effects.Engine.init(a, &effects.example_hierarchy, .{});
+    var b_hier = try buildText("app", &texts);
+    defer b_hier.deinit();
+    const hier_stats = try hir_seg.optimize(b_hier.arena.allocator(), b_hier.built, .{
+        .graph = b_hier.graph,
+        .host_decls = &decls,
+        .engine = &eng,
+    });
+    try revalidateRewrittenWith(&b_hier, &decls);
+    try testing.expect(hier_stats.reorders >= 1);
+
+    const calleeName = struct {
+        fn of(b: *Built, call: hir.ExprId) ?[]const u8 {
+            const pr = &b.built.program;
+            const ops = pr.operands(call);
+            if (ops.len == 0) return null;
+            const callee = pr.node(ops[0]);
+            if (callee.payload != .func or callee.payload.func != .func) return null;
+            const fid = callee.payload.func.func;
+            if (fid >= b.built.funcs.items.len) return null;
+            return b.built.funcs.items[fid].name;
+        }
+    }.of;
+    const h_root = (try findFunc(&b_hier, "app.h")).root;
+    const add = (try findNode(&b_hier, h_root, "add.i32")) orelse return error.TestUnexpectedResult;
+    const ops = b_hier.built.program.operands(add);
+    try testing.expect(ops.len == 2);
+    // Canonical order is `read` (host2) before `peek` (host3).
+    try testing.expectEqualStrings("app.f", calleeName(&b_hier, ops[0]).?);
+    try testing.expectEqualStrings("app.g", calleeName(&b_hier, ops[1]).?);
+}
+
 test "SEG: CSE is refused for an observable or Q-carrying host read" {
     const sensor = try probe_corpus.read(testing.allocator, "probes/cases", "seg_cse_host_sensor");
     defer testing.allocator.free(sensor);
@@ -1153,7 +1237,7 @@ test "SEG: a declaration/constructor arity mismatch refuses the reduction" {
     defer b.deinit();
     const f = try findFunc(&b, "app.f");
     const vm = try findNode(&b, f.root, "variant_make") orelse return error.TestUnexpectedResult;
-    const named = switch (b.built.program.node(vm).ty) {
+    const named = switch (b.built.program.typeOf(b.built.program.node(vm).ty)) {
         .named => |n| n,
         else => return error.TestUnexpectedResult,
     };

@@ -102,7 +102,6 @@
 //! unchanged (identity) or writes a freshly materialized subtree into it.
 
 const std = @import("std");
-const meta = @import("stilla").meta;
 const hir = @import("stilla").hir;
 const moduleinfo = @import("stilla").moduleinfo;
 const effects = @import("stilla").effects;
@@ -110,7 +109,7 @@ const hir_effects = @import("hir_effects.zig");
 const hir_egraph = @import("hir_egraph.zig");
 const rewrite_contract = @import("rewrite_contract.zig");
 
-pub const Error = std.mem.Allocator.Error;
+pub const Error = hir.Program.InternTypeError;
 
 /// A `fn_ref` chain longer than this is a cycle or a pathological tower
 /// and is refused rather than followed (hir.md §8.5).
@@ -778,7 +777,7 @@ const Rewriter = struct {
         // — it also demands the arguments be total and observable-effect-
         // free, which β does not need and would wrongly reject an effectful
         // argument (docs/effects.md §10.4).
-        const result_cap = try self.analysis.capabilityOf(n.ty) orelse return false;
+        const result_cap = try self.analysis.capabilityOf(pr.typeOf(n.ty)) orelse return false;
         if (result_cap != .copy) return false;
         // The declared contract (`beta_rule`) goes through the legality
         // engine, which knows requirements, not opcodes: the
@@ -811,7 +810,7 @@ const Rewriter = struct {
         var k: usize = 1;
         while (k < ops.len) : (k += 1) {
             const arg = ops[k];
-            const cap = try self.analysis.capabilityOf(pr.node(arg).ty) orelse return false;
+            const cap = try self.analysis.capabilityOf(pr.typeOf(pr.node(arg).ty)) orelse return false;
             if (cap != .copy) return false;
         }
 
@@ -823,7 +822,7 @@ const Rewriter = struct {
         const fresh = try self.arena.alloc(hir.BinderId, params.len);
         for (params, 0..) |pb, j| {
             const b = pr.binder(pb);
-            fresh[j] = try pr.addBinder(b.ty, .value);
+            fresh[j] = try pr.addBinder(pr.typeOf(b.ty), .value);
             try map.put(self.arena, pb, fresh[j]);
         }
         self.clone_fe = n.full_expr;
@@ -873,7 +872,7 @@ const Rewriter = struct {
     /// - v1 only `callee = fn_ref` (a more general callee expression could
     ///   change evaluation after expansion);
     /// - the wrapper's function type equals the callee's, parameter modes
-    ///   and arity included (`meta.Type.eql`);
+    ///   and arity included (O(1) canonical `HIRTypeId` equality);
     /// - the callee is applied to the wrapper's own parameters, once each,
     ///   in order — which is also the whole of the "`B0` not free in the
     ///   callee" / capture condition, since a `fn_ref` closes over no
@@ -923,7 +922,7 @@ const Rewriter = struct {
     /// order, and `wrapper_ty` equals the callee's function type; `null`
     /// otherwise. Pure structural predicate — the totality gate is
     /// `redexTotal`.
-    fn etaRedexCallee(self: *Rewriter, lam_root: hir.ExprId, wrapper_ty: meta.Type) ?hir.ExprId {
+    fn etaRedexCallee(self: *Rewriter, lam_root: hir.ExprId, wrapper_ty: hir.HIRTypeId) ?hir.ExprId {
         const pr = self.p();
         if (!std.mem.eql(u8, hir.registry.get(pr.node(lam_root).op).name, "lambda")) return null;
         const regs = pr.regionsOf(lam_root);
@@ -936,7 +935,7 @@ const Rewriter = struct {
         if (!std.mem.eql(u8, hir.registry.get(pr.node(callee).op).name, "fn_ref")) return null;
         const params = pr.params(regs[0]);
         if (bops.len - 1 != params.len) return null;
-        if (!wrapper_ty.eql(pr.node(callee).ty)) return null;
+        if (wrapper_ty != pr.node(callee).ty) return null;
         for (params, 0..) |param, i| {
             const arg = pr.node(bops[i + 1]);
             if (!std.mem.eql(u8, hir.registry.get(arg.op).name, "local")) return null;
@@ -977,7 +976,7 @@ const Rewriter = struct {
                     new_params[k] = mapped;
                 } else {
                     const b = pr.binder(pb);
-                    new_params[k] = try pr.addBinder(b.ty, b.mode);
+                    new_params[k] = try pr.addBinder(pr.typeOf(b.ty), b.mode);
                     try map.put(self.arena, pb, new_params[k]);
                 }
             }
@@ -1165,7 +1164,7 @@ const Rewriter = struct {
         if (!std.mem.eql(u8, hir.registry.get(sn.op).name, "variant_make")) return false;
         // The scrutinee's union declaration fixes the tag range and the
         // constructor arity (the HIR validator checks neither).
-        const named = switch (sn.ty) {
+        const named = switch (pr.typeOf(sn.ty)) {
             .named => |n| n,
             else => return false,
         };
@@ -1354,7 +1353,7 @@ const Rewriter = struct {
         const uses = scan.count;
         if (self.cfg.let_dead and uses == 0) {
             if (!try rewrite_contract.check(self.analysis, let_dead_rule.legality, .{ .expr = init })) return false;
-            const bind_ty = pr.binder(bind).ty;
+            const bind_ty = pr.typeOf(pr.binder(bind).ty);
             if (!try rewrite_contract.checkCleanup(let_dead_rule, self.analysis, .{ .binder_destruction = bind_ty })) return false;
             pr.exprs.items[id] = pr.node(body);
             // The surviving reachable node is `id`; a cleanup token that
@@ -1371,7 +1370,7 @@ const Rewriter = struct {
         // carry an implicit coercion (`let b: any = %value`), and the
         // lowering dispatches on the operand node's own type (`any_cast`
         // packs vs unpacks) — such a `let` stays.
-        if (!pr.node(init).ty.eql(pr.binder(bind).ty)) return false;
+        if (pr.node(init).ty != pr.binder(bind).ty) return false;
         // `move` / `drop` lower their operand through the operand node's own
         // binder payload (`hir_lower_expr.moveNode`), so a forwarded
         // initializer may only land in such a slot when it is itself a
@@ -1388,7 +1387,7 @@ const Rewriter = struct {
             if (init < self.enc.len and self.dirty.contains(init)) return false;
             if (!try rewrite_contract.check(self.analysis, let_forward_rule.legality, .{ .expr = init })) return false;
             if (!try rewrite_contract.checkCleanup(let_forward_rule, self.analysis, .{ .cleanup_free_subtree = init })) return false;
-            const cap = try self.analysis.capabilityOf(pr.node(init).ty) orelse return false;
+            const cap = try self.analysis.capabilityOf(pr.typeOf(pr.node(init).ty)) orelse return false;
             if (cap != .copy) return false;
             try self.substOnce(body, bind, init);
             pr.exprs.items[id] = pr.node(body);
@@ -1530,8 +1529,8 @@ test "tuple projection fires end to end through island admission" {
         .name = "f",
         .kind = .member,
         .module = 0,
-        .params = try a.alloc(meta.Param, 0),
-        .ret = meta.Type{ .primitive = .int32 },
+        .params = try a.alloc(hir.FuncParam, 0),
+        .ret = try built.program.intern(.{ .primitive = .int32 }),
         .root = p.root,
     });
     const stats = try optimize(a, &built, .{});

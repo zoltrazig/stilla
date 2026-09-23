@@ -44,14 +44,15 @@ pub fn bindPattern(c: *Ctx, fs: *FuncState, pid: hir.PatternId, base: *cfg.Value
         .type_test => |tp| {
             // The arm's `type_is` test verified the tag, so the unpack
             // extracts the payload without trapping (Core §11.6.1–2).
+            const tty = c.built.program.typeOf(tp.ty);
             if (base.type_ != .primitive or base.type_.primitive != .any) {
                 return self.fail(no_span, "a type-test pattern requires an 'any' scrutinee", .{});
             }
-            if (cfg_lower_emit.isUnique(self, fs, tp.ty) and !base_owned) {
+            if (cfg_lower_emit.isUnique(self, fs, tty) and !base_owned) {
                 return self.fail(no_span, "cannot recover an unique payload from a borrowed 'any'", .{});
             }
             const op: cfg.Op = if (base_owned) .{ .any_unpack_move = base } else .{ .any_unpack_copy = base };
-            const payload = (try cfg_lower_emit.emit(self, fs, no_span, op, tp.ty)) orelse return;
+            const payload = (try cfg_lower_emit.emit(self, fs, no_span, op, tty)) orelse return;
             try hir_lower.bindBinder(c, fs, tp.bind, payload, payload.state == .owned and payload.ownership == .unique);
         },
         .tuple => |elems| {
@@ -297,7 +298,7 @@ pub fn armTest(c: *Ctx, fs: *FuncState, scrut: *cfg.Value, rid: hir.RegionId, k:
         },
         .type_test => |tp| {
             if (k != 0) return null;
-            return try cfg_lower_emit.emit(self, fs, no_span, .{ .type_is = .{ .value = scrut, .type_ = tp.ty } }, .{ .primitive = .bool });
+            return try cfg_lower_emit.emit(self, fs, no_span, .{ .type_is = .{ .value = scrut, .type_ = c.built.program.typeOf(tp.ty) } }, .{ .primitive = .bool });
         },
         .list => |lp| {
             if (k == 0) {
