@@ -54,9 +54,11 @@ const hir_effects_never = @import("hir_effects_never.zig");
 const hir_effects_drop = @import("hir_effects_drop.zig");
 const hir_effects_const = @import("hir_effects_const.zig");
 const hir_effects_queries = @import("hir_effects_queries.zig");
+const hir_effects_cache = @import("hir_effects_cache.zig");
 
 pub const Summary = effects.Summary;
 pub const Error = std.mem.Allocator.Error;
+pub const SummaryCache = hir_effects_cache.SummaryCache;
 
 pub const lambda_op = hir.opId("lambda").?;
 pub const fn_ref_op = hir.opId("fn_ref").?;
@@ -111,6 +113,13 @@ pub const Config = struct {
     /// generic named type instantiations. Without it, such a type is
     /// conservatively Unique.
     graph: ?*moduleinfo.ModuleGraph = null,
+    /// The session's persistent summary cache (docs/effects.md §8.3).
+    /// When null the analysis allocates a private, never-armed cache, so
+    /// every solve is a full re-derivation — the behavior is byte-for-
+    /// byte the pre-incremental one. A supplied cache lets successive
+    /// `Analysis` instances reuse finalized summaries and re-solve only
+    /// the SCCs a rewrite dirtied.
+    cache: ?*SummaryCache = null,
 };
 
 /// The function-summary driver's state (docs/effects.md §8.2). `cur`
@@ -169,18 +178,49 @@ pub const Analysis = struct {
     /// `never_returns` approximation (the gfp clears it per round).
     never_memo: []?bool,
     never_computed: bool = false,
+    /// The persistent summary cache this analysis solves against
+    /// (docs/effects.md §8.3). A caller-supplied cache arms and is reused
+    /// incrementally; a private one never arms, keeping the default path
+    /// full-solve.
+    cache: *SummaryCache,
+    /// Whether `cache` was supplied by the caller. The private default
+    /// cache is a sink only: it never arms, so every solve is full.
+    incremental: bool,
 
     pub fn init(arena: std.mem.Allocator, built: *hir.BuiltProgram, config: Config) Error!Analysis {
         const memo = try arena.alloc(?Summary, built.program.exprs.items.len);
         @memset(memo, null);
-        const summary = try arena.alloc(Summary, built.funcs.items.len);
+        const cache = if (config.cache) |c| c else try SummaryCache.init(arena);
+        const incremental = config.cache != null;
+        var summary = try arena.alloc(Summary, built.funcs.items.len);
         @memset(summary, effects.pure);
-        const known = try arena.alloc(bool, built.funcs.items.len);
+        var known = try arena.alloc(bool, built.funcs.items.len);
         @memset(known, false);
-        const comp_of = try arena.alloc(u32, built.funcs.items.len);
+        var comp_of = try arena.alloc(u32, built.funcs.items.len);
         @memset(comp_of, 0);
-        const cur = try arena.alloc(Summary, built.funcs.items.len);
+        var cur = try arena.alloc(Summary, built.funcs.items.len);
         @memset(cur, effects.pure);
+        // Seed the working arrays from an armed cache: the incremental
+        // solve starts from the last finalized values and only re-solves
+        // the SCCs a rewriter dirtied.
+        var drop_node_of: std.AutoHashMapUnmanaged(hir.HIRTypeId, u32) = .empty;
+        var drop_key_of_node: std.ArrayList(hir.HIRTypeId) = .empty;
+        var top_sink_node: u32 = 0;
+        if (incremental and cache.armed and cache.summary.len > 0) {
+            const n = cache.summary.len;
+            summary = try arena.alloc(Summary, n);
+            @memcpy(summary, cache.summary);
+            known = try arena.alloc(bool, n);
+            @memcpy(known, cache.known);
+            comp_of = try arena.alloc(u32, n);
+            @memset(comp_of, 0);
+            cur = try arena.alloc(Summary, n);
+            @memset(cur, effects.pure);
+            try drop_key_of_node.appendSlice(arena, cache.drop_key_of_node.items);
+            var it = cache.drop_node_of.iterator();
+            while (it.next()) |e| try drop_node_of.put(arena, e.key_ptr.*, e.value_ptr.*);
+            top_sink_node = cache.top_sink_node;
+        }
         // The local fn-ref propagation index (docs/effects.md §9.2): one
         // pass over the node store mapping a plain `let`'s single binder
         // to the initializer it is bound to. Destructuring lets
@@ -222,6 +262,11 @@ pub const Analysis = struct {
             .comp_of = comp_of,
             .solving = null,
             .cur = cur,
+            .drop_node_of = drop_node_of,
+            .drop_key_of_node = drop_key_of_node,
+            .top_sink_node = top_sink_node,
+            .cache = cache,
+            .incremental = incremental,
             .binder_init = binder_init,
             .never_returns = blk: {
                 const nr = try arena.alloc(bool, built.funcs.items.len);
@@ -2540,4 +2585,196 @@ test "hir_effects: an undeclared host call is the instance top, extra modes incl
         if (e.op != call_op) continue;
         try testing.expect((try an2.effectOf(@intCast(i))).eql(effects.top));
     }
+}
+
+// ---------------------------------------------------------------------------
+// Incremental function-summary cache (docs/effects.md §8.3)
+// ---------------------------------------------------------------------------
+
+test "hir_effects: an armed summary cache re-solves only dirty SCCs" {
+    var f = try build("app", &.{.{
+        "app",
+        \\fn base() -> int32 { 1 }
+        \\fn mid() -> int32 { base() + 2 }
+        \\fn top() -> int32 { mid() + 3 }
+    }});
+    defer f.deinit();
+    const a = f.arena.allocator();
+    const cache = try SummaryCache.init(a);
+
+    // First solve: the cache is unarmed, so this is a full derivation.
+    var an = try Analysis.init(a, f.built, .{ .graph = f.graph, .cache = cache });
+    try an.analyze();
+    try testing.expect(cache.armed);
+    try testing.expectEqual(@as(usize, 0), cache.dirtyCount());
+    const full_transfers = cache.stats.node_transfers;
+    const full_solved = cache.stats.components_solved;
+    const full_rounds = cache.stats.fixpoint_rounds;
+    const full_solves = cache.stats.solves;
+    try testing.expect(full_transfers > 0);
+    try testing.expect(full_solved > 1);
+
+    // Nothing dirty: the second analysis reuses every cached value and
+    // performs no transfer at all.
+    var an_noop = try Analysis.init(a, f.built, .{ .graph = f.graph, .cache = cache });
+    try an_noop.analyze();
+    try testing.expectEqual(full_transfers, cache.stats.node_transfers);
+    try testing.expectEqual(full_solved, cache.stats.components_solved);
+    try testing.expectEqual(full_rounds, cache.stats.fixpoint_rounds);
+    try testing.expectEqual(full_solves, cache.stats.solves);
+
+    // Dirty one function: only its SCC (no caller's summary can move) is
+    // re-solved, so every counter is strictly below the full solve.
+    const mid = funcId(&f, "app.mid").?;
+    try cache.markFunctionDirty(mid);
+    var an2 = try Analysis.init(a, f.built, .{ .graph = f.graph, .cache = cache });
+    try an2.analyze();
+    try testing.expect(cache.stats.node_transfers - full_transfers < full_transfers);
+    try testing.expect(cache.stats.components_solved - full_solved < full_solved);
+    try testing.expect(cache.stats.fixpoint_rounds - full_rounds < full_rounds);
+    // Every other SCC kept its cached value.
+    try testing.expect(cache.stats.components_reused > 0);
+
+    // The incremental result agrees with a fresh full solve, function by
+    // function.
+    var fresh = try Analysis.init(a, f.built, .{ .graph = f.graph });
+    try fresh.analyze();
+    for (f.built.funcs.items, 0..) |_, i| {
+        const fid: hir.FuncId = @intCast(i);
+        try testing.expect(an2.eng.eql(try an2.functionSummary(fid), try fresh.functionSummary(fid)));
+    }
+}
+
+test "hir_effects: an incremental re-solve propagates a changed callee to callers" {
+    // Only `leaf` is marked dirty; the may_trap it gains must still reach
+    // `mid` and `top` through the incremental pass's caller propagation.
+    var f = try build("app", &.{.{
+        "app",
+        \\fn leaf() -> int32 { 1 }
+        \\fn mid() -> int32 { leaf() }
+        \\fn top() -> int32 { mid() }
+    }});
+    defer f.deinit();
+    const a = f.arena.allocator();
+    const cache = try SummaryCache.init(a);
+    var an = try Analysis.init(a, f.built, .{ .graph = f.graph, .cache = cache });
+    try an.analyze();
+    const leaf = funcId(&f, "app.leaf").?;
+    const mid = funcId(&f, "app.mid").?;
+    const top = funcId(&f, "app.top").?;
+    try testing.expect((try an.functionSummary(top)).eql(effects.pure));
+
+    // Rewrite `leaf`'s body to a trapping operation and mark it stale.
+    const leaf_root = f.built.funcs.items[leaf].root;
+    const leaf_body = bodyOf(&f.built.program, leaf_root);
+    f.built.program.exprs.items[leaf_body].op = hir.opId("panic").?;
+    try cache.markFunctionDirty(leaf);
+
+    var an2 = try Analysis.init(a, f.built, .{ .graph = f.graph, .cache = cache });
+    try an2.analyze();
+    try testing.expect((try an2.functionSummary(leaf)).may_trap);
+    try testing.expect((try an2.functionSummary(mid)).may_trap);
+    try testing.expect((try an2.functionSummary(top)).may_trap);
+
+    // The incremental result agrees with a fresh full solve.
+    var fresh = try Analysis.init(a, f.built, .{ .graph = f.graph });
+    try fresh.analyze();
+    try testing.expect(an2.eng.eql(try an2.functionSummary(leaf), try fresh.functionSummary(leaf)));
+    try testing.expect(an2.eng.eql(try an2.functionSummary(mid), try fresh.functionSummary(mid)));
+    try testing.expect(an2.eng.eql(try an2.functionSummary(top), try fresh.functionSummary(top)));
+}
+
+test "hir_effects: a stale summary read before the solve fails closed" {
+    var f = try build("app", &.{.{
+        "app",
+        \\fn leaf() -> int32 { 1 }
+        \\fn mid() -> int32 { leaf() }
+    }});
+    defer f.deinit();
+    const a = f.arena.allocator();
+    const cache = try SummaryCache.init(a);
+    var an = try Analysis.init(a, f.built, .{ .graph = f.graph, .cache = cache });
+    try an.analyze();
+
+    const leaf = funcId(&f, "app.leaf").?;
+    const mid = funcId(&f, "app.mid").?;
+    try cache.markFunctionDirty(mid);
+
+    // An analysis that has not solved yet must not publish the stale
+    // cached value of a dirty function; a clean sibling still reads its
+    // cached value.
+    var an2 = try Analysis.init(a, f.built, .{ .graph = f.graph, .cache = cache });
+    try testing.expect(an2.cache.isDirty(mid));
+    try testing.expect((try an2.functionSummary(mid)).eql(effects.top));
+    try testing.expect((try an2.functionSummary(leaf)).eql(effects.pure));
+
+    // After the solve the stale entry is gone and the value is precise.
+    try an2.analyze();
+    try testing.expect(!an2.cache.isDirty(mid));
+    try testing.expect((try an2.functionSummary(mid)).eql(effects.pure));
+}
+
+test "hir_effects: drop-node identity survives incremental solves" {
+    var f = try build("app", &.{.{
+        "app",
+        \\struct Token { id: int32; drop(t) { let x = t.id; } }
+        \\fn use(id: int32) -> int32 {
+        \\    let t = Token { id: id };
+        \\    0
+        \\}
+        \\fn caller(id: int32) -> int32 { use(id) }
+    }});
+    defer f.deinit();
+    const a = f.arena.allocator();
+    const cache = try SummaryCache.init(a);
+    var an = try Analysis.init(a, f.built, .{ .graph = f.graph, .cache = cache });
+    try an.analyze();
+    const nodes = cache.drop_key_of_node.items.len;
+    try testing.expect(nodes > f.built.funcs.items.len + 1);
+
+    // No new type is interned, so the persistent identity table keeps its
+    // length and every cached node id still names the same type.
+    try cache.markFunctionDirty(funcId(&f, "app.use").?);
+    var an2 = try Analysis.init(a, f.built, .{ .graph = f.graph, .cache = cache });
+    try an2.analyze();
+    try testing.expectEqual(nodes, cache.drop_key_of_node.items.len);
+
+    var fresh = try Analysis.init(a, f.built, .{ .graph = f.graph });
+    try fresh.analyze();
+    for (f.built.funcs.items, 0..) |_, i| {
+        const fid: hir.FuncId = @intCast(i);
+        try testing.expect(an2.eng.eql(try an2.functionSummary(fid), try fresh.functionSummary(fid)));
+    }
+}
+
+test "hir_effects: a lattice-instance change un-arms the summary cache" {
+    var f = try build("app", &.{.{
+        "app",
+        \\const base: int32 = 3;
+        \\fn get() -> int32 { base }
+    }});
+    defer f.deinit();
+    const a = f.arena.allocator();
+    const cache = try SummaryCache.init(a);
+    var an = try Analysis.init(a, f.built, .{ .graph = f.graph, .cache = cache });
+    try an.analyze();
+    try testing.expect(cache.armed);
+    try testing.expect(cache.instance_digest != null);
+
+    // A provider with a different identity has a different descriptor, so
+    // the cache's values are stale in bulk: the next solve must be full.
+    const provider = effects.Provider{ .id = "stilla.test.cache-instance" };
+    var eng = try effects.Engine.init(a, &provider, .{});
+    try testing.expect(eng.descriptor_digest != an.eng.descriptor_digest);
+    try f.built.program.effect_interner.reset(eng.descriptor_digest);
+    const reused_before = cache.stats.components_reused;
+
+    var an2 = try Analysis.init(a, f.built, .{
+        .graph = f.graph,
+        .cache = cache,
+        .engine = &eng,
+    });
+    try an2.analyze();
+    try testing.expectEqual(reused_before, cache.stats.components_reused);
+    try testing.expectEqual(eng.descriptor_digest, cache.instance_digest.?);
 }

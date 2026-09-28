@@ -515,8 +515,9 @@ mode、别名或层级成环、一个 child 两个 parent、别名 / 树边涉�
 
 **消费面。** `hir_effects` 的派生查询、函数摘要 SCC fixpoint、SEG legality、
 `rewrite_contract.Requirement`、module-const 初始化 / teardown 检查、host 元数据
-（`HostDecl` / `HostEffects.resolve` / `consolidate`）都读同一个引擎实例；CFG 层的
-粗粒度 op 位保持**显式分层**（§15，不要求逐位相等）。
+（`HostDecl` / `HostEffects.resolve` / `consolidate`）都读同一个引擎实例；会话的
+`SummaryCache`（§8.3）也以该实例的 `descriptor_digest` 为键，换实例即 un-arm
+重解。CFG 层的粗粒度 op 位保持**显式分层**（§15，不要求逐位相等）。
 
 **指纹。** `EffectEnvironmentFingerprint` 把 provider 身份 / 版本、规范化后的 mode
 集、资源偏序与 registry generation 纳入语义键（§13）：会话的格描述子或注册表任一
@@ -678,7 +679,8 @@ until stable
   `solveComponent` 做 dependency-first Kleene / Jacobi 迭代；同 SCC 读 `cur`、已完成
   读 final），递归 SCC 的**函数**成员播种 `may_diverge`。注册表在本轮推导期间固定，
   单调 transfer 与有限高度保证收敛。函数摘要与 `drop_effect(T)` 已在
-  **一张依赖图**上求解（§11.1）。
+  **一张依赖图**上求解（§11.1）。会话 `SummaryCache`（§8.3）让非脏 SCC 复用上次
+  finalize 值，只有被改写函数所在的 SCC 才从种子重解。
 - **调用图构成**：函数 SCC 建在统一依赖图（§11.1）的 `function` 节点上：`collectCallees`
   为可直接解析的 callee（直接 `fn_ref`、§9.2 局部收窄得到的有限目标集）加边，
   可以是跨模块的调用环；`drop` 类型的 hook、结构销毁字段与 cleanup token 是
@@ -705,24 +707,43 @@ fn g() { f(); host.foo(); }  两者均 may_diverge = true；访问仍保守含 h
 ### 8.3 失效与重算
 
 摘要随 HIR 变换失效（任何变换之后都要对受影响区域重新验证 ownership 与
-effects）。
+effects）。**已落地：会话级增量缓存。** 每次 `frontend.compile` 在 compile
+arena 上建一个 `SummaryCache`（`passes/hir_effects_cache.zig`），并以 `.cache`
+穿到初始 `hir_effects.Analysis`、`hir_simplify.optimize` / `hir_seg.optimize`
+的每一轮、以及每次 `revalidateHir`。默认 `.cache = null` 时 `Analysis` 自建一个
+**永不 arm** 的私有缓存，故直接的白盒调用方仍是逐字节不变的全量求解。
 
-> **现状：全量重算，无增量失效。** `solveSummaries` 每次开始时清空 memo /
-> summary，`analyze` / `validate` 从头重导；没有标脏、世代 / 版本号或调用者
-> 传播。原设计的增量失效模型（下方）**未实现**，因为当前消费者每轮都从头
-> 重导（hir_seg.zig）与 `revalidateHir`。
-
-设计意图（待需要时落地）：
-
-- **存储与求解**：函数级 memo 缓存每函数摘要；被改写函数所属递归 SCC 需重算时
-  **联合重算**——从种子重新迭代，**不在旧摘要上继续 join**（重写会减少
-  effects，增量向上合并永远降不下来）。
-- **标脏**：标脏被改写函数，并用世代 / 版本号阻断一切缓存旧摘要的查询。
-- **传播**：重算后 interned id 与旧值相等即短路；传播范围由「摘要是否真的变了」
-  决定，不由「哪个函数被改」决定。
-- **边界**：id 短路只作用于效果摘要；ownership / cleanup / call-target 等派生
-  事实各有依赖与失效规则——§10 的查询组合它们，不等于它们随 effect id 自动免
-  失效。
+- **存储与求解**：`SummaryCache` 按统一节点（§11.1）保存上一次 finalize 的
+  `summary` / `known`，以及稳定的 drop-node 身份（`drop_node_of` /
+  `drop_key_of_node`）与 drop 节点的出边（`drop_edges`）。被改写函数标脏后，
+  `solveSummaries` 只对「脏函数的当前 SCC + 它上一轮所属 SCC 的全体成员 + 一切
+  无 finalize 值的新节点」**联合重解**：从种子重新迭代，**不在旧摘要上继续
+  join**（重写会减少 effects，增量向上合并永远降不下来）。非脏 SCC 直接复用
+  缓存值。`Analysis.init` 在 arm 的缓存上播种工作数组，故无脏函数时
+  `solveSummaries` 直接短路，连依赖图都不重建。
+- **标脏**：改写者在改写时把每个被改函数标脏（`markFunctionDirty`），下一次
+  `Analysis.init` 消费脏集。`hir_simplify` / `hir_seg` 的 `Rewriter.run` 按函数
+  下标遍历：进每个函数前把 `self.changed` 复位为 `false`，改写后若仍为真则标脏
+  该函数，并 OR 进本轮局部的 `any_changed`（作为该轮的收敛标志 / 返回值）。
+  `self.changed` 在单个函数的改写期间只置真、不清零，故必须逐函数复位——若沿用
+  一个累积标志，就只标脏本轮第一个变化的函数、静默漏掉此后每一个。常量初始化器
+  不是依赖图节点，只贡献 drop 类型的*存在性*（新 drop 节点无缓存值、自动重解），
+  故不标脏。`hir_simplify` 还在退役一个仍具活动 token 的节点时（`active_tokens`）
+  显式标脏其属主，即便该函数本轮没有结构改写（如对类型已是 `never` 的节点跑
+  `neverSuffix`）；早已退役的节点再次标 retire 不改变 HIR 内容，故不标。只有
+  真正的 HIR 内容变化才标；改写器自己的每轮 `dirty` / `retire` 临时集不算。
+- **过期读失败关闭**：`nodeValue` 对仍是脏的函数返回 `Top`——它的缓存值在重解
+  前是过期事实。增量 pass 一旦 finalize 某 SCC 就移除其中函数的脏标记，之后
+  调用者读到新值；pass 结束脏集为空。
+- **传播**：`solveComponent` 返回成员 finalize 值是否真的移动；只有移动才沿反图
+  把调用者 SCC 加入脏集。传播范围由「摘要是否真的变了」决定，不由「哪个函数被
+  改」决定。
+- **失效边界**：缓存值以格实例的 `descriptor_digest` 为键，发现与当前实例不符
+  即 `reset`（un-arm），下次全量重解（§5.7）。`EffectEnvironmentFingerprint`
+  是 phase-2/3 结果的语义键；`SummaryCache` 本身是**单次 compile 会话**内的，
+  跨 compile 不复用。id 短路只作用于效果摘要；ownership / cleanup /
+  call-target 等派生事实各有依赖与失效规则——§10 的查询组合它们，不等于它们随
+  effect id 自动免失效。
 
 ## 9. 一等函数与间接调用
 

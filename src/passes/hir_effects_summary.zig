@@ -26,6 +26,16 @@ const seq_op = hir_effects.seq_op;
 const move_op = hir_effects.move_op;
 const borrow_op = hir_effects.borrow_op;
 
+/// The unified dependency graph + SCC decomposition of one solve, built
+/// by `buildGraph`. `adj[u]` are the nodes `u` depends on; `radj` is the
+/// reverse; `comps` are in Kosaraju's discovery order (source SCCs
+/// first), so iterating it in reverse is dependency-first.
+const Graph = struct {
+    adj: std.ArrayList(std.ArrayList(u32)),
+    radj: []std.ArrayList(u32),
+    comps: std.ArrayList(std.ArrayList(u32)),
+};
+
 fn targetEq(a: ResolvedTarget, b: ResolvedTarget) bool {
     return switch (a) {
         .func => |f| switch (b) {
@@ -320,10 +330,18 @@ pub fn callbackBound(self: *Analysis, arg: hir.ExprId) Error!?Summary {
 /// being solved a member reads the in-progress approximation; every
 /// other node reads the finalized value. An unknown node is `Top`
 /// (docs/effects.md §8.2/§11.1).
+///
+/// A **dirty function** (one a rewriter changed since the last solve)
+/// has a stale cached value, so it fails closed to `Top` until its SCC
+/// is re-solved (docs/effects.md §8.3). During the incremental pass the
+/// dirty entry is removed as soon as that SCC is finalized, so a later
+/// caller reads the fresh value; after the pass the set is empty and
+/// ordinary reads are unaffected.
 pub fn nodeValue(self: *Analysis, node: u32) Summary {
     if (self.solving) |s| {
         if (self.comp_of[node] == s) return self.cur[node];
     }
+    if (node < self.built.funcs.items.len and self.cache.isDirty(@intCast(node))) return self.eng.top();
     if (!self.known[node]) return self.eng.top();
     return self.summary[node];
 }
@@ -353,33 +371,96 @@ pub fn nodeTransfer(self: *Analysis, node: u32) Error!Summary {
 /// Solve the whole program's effect summaries on one dependency graph
 /// (docs/effects.md §11.1). Nodes `0..F-1` are functions, `F` the `Top`
 /// sink, `F+1..` `drop_type` nodes keyed by canonical `HIRTypeId`; the
-/// four edge kinds are built once and kept for the SCC pass. A single
-/// Kosaraju decomposition is processed dependency-first; each SCC runs
-/// a Kleene/Jacobi simultaneous update over the union. `function →
+/// four edge kinds are built per solve and fed to one Kosaraju
+/// decomposition processed dependency-first, each SCC running a
+/// Kleene/Jacobi simultaneous update over the union. `function →
 /// drop_type` edges — previously missing for implicit cleanup — close
 /// the cross-layer cycle (`hook → fn → type`) that used to fall back to
 /// `Top`.
+///
+/// With a caller-supplied, armed cache (docs/effects.md §8.3) only the
+/// SCCs a rewriter dirtied are re-solved from their seeds; every other
+/// SCC reuses its cached finalized values. The default (no-cache) path
+/// allocates a private never-armed cache, so it always runs the full
+/// solve above and is unchanged.
 pub fn solveSummaries(self: *Analysis) Error!void {
     const fn_count = self.built.funcs.items.len;
     self.solving = null;
     @memset(self.memo, null);
-    self.drop_node_of.clearRetainingCapacity();
-    self.drop_key_of_node.clearRetainingCapacity();
 
-    // Nodes 0..F-1 are functions, F the reserved Top sink. One adjacency
-    // list per node, and the inverse type-key table grows in lockstep.
-    var adj = std.ArrayList(std.ArrayList(u32)).empty;
-    for (0..fn_count + 1) |_| {
-        try adj.append(self.arena, .empty);
-        try self.drop_key_of_node.append(self.arena, 0);
+    // The cross-instance binding (docs/effects.md §5.7/§8.3): a cache
+    // populated under a different lattice descriptor is stale in bulk.
+    if (self.cache.instance_digest) |d| {
+        if (d != self.eng.descriptor_digest) self.cache.reset();
     }
+
+    const incremental = self.incremental and self.cache.armed;
+    if (incremental and self.cache.dirty.count() == 0) {
+        // Nothing body-level changed since the last solve (the invariant
+        // the rewriters uphold): the working arrays seeded at init hold
+        // every finalized value, so there is nothing to rebuild.
+        return;
+    }
+
+    if (!incremental) {
+        // Full re-derivation. The private default cache never arms, so
+        // an ordinary analysis always takes this path.
+        self.drop_node_of.clearRetainingCapacity();
+        self.drop_key_of_node.clearRetainingCapacity();
+        for (0..fn_count + 1) |_| try self.drop_key_of_node.append(self.arena, 0);
+        const g = try buildGraph(self, fn_count, false);
+        var c = g.comps.items.len;
+        while (c > 0) {
+            c -= 1;
+            _ = try self.solveComponent(g.comps.items[c].items, g.adj.items);
+            self.cache.stats.components_solved += 1;
+        }
+        if (self.incremental) {
+            try snapshot(self, g);
+            self.cache.arm();
+            self.cache.instance_digest = self.eng.descriptor_digest;
+            self.cache.dirty.clearRetainingCapacity();
+            self.cache.stats.solves += 1;
+        }
+        return;
+    }
+
+    // Incremental: the node-identity tables were seeded from the cache
+    // at init; rebuild the (possibly changed) edges, then re-solve only
+    // the SCCs the dirty set reaches.
+    const g = try buildGraph(self, fn_count, true);
+    try incrementalPass(self, g, fn_count);
+    try snapshot(self, g);
+    self.cache.instance_digest = self.eng.descriptor_digest;
+    self.cache.dirty.clearRetainingCapacity();
+    self.cache.stats.solves += 1;
+}
+
+/// Rebuild the unified graph and its SCC decomposition. `preserve`
+/// selects the incremental contract: existing `summary` / `known`
+/// values carry over (and new nodes default to `pure` / `false`); a
+/// full solve resets the whole store. Pre-existing drop nodes keep
+/// their cached structural edges (`cache.drop_edges`); only function /
+/// constant edges are recomputed, and new drop nodes are generated by
+/// `addDropNode`, which preserves every existing id.
+fn buildGraph(self: *Analysis, fn_count: usize, preserve: bool) Error!Graph {
+    var adj = std.ArrayList(std.ArrayList(u32)).empty;
+    const pre = self.drop_key_of_node.items.len;
+    for (0..pre) |_| try adj.append(self.arena, .empty);
+
+    // Nodes 0..F-1 are functions, F the reserved Top sink.
     self.top_sink_node = @intCast(fn_count);
+    const first_drop: usize = @as(usize, self.top_sink_node) + 1;
+    var i = first_drop;
+    while (i < pre) : (i += 1) {
+        for (self.cache.drop_edges.items[i]) |v| try adj.items[i].append(self.arena, v);
+    }
 
     // 1. function → function and function → drop_type.
-    for (0..fn_count) |i| {
-        const f: hir.FuncId = @intCast(i);
-        try self.collectCallees(f, &adj.items[i]);
-        try self.collectFunctionDrops(f, &adj, @intCast(i));
+    for (0..fn_count) |k| {
+        const f: hir.FuncId = @intCast(k);
+        try self.collectCallees(f, &adj.items[k]);
+        try self.collectFunctionDrops(f, &adj, @intCast(k));
     }
 
     // 2. Drop-type roots outside function bodies: a constant's declared
@@ -395,10 +476,14 @@ pub fn solveSummaries(self: *Analysis) Error!void {
 
     // 3. Node storage sized to the whole graph.
     const n = adj.items.len;
-    self.summary = try self.arena.alloc(Summary, n);
-    @memset(self.summary, effects.pure);
-    self.known = try self.arena.alloc(bool, n);
-    @memset(self.known, false);
+    if (preserve) {
+        try growNodeArrays(self, n);
+    } else {
+        self.summary = try self.arena.alloc(Summary, n);
+        @memset(self.summary, effects.pure);
+        self.known = try self.arena.alloc(bool, n);
+        @memset(self.known, false);
+    }
     self.cur = try self.arena.alloc(Summary, n);
     @memset(self.cur, effects.pure);
     self.comp_of = try self.arena.alloc(u32, n);
@@ -415,10 +500,10 @@ pub fn solveSummaries(self: *Analysis) Error!void {
     var comps = std.ArrayList(std.ArrayList(u32)).empty;
     const seen = try self.arena.alloc(bool, n);
     @memset(seen, false);
-    var i = order.len;
-    while (i > 0) {
-        i -= 1;
-        const v = order[i];
+    var k = order.len;
+    while (k > 0) {
+        k -= 1;
+        const v = order[k];
         if (seen[v]) continue;
         var comp = std.ArrayList(u32).empty;
         try dfsCollect(self.arena, radj, v, seen, &comp);
@@ -426,14 +511,125 @@ pub fn solveSummaries(self: *Analysis) Error!void {
         for (comp.items) |m| self.comp_of[m] = cid;
         try comps.append(self.arena, comp);
     }
+    return .{ .adj = adj, .radj = radj, .comps = comps };
+}
 
-    // 5. Process components dependency-first. Kosaraju's second pass
-    //    discovers source SCCs of G first; reverse that.
-    var c = comps.items.len;
+/// Grow the working per-node arrays to `n`, preserving the finalized
+/// prefix (seeded from the cache) and defaulting new nodes to
+/// `pure` / `false`.
+fn growNodeArrays(self: *Analysis, n: usize) Error!void {
+    if (self.summary.len >= n) return;
+    const old = self.summary.len;
+    const summary = try self.arena.alloc(Summary, n);
+    @memcpy(summary[0..old], self.summary[0..old]);
+    @memset(summary[old..], effects.pure);
+    self.summary = summary;
+    const known = try self.arena.alloc(bool, n);
+    @memcpy(known[0..old], self.known[0..old]);
+    @memset(known[old..], false);
+    self.known = known;
+}
+
+/// The incremental pass (docs/effects.md §8.3): mark the SCCs a dirty
+/// function (or an unsolved node) reaches, then walk the SCCs in
+/// dependency-first order, re-solving each marked one from its seeds and
+/// propagating through `radj` whenever a member's finalized value moved.
+fn incrementalPass(self: *Analysis, g: Graph, fn_count: usize) Error!void {
+    const n = g.adj.items.len;
+    var dirty_comps = std.AutoHashMapUnmanaged(u32, void).empty;
+    defer dirty_comps.deinit(self.arena);
+
+    // Initial dirty set: the function's new SCC, every member of the SCC
+    // it used to share (so a broken recursion loses its old `Diverge`
+    // seed), and every node with no finalized value (new drop nodes).
+    var it = self.cache.dirty.keyIterator();
+    while (it.next()) |key| {
+        const fid = key.*;
+        if (fid < self.comp_of.len) try dirty_comps.put(self.arena, self.comp_of[fid], {});
+        if (fid < self.cache.cached_comp_of.len) {
+            const old = self.cache.cached_comp_of[fid];
+            if (old < self.cache.cached_comps.len) {
+                for (self.cache.cached_comps[old]) |m| {
+                    if (m < self.comp_of.len) try dirty_comps.put(self.arena, self.comp_of[m], {});
+                }
+            }
+        }
+    }
+    var node: u32 = 0;
+    while (node < n) : (node += 1) {
+        if (!self.known[node]) try dirty_comps.put(self.arena, self.comp_of[node], {});
+    }
+
+    // Kosaraju's second pass discovers source SCCs first; reversing it
+    // visits callees before their callers, so marking a caller when a
+    // callee moves always lands on a component not yet processed.
+    var c = g.comps.items.len;
     while (c > 0) {
         c -= 1;
-        try self.solveComponent(comps.items[c].items, adj.items);
+        const comp = g.comps.items[c].items;
+        if (!dirty_comps.contains(self.comp_of[comp[0]])) {
+            self.cache.stats.components_reused += 1;
+            for (comp) |m| {
+                if (m < fn_count) self.cache.stats.functions_reused += 1;
+            }
+            continue;
+        }
+        const changed = try self.solveComponent(comp, g.adj.items);
+        self.cache.stats.components_solved += 1;
+        // The component is finalized: its functions are no longer stale.
+        for (comp) |m| {
+            if (m < fn_count) _ = self.cache.dirty.remove(m);
+        }
+        if (changed) {
+            for (comp) |v| {
+                for (g.radj[v].items) |u| try dirty_comps.put(self.arena, self.comp_of[u], {});
+            }
+        }
     }
+}
+
+/// Copy the working solver state back into the persistent cache so the
+/// next `Analysis` can seed from it.
+fn snapshot(self: *Analysis, g: Graph) Error!void {
+    const cache = self.cache;
+    const n = g.adj.items.len;
+    try cache.resize(n);
+    // Match the cache to *this* solve's node count even when a full re-solve
+    // after an un-arm landed on fewer nodes than the previous armed solve.
+    // `resize` only grows, so without trimming, `summary` / `known` would
+    // keep a stale tail past the live `drop_key_of_node` range; a later
+    // incremental solve appending a new drop node into that tail would read
+    // a stale `known == true` value. Trimming (the backing buffer stays in
+    // the arena) makes `summary.len == known.len == drop_key_of_node.len`
+    // an invariant, so every appended node starts `pure` / `false`.
+    if (cache.summary.len != n) {
+        cache.summary = cache.summary[0..n];
+        cache.known = cache.known[0..n];
+    }
+    @memcpy(cache.summary[0..n], self.summary[0..n]);
+    @memcpy(cache.known[0..n], self.known[0..n]);
+
+    cache.cached_comp_of = try self.arena.dupe(u32, self.comp_of);
+    const comps = try self.arena.alloc([]u32, g.comps.items.len);
+    for (g.comps.items, 0..) |comp, k| comps[k] = try self.arena.dupe(u32, comp.items);
+    cache.cached_comps = comps;
+
+    cache.drop_key_of_node.clearRetainingCapacity();
+    try cache.drop_key_of_node.appendSlice(self.arena, self.drop_key_of_node.items);
+    cache.drop_node_of.clearRetainingCapacity();
+    var it = self.drop_node_of.iterator();
+    while (it.next()) |e| try cache.drop_node_of.put(self.arena, e.key_ptr.*, e.value_ptr.*);
+
+    cache.drop_edges.clearRetainingCapacity();
+    var k: usize = 0;
+    while (k < n) : (k += 1) {
+        if (k <= self.top_sink_node) {
+            try cache.drop_edges.append(self.arena, try self.arena.alloc(u32, 0));
+        } else {
+            try cache.drop_edges.append(self.arena, try self.arena.dupe(u32, g.adj.items[k].items));
+        }
+    }
+    cache.top_sink_node = self.top_sink_node;
 }
 
 /// Every `call` target in `fid`'s body that the local narrowing of
@@ -505,7 +701,12 @@ pub fn collectCallableTarget(self: *Analysis, arg: hir.ExprId, out: *std.ArrayLi
 /// recursive component (a cycle or self-loop containing at least one
 /// function); `drop_type` nodes seed `pure`, so a purely recursive type
 /// never acquires `may_diverge` (docs/effects.md §11.1).
-pub fn solveComponent(self: *Analysis, comp: []const u32, adj: []const std.ArrayList(u32)) Error!void {
+///
+/// Returns whether any member's finalized value differs from the value
+/// it had before this call. The incremental pass uses that to propagate
+/// dirty marks to the callers of a component whose summary moved
+/// (docs/effects.md §8.3).
+pub fn solveComponent(self: *Analysis, comp: []const u32, adj: []const std.ArrayList(u32)) Error!bool {
     const fn_count = self.built.funcs.items.len;
     var recursive = comp.len > 1;
     if (!recursive) {
@@ -526,6 +727,7 @@ pub fn solveComponent(self: *Analysis, comp: []const u32, adj: []const std.Array
     }
 
     const next = try self.arena.alloc(Summary, comp.len);
+    var rounds: u64 = 0;
     while (true) {
         // A round is a simultaneous (Jacobi) update: the memo is
         // cleared so every transfer is derived from the same `cur`
@@ -536,7 +738,9 @@ pub fn solveComponent(self: *Analysis, comp: []const u32, adj: []const std.Array
             const body = try self.nodeTransfer(node);
             const seed: Summary = if (func_recursive and node < fn_count) effects.may_diverge else effects.pure;
             next[k] = try self.eng.join(seed, body);
+            self.cache.stats.node_transfers += 1;
         }
+        rounds += 1;
         var changed = false;
         for (comp, 0..) |node, k| {
             if (!self.eng.eql(next[k], self.cur[node])) {
@@ -546,10 +750,14 @@ pub fn solveComponent(self: *Analysis, comp: []const u32, adj: []const std.Array
         }
         if (!changed) break;
     }
+    self.cache.stats.fixpoint_rounds += rounds;
+    var value_changed = false;
     for (comp) |node| {
+        if (!self.known[node] or !self.eng.eql(self.cur[node], self.summary[node])) value_changed = true;
         self.summary[node] = self.cur[node];
         self.known[node] = true;
     }
+    return value_changed;
 }
 
 pub fn recordBodySummary(self: *Analysis, rec: hir.FuncRecord) Error!Summary {

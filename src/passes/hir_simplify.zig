@@ -139,6 +139,12 @@ pub const Config = struct {
     /// final re-validation read one instance. Null = the default `flat`
     /// instance over `resources`.
     engine: ?*const effects.Engine = null,
+    /// The session's persistent summary cache (docs/effects.md §8.3),
+    /// passed through to every internal `hir_effects.Analysis` so the
+    /// rounds reuse finalized summaries and re-solve only the SCCs a
+    /// rewrite dirtied. Null = a private, never-armed cache (a full solve
+    /// every round), leaving direct white-box callers unchanged.
+    cache: ?*hir_effects.SummaryCache = null,
     /// Bound on analysis → rewrite rounds (each round re-derives effects).
     max_iterations: u32 = 8,
     /// Run dead-let elimination.
@@ -158,7 +164,7 @@ pub fn optimize(arena: std.mem.Allocator, built: *hir.BuiltProgram, config: Conf
     var stats = Stats{};
     var iter: u32 = 0;
     while (iter < config.max_iterations) : (iter += 1) {
-        var analysis = try hir_effects.Analysis.init(arena, built, .{ .graph = config.graph, .host_decls = config.host_decls, .resources = config.resources, .engine = config.engine });
+        var analysis = try hir_effects.Analysis.init(arena, built, .{ .graph = config.graph, .host_decls = config.host_decls, .resources = config.resources, .engine = config.engine, .cache = config.cache });
         try analysis.analyze();
         var rw = Rewriter{ .arena = arena, .built = built, .analysis = &analysis, .cfg = config };
         const changed = try rw.run();
@@ -186,6 +192,15 @@ const Rewriter = struct {
     /// temporary can no longer be a live value, and the cleanup-token
     /// validator requires the token's `ty` to agree with its node).
     retire: std.AutoHashMapUnmanaged(hir.ExprId, void) = .empty,
+    /// The function whose body the walk is currently rewriting, so a
+    /// retire mark can be attributed to its owner (`retireTokens` runs
+    /// after the walk). Null while a constant initializer is rewritten.
+    cur_fn: ?hir.FuncId = null,
+    /// Origins of cleanup tokens still active at the start of this round.
+    /// A retire mark for a node with no active token changes no HIR
+    /// content (its token was retired in an earlier round), so it must not
+    /// mark its function stale.
+    active_tokens: std.AutoHashMapUnmanaged(hir.ExprId, void) = .empty,
 
     fn p(self: *Rewriter) *hir.Program {
         return &self.built.program;
@@ -193,13 +208,38 @@ const Rewriter = struct {
 
     fn run(self: *Rewriter) Error!bool {
         // Nodes appended by this pass are rewritten only on a later
-        // round, when a fresh analysis covers them.
-        for (self.built.funcs.items) |rec| try self.rewrite(rec.root);
+        // round, when a fresh analysis covers them. Attribute every
+        // rewrite to its owning function and mark it stale in the session
+        // cache so the next `Analysis.init` re-solves exactly the SCCs
+        // whose summaries may have moved (docs/effects.md §8.3).
+        //
+        // `self.changed` is a monotone round-level flag for the return
+        // value, so it is reset per function: a single cumulative flag
+        // would mark only the first function that changed and silently
+        // skip every later one. Constant initializers are not
+        // dependency-graph nodes (constants only contribute drop-type
+        // *existence*, handled automatically), so they are not marked.
+        for (self.p().cleanup_tokens.items) |tk| {
+            if (tk.origin_expr != hir.no_expr) try self.active_tokens.put(self.arena, tk.origin_expr, {});
+        }
+        var any_changed = false;
+        for (self.built.funcs.items, 0..) |rec, i| {
+            self.cur_fn = @intCast(i);
+            self.changed = false;
+            try self.rewrite(rec.root);
+            if (self.changed) {
+                any_changed = true;
+                try self.analysis.cache.markFunctionDirty(self.cur_fn.?);
+            }
+        }
+        self.cur_fn = null;
         for (self.built.consts.items) |c| {
+            self.changed = false;
             if (c.init) |root| try self.rewrite(root);
+            if (self.changed) any_changed = true;
         }
         self.retireTokens();
-        return self.changed;
+        return any_changed;
     }
 
     /// Copy the operand/region/param id lists into arena-owned slices
@@ -337,6 +377,16 @@ const Rewriter = struct {
 
     fn markRetire(self: *Rewriter, id: hir.ExprId) Error!void {
         try self.retire.put(self.arena, id, {});
+        // Retiring an *active* token changes the owning function's
+        // cleanup summary even when no structural rewrite touched its body
+        // this round (e.g. `neverSuffix` on a node whose type was already
+        // `never`), so mark the owner explicitly rather than relying on
+        // `self.changed` (docs/effects.md §8.3). A node with no active
+        // token was retired in an earlier round: `retireTokens` is then a
+        // no-op and the function need not be re-solved.
+        if (self.cur_fn) |fid| {
+            if (self.active_tokens.contains(id)) try self.analysis.cache.markFunctionDirty(fid);
+        }
     }
 
     /// Mark a whole deleted subtree for token retirement.
@@ -346,7 +396,7 @@ const Rewriter = struct {
         try work.append(self.arena, root);
         while (work.pop()) |id| {
             if (self.retire.contains(id)) continue;
-            try self.retire.put(self.arena, id, {});
+            try self.markRetire(id);
             const pr = self.p();
             for (pr.operands(id)) |op| try work.append(self.arena, op);
             for (pr.regionsOf(id)) |r| try work.append(self.arena, pr.region(r).root);

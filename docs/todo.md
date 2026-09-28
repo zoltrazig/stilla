@@ -9,17 +9,6 @@
 
 ## 近期（建议顺序）
 
-- [ ] **27. 函数摘要增量失效**（[effects.md](effects.md) §8.3）
-  - 现状：摘要每次全量重算；`EffectEnvironmentFingerprint`（「已完成」第 2 项）
-    已落地，但 phase-2/3 结果未缓存。
-  - 范围：持久化依赖图 + 每函数 generation / dirty 的 `SummaryCache`；
-    `solveSummaries` 只对脏函数所在 SCC 联合重解（从种子起，不并到旧摘要上）；
-    `functionSummary` 拦截过期读并在 interned id 相等时短路；改写者在
-    `Analysis.init` 跨阶段标脏所属函数。
-  - 依赖：第 26 项与已落地的 `EffectEnvironmentFingerprint`。
-  - 验收：与今日输出逐字一致（四组合差分、SEG budget 均不变）；可度量的
-    fixpoint 次数下降。
-
 - [ ] **28. SEG 的 associativity / commutativity 全搜索**（[hir.md](hir.md) §8）
   - 现状：结构相等的 CSE sharing 已落地（「已完成」第 10 项），但没有
     assoc / comm 重结合搜索。
@@ -30,10 +19,52 @@
   - 验收：`(a+b)+c` 与 `a+(b+c)` 归入同一 e-class；extraction 取规范 / 最小
     cost 形态；有界轮内收敛；新 probe 实际触发该规则。
 
-## 已完成（归档，原「近期」第 1–26 项）
+## 已完成（归档，原「近期」第 1–27 项）
 
 > 以下条目均已落地，按完成时的编号保留，供 [effects.md](effects.md) 等正文
-> 交叉引用；新工作从第 27 项编号续起。
+> 交叉引用；新工作从第 28 项编号续起。
+
+- [x] **27. 函数摘要增量失效**（[effects.md](effects.md) §8.3）
+  - 现状：摘要每次全量重算；`EffectEnvironmentFingerprint`（「已完成」第 2 项）
+    已落地，但 phase-2/3 结果未缓存。
+  - 范围：持久化依赖图 + 每函数 generation / dirty 的 `SummaryCache`；
+    `solveSummaries` 只对脏函数所在 SCC 联合重解（从种子起，不并到旧摘要上）；
+    `functionSummary` 拦截过期读并在 interned id 相等时短路；改写者在
+    `Analysis.init` 跨阶段标脏所属函数。
+  - 依赖：第 26 项与已落地的 `EffectEnvironmentFingerprint`。
+  - 验收：与今日输出逐字一致（四组合差分、SEG budget 均不变）；可度量的
+    fixpoint 次数下降。
+  - 已完成：新增会话级 `SummaryCache`（`passes/hir_effects_cache.zig`）：稳定
+    drop-node 身份（`drop_node_of` / `drop_key_of_node` / `drop_edges` /
+    `top_sink_node`）、持久 `summary` / `known`、缓存的组件划分
+    （`cached_comp_of` / `cached_comps`）、每函数 `dirty` 集、`Stats` 计数器
+    （`solves` / `components_solved` / `components_reused` / `node_transfers` /
+    `fixpoint_rounds` / `functions_reused`）与 `armed` / `instance_digest`。
+    `Analysis.Config.cache` 由调用方提供并跨阶段增量复用；私有默认缓存永不 arm，
+    故无缓存路径逐字节不变。`solveSummaries` 全量路径构图 + 单次 Kosaraju 后
+    快照；无脏函数时快速路径直接返回；增量路径重建图与 SCC，标记每个脏函数的
+    新 SCC + 其上一轮缓存 SCC 的全体成员 + 一切无 finalize 值的节点，只对标记
+    SCC 按 dependency-first 重解，成员 finalize 值真的移动时（`eng.eql` 短路）
+    才沿反图向调用者传播；`nodeValue` 对脏函数在其 SCC 重解前失败关闭为 `Top`。
+    改写者标脏：`hir_simplify` / `hir_seg` 的 `Rewriter.run` 逐函数复位
+    `self.changed` 并 OR 进局部 `any_changed`（作为本轮收敛标志返回），函数体
+    变化即标脏其 `FuncId`；cleanup token 退役仅在该节点仍有活动 token 时
+    （`active_tokens`）标脏属主。常量初始化器不是图节点、不标脏（新 drop 节点
+    无缓存值，自动重解）。前端：`frontend.compile` 在 compile arena 上建会话
+    缓存并穿到初始 `hir_effects.Analysis.init`、`hir_simplify.optimize`、
+    `hir_seg.optimize` 与两处 `revalidateHir`。测试：`hir_effects.zig` 五条白盒
+    缓存测试（脏集重解计数严格低于全量；被改 callee 向调用者传播；过期读失败
+    关闭；drop-node 身份跨增量解存活；格实例变更 un-arm 缓存）、`hir_seg_tests.zig`
+    的端到端复用测试与逐函数归因回归，以及全语料永久差分 `SEG corpus — a session
+    SummaryCache leaves every corpus program byte-identical`。验证：全套 1307/1307；
+    `SEG budget` 基线逐字节不变（61 files / 4812 nodes / 2595 islands / 92 rounds /
+    112 rewrites / 2095 arena rounds / 43 unions / 334 merges / 89 copies / 89 rule
+    matches / 43 rule applies / 8 ac swaps / 5156 extract cost）；四组合
+    `--simplify` × `--seg` 差分不变；对 HEAD worktree，默认模式与 `--opt hir` 下
+    `--emit-hir` 全语料输出逐字节一致（158 组比较）；`zig fmt --check src/` 干净。
+    语料计数 61 files / 367 solves / 992 components solved / 2493 components
+    reused。评审中发现并修掉 `snapshot` 的一处缓存卫生隐患（把持久数组裁剪到节点
+    数）。
 
 - [x] **26. 统一 `EffectDependencyNode`**（[effects.md](effects.md) §11.1）
   - 现状：函数摘要 SCC 层与 drop-type 层是两张依赖图，跨层环（hook→fn→type）

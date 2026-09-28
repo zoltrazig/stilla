@@ -18,6 +18,7 @@ const hir_build = @import("passes/hir_build.zig");
 const hir_effects = @import("passes/hir_effects.zig");
 const effects = @import("effects.zig");
 const hir_seg = @import("passes/hir_seg.zig");
+const hir_simplify = @import("passes/hir_simplify.zig");
 const frontend = @import("frontend.zig");
 const interpreter = @import("interpreter.zig");
 const support = @import("interpreter_test_support.zig");
@@ -184,6 +185,87 @@ fn funcRawText(b: *Built, name: []const u8) ![]u8 {
     const f = try findFunc(b, name);
     const ctx = try b.built.serCtx();
     return hir.print(&b.built.program, f.root, b.arena.allocator(), ctx);
+}
+
+/// Every function root printed in index order and concatenated — a
+/// whole-program text comparison that does not depend on names.
+fn allFuncText(b: *Built) ![]u8 {
+    const alloc = b.arena.allocator();
+    const ctx = try b.built.serCtx();
+    var out = std.ArrayList(u8).empty;
+    for (b.built.funcs.items) |f| {
+        try out.appendSlice(alloc, try hir.print(&b.built.program, f.root, alloc, ctx));
+        try out.append(alloc, '\n');
+    }
+    return out.toOwnedSlice(alloc);
+}
+
+/// Assert two builds print byte-identically, function by function and
+/// constant by constant, through the canonical `hir.print` form (the
+/// `--emit-hir` text). A mismatch names the differing root so a cache
+/// bug is locatable rather than just "the program differs".
+fn expectSameHir(uncached: *Built, cached: *Built, label: []const u8) !void {
+    // `hir.print`'s internal ref-number tables are not freed, so the
+    // prints go through each build's arena (the `funcText`/`allFuncText`
+    // pattern) rather than the leak-checked test allocator.
+    const ualloc = uncached.arena.allocator();
+    const calloc = cached.arena.allocator();
+    try testing.expectEqual(uncached.built.funcs.items.len, cached.built.funcs.items.len);
+    try testing.expectEqual(uncached.built.consts.items.len, cached.built.consts.items.len);
+    const uctx = try uncached.built.serCtx();
+    const cctx = try cached.built.serCtx();
+    for (uncached.built.funcs.items, cached.built.funcs.items) |uf, cf| {
+        const ut = try hir.print(&uncached.built.program, uf.root, ualloc, uctx);
+        const ct = try hir.print(&cached.built.program, cf.root, calloc, cctx);
+        if (!std.mem.eql(u8, ut, ct)) {
+            std.debug.print("cache differential: {s} function '{s}' differs\n--- uncached ---\n{s}\n--- cached ---\n{s}\n", .{ label, uf.name, ut, ct });
+            return error.TestUnexpectedResult;
+        }
+    }
+    for (uncached.built.consts.items, cached.built.consts.items) |uc, cc| {
+        const uroot = uc.init orelse {
+            try testing.expect(cc.init == null);
+            continue;
+        };
+        const croot = cc.init orelse {
+            std.debug.print("cache differential: {s} constant '{s}' present only in the uncached build\n", .{ label, uc.key });
+            return error.TestUnexpectedResult;
+        };
+        const ut = try hir.print(&uncached.built.program, uroot, ualloc, uctx);
+        const ct = try hir.print(&cached.built.program, croot, calloc, cctx);
+        if (!std.mem.eql(u8, ut, ct)) {
+            std.debug.print("cache differential: {s} constant '{s}' differs\n--- uncached ---\n{s}\n--- cached ---\n{s}\n", .{ label, uc.key, ut, ct });
+            return error.TestUnexpectedResult;
+        }
+    }
+}
+
+/// Assert the incremental-solve function summaries equal a fresh full
+/// recompute's, function by function. This is the direct form of the
+/// docs/effects.md §8.3 contract: HIR byte-identity alone could miss a
+/// stale summary that happens not to flip a rewrite decision on this
+/// fixture, so compare the summaries themselves too.
+fn expectSameFunctionSummaries(cache: *hir_effects.SummaryCache, uncached: *Built, cached: *Built, label: []const u8) !void {
+    var inc = try hir_effects.Analysis.init(cached.arena.allocator(), cached.built, .{ .graph = cached.graph, .cache = cache });
+    try inc.analyze();
+    var full = try hir_effects.Analysis.init(uncached.arena.allocator(), uncached.built, .{ .graph = uncached.graph });
+    try full.analyze();
+    try testing.expectEqual(cached.built.funcs.items.len, uncached.built.funcs.items.len);
+    for (0..cached.built.funcs.items.len) |i| {
+        const fid: hir.FuncId = @intCast(i);
+        const a = try inc.functionSummary(fid);
+        const b = try full.functionSummary(fid);
+        if (!effects.Summary.eql(a, b)) {
+            std.debug.print("cache differential: {s} function summary '{s}' differs (cached may_trap={} may_diverge={} nondet={} accesses={d} / full may_trap={} may_diverge={} nondet={} accesses={d})\n", .{
+                label,              cached.built.funcs.items[i].name,
+                a.may_trap,         a.may_diverge,
+                a.nondeterministic, a.accesses.accesses.len,
+                b.may_trap,         b.may_diverge,
+                b.nondeterministic, b.accesses.accesses.len,
+            });
+            return error.TestUnexpectedResult;
+        }
+    }
 }
 
 /// Collapse every whitespace run to a single space. The rewrite assertions
@@ -1319,6 +1401,61 @@ test "SEG: a construct needing more than one round converges within the bound" {
     try testing.expectEqualStrings(after, try funcText(&b, "app.share_after_fold"));
 }
 
+test "SEG: a caller-supplied SummaryCache reuses summaries and is byte-identical" {
+    // End-to-end incremental reuse (docs/effects.md §8.3): driving the
+    // multi-round fixture with one session cache must (a) produce exactly
+    // the text the private, never-armed cache produces and (b) actually
+    // reuse round-2+ components instead of re-deriving every SCC.
+    const src = try probe_corpus.read(testing.allocator, "probes/cases", "seg_multi_round");
+    defer testing.allocator.free(src);
+
+    var cached = try buildText("app", &.{.{ "app", src }});
+    defer cached.deinit();
+    const cache = try hir_effects.SummaryCache.init(cached.arena.allocator());
+    const with_cache = try hir_seg.optimize(cached.arena.allocator(), cached.built, .{ .graph = cached.graph, .cache = cache });
+    try revalidateRewritten(&cached);
+
+    var plain = try buildText("app", &.{.{ "app", src }});
+    defer plain.deinit();
+    const without_cache = try hir_seg.optimize(plain.arena.allocator(), plain.built, .{ .graph = plain.graph });
+    try revalidateRewritten(&plain);
+
+    // The fixture needs more than one analysis→rewrite round; the cache
+    // does not change the rewrite sequence or the optimized program.
+    try testing.expect(without_cache.iterations > 1);
+    try testing.expectEqual(without_cache.iterations, with_cache.iterations);
+    try testing.expectEqual(without_cache.conds, with_cache.conds);
+    try testing.expectEqual(without_cache.shares, with_cache.shares);
+    try testing.expectEqualStrings(try allFuncText(&plain), try allFuncText(&cached));
+
+    // Genuinely exercised: armed on the first full solve, more than one
+    // solve, and round 2+ reused components rather than re-deriving them.
+    try testing.expect(cache.armed);
+    try testing.expect(cache.stats.solves > 1);
+    try testing.expect(cache.stats.components_reused > 0);
+    try testing.expect(cache.stats.components_solved > 0);
+}
+
+test "SEG: every changed function is marked dirty, not just the first" {
+    // The rewriter's `changed` flag is one round-level bool. If per-function
+    // attribution used a cumulative snapshot, only the first function that
+    // changed would be marked and the rest would keep stale cached
+    // summaries. Two independent foldable bodies must both land in the
+    // dirty set after a single round (docs/effects.md §8.3).
+    const src =
+        \\fn a() -> int32 { (1 + 2) * (1 + 2) }
+        \\fn b() -> int32 { (3 + 4) * (3 + 4) }
+        \\fn main() -> void { }
+    ;
+    var b = try buildText("app", &.{.{ "app", src }});
+    defer b.deinit();
+    const cache = try hir_effects.SummaryCache.init(b.arena.allocator());
+    _ = try hir_seg.optimize(b.arena.allocator(), b.built, .{ .graph = b.graph, .cache = cache, .max_iterations = 1 });
+    try testing.expect(cache.isDirty(try findFuncId(&b, "app.a")));
+    try testing.expect(cache.isDirty(try findFuncId(&b, "app.b")));
+    try testing.expectEqual(@as(usize, 2), cache.dirtyCount());
+}
+
 test "SEG: two fresh builds produce the same optimized text (deterministic)" {
     // One β fixture and one CSE fixture: a CSE rewrite must also be stable
     // across fresh builds (the `BinderMap` is never iterated, so it is).
@@ -1923,4 +2060,91 @@ test "SEG budget — every corpus program converges inside the round bound" {
     // applied half is a subset of the recognized redexes. This pins the
     // match-counter mechanics to the same corpus.
     try testing.expect(total_matches >= total_rule_applies);
+}
+
+// ---------------------------------------------------------------------------
+// Incremental cache differential (docs/effects.md §8.3)
+// ---------------------------------------------------------------------------
+
+// The strongest guard for the incremental contract: for every corpus
+// program, the whole M2b (hir_simplify) + M2a (hir_seg) pipeline run
+// against one caller-supplied session `SummaryCache` must print exactly
+// the same canonical HIR as the same pipeline run with the default
+// never-armed private cache, per function and per const. Any dirty-marking
+// hole that lets a stale summary survive into a rewrite decision changes a
+// legality verdict and therefore the rewritten term; this test is where
+// that surfaces, on every rewrite-triggering fixture at once.
+//
+// It also drives the SEG budget's corpus enumeration (`probes/` +
+// `examples/`), so a new probe joins automatically, and asserts the cache
+// was actually exercised (`solves` beyond the per-file arming solve and
+// reused components), so a silently bypassed cache cannot pass.
+test "SEG corpus — a session SummaryCache leaves every corpus program byte-identical" {
+    var total_files: usize = 0;
+    var total_solves: u64 = 0;
+    var total_reused: u64 = 0;
+    var total_solved: u64 = 0;
+    for ([_][]const u8{ "probes", "examples" }) |dir| {
+        var corpus = try probe_corpus.list(testing.allocator, dir);
+        defer corpus.deinit();
+        for (corpus.names) |spec| {
+            const text = try probe_corpus.read(testing.allocator, dir, spec);
+            defer testing.allocator.free(text);
+            const label = try std.fmt.allocPrint(testing.allocator, "{s}/{s}", .{ dir, spec });
+            defer testing.allocator.free(label);
+
+            // Two independent builds of the same source.
+            var plain = buildText("app", &.{.{ "app", text }}) catch |err| {
+                std.debug.print("cache differential: {s} HIR build failed (uncached) ({s})\n", .{ label, @errorName(err) });
+                return error.TestUnexpectedResult;
+            };
+            defer plain.deinit();
+            var cached = buildText("app", &.{.{ "app", text }}) catch |err| {
+                std.debug.print("cache differential: {s} HIR build failed (cached) ({s})\n", .{ label, @errorName(err) });
+                return error.TestUnexpectedResult;
+            };
+            defer cached.deinit();
+
+            // Uncached: each pass allocates a private, never-armed cache.
+            _ = hir_simplify.optimize(plain.arena.allocator(), plain.built, .{ .graph = plain.graph }) catch |err| {
+                std.debug.print("cache differential: {s} simplify failed (uncached) ({s})\n", .{ label, @errorName(err) });
+                return error.TestUnexpectedResult;
+            };
+            _ = hir_seg.optimize(plain.arena.allocator(), plain.built, .{ .graph = plain.graph }) catch |err| {
+                std.debug.print("cache differential: {s} SEG failed (uncached) ({s})\n", .{ label, @errorName(err) });
+                return error.TestUnexpectedResult;
+            };
+
+            // Cached: both passes share the session cache, so simplify's
+            // dirty marks and seg's all land on one incremental chain.
+            const cache = try hir_effects.SummaryCache.init(cached.arena.allocator());
+            _ = hir_simplify.optimize(cached.arena.allocator(), cached.built, .{ .graph = cached.graph, .cache = cache }) catch |err| {
+                std.debug.print("cache differential: {s} simplify failed (cached) ({s})\n", .{ label, @errorName(err) });
+                return error.TestUnexpectedResult;
+            };
+            _ = hir_seg.optimize(cached.arena.allocator(), cached.built, .{ .graph = cached.graph, .cache = cache }) catch |err| {
+                std.debug.print("cache differential: {s} SEG failed (cached) ({s})\n", .{ label, @errorName(err) });
+                return error.TestUnexpectedResult;
+            };
+
+            try expectSameHir(&plain, &cached, label);
+            try expectSameFunctionSummaries(cache, &plain, &cached, label);
+            // Both rewritten programs must still validate structurally and
+            // re-derive soundly (the cache may not produce an invalid tree).
+            try revalidateRewritten(&plain);
+            try revalidateRewritten(&cached);
+
+            total_files += 1;
+            total_solves += cache.stats.solves;
+            total_reused += cache.stats.components_reused;
+            total_solved += cache.stats.components_solved;
+        }
+    }
+    try testing.expect(total_files > 0);
+    // Non-vacuity: the session cache was armed by a full solve for every
+    // file (one `solves` each) and the rewrite rounds forced extra
+    // incremental rebuilds; clean SCCs were actually reused, not re-solved.
+    try testing.expect(total_solves > total_files);
+    try testing.expect(total_reused > 0);
+    try testing.expect(total_solved > 0);
 }

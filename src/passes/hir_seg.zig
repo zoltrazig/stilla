@@ -330,6 +330,12 @@ pub const Config = struct {
     /// final re-validation read one instance. Null = the default `flat`
     /// instance over `resources`.
     engine: ?*const effects.Engine = null,
+    /// The session's persistent summary cache (docs/effects.md §8.3),
+    /// passed through to every internal `hir_effects.Analysis` so the
+    /// rounds reuse finalized summaries and re-solve only the SCCs a
+    /// rewrite dirtied. Null = a private, never-armed cache (a full solve
+    /// every round), leaving direct white-box callers unchanged.
+    cache: ?*hir_effects.SummaryCache = null,
     /// Bound on analysis→rewrite rounds (each round re-derives effects).
     /// The same bound caps one island's e-graph saturation rounds.
     max_iterations: u32 = 8,
@@ -368,7 +374,7 @@ pub fn optimize(arena: std.mem.Allocator, built: *hir.BuiltProgram, config: Conf
     var beta_done = std.AutoHashMapUnmanaged(hir.FuncId, void).empty;
     var iter: u32 = 0;
     while (iter < config.max_iterations) : (iter += 1) {
-        var analysis = try hir_effects.Analysis.init(arena, built, .{ .graph = config.graph, .host_decls = config.host_decls, .resources = config.resources, .engine = config.engine });
+        var analysis = try hir_effects.Analysis.init(arena, built, .{ .graph = config.graph, .host_decls = config.host_decls, .resources = config.resources, .engine = config.engine, .cache = config.cache });
         try analysis.analyze();
         var rw = Rewriter{
             .arena = arena,
@@ -501,11 +507,31 @@ const Rewriter = struct {
         for (self.built.consts.items) |c| {
             if (c.init) |root| try self.markIslandRoots(root);
         }
-        for (self.built.funcs.items) |rec| try self.rewrite(rec.root);
-        for (self.built.consts.items) |c| {
-            if (c.init) |root| try self.rewrite(root);
+        // Attribute each rewrite to its owning function and mark it stale
+        // in the session cache so the next `Analysis.init` re-solves
+        // exactly the SCCs whose summaries may have moved
+        // (docs/effects.md §8.3). `self.changed` is a monotone round-level
+        // flag for the return value, so it is reset per function: a single
+        // cumulative flag would mark only the first function that changed
+        // and silently skip every later one. The per-round `dirty`/island
+        // scratch sets are not HIR content and never mark. Constant
+        // initializers are not dependency-graph nodes, so they are not
+        // marked.
+        var any_changed = false;
+        for (self.built.funcs.items, 0..) |rec, i| {
+            self.changed = false;
+            try self.rewrite(rec.root);
+            if (self.changed) {
+                any_changed = true;
+                try self.analysis.cache.markFunctionDirty(@intCast(i));
+            }
         }
-        return self.changed;
+        for (self.built.consts.items) |c| {
+            self.changed = false;
+            if (c.init) |root| try self.rewrite(root);
+            if (self.changed) any_changed = true;
+        }
+        return any_changed;
     }
 
     /// Top-down: a member whose parent is not a member starts an island;

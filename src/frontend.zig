@@ -180,7 +180,7 @@ fn failed(
 /// annotations must be `ready` and a sound over-approximation. Used after
 /// an in-place HIR transform (M2b consumers, SEG). Returns null or the
 /// diagnostic to report.
-fn revalidateHir(arena_alloc: std.mem.Allocator, graph: *moduleinfo.ModuleGraph, built: *hir.BuiltProgram, host_decls: []const effects.HostDecl, resources: effects.ResourceRegistry, engine: *const effects.Engine) CompileError!?moduleinfo.Diag {
+fn revalidateHir(arena_alloc: std.mem.Allocator, graph: *moduleinfo.ModuleGraph, built: *hir.BuiltProgram, host_decls: []const effects.HostDecl, resources: effects.ResourceRegistry, engine: *const effects.Engine, cache: *hir_effects.SummaryCache) CompileError!?moduleinfo.Diag {
     for (built.funcs.items) |rec| {
         if (hir.validate(&built.program, rec.root, arena_alloc) catch return error.OutOfMemory) |msg| {
             return moduleinfo.Diag{ .span = meta.Span.init(0, 0, 0), .message = msg };
@@ -192,7 +192,7 @@ fn revalidateHir(arena_alloc: std.mem.Allocator, graph: *moduleinfo.ModuleGraph,
             return moduleinfo.Diag{ .span = meta.Span.init(0, 0, 0), .message = msg };
         }
     }
-    var an = hir_effects.Analysis.init(arena_alloc, built, .{ .graph = graph, .host_decls = host_decls, .resources = resources, .engine = engine }) catch return error.OutOfMemory;
+    var an = hir_effects.Analysis.init(arena_alloc, built, .{ .graph = graph, .host_decls = host_decls, .resources = resources, .engine = engine, .cache = cache }) catch return error.OutOfMemory;
     an.analyze() catch return error.OutOfMemory;
     if (an.validate(arena_alloc) catch return error.OutOfMemory) |msg| {
         return moduleinfo.Diag{ .span = meta.Span.init(0, 0, 0), .message = msg };
@@ -301,6 +301,13 @@ pub fn compile(allocator: std.mem.Allocator, options: Options) CompileError!Comp
             else => return err,
         };
         built_hir = built;
+        // The session's persistent summary cache (docs/effects.md §8.3):
+        // owned by the compile arena so it outlives every short-lived
+        // `Analysis` the pipeline constructs below. The initial analysis
+        // arms it with a full solve; each M2b / SEG round and every
+        // `revalidateHir` then reuse finalized summaries and re-solve only
+        // the SCCs a rewriter marked dirty.
+        const summary_cache = hir_effects.SummaryCache.init(arena_alloc) catch return error.OutOfMemory;
         // M1b seam order (docs/hir.md §2.3/§10.1): structural validation
         // first, then effect analysis and annotation validation. The
         // structural gate is what makes the effect walk safe on a
@@ -317,7 +324,7 @@ pub fn compile(allocator: std.mem.Allocator, options: Options) CompileError!Comp
                 return failed(arena, &.{.{ .span = meta.Span.init(0, 0, 0), .message = msg }}, graph, builder.loaded_sources.items);
             }
         }
-        var effect_analysis = hir_effects.Analysis.init(arena_alloc, built, .{ .graph = graph, .host_decls = options.host_decls, .resources = options.resources, .engine = &engine }) catch return error.OutOfMemory;
+        var effect_analysis = hir_effects.Analysis.init(arena_alloc, built, .{ .graph = graph, .host_decls = options.host_decls, .resources = options.resources, .engine = &engine, .cache = summary_cache }) catch return error.OutOfMemory;
         effect_analysis.analyze() catch return error.OutOfMemory;
         if (effect_analysis.validate(arena_alloc) catch return error.OutOfMemory) |msg| {
             return failed(arena, &.{.{
@@ -345,11 +352,12 @@ pub fn compile(allocator: std.mem.Allocator, options: Options) CompileError!Comp
                 .host_decls = options.host_decls,
                 .resources = options.resources,
                 .engine = &engine,
+                .cache = summary_cache,
                 .dead_let = options.optimize.dead_let,
                 .anf = options.optimize.anf,
                 .never_suffix = options.optimize.never_suffix,
             }) catch return error.OutOfMemory;
-            if (revalidateHir(arena_alloc, graph, built, options.host_decls, options.resources, &engine) catch return error.OutOfMemory) |diag| {
+            if (revalidateHir(arena_alloc, graph, built, options.host_decls, options.resources, &engine, summary_cache) catch return error.OutOfMemory) |diag| {
                 return failed(arena, &.{diag}, graph, builder.loaded_sources.items);
             }
         }
@@ -363,6 +371,7 @@ pub fn compile(allocator: std.mem.Allocator, options: Options) CompileError!Comp
                 .host_decls = options.host_decls,
                 .resources = options.resources,
                 .engine = &engine,
+                .cache = summary_cache,
                 .beta = options.optimize.seg_beta,
                 .eta = options.optimize.seg_eta,
                 .let_dead = options.optimize.seg_let_dead,
@@ -377,7 +386,7 @@ pub fn compile(allocator: std.mem.Allocator, options: Options) CompileError!Comp
                 .egraph_cse = options.optimize.egraph_cse,
                 .egraph_ac = options.optimize.egraph_ac,
             }) catch return error.OutOfMemory;
-            if (revalidateHir(arena_alloc, graph, built, options.host_decls, options.resources, &engine) catch return error.OutOfMemory) |diag| {
+            if (revalidateHir(arena_alloc, graph, built, options.host_decls, options.resources, &engine, summary_cache) catch return error.OutOfMemory) |diag| {
                 return failed(arena, &.{diag}, graph, builder.loaded_sources.items);
             }
         }
