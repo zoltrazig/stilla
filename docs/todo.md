@@ -5,11 +5,18 @@
 「近期」内各项的先后是**建议顺序**，不是串行依赖；每项单独列出前置
 依赖。设计细节仍在两篇文档正文，本文件只记范围、依赖与验收。
 已完成的历史条目按原编号归档于「已完成」节，供跨文档交叉引用；
-「近期」自第 25 项起续编号、追加到队尾。
+「近期」自第 29 项起续编号、追加到队尾。
 
 ## 近期（建议顺序）
 
-- [ ] **28. SEG 的 associativity / commutativity 全搜索**（[hir.md](hir.md) §8）
+暂无。第 28 项已完成并归档；后续工作从「长期探索」提升时按第 29 项续编号。
+
+## 已完成（归档，原「近期」第 1–28 项；近期完成者在前，早期项在后）
+
+> 以下条目均已落地，按完成时的编号保留，供 [effects.md](effects.md) 等正文
+> 交叉引用；新工作从第 29 项编号续起。
+
+- [x] **28. SEG 的 associativity / commutativity 全搜索**（[hir.md](hir.md) §8）
   - 现状：结构相等的 CSE sharing 已落地（「已完成」第 10 项），但没有
     assoc / comm 重结合搜索。
   - 范围：`isAssociativeInt`；展平交换-结合链、规范化操作数序、经 class 成员
@@ -18,11 +25,45 @@
   - 依赖：无。
   - 验收：`(a+b)+c` 与 `a+(b+c)` 归入同一 e-class；extraction 取规范 / 最小
     cost 形态；有界轮内收敛；新 probe 实际触发该规则。
-
-## 已完成（归档，原「近期」第 1–27 项）
-
-> 以下条目均已落地，按完成时的编号保留，供 [effects.md](effects.md) 等正文
-> 交叉引用；新工作从第 28 项编号续起。
+  - 已完成：谓词与规则落地（`hir_egraph_rules.zig` / `hir_egraph.zig`）：
+    `isAssociativeInt` = `{add, mul, band, bor, bxor, min, max}`；
+    `isCommutativeInt` 扩入 `min` / `max`；`isAcInt` 合成二者。
+    `ruleAcRegroup` 对同 `op` / 类型的 class 成员取最低 `NodeId` 者展平成叶子
+    多重集（DAG 共享按全多重度计，`x + x` 且 `x = a + b` 摊出四片叶子），
+    展平路径用 class 集合守卫防环；叶子按各自 class 的最低 `NodeId` 代表元排序，
+    再经 `lookupNode` / `addNode` 左深重组（每层都过 hash-consing），建链后用
+    `nodeEql` 与 `find(链根) == cls` 两道判定收尾（已规范的链保持
+    `preferred_prio == 0` 与 identity 抽取）。展平预算 `max_ac_leaves = 32`：
+    超预算即中止展平、跳过本轮规范化（只放弃一次优化，sound），关掉 CSE 共享
+    嵌套 `(E)+(E)` 的指数 DoS——按全多重度重分组曾物化 `2^k − 1` 个链节点，
+    k=11 挂死编译（>300 s），预算后同款 DAG 远低于 1 s。extraction 经
+    `ENode.ac_root` + `improvesChoice` 的 tie-break 确定性选中规范左深形。
+    原位交换只留给 `eq` / `ne`（`Stats.ac` 只计这两类），新增 `Stats.assoc` /
+    `hir_seg.Stats.egraph_assoc` 计一切 AC 规范化（含二元纯交换的退化触发）。
+    **与计划的偏离**：未新增 `Config.egraph_ac_search`，全搜索并入既有
+    `egraph_ac`。语料：新 `probes/egraph_ac.st`（唯一 SEG 重写就是该搜索，
+    `probes/README.md` 有条目）+ `probes/egraph.st` 增 `eq` / `ne` 反向用例
+    覆盖不重结合的交换路径。测试：白盒「`AC: (a+b)+c and a+(b+c) land in one
+    e-class`」「`AC: extraction emits the canonical left-deep form and is a
+    fixpoint`」「`AC: a forced extra round over a canonical island appends no
+    e-nodes`」（强制额外一轮零新增，覆盖被删坏守卫回归、超预算 DAG 与反序链三
+    形态）「`AC: DAG-shared multiplicity (x + x, x = a + b) regroups the four
+    leaves, not two`」「`AC: an over-budget DAG never builds the exponential
+    chain`」「`AC: an operand class merge across rounds still converges and
+    canonicalizes`」「`AC: non-associative and eq/ne ops are never regrouped`」
+    「`AC: integer min/max are commuted and regrouped`」及 commutative / float /
+    `x - x` / `0 - x` 诸条；黑盒「`SEG arena — integer associativity
+    (egraph_ac) canonicalizes the AC chain in the AIR`」（`egraph_assoc > 0`、
+    `==` 两侧抽到同一节点、AC 关逐字节等于整段 `seg` 关、on/off 运行输出同为
+    `1`）与「`SEG arena — integer commutativity (egraph_ac) is observable in
+    the AIR`」。`SEG budget` 基线重录为 62 / 4861 / 2629 / 94 / 117 / 2112 轮
+    （58 union / 348 merges / 115 copies）/ 97 matches / 46 applies / 1 ac swap
+    / 12 assoc regroups / 5234 cost，`total_ac > 0` / `total_assoc > 0` 非空跑
+    断言保留。验证：全套 1317/1317；关 `egraph_ac` 对 HEAD（`d8fa77f`）全语料
+    逐字节一致（375 个文件 374 个相同；唯一例外是既有崩溃 fixture
+    `probes/cases/lowering_multi_payload_borrow_variant.st`，两侧同样 segfault、
+    栈迹只差 ASLR 地址与构建布局）；`--simplify` × `--seg` 四组合差分不变；
+    两轮独立评审驱动了上述 DoS 与被删守卫的修复。
 
 - [x] **27. 函数摘要增量失效**（[effects.md](effects.md) §8.3）
   - 现状：摘要每次全量重算；`EffectEnvironmentFingerprint`（「已完成」第 2 项）
@@ -133,13 +174,13 @@
   - 现状：第 21 项已落 arena 一半——`hir_egraph.Stats`（`rounds` / `converged`
     / `eclasses` / `enodes` / `merges` / `unions` / 按规则计数 / `materialized`
     / `copied` / `written`）与 `hir_seg.Stats.egraph_*`，`SEG budget` 同步汇总
-    e-graph 维度并断言 `egraph_converged`，基线已重录进 hir.md 的「验收与
+    e-graph 维度并断言 `egraph_converged`，基线已重录进 [hir.md](hir.md) 的「验收与
     落地现状」。**尚缺**：`Stats` 各字段的 doc 注释（`hir_seg.zig` 侧只标了
     `egraph_*` 的聚合语义）、按规则的匹配 / 应用计数（现在只有应用后成功的
     计数）、以及 extraction 选中的总 cost（依赖第 22 项）。
   - 范围：补齐上述三项；v1 计数保留（读旧字段的测试随命名迁移）。
   - 依赖：第 21 项（已落地）；cost 部分依赖第 22 项。
-  - 已完成：三项全部补齐并写入 hir.md 的 §8.2 / §11。
+  - 已完成：三项全部补齐并写入 [hir.md](hir.md) 的 §8.2 / §11。
     (a) **doc 注释**——`hir_egraph.Stats` 与 `hir_seg.Stats` 每个字段都有语义
     doc：`hir_seg.zig` 侧补齐 `iterations` / `beta` / `etas` / `folds` /
     `algebra` / `lets` / `conds` / `matches` / `projects` / `shares`（原只标了
@@ -168,18 +209,19 @@
     且 matched ≥ applied。`zig build -fincremental test` 全绿（1232/1232）。
   - 验收：`SEG budget` 对全语料断言 e-graph 引擎也在轮界内收敛（`egraph_converged`，
     原有）且计数非零（rule matches / rule applies 均 > 0，新增）；`Stats` 各字段
-    语义在 `hir_seg.zig` 的 doc 注释说明（已完成 (a)）；新基线记入 hir.md
+    语义在 `hir_seg.zig` 的 doc 注释说明（已完成 (a)）；新基线记入 [hir.md](hir.md)
     （§11 增补 rule matches / rule applies 两项聚合，§8.2 落匹配 / 应用口径）。
 
 - [x] **24. 通用可插拔 effect 格引擎**（[effects.md](effects.md) §1.3、§5.4、
-      §5.6；新增 Target 节）
+      §5.6；Target 节现已并入 §5.7）
   - 现状：§5.4 的格是**写死的乘积格**——`EffectMode` 是闭合 `enum(u2)`
     （read / write / allocate / release，`effects.zig` 的 `mode_count`），
     `AccessSet` 是 `all: [mode_count]bool` + 具体访问行，`joinAccess` /
     `latticeMeetAccess` 直接对四个 mode 循环；资源是闭合 union
     （`module_const` / `host` / `runtime` / `extension` / `host_any` / `top`），
     mode 通配 `All_m` 由 per-mode bool 承担、`.top` 资源在规范化时折进该 bool。
-    §1.3 明确把「可扩展的通用 lattice 引擎」列为**非目标**；域间关系
+    §1.3 曾明确把「可扩展的通用 lattice 引擎」列为**非目标**（本项落地后
+    已撤销该条）；域间关系
     （`stable` 集合与显式 `disjoint` 对）是格子**之外**的侧表
     （`ResourceRegistry`），只被 `conflictOf` / `orderCompatible` /
     `stableReadPair` 消费，并由 `EffectEnvironmentFingerprint` 的
@@ -198,7 +240,7 @@
     (b) `effects.zig` 抽出格接口（arena + 元素类型 + 操作），现有 `Summary` /
     `AccessSet` 改造为默认实例（`ProductLattice`），`joinAccess` /
     `latticeMeetAccess` 的逐 mode 循环降为实例内部实现；
-    (c) 域间层级 / alias 例外（§5.6 的 Target）从侧表升为格资源偏序的一个
+    (c) 域间层级 / alias 例外（§5.6 的 Target，现并入 §5.7）从侧表升为格资源偏序的一个
     实例，`All` 通配与 per-mode bool 由该实例给出；
     (d) interning / 指纹：`EffectEnvironmentFingerprint` 把格描述子（mode 集、
     资源偏序、provider registry generation）纳入语义键，格或注册表变化即失效
@@ -245,7 +287,7 @@
     cost 求解。白盒测试已固定 extraction 的往返契约（identity 写回零新节点 /
     重定向后深拷贝 / 共享类 materialize 成 `let` / fresh `BinderId`）。
   - 范围：把「优先级 + 最低索引」升级为 **per-opcode cost model**——cost 是
-    优化器事实、**不进 op descriptor**（hir.md 已定），按 op 类给权重（构造 /
+    优化器事实、**不进 op descriptor**（[hir.md](hir.md) 已定），按 op 类给权重（构造 /
     投影 / 调用 / 字面量……），缺省回退到节点计数；extraction 自底向上取最小
     cost 项，确定性 tie-break（优先规则顺序 → 稳定的 op / operand 序）。
     extraction 回 HIR 的契约（fresh `BinderId`、island 外原 binder 不得混淆、
@@ -270,7 +312,7 @@
     `copyClass` / `materialization` 全部走 cost 选点。`Stats` 新增
     `extract_cost`（该 island 根类的 DAG cost），`hir_seg.Stats` 聚合成
     `egraph_extract_cost`，`SEG budget` 基线行随之多打印一项（5089）；
-    `hir.md` §8.2 增补 cost model 落地清单、§11 基线记录新项、§12 开放问题
+    [hir.md](hir.md) §8.2 增补 cost model 落地清单、§11 基线记录新项、§12 开放问题
     改写。
   - 验收：白盒五项新测试——`the weight ladder is per op class with a
     node-count fallback`（各级权重 + `field_get` < `struct_make` + 未列出的
@@ -287,7 +329,7 @@
     逐项不变（默认权重下最小 cost 与旧优先级选点一致），只多出
     `egraph_extract_cost` 一项聚合。
 
-- [x] **21. Slotted E-Graph 本体**（hir.md §8.1–§8.2；`hir_egraph.zig`）
+- [x] **21. Slotted E-Graph 本体**（[hir.md](hir.md) §8.1–§8.2；`hir_egraph.zig`）
   - 范围：新增一个 pass 承载 SEG arena：e-class 表 + union-find、SLOT 编号、
     递归 `encode`、saturation 主循环（把 union 规则从逐节点原位改写改为
     e-graph 规则），β / η / `let` 三族与 known-variant `match` 保持编码边界
@@ -302,7 +344,7 @@
     自然涌现，extraction 的 materialize 准入与旧 `ruleCse` 一致（`strict_ltr`
     无 region 父节点 + `isDuplicable` + 非 trivial atom）。`Stats` 新增
     `egraph_islands` / `egraph_rounds` / `egraph_converged` / `egraph_merges`
-    / `egraph_unions` / `egraph_copies`，`SEG budget` 一并汇总并在 hir.md §11
+    / `egraph_unions` / `egraph_copies`，`SEG budget` 一并汇总并在 [hir.md](hir.md) §11
     重录基线；arena 的 `Stats` 落在 `hir_egraph.zig`（§8.2 正文）。
   - 验收：白盒——`hir_egraph.zig` 的 e-class 合并 / α-CSE、SLOT 重用与
     free-binder 身份（island 外 binder 经 slot 表原样写回）、递归编码边界拒绝
@@ -386,7 +428,7 @@
     越界 / 缺主体失败关闭），新增「the materializable requirement routes through
     `canMaterializeOperand`」——同一父形状下 `Consume` 的 Unique 实参可物化、
     `borrow` 的实参被拒，`check` 与派生查询逐项一致。`zig build test` 全绿
-    （1238/1238）。effects.md §10.1 / §10.3–§10.4 / §12.1 与 hir.md §5.7 /
+    （1238/1238）。[effects.md](effects.md) §10.1 / §10.3–§10.4 / §12.1 与 [hir.md](hir.md) §5.7 /
     §8.1 / §8.5 同步改写。
 
 - [x] **17. scope-end 清理建模**（[effects.md](effects.md) §11.2）
@@ -430,8 +472,8 @@
     normal-exit 析构、被弃 Unique 语句物化后仍在语句处析构；全部印出）进全语料
     `--simplify` × `--seg` 四组合解释器差分、pass smoke 与 SEG budget；实测 CLI 四
     组合输出逐字相等（`1\n1\n2\n2\n3\n4\n4\n`）。`zig build test` 全绿
-    （1234/1234）。effects.md §11.2 / hir.md §5.6–§5.7 同步改写，SEG budget 基线随
-    语料更新（58 程序 / 4551 节点 / 2404 islands / 86 轮 / 94 次重写 / ≈93 ms，仍
+    （1234/1234）。[effects.md](effects.md) §11.2 / [hir.md](hir.md) §5.6–§5.7 同步改写，SEG budget
+    基线随语料更新（58 程序 / 4551 节点 / 2404 islands / 86 轮 / 94 次重写 / ≈93 ms，仍
     断言收敛）。
 
 - [x] **16. HIR canonical 文本的 round-trip 闭合**（[hir.md](hir.md) §4.4 / §4.5 / §4.10）
@@ -588,8 +630,8 @@
     `canSwapOperands` 对账（trap 负例、纯 call / 纯 `add.i32` 正例、缺 swap 主体
     失败关闭），并断言 kind 不符的 `checkCleanup` 拒绝；β / dead-let 的既有
     白盒正负例与全语料 on/off 差分在形式化实现下全部通过（`zig build test`
-    1216/1216）。effects.md §10.3–§10.4 的「无统一接口类型」/「契约是设计概念」
-    段落改写为落地形态与实现差异；hir.md §8.1 / §8.4 同步。
+    1216/1216）。[effects.md](effects.md) §10.3–§10.4 的「无统一接口类型」/
+    「契约是设计概念」段落改写为落地形态与实现差异；[hir.md](hir.md) §8.1 / §8.4 同步。
   - 依赖：无（是现有内联判定的提取，不是新语义）。
 
 - [x] **12. SEG 编译时间预算与默认开启**（应用面；[hir.md](hir.md) §11、
@@ -599,7 +641,7 @@
   - 已完成：`hir_seg_tests.zig` 新增 `SEG budget` 测试——逐语料文件 `buildText`
     - `hir_seg.optimize`，断言每个程序都在 `Config.max_iterations` 界内收敛
     （`Stats.converged == true`，CI 稳定 oracle），并汇总时间 / 轮数 / island
-    覆盖；实测基线（2026-09-13、macOS/arm64，记录于 hir.md §11）：56 个程序 /
+    覆盖；实测基线（2026-09-13、macOS/arm64，记录于 [hir.md](hir.md) §11）：56 个程序 /
     4306 个可达节点，2347 个 island 成员（≈54%），69 轮、51 次重写，总时间
     ≈70 ms，单文件最慢 `examples/fold`（10 ms / 2 轮）。据此 `stilla` 可执行文件
     默认开启 SEG：`main.zig` 的 `Options.seg` 默认 true，新增 `--no-seg` 保留
@@ -622,14 +664,14 @@
     每条准入重写都保语义，故任一「重导效果分析 → 原位重写」轮前缀仍是正确程序，
     撞轮界只是错过优化的上界，绝不是正确性上界。`hir_seg.optimize` 至多跑
     `Config.max_iterations`（默认 8）轮后停止；`Stats.converged` 新增，报告退出
-    方式（安静轮 = 当前规则集的不动点；否则撞轮界）。hir.md §8.2 与该 pass 头注释
-    改写为显式契约，并记各规则的消耗性守卫：`beta_done` 使 β 按 λ 记录有界、每个
+    方式（安静轮 = 当前规则集的不动点；否则撞轮界）。[hir.md](hir.md) §8.2 与该 pass 头
+    注释改写为显式契约，并记各规则的消耗性守卫：`beta_done` 使 β 按 λ 记录有界、每个
     `match` 节点只被消费一次、CSE 绑定至少两处使用且 init 非平凡（`ruleLet` 无法
     撤销）、其余规则严格减小 `costOf`。测试：新增 `probes/cases/seg_multi_round`
     （常量 `if` 折叠把操作数原位改写，父节点 CSE 当轮因 dirty 拒绝，须下一轮才
     共享），断言 `iterations > 1`、`converged == true`、`shares == 1`，且第二遍
     `optimize` 零改写；既有 fixpoint 用例补 `converged` 断言。
-  - 依赖：无。为「近期」第 12 项的编译时间预算提供上界依据。
+  - 依赖：无。为第 12 项（已归档）的编译时间预算提供上界依据。
 
 - [x] **10. CSE-style sharing → 合成 `let`**（[hir.md](hir.md) §8.3）
   - 范围：同一 island 内结构相等（`alphaEq`）且 `isDuplicable` 的纯子树合并为
@@ -722,7 +764,7 @@
     规则改走 boundary 契约（见「已完成」第 15 项：跨 FE 折叠的契约准入），
     β / match 拼接的 `let` 则仍可在 FE 内继续化简。
 
-- [x] **1. `match` 进 SEG**（[hir.md](hir.md) island/规则集与
+- [x] **1. `match` 进 SEG**（[hir.md](hir.md) §8.1 / §8.3 与
       `passes/hir_seg.zig`）
   - 范围：为 `match` op 增加 SEG 编码与 **copy-only、known-variant**
     归约 → `let` 规则；consuming match 与 effectful arm 排除；准入仍走
@@ -879,32 +921,20 @@
 
 ## 长期探索
 
-- [ ] 统一 `EffectDependencyNode`（Function ∪ DropType）单图 fixpoint，
-      消掉跨层环回退 `Top` 的精度洞（[effects.md](effects.md) §11.1）。
-      **已提升为「近期」：** 作为第 26 项落地。
-- **已提升为「近期」：** 真正的 slotted e-graph / extraction 拆为第 21–23 项
-      （e-graph 本体、cost model + extraction、覆盖 e-graph 的统计与预算）；v1
-      原位树重写器是其前身。
-- [ ] `HIRTypeId` canonical 表（[hir.md](hir.md) §3.8）：为 SEG 的 O(1)
-      类型相等与摘要 interning 给 `meta.Type` 加一张 canonical 表。
-      **已提升为「近期」：** 作为第 25 项完整迁移落地。
-- [x] source span side table（[hir.md](hir.md) §3.2）：已落地——`Program.origins`
-      + `origin_map` interning，builder 从 AST span 填充 `ExprNode.origin`；
-      `Program.originOf` 查询，validator 拒越界 id。合成节点保持 0，克隆继承。
 - [ ] Unique / consuming / borrowed 情形进 SEG（需线性等式系统）。
 - [ ] Typed HIR Target 形态：monomorphization / ownership 检查在 HIR 上
       完成（[hir.md](hir.md) §2.3 远期边界；未立项）。
-- [ ] SEG 的 associativity / commutativity 搜索（正文列为 SEG 之外的
-      方向，未立项；结构相等的 CSE sharing 已落地（见「已完成」第 10 项））。
-      **已提升为「近期」：** 作为第 28 项落地。
-- [ ] effect 域间层级 / alias 例外表（[effects.md](effects.md) §5.6 Target）：
-      现只有 `stable` 域集合与显式 `disjoint` 对，域内层级 / alias 例外未建模；
-      与「待决」的 overlap/disjoint 具体条目是同一方向的精度补全。
-      **已提升为「近期」：** 作为第 24 项通用格引擎的资源偏序实例落地。
-- [ ] 函数摘要的增量失效：标脏 / 世代号 / 依赖传播（[effects.md](effects.md)
+- [x] SEG 的 associativity / commutativity 搜索（正文列为 SEG 之外的方向，
+      未立项；结构相等的 CSE sharing 已落地，见「已完成」第 10 项）。
+      已落地：第 28 项（见「已完成」）。
+- [x] effect 域间层级 / alias 例外表（[effects.md](effects.md) §5.6 的 Target 段，
+      现并入 §5.7）：现只有 `stable` 域集合与显式 `disjoint` 对，域内层级 /
+      alias 例外未建模；与「待决」的 overlap/disjoint 具体条目是同一方向的精度
+      补全。已落地：第 24 项（见「已完成」）。
+- [x] 函数摘要的增量失效：标脏 / 世代号 / 依赖传播（[effects.md](effects.md)
       §8.3）。现为全量重算；触发条件是「缓存 phase-2/3 结果」——
       `EffectEnvironmentFingerprint`（「已完成」第 2 项）是已落地的先决条件，本项
-      是其剩余部分。**已提升为「近期」：** 作为第 27 项落地。
+      是其剩余部分；已落地：第 27 项（见「已完成」）。
 - [ ] `canMove` / `MovementContext` 暴露（[effects.md](effects.md) §10.5）：需先
       建模移动路径上的 FE / lifetime / 清理注册变化事实；在第一个需要 code motion
       的重写出现前，暴露恒 false 的入口无意义。
@@ -918,7 +948,7 @@
       [effects.md](effects.md) §15 与 checker 行为。
 - [ ] effect 域间 overlap/disjoint 的具体条目，随真实 host 域出现后
       按需补全（[effects.md](effects.md) §5.6）。
-- [x] host 重入契约已定并落地（[effects.md](effects.md) §13）：缺失 =
+- [x] **（已决）** host 重入契约已定并落地（[effects.md](effects.md) §13）：缺失 =
       `Unknown` 取完整 `Top`，只有显式 `Forbidden` 才让声明逐字生效。
       回调参数化摘要与 `EffectEnvironmentFingerprint` 缓存指纹均已落地
       （见「已完成」第 2 项）；运行时侧契约校验仍不在范围内（编译器看不到

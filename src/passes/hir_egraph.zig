@@ -141,8 +141,17 @@ pub const Stats = struct {
     /// Aggregate projections actually applied (`field_get(C(…), i) → vi`).
     projects: usize = 0,
     /// In-place commutativity canonicalization swaps performed (the
-    /// matched half; `merges` counts the applied half).
+    /// matched half; `merges` counts the applied half). After the AC
+    /// search landed this covers only the commutative-but-not-associative
+    /// ops (`eq` / `ne`); the associative ops flow through `assoc`.
     ac: usize = 0,
+    /// AC regroup/canonicalization applications: a flattened operand
+    /// multiset was rebuilt in canonical order and its chain root unioned
+    /// into the node's class (`redirect` reported a change). Every AC node
+    /// fires this, **including plain 2-operand commutes** (`b + a` → `a +
+    /// b`), which the rule now canonicalizes through the same path; the
+    /// associative half of the AC search (hir.md §8.2).
+    assoc: usize = 0,
     /// `let` bindings synthesized for a shared operand class during extraction.
     materialized: usize = 0,
     /// Fresh subtrees written at a site (a redirected class or a non-member
@@ -260,6 +269,11 @@ const ENode = struct {
     full_expr: hir.FullExprId,
     hash: u64 = 0,
     cls: Ref = 0,
+    /// True for the root e-node a `ruleAcRegroup` built as the canonical
+    /// AC bracketing. `select`'s tie-break prefers it among equal-cost
+    /// members so extraction emits the canonical form (hir.md §8.2). Not
+    /// part of structural identity: `nodeEql` / `hashNode` ignore it.
+    ac_root: bool = false,
 };
 
 /// One e-class: the union-find parent (its own id at the root), the
@@ -433,13 +447,13 @@ pub const Island = struct {
     /// merging when a structurally equal e-node exists elsewhere
     /// (encode-time CSE).
     fn internNode(self: *Island, nid: NodeId) Error!Ref {
-        const hash = self.hashNode(nid);
+        const hash = self.hashNode(self.nodes.items[nid]);
         self.nodes.items[nid].hash = hash;
         const gop = try self.index.getOrPut(self.arena, hash);
         if (!gop.found_existing) gop.value_ptr.* = .empty;
         for (gop.value_ptr.items) |other| {
             if (other == nid) continue;
-            if (!self.nodeEql(nid, other)) continue;
+            if (!self.nodeEql(self.nodes.items[nid], self.nodes.items[other])) continue;
             const a = self.find(self.nodes.items[nid].cls);
             const b = self.find(self.nodes.items[other].cls);
             if (a != b) {
@@ -452,9 +466,27 @@ pub const Island = struct {
         return self.find(self.nodes.items[nid].cls);
     }
 
-    fn nodeEql(self: *Island, a: NodeId, b: NodeId) bool {
-        const x = self.nodes.items[a];
-        const y = self.nodes.items[b];
+    /// Find an already-interned e-node structurally equal to `n` without
+    /// creating one, keyed on `n`'s raw structural hash. `ruleAcRegroup`
+    /// uses this while rebuilding a canonical chain: the caller passes real
+    /// operand roots (`find(acc)` / `find(leaf)`), so the key matches every
+    /// node whose index entry the last `rebuild` re-rooted. (A node indexed
+    /// before a later same-round union of one of its operand classes is not
+    /// found until the next `rebuild` re-keys it — at most one transient
+    /// equivalent node, never the per-round duplicate drift the deleted
+    /// representative-keyed guard caused.) A no-op visit reuses the existing
+    /// chain node instead of appending a duplicate; without that,
+    /// saturation's growing node loop would never settle.
+    fn lookupNode(self: *Island, n: ENode) Error!?NodeId {
+        const hash = self.hashNode(n);
+        const bucket = self.index.get(hash) orelse return null;
+        for (bucket.items) |other| {
+            if (self.nodeEql(n, self.nodes.items[other])) return other;
+        }
+        return null;
+    }
+
+    fn nodeEql(self: *Island, x: ENode, y: ENode) bool {
         if (x.op != y.op) return false;
         if (x.ty != y.ty) return false;
         if (!payloadEql(x.payload, y.payload)) return false;
@@ -478,8 +510,7 @@ pub const Island = struct {
         return true;
     }
 
-    fn hashNode(self: *Island, nid: NodeId) u64 {
-        const n = self.nodes.items[nid];
+    fn hashNode(self: *Island, n: ENode) u64 {
         var h = std.hash.Wyhash.init(0);
         h.update(std.mem.asBytes(&n.op));
         // The canonical type id is the whole identity of the type slot:
@@ -715,14 +746,14 @@ pub const Island = struct {
             for (n.operands) |*r| r.* = self.find(r.*);
             for (n.regions) |*rt| rt.body = self.find(rt.body);
             const cls = self.find(n.cls);
-            const hash = self.hashNode(nid);
+            const hash = self.hashNode(n.*);
             self.nodes.items[nid].hash = hash;
             const gop = try self.index.getOrPut(self.arena, hash);
             if (!gop.found_existing) gop.value_ptr.* = .empty;
             var merged = false;
             for (gop.value_ptr.items) |other| {
                 if (other == nid) continue;
-                if (!self.nodeEql(nid, other)) continue;
+                if (!self.nodeEql(n.*, self.nodes.items[other])) continue;
                 const ocls = self.find(self.nodes.items[other].cls);
                 if (ocls == cls) continue;
                 _ = try self.unionRoots(ocls, cls);
@@ -742,7 +773,15 @@ pub const Island = struct {
     fn applyRules(self: *Island, nid: NodeId) Error!bool {
         const n = self.nodes.items[nid];
         const d = hir.registry.get(n.op);
-        if (d.typed and (self.rules.fold or self.rules.algebra or self.rules.ac)) return self.ruleNumeric(nid);
+        if (d.typed and (self.rules.fold or self.rules.algebra or self.rules.ac)) {
+            if (try self.ruleNumeric(nid)) return true;
+            // No fold / algebra / `eq`-`ne` swap landed; the AC regroup
+            // (`add` / `mul` / …) is the last rule tried. The one-rule-per-
+            // node discipline holds: `ruleNumeric` returning true returns
+            // here, and the next round sees the merged class.
+            if (self.rules.ac) return self.ruleAcRegroup(nid);
+            return false;
+        }
         const base = baseName(d.name);
         if (self.rules.cond and (std.mem.eql(u8, base, "if") or std.mem.eql(u8, base, "and") or std.mem.eql(u8, base, "or"))) {
             return self.ruleConstCond(nid);
@@ -790,13 +829,17 @@ pub const Island = struct {
             }
         }
 
-        // Integer commutativity (AC-lite, `rules.ac`): canonicalize the
-        // operand order in place so the round's `rebuild` hash-conses
-        // `a ⊕ b` with `b ⊕ a` into one class. No mirrored e-node (a
-        // mirror is itself commutative, so `saturate`'s node loop would
-        // never terminate) and no `propose` (it would raise
+        // Integer commutativity (`rules.ac`): canonicalize the operand
+        // order in place so the round's `rebuild` hash-conses `a ⊕ b` with
+        // `b ⊕ a` into one class. Only the commutative-but-not-associative
+        // ops (`eq` / `ne`) use this path now: the associative ops
+        // (`add` / `mul` / …) are owned by `ruleAcRegroup`, which orders and
+        // regroups them; keeping a second, differently-keyed in-place order
+        // for them made the two rules fight and never converge. No mirrored
+        // e-node (a mirror is itself commutative, so `saturate`'s node loop
+        // would never terminate) and no `propose` (it would raise
         // `preferred_prio` and perturb identity extraction) — a lone
-        // `b + a` extracts unchanged; AC only surfaces through genuine
+        // `b ⊕ a` extracts unchanged; AC only surfaces through genuine
         // sharing. The swap mutates the node's arena slice in place (the
         // `rebuild` precedent); the stale index bucket is harmless because
         // `rebuild` clears and rebuilds every bucket. Sound because island
@@ -805,7 +848,9 @@ pub const Island = struct {
         // integer LTR evaluation order is unobservable inside an island, so
         // no path-sensitive `reorderable(a, b)` query is consulted
         // (docs/effects.md §12.3).
-        if (self.rules.ac and n.operands.len == 2 and isIntegerRep(rep) and isCommutativeInt(base)) {
+        if (self.rules.ac and n.operands.len == 2 and isIntegerRep(rep) and
+            isCommutativeInt(base) and !isAssociativeInt(base))
+        {
             const c0 = self.find(n.operands[0]);
             const c1 = self.find(n.operands[1]);
             if (c0 > c1) {
@@ -893,6 +938,189 @@ pub const Island = struct {
                     }
                 },
             }
+        }
+        return false;
+    }
+
+    // -----------------------------------------------------------------
+    // AC regroup (associativity + commutativity)
+    // -----------------------------------------------------------------
+
+    /// Budget on the leaf multiset `flattenAc` may build for one node
+    /// (hir.md §8.2). Without it the flatten has no bound: a shared add /
+    /// mul DAG expands with full multiplicity, so a tree that CSE shares k
+    /// times (`c_i = add(c_{i-1}, c_{i-1})`, the "diamond" a nested
+    /// `(x + x)` source produces) has `2^k` leaves and the regroup
+    /// materializes `2^k - 1` chain nodes — `k = 8` seconds, `k = 10`
+    /// minutes, `k = 11` an effective hang, all from legal source. The cap
+    /// removes that exponential: a node whose flatten would exceed it is
+    /// left alone, so the regroup's cost stays linear in source size times
+    /// a constant factor. It is a guard on the search, not a compile-time
+    /// promise — the SEG arena's own residual cost still dominates at large
+    /// k (hir.md §11).
+    ///
+    /// On exceeding the budget `flattenAc` abandons the walk and
+    /// `ruleAcRegroup` returns without creating nodes or redirecting: the
+    /// node is simply left uncanonicalized. That is sound — skipping a
+    /// canonicalization only forgoes an optimization, never changes
+    /// semantics — and it contains the cost, because a node whose flatten
+    /// is over budget re-abandons in a handful of appends on every later
+    /// visit. 32 clears every corpus program's widest real chain while
+    /// keeping the `2^k` blowup out of reach of the compiler.
+    const max_ac_leaves: usize = 32;
+
+    /// Flatten one operand class into the leaf multiset of the AC chain
+    /// rooted at it: while the class has a member with the same `op` /
+    /// `ty`, recurse through that member's operands (lowest-`NodeId`
+    /// member, deterministic). `path` holds the classes on the current
+    /// expansion path, so a cycle is emitted as a leaf instead of looping;
+    /// a class reached twice through the DAG is expanded twice (it really
+    /// is two occurrences in the multiset). Abandons (set `aborted`) once
+    /// `out` would pass `max_ac_leaves`: the caller then leaves the node
+    /// uncanonicalized.
+    fn flattenAc(
+        self: *Island,
+        op: hir.OpId,
+        ty: hir.HIRTypeId,
+        c: Ref,
+        path: *std.AutoHashMapUnmanaged(Ref, void),
+        out: *std.ArrayList(Ref),
+        aborted: *bool,
+    ) Error!void {
+        if (out.items.len >= max_ac_leaves) {
+            aborted.* = true;
+            return;
+        }
+        const root = self.find(c);
+        if (path.contains(root)) {
+            try out.append(self.arena, root);
+            return;
+        }
+        const m = self.acExpand(root, op, ty) orelse {
+            try out.append(self.arena, root);
+            return;
+        };
+        try path.put(self.arena, root, {});
+        for (self.nodes.items[m].operands) |o| {
+            try self.flattenAc(op, ty, o, path, out, aborted);
+            if (aborted.*) break;
+        }
+        _ = path.remove(root);
+    }
+
+    /// The lowest-`NodeId` member of `root` that is the same AC op and
+    /// type, or null when the class is a leaf for this chain.
+    fn acExpand(self: *Island, root: Ref, op: hir.OpId, ty: hir.HIRTypeId) ?NodeId {
+        var best: ?NodeId = null;
+        for (self.classes.items[root].members.items) |m| {
+            const nd = self.nodes.items[m];
+            if (nd.op != op or nd.ty != ty) continue;
+            if (best == null or m < best.?) best = m;
+        }
+        return best;
+    }
+
+    /// The canonical-order key of a leaf class: its lowest-`NodeId`
+    /// member. Nodes are never removed, so this pick is monotone
+    /// (non-increasing) across unions and stable when `unionRoots` renames
+    /// a class (unlike the raw class id). Extraction writes operands in
+    /// this order and `encode` assigns `NodeId`s depth-first left-to-right,
+    /// so a re-encoded canonical chain reproduces the order — a fixpoint,
+    /// not an oscillation.
+    fn acRep(self: *Island, cls: Ref) NodeId {
+        const root = self.find(cls);
+        var best: NodeId = std.math.maxInt(NodeId);
+        for (self.classes.items[root].members.items) |m| {
+            if (m < best) best = m;
+        }
+        return best;
+    }
+
+    fn acLeafLess(self: *Island, a: Ref, b: Ref) bool {
+        return self.acRep(a) < self.acRep(b);
+    }
+
+    /// Full AC search for one integer binary AC node (hir.md §8.2):
+    /// flatten the chain, rebuild the leaves in canonical order as a fixed
+    /// left-deep chain, and union the chain root into the node's class so
+    /// extraction can pick the canonical bracketing.
+    ///
+    /// Termination: the target form is a deterministic function of the leaf
+    /// multiset, and classes only grow (unions are monotone), so a given
+    /// class yields at most one canonical root per distinct leaf multiset;
+    /// the rule fires only while the class does not already hold that root
+    /// (`nodeEql` false and `find(chain_root) != find(n.cls)`), so
+    /// saturation reaches a fixpoint. It deliberately does NOT `propose`
+    /// unconditionally: those guards return before `redirect`, keeping an
+    /// already-canonical chain at `preferred_prio == 0` and identity
+    /// extraction intact. `max_rounds` remains the outer bound, and
+    /// `max_ac_leaves` bounds the flatten so a shared DAG cannot turn a
+    /// legal program into a hang.
+    fn ruleAcRegroup(self: *Island, nid: NodeId) Error!bool {
+        const n = self.nodes.items[nid];
+        const d = hir.registry.get(n.op);
+        const rep = d.rep orelse return false;
+        if (n.operands.len != 2 or !isIntegerRep(rep)) return false;
+        if (!isAcInt(baseName(d.name))) return false;
+        const cls = self.find(n.cls);
+
+        var leaves = std.ArrayList(Ref).empty;
+        defer leaves.deinit(self.arena);
+        var path = std.AutoHashMapUnmanaged(Ref, void).empty;
+        defer path.deinit(self.arena);
+        var aborted = false;
+        for (n.operands) |c| {
+            try self.flattenAc(n.op, n.ty, c, &path, &leaves, &aborted);
+            if (aborted) break;
+        }
+        // Over budget (a DAG-shared chain): leave the node uncanonicalized
+        // rather than build an exponential number of chain nodes.
+        if (aborted) return false;
+        // Two operands each append at least one leaf; this is defensive.
+        if (leaves.items.len < 2) return false;
+        std.mem.sort(Ref, leaves.items, self, acLeafLess);
+
+        // Build the canonical left-deep chain leaf-first: each piece's left
+        // operand is the running accumulator, its right the next sorted
+        // leaf. A piece already interned (index re-rooted by the previous
+        // `rebuild`) is reused through its raw hash, so a no-op visit
+        // appends nothing and the guards below return; only a genuinely
+        // absent piece is created and `internNode` registers it.
+        var acc = leaves.items[0];
+        var root_nid: NodeId = undefined;
+        for (leaves.items[1..]) |leaf| {
+            const ops = try self.arena.alloc(Ref, 2);
+            ops[0] = self.find(acc);
+            ops[1] = self.find(leaf);
+            const cand = ENode{
+                .op = n.op,
+                .ty = n.ty,
+                .payload = n.payload,
+                .operands = ops,
+                .regions = &.{},
+                .access_hops = &.{},
+                .origin = null,
+                .full_expr = n.full_expr,
+            };
+            if (try self.lookupNode(cand)) |other| {
+                root_nid = other;
+                acc = self.find(self.nodes.items[other].cls);
+                continue;
+            }
+            root_nid = try self.addNode(cand);
+            acc = try self.internNode(root_nid);
+        }
+        // Nothing to regroup when the canonical chain is already this
+        // node's content: a class split here is a stale-hash artifact that
+        // the round's `rebuild` closes, and redirecting would needlessly
+        // raise `preferred_prio` (and, on an identical shape, churn every
+        // round without changing the tree).
+        if (self.nodeEql(self.nodes.items[root_nid], n)) return false;
+        if (self.find(acc) == cls) return false; // canonical form already present
+        self.nodes.items[root_nid].ac_root = true;
+        if (try self.redirect(acc, cls, root_nid)) {
+            self.stats.assoc += 1;
+            return true;
         }
         return false;
     }
@@ -1040,12 +1268,17 @@ pub const Island = struct {
         self.choice_node = best;
     }
 
-    /// The cost tie-break (item 22): strictly lower cost wins; on a tie
-    /// the class's existing `preferred` member wins; otherwise the lower
-    /// e-node index (creation order: encode before any rule).
+    /// The cost tie-break (item 22, extended by the AC search): strictly
+    /// lower cost wins; on a tie a canonical AC root wins (so
+    /// `(a + b) + c` and `a + (b + c)` extract the same bracketing); then
+    /// the class's existing `preferred` member; otherwise the lower e-node
+    /// index (creation order: encode before any rule).
     fn improvesChoice(self: *Island, cls: Ref, node: NodeId, total: u64, cost: []const u64, best: []const NodeId) bool {
         if (total < cost[cls]) return true;
         if (total != cost[cls]) return false;
+        const node_root = self.nodes.items[node].ac_root;
+        const best_root = self.nodes.items[best[cls]].ac_root;
+        if (node_root != best_root) return node_root;
         const pref = self.classes.items[cls].preferred;
         if (node == pref) return best[cls] != pref;
         if (best[cls] == pref) return false;
@@ -1413,6 +1646,8 @@ const fmaxIeee = hir_egraph_rules.fmaxIeee;
 const integerAlgebra = hir_egraph_rules.integerAlgebra;
 const intAlgebraT = hir_egraph_rules.intAlgebraT;
 const isCommutativeInt = hir_egraph_rules.isCommutativeInt;
+const isAssociativeInt = hir_egraph_rules.isAssociativeInt;
+const isAcInt = hir_egraph_rules.isAcInt;
 const negOpId = hir_egraph_rules.negOpId;
 
 // ---------------------------------------------------------------------------
@@ -1529,6 +1764,10 @@ test "the arena merges α-equal island subtrees into one e-class (CSE)" {
     try testing.expect(it.stats.written > 0);
     try testing.expectEqual(@as(usize, 1), it.stats.materialized);
     try testing.expectEqualStrings("let", hir.registry.get(pr.node(body).op).name);
+    // The extraction materializes the shared `mul` once (one `let`, one
+    // `mul`) and reads it twice; the emitted tree has one `mul` with four
+    // `local` reads.
+    try testing.expectEqual(@as(usize, 1), countNodes(pr, root, "let"));
     try testing.expectEqual(@as(usize, 1), countNodes(pr, root, "mul.i32"));
     try testing.expectEqual(@as(usize, 4), countNodes(pr, root, "local"));
 }
@@ -1831,12 +2070,22 @@ test "AC: commutative operands merge into one class" {
     var it = f.island();
     _ = try it.encode(f.root());
     try it.saturate();
-    // The canonicalization swap fired, and `rebuild` hash-consed the two
-    // now-identical `add` nodes into one class with two members.
-    try testing.expect(it.stats.ac > 0);
+    // The AC regroup canonicalized the `b + a` chain into `a + b` and
+    // unioned it with the `a + b` class, so the two `add`s are one class
+    // (plus the canonical chain's intermediate `a + b` node). (`stats.ac`
+    // — the `eq`/`ne` in-place swap — does not move for an associative op.)
+    try testing.expect(it.stats.assoc > 0);
+    try testing.expectEqual(@as(usize, 0), it.stats.ac);
     const c = it.classOfOrigin(a0).?;
     try testing.expectEqual(c, it.classOfOrigin(a1).?);
-    try testing.expectEqual(@as(usize, 2), it.memberCount(c));
+    // Three members: the two source `add`s plus one rule-synthesized
+    // canonical `add`. The source operand orders are reversed (`a0 = a + b`,
+    // `a1 = b + a`), so on the first visit — before that round's `rebuild`
+    // re-keys the index — the raw-hash lookup misses and materializes one
+    // extra structurally-α-equal node, which `internNode` then merges into
+    // the class. It is created once, not per round, and extraction collapses
+    // the class to a single canonical shape.
+    try testing.expectEqual(@as(usize, 3), it.memberCount(c));
 }
 
 test "AC: x - x collapses to const 0 once commutativity merged the operands" {
@@ -1849,7 +2098,7 @@ test "AC: x - x collapses to const 0 once commutativity merged the operands" {
     var it = f.island();
     _ = try it.encode(f.root());
     try it.saturate();
-    try testing.expect(it.stats.ac > 0);
+    try testing.expect(it.stats.assoc > 0);
     // The sub's class holds the folded `const 0` member.
     const sub_cls = it.classOfOrigin(body).?;
     const zero = it.constIn(sub_cls).?;
@@ -1867,9 +2116,324 @@ test "AC: float adds are never canonicalized (NaN payload / ±0 observable)" {
     var it = f.island();
     _ = try it.encode(f.root());
     try it.saturate();
-    // No swap fired, and the two adds stayed distinct classes.
+    // No swap / regroup fired, and the two adds stayed distinct classes.
     try testing.expectEqual(@as(usize, 0), it.stats.ac);
+    try testing.expectEqual(@as(usize, 0), it.stats.assoc);
     try testing.expect(it.classOfOrigin(a0).? != it.classOfOrigin(a1).?);
+}
+
+test "AC: (a+b)+c and a+(b+c) land in one e-class" {
+    // The two bracketings are structurally different, so congruence alone
+    // never merges them; only the flatten/sort/regroup search does.
+    var f = try fixture(i32ty, "fn (B0: i32, B1: i32, B2: i32) { add.i32(add.i32(add.i32(%B0, %B1), %B2), add.i32(%B0, add.i32(%B1, %B2))) }");
+    defer f.deinit();
+    const pr = f.pr();
+    const body = pr.region(pr.regionsOf(f.root())[0]).root;
+    const left = pr.operands(body)[0];
+    const right = pr.operands(body)[1];
+    var it = f.island();
+    _ = try it.encode(f.root());
+    try it.saturate();
+    try testing.expect(it.stats.converged);
+    try testing.expect(it.stats.assoc > 0);
+    const cls = it.classOfOrigin(left).?;
+    try testing.expectEqual(cls, it.classOfOrigin(right).?);
+    // The merged class holds the two source bracketings plus the canonical
+    // left-deep chain root: the outer node's two operand classes flatten to
+    // the six-occurrence multiset `[a, a, b, b, c, c]`, so the canonical
+    // chain is a distinct five-`add` shape, not either source tree.
+    try testing.expectEqual(@as(usize, 3), it.memberCount(cls));
+}
+
+test "AC: extraction emits the canonical left-deep form and is a fixpoint" {
+    var f = try fixture(i32ty, "fn (B0: i32, B1: i32, B2: i32) { add.i32(%B0, add.i32(%B1, %B2)) }");
+    defer f.deinit();
+    const pr = f.pr();
+    const root = f.root();
+    const body = pr.region(pr.regionsOf(root)[0]).root;
+    const r1 = try optimizeIsland(f.arena.allocator(), pr, f.analysis, body, .{});
+    try testing.expect(r1.changed);
+    try testing.expect(r1.stats.assoc > 0);
+    // The emitted chain is left-deep: the outer add's first operand is an
+    // add, its second a leaf. A right-leaning source chain is rewritten.
+    try testing.expectEqualStrings("add.i32", hir.registry.get(pr.node(body).op).name);
+    const first = pr.operands(body)[0];
+    const second = pr.operands(body)[1];
+    try testing.expectEqualStrings("add.i32", hir.registry.get(pr.node(first).op).name);
+    try testing.expectEqualStrings("local", hir.registry.get(pr.node(second).op).name);
+    // A second saturation over the now-canonical chain is identity: the
+    // guard keeps `preferred_prio == 0` and nothing regroups again.
+    const r2 = try optimizeIsland(f.arena.allocator(), pr, f.analysis, body, .{});
+    try testing.expect(!r2.changed);
+    try testing.expectEqual(@as(usize, 0), r2.stats.assoc);
+    try testing.expectEqual(@as(usize, 0), r2.stats.written);
+}
+
+test "AC: with rules.ac off the two bracketings stay in separate classes" {
+    var f = try fixture(i32ty, "fn (B0: i32, B1: i32, B2: i32) { add.i32(add.i32(add.i32(%B0, %B1), %B2), add.i32(%B0, add.i32(%B1, %B2))) }");
+    defer f.deinit();
+    const pr = f.pr();
+    const body = pr.region(pr.regionsOf(f.root())[0]).root;
+    const left = pr.operands(body)[0];
+    const right = pr.operands(body)[1];
+    var it = f.island();
+    it.rules.ac = false;
+    _ = try it.encode(f.root());
+    try it.saturate();
+    try testing.expectEqual(@as(usize, 0), it.stats.assoc);
+    try testing.expect(it.classOfOrigin(left).? != it.classOfOrigin(right).?);
+}
+
+test "AC: non-associative and eq/ne ops are never regrouped" {
+    // `sub` / `shl` / `shr` are island-admissible but not associative:
+    // regrouping would change the result, so `assoc` stays zero.
+    for ([_][]const u8{
+        "sub.i32(sub.i32(%B0, %B1), %B2)",
+        "shl.i32(shl.i32(%B0, %B1), %B2)",
+        "shr.i32(shr.i32(%B0, %B1), %B2)",
+    }) |expr| {
+        const text = try std.fmt.allocPrint(testing.allocator, "fn (B0: i32, B1: i32, B2: i32) {{ {s} }}", .{expr});
+        defer testing.allocator.free(text);
+        var f = try fixture(i32ty, text);
+        defer f.deinit();
+        const body = f.pr().region(f.pr().regionsOf(f.root())[0]).root;
+        const result = try optimizeIsland(f.arena.allocator(), f.pr(), f.analysis, body, .{});
+        try testing.expectEqual(@as(usize, 0), result.stats.assoc);
+    }
+    // `eq` / `ne` are commutative but not associative: the in-place swap
+    // (`stats.ac`) fires, regrouping never does.
+    {
+        const boolty = meta.Type{ .primitive = .bool };
+        var f = try fixture(boolty, "fn (B0: i32, B1: i32) { eq.bool(eq.i32(%B0, %B1), eq.i32(%B1, %B0)) }");
+        defer f.deinit();
+        const body = f.pr().region(f.pr().regionsOf(f.root())[0]).root;
+        const result = try optimizeIsland(f.arena.allocator(), f.pr(), f.analysis, body, .{});
+        try testing.expectEqual(@as(usize, 0), result.stats.assoc);
+        try testing.expect(result.stats.ac > 0);
+    }
+}
+
+test "AC: integer min/max are commuted and regrouped" {
+    var f = try fixture(i32ty, "fn (B0: i32, B1: i32) { min.i32(min.i32(%B0, %B1), min.i32(%B1, %B0)) }");
+    defer f.deinit();
+    const pr = f.pr();
+    const body = pr.region(pr.regionsOf(f.root())[0]).root;
+    const left = pr.operands(body)[0];
+    const right = pr.operands(body)[1];
+    var it = f.island();
+    _ = try it.encode(f.root());
+    try it.saturate();
+    try testing.expect(it.stats.assoc > 0);
+    try testing.expectEqual(it.classOfOrigin(left).?, it.classOfOrigin(right).?);
+
+    var g = try fixture(i32ty, "fn (B0: i32, B1: i32) { max.i32(max.i32(%B0, %B1), max.i32(%B1, %B0)) }");
+    defer g.deinit();
+    var git = g.island();
+    _ = try git.encode(g.root());
+    try git.saturate();
+    try testing.expect(git.stats.assoc > 0);
+}
+
+test "AC: an operand class merge across rounds still converges and canonicalizes" {
+    // `(a + b) + ((b + a) + c)`: the inner `a+b` and `b+a` merge in an
+    // early round, which changes the outer flatten's leaf multiset — the
+    // search must still reach a fixpoint inside the bound.
+    var f = try fixture(i32ty, "fn (B0: i32, B1: i32, B2: i32) { add.i32(add.i32(%B0, %B1), add.i32(add.i32(%B1, %B0), %B2)) }");
+    defer f.deinit();
+    const pr = f.pr();
+    const body = pr.region(pr.regionsOf(f.root())[0]).root;
+    const inner_left = pr.operands(body)[0];
+    const right_add = pr.operands(body)[1];
+    const inner_right = pr.operands(right_add)[0];
+    var it = f.island();
+    _ = try it.encode(f.root());
+    try it.saturate();
+    try testing.expect(it.stats.converged);
+    try testing.expect(it.stats.assoc > 0);
+    try testing.expectEqual(it.classOfOrigin(inner_left).?, it.classOfOrigin(inner_right).?);
+}
+
+test "AC: DAG-shared multiplicity (x + x, x = a + b) regroups the four leaves, not two" {
+    // `add(add(a, b), add(a, b))`: CSE makes both operands one class, so
+    // the leaf multiset is `[a, b, a, b]` (the shared `x = a + b` class is
+    // expanded twice), and the canonical form is a three-piece chain
+    // distinct from the source's `x + x`. The search must see the four
+    // leaves, not merge the two `x` reads naively, and a re-saturation over
+    // the canonical tree must no-op instead of appending a duplicate chain
+    // every round.
+    const text = "fn (B0: i32, B1: i32) { add.i32(add.i32(%B0, %B1), add.i32(%B0, %B1)) }";
+
+    // 1. Structure: the two source operands merge into one class (CSE) and
+    //    the search fires on the merged class's four leaves.
+    {
+        var f = try fixture(i32ty, text);
+        defer f.deinit();
+        const pr = f.pr();
+        const body = pr.region(pr.regionsOf(f.root())[0]).root;
+        const left = pr.operands(body)[0];
+        const right = pr.operands(body)[1];
+        var it = f.island();
+        _ = (try it.encode(f.root())).?;
+        try it.saturate();
+        try testing.expect(it.stats.converged);
+        try testing.expect(it.stats.assoc > 0);
+        try testing.expect(it.stats.merges >= 1);
+        try testing.expectEqual(it.classOfOrigin(left).?, it.classOfOrigin(right).?);
+    }
+
+    // 2. Extraction emits the shared `a + b` (materialized once) plus the
+    //    dangling `+ a + b` above it: two `add` nodes, not the source's
+    //    three, and the canonical `x + x`-shaped result the search picked.
+    {
+        var f = try fixture(i32ty, text);
+        defer f.deinit();
+        const pr = f.pr();
+        const body = pr.region(pr.regionsOf(f.root())[0]).root;
+        const r = try optimizeIsland(f.arena.allocator(), pr, f.analysis, body, .{});
+        try testing.expect(r.stats.assoc > 0);
+        try testing.expectEqual(@as(usize, 2), countNodes(pr, body, "add.i32"));
+        try testing.expectEqual(@as(usize, 1), r.stats.materialized);
+    }
+
+    // 3. Fixpoint: a second island over the same source regroups the same
+    //    way and appends the same nodes — no per-round chain drift — and
+    //    extraction writes the same canonical two-`add` tree.
+    {
+        var g = try fixture(i32ty, text);
+        defer g.deinit();
+        const pr2 = g.pr();
+        const body2 = pr2.region(pr2.regionsOf(g.root())[0]).root;
+        const r2 = try optimizeIsland(g.arena.allocator(), pr2, g.analysis, body2, .{});
+        try testing.expect(r2.stats.assoc > 0);
+        try testing.expectEqual(@as(usize, 2), countNodes(pr2, body2, "add.i32"));
+    }
+}
+
+test "AC: an over-budget DAG never builds the exponential chain" {
+    // `k` nested `add(x, x)` levels with CSE sharing each level: the leaf
+    // multiset is `2^k`. Past `max_ac_leaves` (32 leaves, i.e. `k = 6`) the
+    // flatten must abort. The e-node count is the proof: an exponential
+    // build would add `2^k − 1` chain nodes per level; the cap keeps the
+    // island at a small polynomial in `k`. Inner nodes may still regroup
+    // (the cap stops the exponential chain build, not the rule), so this
+    // asserts size, not `assoc == 0`.
+    const k6 = try diamondEnodes(testing.allocator, 6);
+    const k8 = try diamondEnodes(testing.allocator, 8);
+    // Unbounded, each level's `2^i`-leaf flatten materializes `2^i − 1`
+    // chain nodes: dozens of millions for `k = 8` alone, and seconds of
+    // compile time. The cap keeps the whole island in the low thousands,
+    // growing only polynomially in `k` (measured 285 → 1053 from k=6 to
+    // k=8, i.e. under 4× for +2 levels — nowhere near the 4×-per-level an
+    // exponential build would show).
+    try testing.expect(k6 < 512);
+    try testing.expect(k8 < 2048);
+    try testing.expect(k8 < 4 * k6);
+
+    // The same shape *inside* the budget regroups at the root, proving the
+    // cap — not an unavailable rule — is what stopped the big ones.
+    const small = 4; // 16 leaves: inside the budget
+    var e2 = std.ArrayList(u8).empty;
+    defer e2.deinit(testing.allocator);
+    try e2.appendSlice(testing.allocator, "add.i32(%B0, %B0)");
+    for (0..small) |_| {
+        const next = try std.fmt.allocPrint(testing.allocator, "add.i32({s}, {s})", .{ e2.items, e2.items });
+        e2.clearRetainingCapacity();
+        try e2.appendSlice(testing.allocator, next);
+        testing.allocator.free(next);
+    }
+    const text2 = try std.fmt.allocPrint(testing.allocator, "fn (B0: i32) {{ {s} }}", .{e2.items});
+    defer testing.allocator.free(text2);
+    var f2 = try fixture(i32ty, text2);
+    defer f2.deinit();
+    const body2 = f2.pr().region(f2.pr().regionsOf(f2.root())[0]).root;
+    const r2 = try optimizeIsland(f2.arena.allocator(), f2.pr(), f2.analysis, body2, .{});
+    try testing.expect(r2.stats.assoc > 0);
+}
+
+/// The e-node count `optimizeIsland` reached for a `k`-level shared add
+/// diamond (`add(add(…(a, a)…, add(…)))`, each level CSE-shared).
+fn diamondEnodes(allocator: std.mem.Allocator, k: usize) !usize {
+    const text = try diamondText(allocator, k);
+    defer allocator.free(text);
+    var f = try fixture(i32ty, text);
+    defer f.deinit();
+    const body = f.pr().region(f.pr().regionsOf(f.root())[0]).root;
+    const r = try optimizeIsland(f.arena.allocator(), f.pr(), f.analysis, body, .{});
+    return r.stats.enodes;
+}
+
+/// The source of a `k`-level shared add diamond: `add.i32(add.i32(…, …),
+/// add.i32(…, …))`, each level CSE-shared.
+fn diamondText(allocator: std.mem.Allocator, k: usize) ![]u8 {
+    var expr = std.ArrayList(u8).empty;
+    defer expr.deinit(allocator);
+    try expr.appendSlice(allocator, "add.i32(%B0, %B0)");
+    for (0..k) |_| {
+        const next = try std.fmt.allocPrint(allocator, "add.i32({s}, {s})", .{ expr.items, expr.items });
+        expr.clearRetainingCapacity();
+        try expr.appendSlice(allocator, next);
+        allocator.free(next);
+    }
+    return std.fmt.allocPrint(allocator, "fn (B0: i32) {{ {s} }}", .{expr.items});
+}
+
+/// Force one more `applyRules`-over-every-node + `rebuild` pass and return
+/// the change in `nodes.items.len`. On a saturated (canonical) island every
+/// rule visit and congruence close is a no-op, so this is 0; a rewrite that
+/// re-appends a canonical chain node every rebuild shows up as positive.
+fn forcedRoundDelta(it: *Island) !isize {
+    const before: isize = @intCast(it.nodes.items.len);
+    var i: usize = 0;
+    while (i < it.nodes.items.len) : (i += 1) {
+        _ = try it.applyRules(@intCast(i));
+    }
+    _ = try it.rebuild();
+    return @as(isize, @intCast(it.nodes.items.len)) - before;
+}
+
+test "AC: a forced extra round over a canonical island appends no e-nodes" {
+    // Regression for the deleted representative-keyed guard: it hashed a
+    // malformed placeholder root (`op(leaf_last, leaf_last)`), so it missed
+    // the already-present canonical chain and appended duplicate chain
+    // e-nodes on every rebuild (and never settled). One forced
+    // `applyRules` + `rebuild` over a saturated island must add exactly
+    // zero nodes.
+    {
+        var f = try fixture(i32ty, "fn (B0: i32, B1: i32) { add.i32(add.i32(%B0, %B1), add.i32(%B0, %B1)) }");
+        defer f.deinit();
+        var it = f.island();
+        _ = (try it.encode(f.root())).?;
+        try it.saturate();
+        try testing.expect(it.stats.converged);
+        try testing.expect(it.stats.assoc > 0);
+        try testing.expectEqual(@as(isize, 0), try forcedRoundDelta(&it));
+    }
+    // The over-budget DAG is the case that appended a chain node per level
+    // per round before the fix.
+    {
+        const text = try diamondText(testing.allocator, 6);
+        defer testing.allocator.free(text);
+        var f = try fixture(i32ty, text);
+        defer f.deinit();
+        var it = f.island();
+        _ = (try it.encode(f.root())).?;
+        try it.saturate();
+        try testing.expect(it.stats.converged);
+        try testing.expectEqual(@as(isize, 0), try forcedRoundDelta(&it));
+    }
+    // The reversed-operand chain is the shape that materializes one
+    // transient equivalent node on its *first* visit (the index is not yet
+    // re-rooted); after saturation the same forced round must still add
+    // nothing.
+    {
+        var f = try fixture(i32ty, "fn (B0: i32, B1: i32) { add.i32(add.i32(%B0, %B1), add.i32(%B1, %B0)) }");
+        defer f.deinit();
+        var it = f.island();
+        _ = (try it.encode(f.root())).?;
+        try it.saturate();
+        try testing.expect(it.stats.converged);
+        try testing.expectEqual(@as(isize, 0), try forcedRoundDelta(&it));
+    }
 }
 
 test "AC: 0 - x extracts to neg (the .negate identity)" {
@@ -1983,6 +2547,7 @@ test "cost model: selection is deterministic and prefers the lower member index 
     try it.saturate();
     const cls = it.classOfOrigin(m0).?;
     const members = it.classes.items[cls].members.items;
+    // Both `mul`s are α-equal members of one class.
     try testing.expectEqual(@as(usize, 2), members.len);
     // Both members are α-equal, so the tie resolves to the lower index —
     // and it does so identically on a second island over the same tree.

@@ -92,11 +92,26 @@ The detailed probes cover the source-reachable operation/type matrix:
   duplicated to both operands — the emitted binder reads stay copies of the
   island-external `let` binder. The refusal sits here too: a may-trap
   initializer is no island member, so its α-equal products never merge.
-  Three more cases: `(a + b) + (b + a)` merges via integer
-  commutativity canonicalization (one evaluation materialized),
-  `(a * b) - (b * a)` collapses to 0 (commutativity plus the
-  `x - x → 0` identity compound), and `0 - a` rewrites to `neg` (AIR-text
-  change only; `neg` and `sub` cost the same)
+  More AC cases: `(a + b) + (b + a)` merges via the
+  commutativity/associativity search (one evaluation materialized),
+  `(a * b) - (b * a)` collapses to 0 (AC plus the `x - x → 0` identity
+  compound), `0 - a` rewrites to `neg` (AIR-text change only; `neg` and
+  `sub` cost the same), and `(a == b) == (b == a)` exercises the
+  commutative-but-not-associative `eq` / `ne` in-place swap (never
+  regrouped)
+- `egraph_ac.st`: the **full associativity** search's flatten → stable-sort
+  → left-deep regroup ([hir.md](hir.md) §8.2, the `egraph_ac` toggle), on a
+  program whose only SEG-eligible rewrite is that search. `(a + b) + c` and
+  `a + (b + c)` are structurally different, so hash-consing and the
+  commutativity swap alone leave them in two classes; the regroup unions
+  them, and extraction's `ac_root` tie-break emits one canonical left-deep
+  chain. The `==` therefore compares the same value with itself
+  (`eq %t, %t`), while with `egraph_ac` off the AIR keeps both source
+  bracketings and is byte-identical to compiling with `seg` off entirely
+  (the program fires no other SEG rule). The regroup preserves the value,
+  so the probe's printed output is `1` with AC on **and** off — the on/off
+  runtime differential is intentionally flat, and the real assertion is the
+  AIR canonicalization in `src/hir_seg_tests.zig`, not the output
 - `never_suffix.st`: the `never_returns` must fact's suffix deletion
   ([effects.md](effects.md) §10.1) — a structurally-never callee
   (`builtin.panic` behind a `void` signature) deletes the statements after

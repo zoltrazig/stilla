@@ -74,6 +74,15 @@ fn zero_minus(a: int32) -> int32 {
     (0 - a) + a
 }
 
+// Commutative but NOT associative (`eq` / `ne`): the reversed operand pair
+// `(b == a)` is canonicalized in place to `(a == b)`, so congruence merges
+// the two inner comparisons while the outer `==` (a `bool` rep, excluded by
+// the integer gate) is untouched. This is the `egraph_ac` commutativity path
+// that never regroups.
+fn commutative_compare(a: int32, b: int32) -> int32 {
+    if ((a == b) == (b == a)) { 1 } else { 0 }
+}
+
 fn main() -> void {
     builtin.print(builtin.str(merged_after_rule(3, 4)));
     builtin.print(builtin.str(deep_merge(2, 3, 5)));
@@ -83,4 +92,5 @@ fn main() -> void {
     builtin.print(builtin.str(commutative_shared(2, 3)));
     builtin.print(builtin.str(self_difference(3, 4)));
     builtin.print(builtin.str(zero_minus(9)));
+    builtin.print(builtin.str(commutative_compare(4, 5)));
 }

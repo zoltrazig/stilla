@@ -310,7 +310,16 @@ pub const Stats = struct {
     egraph_projects_matched: usize = 0,
     /// In-place commutativity canonicalization swaps performed, summed
     /// (the matched half; the applied half flows through `egraph_merges`).
+    /// After the AC regroup superseded the in-place class-id swap for the
+    /// associative ops this counts only the commutative-but-not-associative
+    /// `eq` / `ne`; the associative ops (2-operand commutes included) are
+    /// `egraph_assoc`.
     egraph_ac: usize = 0,
+    /// AC regroup/canonicalization applications summed over all islands /
+    /// rounds (the associativity half of the integer AC search), including
+    /// plain 2-operand commutes; the `eq` / `ne` in-place swaps are
+    /// `egraph_ac`.
+    egraph_assoc: usize = 0,
 };
 
 pub const Config = struct {
@@ -409,6 +418,7 @@ pub fn optimize(arena: std.mem.Allocator, built: *hir.BuiltProgram, config: Conf
         stats.egraph_conds_matched += rw.egraph_conds_matched;
         stats.egraph_projects_matched += rw.egraph_projects_matched;
         stats.egraph_ac += rw.egraph_ac;
+        stats.egraph_assoc += rw.egraph_assoc;
         if (!changed) {
             stats.converged = true;
             break;
@@ -469,6 +479,7 @@ const Rewriter = struct {
     egraph_conds_matched: usize = 0,
     egraph_projects_matched: usize = 0,
     egraph_ac: usize = 0,
+    egraph_assoc: usize = 0,
 
     /// Node ids whose content this round has already overwritten in place.
     /// An island-membership or analysis verdict about such a node describes
@@ -665,6 +676,7 @@ const Rewriter = struct {
         self.egraph_conds_matched += result.stats.conds_matched;
         self.egraph_projects_matched += result.stats.projects_matched;
         self.egraph_ac += result.stats.ac;
+        self.egraph_assoc += result.stats.assoc;
         self.shares += result.stats.materialized;
         if (!result.changed) return;
         self.changed = true;

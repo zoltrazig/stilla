@@ -1946,6 +1946,66 @@ test "SEG arena — integer commutativity (egraph_ac) is observable in the AIR" 
     try testing.expect(!std.mem.eql(u8, ac_off, on));
 }
 
+/// The two operand registers of the (single) `eq` in `air`, trimmed. The AC
+/// probe's only comparison is the bracketing `==`, so this isolates the
+/// canonical-chain observation without pinning a register number.
+fn eqOperandsOf(air: []const u8) ![2][]const u8 {
+    var lines = std.mem.splitScalar(u8, air, '\n');
+    while (lines.next()) |line| {
+        const marker = "= eq ";
+        const at = std.mem.indexOf(u8, line, marker) orelse continue;
+        const rest = line[at + marker.len ..];
+        const comma = std.mem.indexOfScalar(u8, rest, ',') orelse continue;
+        return .{
+            std.mem.trim(u8, rest[0..comma], " "),
+            std.mem.trim(u8, rest[comma + 1 ..], " "),
+        };
+    }
+    return error.TestUnexpectedResult;
+}
+
+test "SEG arena — integer associativity (egraph_ac) canonicalizes the AC chain in the AIR" {
+    const text = try probe_corpus.read(testing.allocator, "probes", "egraph_ac");
+    defer testing.allocator.free(text);
+    // The probe single-handedly triggers the regroup: its only SEG-eligible
+    // redex is the AC search (no folding / algebra / projection, and the
+    // `==` operands start in separate classes), so a non-zero `assoc` here
+    // is the `(a + b) + c` vs `a + (b + c)` search alone.
+    const stats = try egraphStatsOf("egraph_ac");
+    try testing.expect(stats.egraph_assoc > 0);
+
+    // With AC on the two bracketings land in one class and extraction emits
+    // the canonical left-deep chain, so the `==` compares the same value
+    // with itself.
+    const on = try compileAirOpt("app", text, .{ .seg = true, .egraph_ac = true });
+    defer testing.allocator.free(on);
+    const on_eq = try eqOperandsOf(on);
+    try testing.expectEqualStrings(on_eq[0], on_eq[1]);
+
+    // With AC off the AIR keeps both source bracketings — and is
+    // byte-identical to compiling with SEG off entirely, because the AC
+    // search is the only SEG rewrite this program can fire.
+    const ac_off = try compileAirOpt("app", text, .{ .seg = true, .egraph_ac = false });
+    defer testing.allocator.free(ac_off);
+    const seg_off = try compileAir("app", text, false);
+    defer testing.allocator.free(seg_off);
+    try testing.expectEqualStrings(seg_off, ac_off);
+    const off_eq = try eqOperandsOf(ac_off);
+    try testing.expect(!std.mem.eql(u8, off_eq[0], off_eq[1]));
+
+    // Semantic preservation: both forms print the same deterministic value.
+    // (`ac_off`'s AIR is byte-identical to `seg_off`'s above, so the
+    // whole-pass on/off comparison covers the AC-off form too.)
+    const run_off = try capture(text, false);
+    defer testing.allocator.free(run_off);
+    const run_on = try capture(text, true);
+    defer testing.allocator.free(run_on);
+    try testing.expectEqualStrings(run_off, run_on);
+    // Non-vacuous: the program prints the `if`'s taken branch (plus the
+    // `print` newline).
+    try testing.expectEqualStrings("1\n", run_on);
+}
+
 // ---------------------------------------------------------------------------
 // Corpus budget: the recorded SEG compile-time / rounds / island baseline
 // ---------------------------------------------------------------------------
@@ -1975,6 +2035,7 @@ test "SEG budget — every corpus program converges inside the round bound" {
     var total_matches: u64 = 0;
     var total_rule_applies: u64 = 0;
     var total_ac: u64 = 0;
+    var total_assoc: u64 = 0;
     var total_islands: usize = 0;
     var total_nodes: usize = 0;
     var covered: usize = 0;
@@ -2025,6 +2086,7 @@ test "SEG budget — every corpus program converges inside the round bound" {
             total_matches += stats.egraph_folds_matched + stats.egraph_algebra_matched +
                 stats.egraph_conds_matched + stats.egraph_projects_matched;
             total_ac += stats.egraph_ac;
+            total_assoc += stats.egraph_assoc;
             // The union rules' applied half. (`shares` is extraction-side
             // materialization, not a rule application, so it is not part of
             // the match⊇apply comparison and stays in `total_rewrites`.)
@@ -2042,8 +2104,8 @@ test "SEG budget — every corpus program converges inside the round bound" {
         }
     }
     std.debug.print(
-        "SEG budget baseline: {d} files, {d} islands / {d} reachable nodes ({d} files with islands), {d} rounds, {d} rewrites, {d} e-graph rounds, {d} unions / {d} merges / {d} copies, {d} rule matches / {d} rule applies, {d} ac swaps, {d} extract cost, {d} ms total; slowest {s} {d} ms ({d} rounds, {d} islands)\n",
-        .{ files, total_islands, total_nodes, covered, total_iters, total_rewrites, total_egraph_rounds, total_unions, total_merges, total_copies, total_matches, total_rule_applies, total_ac, total_extract_cost, total_ns / std.time.ns_per_ms, slow, slow_ns / std.time.ns_per_ms, slow_iters, slow_islands },
+        "SEG budget baseline: {d} files, {d} islands / {d} reachable nodes ({d} files with islands), {d} rounds, {d} rewrites, {d} e-graph rounds, {d} unions / {d} merges / {d} copies, {d} rule matches / {d} rule applies, {d} ac swaps, {d} assoc regroups, {d} extract cost, {d} ms total; slowest {s} {d} ms ({d} rounds, {d} islands)\n",
+        .{ files, total_islands, total_nodes, covered, total_iters, total_rewrites, total_egraph_rounds, total_unions, total_merges, total_copies, total_matches, total_rule_applies, total_ac, total_assoc, total_extract_cost, total_ns / std.time.ns_per_ms, slow, slow_ns / std.time.ns_per_ms, slow_iters, slow_islands },
     );
     try testing.expect(files > 0);
     try testing.expect(covered > 0);
@@ -2053,9 +2115,12 @@ test "SEG budget — every corpus program converges inside the round bound" {
     // the corpus — the rule set actually fires, it does not merely run.
     try testing.expect(total_matches > 0);
     try testing.expect(total_rule_applies > 0);
-    // Non-vacuous (AC): the commutativity canonicalization swapped operand
-    // pairs somewhere in the corpus, not merely compiled.
+    // Non-vacuous (commutativity): an `eq` / `ne` operand pair was swapped
+    // in place somewhere in the corpus, not merely compiled.
     try testing.expect(total_ac > 0);
+    // Non-vacuous (associativity): a flattened AC chain was regrouped into
+    // its canonical form somewhere in the corpus.
+    try testing.expect(total_assoc > 0);
     // A rule's match always precedes (or equals) its application: the
     // applied half is a subset of the recognized redexes. This pins the
     // match-counter mechanics to the same corpus.

@@ -1049,34 +1049,72 @@ class 给、缺省回退到节点计数（§8.2 末的落地清单）。
   默认权重下全语料的抽取结果与「priority + 最低索引」逐字相同（§11 基线不变）。
   规则外的形态（β 的 `let` 链、多 payload `match` 的绑定叶、materialize 出的
   合成 `let`）不在 arena 里，由驱动按各自契约准入。
-- **integer 交换律（AC-lite，`egraph_ac` 开关，默认开）**：`ruleNumeric` 对
-  base 属于交换集（`add` / `mul` / `eq` / `ne` / `band` / `bor` / `bxor`，与
-  `llir_fusion.isCommutative` 同集）、rep 为 integer 的二元节点做**规范化**：
-  `find(op0) != find(op1)` 时原位交换 operand 使 `find(op0) < find(op1)`（
-  `n.operands` 是 per-node arena 切片，原地改写安全；每轮 `rebuild()` 清空并
-  重建全部 index bucket，过期 bucket 只多一次 `nodeEql` 比较），随后同一轮的
-  `rebuild()` hash-cons 把两个现已同形的节点并成一类——零新建节点。不做镜像
-  e-node（镜像自身也可交换，saturate 的 `while` 循环永不终止），也不用
-  `propose`（会把 `preferred_prio` 提到 1，扰动 identity extraction；孤立的
-  `b + a` 抽取结果不变，AC 只经真实共享显形）。同域的同余恒等式在
-  `integerAlgebra` **之前**检查（后者对非常量 operand 早退 `null`）：
-  `x - x → 0`、`x ^ x → 0`（重定向到 rep 的零常量）、`x & x → x`、
-  `x | x → x`（`.keep` 重定向）——纯类相等判定，零建节点；`0 - x → neg x`
-  经新的 `.negate` `AlgebraResult` 变体构建一元 `neg.<rep>` 节点后
-  `redirectToClass`。三者与交换律复合：`(a*b) - (b*a)` 之所以折叠为 `0`，
-  先靠规范化合并两个 `mul` 类，再由 `x - x` 触发。作用域仅 integer rep（
-  浮点的 NaN payload / ±0 可观察，排序比较是另一条规则，`.byte` 与既有
-  代数门一致地排除）。`neg` 与 `sub` 的 cost 同为 1，`0 - x → neg x` 只在
-  AIR 文本（或 CSE 到既有 `neg`）可观察。交换计数进 `hir_egraph.Stats.ac`
-  （识别/交换这一半；应用一半计入 `merges`），驱动聚合为
-  `hir_seg.Stats.egraph_ac`。该交换之所以**不改语义**，依据是效果系统而非
-  `reorderable(a, b)`：island 准入要求每个节点（含每个 operand）通过
-  `isSegSafe`——`total`（不 trap）、`observable_effect_free`、`Q = 0`
-  （deterministic）、`Copy`（无 move/drop 顺序）、cleanup-free 且过 ownership
-  门（见 effects.md §12.3）。整数 LTR 求值顺序在 island 内因此不可观察，原位
-  交换 operand 合法；反之，任何可能 trap、有可观察效果或 nondeterministic 的
-  节点都进不了 arena，AC 永远不会在顺序可观察的表达式上运行（浮点的 NaN
-  payload / ±0 与顺序无关却仍可观察，故另按 rep 排除，见上）。
+- **integer 交换-结合律（AC 全搜索，`egraph_ac` 开关，默认开）**：`ruleNumeric` 仍先对
+  base 属于交换集但**不**属于结合集的算子（`eq` / `ne`）做原位规范化交换：`find(op0) !=
+  find(op1)` 时交换 operand 使 `find(op0) < find(op1)`（`n.operands` 是 per-node arena
+  切片，原地改写安全；每轮 `rebuild()` 清空并重建全部 index bucket，过期 bucket 只多一次
+  `nodeEql` 比较），随后同一轮的 `rebuild()` hash-cons 把两个现已同形的节点并成一类——零
+  新建节点。不做镜像 e-node（镜像自身也可交换，saturate 的 `while` 循环永不终止）。对 base
+  属于 **AC 集**（`add` / `mul` / `band` / `bor` / `bxor` / `min` / `max`，即既结合又交换）、
+  rep 为 integer 的二元节点，则改由 `ruleAcRegroup` 做完整重结合搜索：
+  1. **展平**：把该节点每个 operand 类中「有同 `op`、同 `ty` 成员」的类递归展开成该成员
+     （取最低 `NodeId` 者，确定性）的 operand 类，得到叶子类的**多重集**；同一类经 DAG
+     重复到达会展开多次，只有回到当前展开路径上的类（环）才当叶子，故展平只依赖 arena
+     当前状态、与 union 顺序无关。展平有预算 `max_ac_leaves = 32`：若无上界，CSE 共享的
+     add / mul DAG 会按全多重度展开（k 层 `c_i = add(c_{i-1}, c_{i-1})` 的叶子数是 `2^k`，
+     重分组要物化 `2^k − 1` 个链节点），合法源码即可把编译器拖成秒级 / 分钟级。超预算时
+     展平中止、`ruleAcRegroup` 不建节点也不重定向，节点**保持未规范化**——跳过一条规范化
+     只是放弃一次优化，绝不改语义，且该节点后续每次访问都在少量 append 内再次中止，代价有
+     界。语料里最宽的链都远在预算内。
+  2. **规范序**：按**稳定 key** 给叶子排序——key 取该类的最低 `NodeId` 成员（e-node
+     索引；节点只增不删，故在 union 增长下单调不增、稳定，不随 `unionRoots` 改写 class id
+     而漂移）。extraction 按此序写回 operand，`encode` 又按 DFS 左到右发 `NodeId`，故
+     重编码的规范链重现同一次序，是不动点而非振荡。
+  3. **重分组**：对排序后的叶子做**固定左深折叠**（`a ⊕ b ⊕ c` 归约为 `(a ⊕ b) ⊕ c`），
+     经 `lookupNode` / `addNode` + `internNode` 建链（已 intern 的链段直接复用，no-op
+     访问不追加节点，hash-cons 会与既有等价节点合并），再把链根类 `redirect` 进原节点
+     的类。目标形唯一、类单调增长，故每个叶子多重集至多产生一个规范节点，规则到达不动
+     点；它只在「链根与当前节点内容不同」（`nodeEql` 为假）且「该类尚未包含规范形」
+     （`find(链根) != find(原类)`）时触发，绝不无条件 `propose`——已规范的链保持
+     `preferred_prio == 0`，identity extraction 不回归。
+     这条规则对**每个** AC 节点都跑（含纯二元交换，如 `b + a`）：旧的「按 class id 原地
+     交换 operand」只保留给 `eq` / `ne`（交换但不结合），因为两条键不同的原地序会互相
+     打架而不收敛。故默认开启时纯二元整数交换也走本路径（`probes/redundancy.st` 的
+     `joined` operand 序因此翻转、CFG 随之改变），`Stats.assoc` 把这些退化的触发也计入。
+     为避免已经规范的宽节点每轮重做展平 / 排序 / 建链，建链的每一段先用 raw
+     `lookupNode`（按该段 operand 的**真实 class root** 散列）探测是否已在 arena：上一次
+     `rebuild` 已把每段的 operand 重新 root，故已存在的链段能被命中并复用，no-op 访问
+     不追加节点——否则 saturation 的「节点边增长边遍历」循环永不收敛。链建完后用两道
+     权威判定收尾：(a) `nodeEql(链根, 原节点)` 为真则原节点本身已是规范形；(b)
+     `find(链根类) == find(原类)` 则该类已含规范形。二者都在 `redirect` 之前返回，故
+     规范节点保持 `preferred_prio == 0`、identity extraction 不回归。（该 lookup 的键只在
+     `rebuild` 之后是当前的：某节点若在其 operand 类于同轮稍后被 union 之前已入索引，
+     本轮会漏命中而多物化一个结构等价的链节点，随后 `internNode` 把它并入同类；这是一次
+     性、等价且不破坏收敛的，绝非每轮追加的重复漂移。）
+  4. **extraction 取规范形**：链根 e-node 标记为 AC 规范根；`select` 的 `improvesChoice`
+     在等 cost 时优先规范根，故 `(a + b) + c` 与 `a + (b + c)` 归入同一 e-class 后抽取
+     稳定的规范括号形（非规范源链会因此深拷贝成规范形）。
+  结合律的健全边界：整数 `add` / `mul` 按 mod 2^n 环绕（不 trap），`band` / `bor` /
+  `bxor` 是精确位运算，`min` / `max` 精确，故重结合保语义；`sub` / `div` / `rem` /
+  `shl` / `shr` 非结合（且 `div` / `rem` 可能 trap）被排除，`eq` / `ne` 交换但不结合，
+  只做交换不做重结合。同域的同余恒等式仍在 `integerAlgebra` **之前**检查（后者对非常量
+  operand 早退 `null`）：`x - x → 0`、`x ^ x → 0`（重定向到 rep 的零常量）、`x & x → x`、
+  `x | x → x`（`.keep` 重定向）——纯类相等判定，零建节点；`0 - x → neg x` 经新的
+  `.negate` `AlgebraResult` 变体构建一元 `neg.<rep>` 节点后 `redirectToClass`。三者与 AC
+  复合：`(a*b) - (b*a)` 之所以折叠为 `0`，先靠 AC 合并两个 `mul` 类，再由 `x - x` 触发。
+  作用域仅 integer rep（浮点的 NaN payload / ±0 可观察，排序比较是另一条规则，`.byte` 与
+  既有代数门一致地排除）。`neg` 与 `sub` 的 cost 同为 1，`0 - x → neg x` 只在 AIR 文本
+  （或 CSE 到既有 `neg`）可观察。`eq` / `ne` 的原位交换计数进 `hir_egraph.Stats.ac`
+  （识别/交换这一半；应用一半计入 `merges`），重结合应用数另计 `hir_egraph.Stats.assoc`
+  ——`assoc` 计入每一次 AC 规范化，包含纯二元整数交换（`b + a` → `a + b`）这类退化触发，
+  驱动聚合为 `hir_seg.Stats.egraph_ac` / `egraph_assoc`（`egraph_ac` 只计 `eq` / `ne` 的
+  原地交换）。AC 之所以**不改语义**，依据是效果
+  系统而非 `reorderable(a, b)`：island 准入要求每个节点（含每个 operand）通过 `isSegSafe`
+  ——`total`（不 trap）、`observable_effect_free`、`Q = 0`（deterministic）、`Copy`
+  （无 move/drop 顺序）、cleanup-free 且过 ownership 门（见 effects.md §12.3）。整数 LTR
+  求值顺序在 island 内因此不可观察，重排 / 重结合 operand 合法；反之，任何可能 trap、有
+  可观察效果或 nondeterministic 的节点都进不了 arena，AC 永远不会在顺序可观察的表达式上
+  运行（浮点的 NaN payload / ±0 与顺序无关却仍可观察，故另按 rep 排除，见上）。
 - **identity extraction**：类的 preferred 优先级为 0、且该类里仍有一个
   `origin == 站点` 的成员、元数匹配时，直接递归回站点自己的 operand / region，
   一个节点都不新建（`Stats.written == 0`）；否则深拷贝：region 重建成新的
@@ -1135,8 +1173,8 @@ class 给、缺省回退到节点计数（§8.2 末的落地清单）。
 | α-equivalence | ✅* | island 内由 arena 的 hash-consing + `rebuild` 同余合并承担（α-相等子树自然同类）；β 克隆时的**捕获规避** fresh-binder 重映射仍由驱动做 |
 | CSE-style sharing | ✅ | 同一 island 内、同一 `strict_ltr` 无 region 节点的 operand 列表里，两个**同类**且 `isDuplicable` 的纯子树由 extraction materialize 成一个合成 `let`，非平凡原子才 materialize、trivial atom 直接复制（详见下） |
 | operand reorder | ✅* | 相邻 operand 对交换、按 `rowLess` 规范序（`canSwapOperands` / `reorder_rule`，§8.8）；仅当实例下该对 `orderCompatible`——默认 flat 空 registry 上从不触发，`hierarchy` 实例下兄弟域读对可交换（docs/effects.md §10.3–§10.5） |
-| integer commutativity (AC-lite) | ✅ | 规范化（canonicalization）而非搜索：`find(op0) > find(op1)` 时原位交换二元 integer rep 节点的 operand，使同类节点 hash-cons 合并；仅 integer rep（`add` / `mul` / `eq` / `ne` / `band` / `bor` / `bxor`），排除浮点（NaN payload / ±0 可观察）与排序比较（`a < b` 是 `b > a`，另一条规则）；交换的合法性由 island 的 `isSegSafe` 准入（total / 无 observable_effect / deterministic / Copy）保证，LTR 求值顺序不可观察 |
-| associativity | ❌ | 搜索空间问题，未立项 |
+| integer commutativity | ✅ | `ruleNumeric` 对**交换但不结合**的二元 integer rep 节点（`eq` / `ne`）做原位规范化：`find(op0) > find(op1)` 时交换 operand，使同类节点 hash-cons 合并。结合交换算子（`add` / `mul` / `band` / `bor` / `bxor` / `min` / `max`）的交换由下一行的 AC 搜索统一处理（**含纯二元交换**：`b + a` 也走 `ruleAcRegroup`，`Stats.assoc` 计入这类退化触发），不再单独原地交换；排除浮点（NaN payload / ±0 可观察）与排序比较（`a < b` 是 `b > a`，另一条规则）；合法性由 island 的 `isSegSafe` 准入（total / 无 observable_effect / deterministic / Copy）保证，LTR 求值顺序不可观察 |
+| associativity + commutativity (AC) | ✅ | `egraph_ac` 下的 `ruleAcRegroup`：展平 AC 链成叶子类多重集（预算 `max_ac_leaves = 32`，超预算则放弃该节点、保持未规范化）、按最低 `NodeId` 稳定序规范排序、固定左深重分组，链根 e-node 标记为 AC 规范根供 extraction 在等 cost 时优先；仅 integer rep 的 `add` / `mul` / `band` / `bor` / `bxor` / `min` / `max`（`eq`/`ne` 交换不结合，`sub`/`div`/`rem`/`shl`/`shr` 非结合，均不重结合）；合法性同样由 island 的 `isSegSafe` 准入保证，详见 §8.2 |
 | Unique rewrite | ❌ | 需线性等式系统 |
 | host calls / `drop` / consuming match / panic 重排 | ⚠️/❌ | 仅**序兼容对**可重排（`reorder` 规则，§8.8）；`drop` / consuming match / panic 不重排 |
 
@@ -1522,6 +1560,48 @@ cost model（§8.2）：全语料 `rounds` / `unions` / `merges` / `copies` 四�
 2585 / 91 / 112 / 2086 / 43 / 334 / 89 / 89 / 43 / 8 / 5143）只随新文件增长
 （+1 程序 / +32 节点 / +10 island / +1 轮 / +9 arena 轮 / +13 cost），
 `rewrites` / `unions` / `merges` / `copies` / rule matches / applies / ac swaps 不变。
+第 28 项把整数交换律扩成**交换-结合全搜索**（`ruleAcRegroup`：展平 / 按最低 `NodeId`
+规范排序 / 左深重分组，仍由 `egraph_ac` 开关，见 §8.2），`Stats.ac` 此后只计 `eq` /
+`ne` 的就地交换、重结合另计 `Stats.assoc`（含纯二元交换的退化触发）；
+`probes/egraph.st` 增一个 `eq` / `ne` 反向用例以覆盖交换路径，新增
+`probes/egraph_ac.st` 单独覆盖重结合路径——`(a+b)+c` 与 `a+(b+c)` 归入同一 e-class、
+extraction 取规范左深形（`==` 两侧抽到同一值），关闭 `egraph_ac` 时保留两个源括号形且与
+整段 `seg` 关闭逐字节一致（该程序的唯一 SEG 重写就是 AC 搜索）。评审又补了 `max_ac_leaves
+= 32` 展平预算（超预算的共享 DAG 保持未规范化，不再物化 `2^k − 1` 个链节点），并删除了
+最初那版按「操作数类代表元」作键的链根早退探测：该探测按 `chainPieces` 的残缺占位根
+（`op(leaf_last, leaf_last)`）散列、从不命中，且其 group-hash 注册不随 `rebuild` 存活，故每
+轮追加重复链节点；改为建链时对每段**真实 class root** 做 raw `lookupNode`，再用建链后的
+`nodeEql` / `find(链根类) == find(原类)` 两道判定收尾。基线变为 **62 个程序 / 4861 个可达
+节点 / 2629 个 island 成员 / 94 轮 / 117 次重写 / 2112 轮外层 saturation（58 union /
+348 merges / 115 copies）/ 97 rule matches / 46 rule applies / 1 ac swap / 12 assoc
+regroups / 5234 extract cost**；相对 `egraph_ac.st` 之前（61 / 4832 / 2608 / 92 / 116 /
+2099 / 56 / 343 / 109 / 97 / 46 / 1 / 10 / 5186）随新程序与 AC 全搜索增长（+1 程序 /
++29 节点 / +21 island / +2 轮 / +1 重写 / +13 arena 轮 / +2 union / +5 merges /
++6 copies / +2 assoc regroups / +48 cost），rule matches / applies 与 ac swaps 不变。
+两层收敛断言仍成立（每个程序与每个 island 都在界内到达不动点），时间仅记录、不断言。
+
+k 层 diamond（合法源码，CSE 逐层共享：`E_0 = a + b`，`E_{i+1} = E_i + E_i`，k=10 / 11 打印
+`3072` / `6144`）的编译时间（本机 macOS/arm64，ReleaseSafe 构建，即 CI 的 `-Doptimize`
+模式；取 3 次运行的最小值）：
+
+| k | HEAD | 本项 `egraph_ac` 关 | 本项 `egraph_ac` 开（默认） | 本项 `seg` 关 |
+| --- | --- | --- | --- | --- |
+| 8 | 0.013 s | 0.014 s | 0.023 s | 0.008 s |
+| 9 | 0.027 s | 0.029 s | 0.062 s | 0.009 s |
+| 10 | 0.083 s | 0.096 s | 0.224 s | 0.010 s |
+| 11 | 0.309 s | 0.351 s | 0.846 s | 0.014 s |
+
+`egraph_ac` 关的那一列与 HEAD 逐项同量级（0.014 / 0.029 / 0.096 / 0.351 s vs HEAD
+0.013 / 0.027 / 0.083 / 0.309 s，差异在计时抖动内）；就 k 层 diamond 而言 HEAD 的 AC-lite
+本就不改写它，故 `egraph_ac` 关、HEAD 默认、HEAD `egraph_ac` 关三者输出逐字节相同。残余的
+k=10 / 11 代价**在 SEG arena 自身**：`egraph_ac` 关（≈HEAD）仍要 0.096 / 0.351 s，而整段
+`seg` 关只耗时 0.010 / 0.014 s——两者之差就是 arena 的 encode / 有界 saturation（展平 / 排序 /
+hash-cons）/ extraction 成本，不是 `cfg` / 前端（`seg` 关那一列同时含二者的非 SEG 部分）。
+默认开的 0.224 / 0.846 s 相对 `egraph_ac` 关只多约 2×，AC 全搜索不再是主导项；k 层 diamond
+的 `2^k` 爆炸已被预算消除，但 arena 的残余成本仍随源码线性增长（见下）。**不做「亚秒」承诺**：
+预算法把 `2^k` 的部分从分钟级 / 挂起拉回线性，绝对耗时仍随 k 与优化模式变化。runtime 输出
+在 `egraph_ac` 开/关与 `seg` 开/关四种组合下逐字相同（k=10 → `3072`，k=11 → `6144`）。
+
 
 落地档映射（历史里程碑编号）：
 

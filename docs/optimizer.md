@@ -50,6 +50,11 @@ family, and each family has one sub-toggle per rewrite:
 | `seg` | `seg_beta`, `seg_eta`, `seg_let_dead`, `seg_let_forward`, `seg_let_atom`, `seg_match`, `seg_reorder`, `egraph_fold`, `egraph_algebra`, `egraph_cond`, `egraph_project`, `egraph_cse`, `egraph_ac` |
 | `cfg` | `cfg_tail_call`, `cfg_inline`, `cfg_cse`, `cfg_copy_prop`, `cfg_pre`, `cfg_if_convert`, `cfg_dead_block`, `cfg_drop_elide`, `cfg_dead_instr`, `cfg_jump_thread`, `cfg_phi_simplify` |
 
+`egraph_ac` is the integer commutativity **and associativity** search in the
+SEG arena (`hir.md` §8.2): it canonicalizes `eq` / `ne` operand order and, for
+the integer AC ops (`add` / `mul` / `band` / `bor` / `bxor` / `min` / `max`),
+flattens, canonically orders, and regroups operand chains.
+
 **Library defaults:** every gate off, every sub-toggle on.
 **Executable defaults:** `seg` and `cfg` on, `hir` off, every
 sub-toggle on. The CLI exposes one generic pair, `--opt <name>` /

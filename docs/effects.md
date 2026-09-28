@@ -168,12 +168,15 @@ EvalPolicy =
 - **可交换是可证明的派生事实**：`reorderable` 可能证明某两个 operand 可交换，
   但语义默认仍保持 LTR；要利用交换的重写必须走显式的 `reorderable` 查询，不能
   用「两者摘要相等」推断。
-- **island 内的 AC 规范化是这条规则的受控例外**：SEG arena 只在整棵 island
+- **island 内的 AC 搜索是这条规则的受控例外**：SEG arena 只在整棵 island
   通过 `isSegSafe` 时准入（effects.md §12.3），island 内每个节点与 operand 都满足
   `total ∧ observable_effect_free ∧ Q = 0 ∧ Copy ∧ cleanup-free ∧ ownership 门`，
-  故 LTR 求值顺序在该上下文中**不可观察**。`hir_egraph.zig` 的整数交换律规范化
-  据此直接对 operand 排序，**不**查询 `reorderable(a, b)`；顺序可观察的表达式永远
-  无法准入，也就永远不会被交换。
+  故 LTR 求值顺序与结合方式在该上下文中**不可观察**。`hir_egraph.zig` 的整数
+  交换-结合律搜索（`egraph_ac`：展平、规范排序、重分组）据此直接对 operand 排序、
+  重结合，**不**查询 `reorderable(a, b)`；顺序可观察的表达式永远无法准入，也就
+  永远不会被交换或重结合。非结合算子（`sub` / `div` / `rem` / `shl` / `shr`）与
+  交换但不结合的 `eq` / `ne` 都不参与重结合：前者重结合会改变语义（`div` / `rem`
+  还可能 trap），后者根本不结合。
 
 ## 4. OperandUse：值使用 / ownership 维度
 
@@ -1364,13 +1367,17 @@ drop / move Unique             ❌
 职责分离：SEG 由 HIR→SEG bridge 的 legality 查询负责准入——检查的是
 **递归属性**（region body 与 ownership 依赖都纳入），而非只看根节点。
 
-`isSegSafe` 同时是 arena 内**重写合法性**的依据，而不只是准入过滤：整数交换律
-（AC-lite，hir.md §8.2）原位交换可交换二元节点的 operand，其正确性正是由
-island 全员 `isSegSafe` 保证的。因为每个 operand 都已证明 `total`（不 trap）、
-无 `observable_effect`（不打印 / 不 host 调用）、`Q = 0`（deterministic）、
-`Copy`（无 move / drop 顺序）、cleanup-free 且过 ownership 门，重新排序 LTR
-求值不改变任何可观察行为——因此该重写无需 `reorderable(a, b)` 路径查询，
-效果系统就是它的执行保证（deterministic execution 不被破坏）。
+`isSegSafe` 同时是 arena 内**重写合法性**的依据，而不只是准入过滤：整数
+交换-结合律搜索（AC，hir.md §8.2）对可交换 / 结合的整数二元节点排序 operand、
+展平链并重结合，其正确性正是由 island 全员 `isSegSafe` 保证的。因为每个 operand
+都已证明 `total`（不 trap）、无 `observable_effect`（不打印 / 不 host 调用）、
+`Q = 0`（deterministic）、`Copy`（无 move / drop 顺序）、cleanup-free 且过
+ownership 门，重排 LTR 求值顺序、改变结合括号都不改变任何可观察行为——因此该
+重写无需 `reorderable(a, b)` 路径查询，效果系统就是它的执行保证（deterministic
+execution 不被破坏）。重结合只对整数 `add` / `mul` / `band` / `bor` / `bxor` /
+`min` / `max` 开放（整数加减乘按 mod 2^n 环绕、位运算与 min/max 精确，均满足结合
+律）；`sub` / `div` / `rem` / `shl` / `shr` 非结合（且 `div` / `rem` 可能 trap），
+`eq` / `ne` 交换但不结合，都不进入重结合。
 
 **本谓词只管普通 island**：boundary rewrite（β，[hir.md](hir.md) §8.4；η，§8.5；
 跨 FE 的 `let` 折叠，§8.3 / §8.7）的操作形式不被编码 / 成员资格覆盖，因此绕过

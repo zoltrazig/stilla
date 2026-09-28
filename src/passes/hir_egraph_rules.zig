@@ -152,16 +152,47 @@ pub fn baseName(name: []const u8) []const u8 {
     return name;
 }
 
-/// Integer commutativity set (AC-lite): mirrors `llir_fusion.isCommutative`'s
-/// op set. Floats (NaN payload / ±0 are observable) and the ordering
-/// comparisons (`a < b` is `b > a`, a different rule) are excluded: callers
-/// gate on `isIntegerRep` and this set simply omits `lt`/`gt`/`le`/`ge`.
+/// Integer commutativity set (AC-lite for `eq` / `ne`, and the commutative
+/// half of the AC set). Floats (NaN payload / ±0 are observable) and the
+/// ordering comparisons (`a < b` is `b > a`, a different rule) are
+/// excluded: callers gate on `isIntegerRep` and this set simply omits
+/// `lt`/`gt`/`le`/`ge`.
+///
+/// `eq` / `ne` are commutative but **not** associative: they are never
+/// regrouped, only operand-swapped (the `ruleNumeric` in-place
+/// canonicalization). `sub` / `div` / `rem` / `shl` / `shr` are neither
+/// associative nor (for `div` / `rem`) trap-free, so they are absent.
 pub fn isCommutativeInt(base: []const u8) bool {
-    const set = [_][]const u8{ "add", "mul", "eq", "ne", "band", "bor", "bxor" };
+    const set = [_][]const u8{ "add", "mul", "eq", "ne", "band", "bor", "bxor", "min", "max" };
     for (set) |op| {
         if (std.mem.eql(u8, base, op)) return true;
     }
     return false;
+}
+
+/// Integer associativity set: the sound binary ops on which reassociation
+/// is value-preserving. Integer `add` / `mul` wrap mod 2^n (no trap), and
+/// `band` / `bor` / `bxor` / `min` / `max` are exact, so `(a ⊕ b) ⊕ c =
+/// a ⊕ (b ⊕ c)` for every operand. `sub` / `div` / `rem` / `shl` / `shr`
+/// are non-associative (and `div` / `rem` can trap); `eq` / `ne` are
+/// commutative but not associative. Floats are excluded by the caller's
+/// `isIntegerRep` gate (NaN payload / ±0 observability).
+pub fn isAssociativeInt(base: []const u8) bool {
+    const set = [_][]const u8{ "add", "mul", "band", "bor", "bxor", "min", "max" };
+    for (set) |op| {
+        if (std.mem.eql(u8, base, op)) return true;
+    }
+    return false;
+}
+
+/// Both halves at once: the entry predicate for the full AC regroup search
+/// (`hir_egraph.ruleAcRegroup`). Every op in `isAssociativeInt` is also in
+/// `isCommutativeInt` here, so this is exactly the associative set today;
+/// it is spelled out separately so the rule reads as "associative ∧
+/// commutative" and a future op that is one but not the other cannot
+/// silently enter.
+pub fn isAcInt(base: []const u8) bool {
+    return isAssociativeInt(base) and isCommutativeInt(base);
 }
 
 pub fn isCtorName(name: []const u8) bool {
