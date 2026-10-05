@@ -105,6 +105,13 @@ const NodeId = u32;
 const BagEntry = struct { cls: Ref, count: u64 };
 const Bag = []BagEntry;
 
+/// Memo key for `acExpand`: a class root plus the AC op / type being
+/// expanded. A class can hold both `add` and `mul` e-nodes (an algebra fold
+/// can merge its class with the kept operand's), whose expansions differ, so
+/// the root alone is not enough. Auto-hashed as a struct — never packed into
+/// an integer where two live keys could collide and return a wrong e-node.
+const AcExpandKey = struct { root: Ref, op: hir.OpId, ty: hir.HIRTypeId };
+
 /// What one island's saturation did — folded into `hir_seg.Stats`, the
 /// per-rule counts split into the recognized-redex (matched) and the
 /// applied halves.
@@ -346,6 +353,31 @@ pub const Island = struct {
     /// produced it is unchanged.
     bag_memo: std.AutoHashMapUnmanaged(u128, Bag) = .empty,
 
+    /// Memoized `constIn` answer per class root: the `const` member found by
+    /// scanning, or `null` when the class holds none. The value is the
+    /// e-node id, not the constant, so a hit returns the exact `ConstValue`
+    /// the scan would have picked (the first `const` member in membership
+    /// order). Cleared exactly when `bag_memo` is: on every `unionRoots`
+    /// (the sole membership mutation), on the conservative
+    /// `redirectToClass` reset, and at the top of each `planAcWork` round.
+    /// Best-effort: a failed `put` is swallowed (`catch {}`) and merely
+    /// costs a rescan, unlike `bag_memo`, whose value is required to build
+    /// a canonical term.
+    const_memo: std.AutoHashMapUnmanaged(Ref, ?NodeId) = .empty,
+
+    /// Memoized `acExpand` answer per `(root, op, ty)`: the lowest-`NodeId`
+    /// same-`(op, ty)` member, or `null` when the class is a leaf for that
+    /// chain. Cleared exactly when `bag_memo` is and written best-effort
+    /// like `const_memo`.
+    ac_expand_memo: std.AutoHashMapUnmanaged(AcExpandKey, ?NodeId) = .empty,
+
+    /// Memoized `acRep` answer per class root: its lowest-`NodeId` member.
+    /// `acRep` runs inside `bagLess` / `finalizeBag` / `acSig` over member
+    /// lists that can grow to O(N), so caching it keeps a bag's sort and
+    /// coalesce from rescanning those lists on every comparison. Cleared
+    /// exactly when `bag_memo` is and written best-effort like `const_memo`.
+    ac_rep_memo: std.AutoHashMapUnmanaged(Ref, NodeId) = .empty,
+
     /// Class roots a round's flatten must treat as *shared*: referenced as
     /// an operand class by two or more AC e-nodes (a repeated operand of one
     /// e-node counts twice). A shared class's bag is materialized once and
@@ -416,10 +448,13 @@ pub const Island = struct {
             self.classes.items[ra].preferred = pb.preferred;
             self.classes.items[ra].preferred_prio = pb.preferred_prio;
         }
-        // The class structure changed: every memoized leaf multiset may now
-        // reference a stale root, so drop them all. This is a handle reset,
-        // not a per-entry walk.
+        // The class structure changed: every memoized leaf multiset or
+        // per-class scan may now reference a stale root, so drop them all.
+        // This is a handle reset, not a per-entry walk.
         self.bag_memo.clearRetainingCapacity();
+        self.const_memo.clearRetainingCapacity();
+        self.ac_expand_memo.clearRetainingCapacity();
+        self.ac_rep_memo.clearRetainingCapacity();
         return ra;
     }
 
@@ -462,11 +497,14 @@ pub const Island = struct {
         const root = self.find(target);
         // These rules (constant fold / algebra / condition / projection)
         // can union a class with a value it did not structurally contain, so
-        // post-order no longer bounds the invalidation: drop the whole bag
-        // memo. `unionRoots` clears the same whole map for every merge
-        // (including the AC regroup's `redirect`), so this is a conservative
-        // whole-memo reset, never a targeted key eviction.
+        // post-order no longer bounds the invalidation: drop every per-class
+        // memo. `unionRoots` clears the same maps for every merge (including
+        // the AC regroup's `redirect`), so this is a conservative whole-memo
+        // reset, never a targeted key eviction.
         self.bag_memo.clearRetainingCapacity();
+        self.const_memo.clearRetainingCapacity();
+        self.ac_expand_memo.clearRetainingCapacity();
+        self.ac_rep_memo.clearRetainingCapacity();
         return self.redirect(self.find(cls), root, self.classes.items[root].preferred);
     }
 
@@ -824,9 +862,17 @@ pub const Island = struct {
             const gop = try self.index.getOrPut(self.arena, hash);
             if (!gop.found_existing) gop.value_ptr.* = .empty;
             var merged = false;
+            // `found` is true when *any* structurally equal node is already
+            // in the bucket, including a same-class one. The node is then
+            // already represented, so it must not be appended again
+            // (mirroring `internNode`). Only `merged` feeds `changed`,
+            // though: a same-class duplicate is not a new equality, so it
+            // must not keep the saturation loop from reaching a quiet round.
+            var found = false;
             for (gop.value_ptr.items) |other| {
                 if (other == nid) continue;
                 if (!self.nodeEql(n.*, self.nodes.items[other])) continue;
+                found = true;
                 const ocls = self.find(self.nodes.items[other].cls);
                 if (ocls == cls) continue;
                 _ = try self.unionRoots(ocls, cls);
@@ -834,7 +880,7 @@ pub const Island = struct {
                 merged = true;
                 break;
             }
-            if (!merged) try gop.value_ptr.append(self.arena, nid);
+            if (!found) try gop.value_ptr.append(self.arena, nid);
             changed = changed or merged;
         }
         return changed;
@@ -1024,14 +1070,21 @@ pub const Island = struct {
     // -----------------------------------------------------------------
 
     /// The lowest-`NodeId` member of `root` that is the same AC op and
-    /// type, or null when the class is a leaf for this chain.
+    /// type, or null when the class is a leaf for this chain. Memoized by
+    /// `(root, op, ty)`; the `null` result is cached too, so a leaf class is
+    /// scanned once per union-free span instead of once per query. `root`
+    /// must already be canonical (every caller resolves through `find`), and
+    /// membership only changes on union, which clears the memo.
     fn acExpand(self: *Island, root: Ref, op: hir.OpId, ty: hir.HIRTypeId) ?NodeId {
+        const key: AcExpandKey = .{ .root = root, .op = op, .ty = ty };
+        if (self.ac_expand_memo.get(key)) |cached| return cached;
         var best: ?NodeId = null;
         for (self.classes.items[root].members.items) |m| {
             const nd = self.nodes.items[m];
             if (nd.op != op or nd.ty != ty) continue;
             if (best == null or m < best.?) best = m;
         }
+        self.ac_expand_memo.put(self.arena, key, best) catch {};
         return best;
     }
 
@@ -1044,10 +1097,12 @@ pub const Island = struct {
     /// not an oscillation.
     fn acRep(self: *Island, cls: Ref) NodeId {
         const root = self.find(cls);
+        if (self.ac_rep_memo.get(root)) |m| return m;
         var best: NodeId = std.math.maxInt(NodeId);
         for (self.classes.items[root].members.items) |m| {
             if (m < best) best = m;
         }
+        self.ac_rep_memo.put(self.arena, root, best) catch {};
         return best;
     }
 
@@ -1179,6 +1234,9 @@ pub const Island = struct {
     fn planAcWork(self: *Island) Error!void {
         self.ac_work.clearRetainingCapacity();
         self.bag_memo.clearRetainingCapacity();
+        self.const_memo.clearRetainingCapacity();
+        self.ac_expand_memo.clearRetainingCapacity();
+        self.ac_rep_memo.clearRetainingCapacity();
         var memo = std.AutoHashMapUnmanaged(u128, ?u128).empty;
         var on_path = std.AutoHashMapUnmanaged(Ref, void).empty;
         var counts = std.AutoHashMapUnmanaged(u128, u32).empty;
@@ -1558,14 +1616,24 @@ pub const Island = struct {
     }
 
     /// The constant a class is known to hold, if any member is a `const`.
+    /// Memoized per class root: the scan stores the first `const` member (or
+    /// `null`), and a hit reads the value from that same member, so the
+    /// returned value is exactly what the scan would produce. Membership
+    /// only changes on union, which clears the memo.
     fn constIn(self: *Island, cls: Ref) ?meta.ConstValue {
         const root = self.find(cls);
+        if (self.const_memo.get(root)) |cached| {
+            return if (cached) |m| self.nodes.items[m].payload.const_value else null;
+        }
+        var found: ?NodeId = null;
         for (self.classes.items[root].members.items) |m| {
             const n = self.nodes.items[m];
             if (!std.mem.eql(u8, hir.registry.get(n.op).name, "const")) continue;
-            return n.payload.const_value;
+            found = m;
+            break;
         }
-        return null;
+        self.const_memo.put(self.arena, root, found) catch {};
+        return if (found) |m| self.nodes.items[m].payload.const_value else null;
     }
 
     // -----------------------------------------------------------------
