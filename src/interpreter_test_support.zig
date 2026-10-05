@@ -163,8 +163,8 @@ pub const builtin_host_decls = [_]effects.HostDecl{
 
 /// A capturing print adapter shared by the module tests: intercepts
 /// `builtin.print` into a buffer, delegates everything else to the
-/// default host (fd 1 is the build runner's `--listen` pipe, so stdout
-/// sinks are probed as subprocesses, never in-process — build.zig).
+/// default host (fd 1 is the build's live stdout, so stdout sinks are
+/// probed as subprocesses, never in-process — build.zig).
 pub const CaptureAdapter = struct {
     buffer: [2048]u8 = undefined,
     len: usize = 0,

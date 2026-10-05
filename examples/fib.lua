@@ -10,7 +10,7 @@ local function print_terms(i, n)
 end
 
 local function main()
-    print_terms(0, 35)
+    print_terms(0, 25)
 end
 
 main()

@@ -7,7 +7,7 @@ def print_terms(i: int, n: int) -> None:
         print_terms(i + 1, n)
 
 def main() -> None:
-    print_terms(0, 35)
+    print_terms(0, 25)
 
 if __name__ == "__main__":
     main()

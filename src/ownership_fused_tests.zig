@@ -286,8 +286,8 @@ const Fused = struct {
     /// Run `main` and assert the heap registry (live counted objects)
     /// is empty afterwards — a release/drop that runs twice or never
     /// leaks or double-frees and fails this check. The default host
-    /// writes `builtin.print` to real stdout (host.zig), which corrupts
-    /// the test-runner's `--listen` protocol pipe, so a capturing host
+    /// sends `builtin.print` to real stdout (host.zig), which under
+    /// `zig build test` is the build's live stdout, so a capturing host
     /// adapter must be used whenever a corpus program prints.
     fn runExpectClean(self: *Fused) !Value {
         return self.runExpectCleanHost(.{});
@@ -512,8 +512,8 @@ test "fused oracle: edge kill — a counted value read on one branch releases on
     const pick_scan = try t.scanFunc(try t.fid("pick"));
     try testing.expectEqual(@as(usize, 1), pick_scan.releases);
     // (d) both paths: no leak, correct result, and the print is captured
-    // (never written to real stdout — that would corrupt the test
-    // runner's `--listen` protocol pipe).
+    // (never written to real stdout, which under `zig build test` is the
+    // build's live stdout).
     {
         var rec = PrintRecorder{};
         try testing.expectEqual(@as(Value, 100), try t.runExpectCleanHost(.{ .userdata = &rec, .invoke = PrintRecorder.invoke }));

@@ -504,7 +504,7 @@ In host_bind_tests.zig and the existing suites:
    rejected at comptime;
 6. `raw()` handlers keep list/array/hashmap ownership semantics
    (existing interpreter_host_tests + lifecycle tests);
-7. full `zig build test --summary all` regression.
+7. full `zig build test --summary all` regression; test counts and timings come from the test runner itself (`test_runner.zig`), and `--summary all` no longer prints an `N/M tests passed` count.
 
 ## 9. Out of scope / future
 

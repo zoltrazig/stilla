@@ -963,7 +963,7 @@ away. Exit codes: 0 normal termination, 1
 Stilla panic (the owned message — which records the trap site, §10 —
 goes to stderr), 2 load/compile error. The `--run` path is probed
 end-to-end from build.zig: its stdout cannot run in-process, because fd 1
-is the test-runner's `--listen` protocol pipe under `zig build test`.
+is the build's live stdout under `zig build test`.
 
 ## 12. Test strategy
 

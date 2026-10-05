@@ -22,5 +22,5 @@ fn print_terms(i: int32, n: int32) -> void {
 }
 
 fn main() -> void {
-    print_terms(0, 35);
+    print_terms(0, 25);
 }

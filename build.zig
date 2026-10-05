@@ -139,6 +139,7 @@ pub fn build(b: *std.Build) void {
     const mod_tests = b.addTest(.{
         .root_module = mod,
         .filters = test_filters,
+        .test_runner = .{ .path = b.path("src/test_runner.zig"), .mode = .simple },
     });
     const run_mod_tests = b.addRunArtifact(mod_tests);
 
@@ -151,17 +152,19 @@ pub fn build(b: *std.Build) void {
     const exe_tests = b.addTest(.{
         .root_module = exe_module,
         .filters = test_filters,
+        .test_runner = .{ .path = b.path("src/test_runner.zig"), .mode = .simple },
     });
     const run_exe_tests = b.addRunArtifact(exe_tests);
     test_step.dependOn(&run_exe_tests.step);
 
-    // The --emit-asm stdout probe: the fd-1 sink of the compiler can't run in the
-    // `zig build test` process (fd 1 is the test-runner's `--listen`
-    // protocol pipe), so it is probed here as a real subprocess — run the
-    // compiled `stilla` with `--emit-asm` on an example and assert that
-    // stdout carries the symbolic LLIR assembly. Together with the
-    // `--output` file-sink test in `src/main.zig`, both sinks of the
-    // `--emit-asm` flag are covered.
+    // The --emit-asm stdout probe: the fd-1 sink of the compiler can't run
+    // in the `zig build test` process (the test step inherits stdio, so fd 1
+    // is the build's live stdout and an in-process test must not write to
+    // it), so it is probed here as a real subprocess — run the compiled
+    // `stilla` with `--emit-asm` on an example and assert that stdout
+    // carries the symbolic LLIR assembly. Together with the `--output`
+    // file-sink test in `src/main.zig`, both sinks of the `--emit-asm` flag
+    // are covered.
     const asm_probe = b.addRunArtifact(exe);
     asm_probe.addArgs(&.{ "--emit-asm", "examples/madd.st" });
     asm_probe.expectStdOutMatch("; LLIR assembly — symbolic projection");
@@ -194,9 +197,10 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&hir_fail_probe.step);
 
     // 13 `--run` probes: the `--run` stdout sink is the fd-1 path that
-    // cannot run in the `zig build test` process (the test-runner's
-    // `--listen` protocol pipe — see the note in `src/main.zig`), so the
-    // full process is probed here as a real subprocess. The source and
+    // cannot run in the `zig build test` process (the test step inherits
+    // stdio, so fd 1 is the build's live stdout — see the note in
+    // `src/main.zig`), so the full process is probed here as a real
+    // subprocess. The source and
     // binary runs print the same golden line; `helper` lowers before
     // `main`, so the binary run prints it only if the header's entry id
     // (main, not function 0) is honored (D3).
@@ -304,6 +308,7 @@ pub fn build(b: *std.Build) void {
     const gen_tests = b.addTest(.{
         .root_module = gen_test_module,
         .filters = test_filters,
+        .test_runner = .{ .path = b.path("src/test_runner.zig"), .mode = .simple },
     });
     const run_gen_tests = b.addRunArtifact(gen_tests);
     test_step.dependOn(&run_gen_tests.step);
