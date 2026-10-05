@@ -1155,6 +1155,58 @@ test "SEG: the cross-layer drop cycle's precise summary unlocks reorder" {
     try testing.expectEqualStrings("app.g", calleeName(&b_hier, ops[1]).?);
 }
 
+test "SEG: equal-row operands do not reorder (strict-reversal reorder, no round cap)" {
+    // Two reads of the *same* declared-stable host domain have equal
+    // canonical rows: `rowLess` orders neither before the other, so neither
+    // direction is a strict reversal. `canSwapOperands` *does* admit the
+    // pair (a same-resource read/read on a stable domain commutes), so the
+    // pre-fix predicate — which swapped on `!rowLess(a, b)` — swapped this
+    // pair every round and only the numeric `max_iterations` cap stopped
+    // it, with `converged == false`. The strict-reversal fix leaves equal
+    // rows untouched, so the pass reaches a quiet round with no cap and a
+    // second `optimize` rewrites nothing.
+    const sensor = try probe_corpus.read(testing.allocator, "probes/cases", "lattice_reorder_host_sensor");
+    defer testing.allocator.free(sensor);
+    const app =
+        \\const sensor = import("sensor");
+        \\fn f(x: int32) -> int32 { sensor.read(x) + sensor.read(x) }
+        \\fn main() -> void { let _: int32 = f(1); }
+    ;
+    const texts = [_]struct { []const u8, []const u8 }{
+        .{ "sensor", sensor },
+        .{ "app", app },
+    };
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const s_read = try effects.summaryOf(a, &.{.{ .resource = .{ .host = 2 }, .mode = .read }});
+    const decls = [_]effects.HostDecl{
+        .{ .key = "sensor.read", .summary = s_read, .stilla_execution = .forbidden },
+    };
+    var eng = try effects.Engine.init(a, &effects.example_hierarchy, .{});
+
+    var b = try buildText("app", &texts);
+    defer b.deinit();
+    const first = try hir_seg.optimize(b.arena.allocator(), b.built, .{ .graph = b.graph, .host_decls = &decls, .engine = &eng });
+    try revalidateRewrittenWith(&b, &decls);
+    // Terminated on a quiet round (no bound hit) and left the equal pair
+    // alone: no reorder fired.
+    try testing.expect(first.converged);
+    try testing.expectEqual(@as(usize, 0), first.reorders);
+    // Both equal reads survive (host reads are observable, so no CSE).
+    try testing.expectEqual(@as(usize, 2), try countNodes(&b, "app.f", "call"));
+    const after_first = try allFuncText(&b);
+
+    // A second run is a true fixpoint: no rewrite fires at all and the
+    // canonical text is unchanged.
+    const second = try hir_seg.optimize(b.arena.allocator(), b.built, .{ .graph = b.graph, .host_decls = &decls, .engine = &eng });
+    try revalidateRewrittenWith(&b, &decls);
+    try testing.expect(second.converged);
+    try testing.expectEqual(@as(usize, 0), second.reorders);
+    try testing.expectEqual(@as(usize, 0), second.beta + second.etas + second.folds + second.algebra + second.lets + second.conds + second.matches + second.projects + second.shares);
+    try testing.expectEqualStrings(after_first, try allFuncText(&b));
+}
+
 test "SEG: CSE is refused for an observable or Q-carrying host read" {
     const sensor = try probe_corpus.read(testing.allocator, "probes/cases", "seg_cse_host_sensor");
     defer testing.allocator.free(sensor);
@@ -1193,11 +1245,11 @@ test "SEG: CSE is refused for an observable or Q-carrying host read" {
     }
 }
 
-/// One analysis/rewrite round only (no fixpoint), so a rule's immediate
-/// output survives long enough to be inspected before later rounds
-/// simplify it away.
+/// One analysis/rewrite round only (no fixpoint loop), so a rule's
+/// immediate output survives long enough to be inspected before later
+/// rounds simplify it away.
 fn segOnce(b: *Built) !hir_seg.Stats {
-    const stats = try hir_seg.optimize(b.arena.allocator(), b.built, .{ .graph = b.graph, .max_iterations = 1 });
+    const stats = try hir_seg.optimizeOnce(b.arena.allocator(), b.built, .{ .graph = b.graph });
     try revalidateRewritten(b);
     return stats;
 }
@@ -1376,12 +1428,12 @@ test "SEG: the pass is a fixpoint (second run rewrites nothing)" {
     try testing.expectEqualStrings(after_first_cse, try funcText(&b, "app.cse_pair"));
 }
 
-test "SEG: a construct needing more than one round converges within the bound" {
+test "SEG: a construct needing more than one round converges to a true fixpoint" {
     // Round 1 folds the constant `if` condition, overwriting the operand node
     // in place; the parent add's CSE pass then refuses the just-rewritten
     // (dirty) operand and defers to a fresh round. The pass must reach
-    // quiescence rather than stop at the `max_iterations` bound (hir.md §8.2
-    // bounded-round contract, `Stats.converged`).
+    // quiescence — a quiet round, with no round cap to stop it early
+    // (hir.md §8.2, `Stats.converged`).
     const src = try probe_corpus.read(testing.allocator, "probes/cases", "seg_multi_round");
     defer testing.allocator.free(src);
     var b = try buildText("app", &.{.{ "app", src }});
@@ -1450,7 +1502,7 @@ test "SEG: every changed function is marked dirty, not just the first" {
     var b = try buildText("app", &.{.{ "app", src }});
     defer b.deinit();
     const cache = try hir_effects.SummaryCache.init(b.arena.allocator());
-    _ = try hir_seg.optimize(b.arena.allocator(), b.built, .{ .graph = b.graph, .cache = cache, .max_iterations = 1 });
+    _ = try hir_seg.optimizeOnce(b.arena.allocator(), b.built, .{ .graph = b.graph, .cache = cache });
     try testing.expect(cache.isDirty(try findFuncId(&b, "app.a")));
     try testing.expect(cache.isDirty(try findFuncId(&b, "app.b")));
     try testing.expectEqual(@as(usize, 2), cache.dirtyCount());
@@ -1890,7 +1942,8 @@ fn egraphStatsOf(spec: []const u8) !hir_seg.Stats {
 test "SEG arena — probes/egraph.st reaches encode, saturation and extraction" {
     const stats = try egraphStatsOf("egraph");
     // Islands were encoded and saturated, and saturation terminated by
-    // reaching a fixpoint rather than by the `max_iterations` bound.
+    // reaching a quiet round (a true fixpoint; there is no numeric round
+    // cap).
     try testing.expect(stats.egraph_islands > 0);
     try testing.expect(stats.egraph_rounds > 0);
     try testing.expect(stats.egraph_converged);
@@ -2006,24 +2059,58 @@ test "SEG arena — integer associativity (egraph_ac) canonicalizes the AC chain
     try testing.expectEqualStrings("1\n", run_on);
 }
 
+test "SEG arena — associativity on a shared DAG (egraph_ac) changes the AIR" {
+    const text = try probe_corpus.read(testing.allocator, "probes", "ac_shared_dag");
+    defer testing.allocator.free(text);
+
+    // The probe is a CSE-shared left-deep chain of 32 `(a + b)` terms, so
+    // hash-consing collapses the repeated term to one class and the AC
+    // search sees a DAG. `egraph_assoc > 0` proves the canonicalization
+    // actually fired (not merely that the arena encoded).
+    const stats = try egraphStatsOf("ac_shared_dag");
+    try testing.expect(stats.egraph_assoc > 0);
+
+    // The source association is deliberately non-canonical, so switching
+    // `egraph_ac` off must leave a different AIR: on, extraction picks the
+    // canonical `acRep`-ordered chain; off, the source left-deep chain over
+    // the shared `a + b` class survives.
+    const on = try compileAirOpt("app", text, .{ .seg = true, .egraph_ac = true });
+    defer testing.allocator.free(on);
+    const ac_off = try compileAirOpt("app", text, .{ .seg = true, .egraph_ac = false });
+    defer testing.allocator.free(ac_off);
+    try testing.expect(!std.mem.eql(u8, on, ac_off));
+
+    // The regroup is value-preserving, so the runtime output is identical
+    // with SEG on and off; the AC differential is the AIR, not the output.
+    const run_off = try capture(text, false);
+    defer testing.allocator.free(run_off);
+    const run_on = try capture(text, true);
+    defer testing.allocator.free(run_on);
+    try testing.expectEqualStrings(run_off, run_on);
+}
+
 // ---------------------------------------------------------------------------
 // Corpus budget: the recorded SEG compile-time / rounds / island baseline
 // ---------------------------------------------------------------------------
 
 // Drive SEG over the whole corpus (`probes/` + `examples/`), asserting
-// the bounded-round contract holds for every program (`Stats.converged`)
-// and aggregating the SEG compile time, rounds, and island coverage.
+// that every program reaches a true fixpoint (`Stats.converged`) and
+// aggregating the SEG compile time, rounds, and island coverage.
 //
-// This is the CI-safe half of the item-12 budget: a round-bound hit is
-// exactly the regression the §8.2 contract makes observable, so the
-// assertion is `converged`, never wall-clock (CI timing is not a stable
-// oracle). The aggregate printed here — plus the measured figures
-// recorded in hir.md §11 — is the baseline the default-on decision
-// rests on.
+// Termination is the stable canonical ordering, not a numeric round cap:
+// the only exit from either round loop is a whole round that changes
+// nothing, so `converged` / `egraph_converged` are **tautologically true**
+// on any run that returns. These assertions therefore do not detect a
+// termination regression — they turn a non-terminating run into a failing
+// test instead of a hang/timeout (a program that never quiesces is a hang,
+// not a bound hit). They are the CI-safe half of the item-12 budget, never
+// wall-clock (CI timing is not a stable oracle). The aggregate printed here
+// — plus the measured figures recorded in hir.md §11 — is the baseline the
+// default-on decision rests on.
 //
 // `slow` names the slowest corpus program (copied into a local buffer,
 // since the corpus names are arena-freed per directory).
-test "SEG budget — every corpus program converges inside the round bound" {
+test "SEG budget — every corpus program reaches a true fixpoint (no numeric cap)" {
     var total_ns: u64 = 0;
     var total_iters: u64 = 0;
     var total_rewrites: u64 = 0;
@@ -2065,14 +2152,16 @@ test "SEG budget — every corpus program converges inside the round bound" {
             };
             const ns: u64 = @intCast(t0.durationTo(std.Io.Clock.awake.now(testing.io)).nanoseconds);
             if (!stats.converged) {
-                std.debug.print("SEG budget: {s}/{s} hit the round bound without converging ({d} rounds)\n", .{ dir, spec, stats.iterations });
+                std.debug.print("SEG budget: {s}/{s} did not reach a true fixpoint in {d} rounds (no numeric cap; a program that never quiesces is a hang)\n", .{ dir, spec, stats.iterations });
                 return error.TestUnexpectedResult;
             }
             // The per-island half of the same contract: an island whose
-            // saturation stops at the bound has an unmerged class, so the
-            // extraction below it is not the saturated form.
+            // saturation never quiesced has an unmerged class, so the
+            // extraction below it is not the saturated form. With no numeric
+            // cap, `false` can only mean a rewrite rule does not terminate
+            // (the termination argument failed), so this must never fire.
             if (!stats.egraph_converged) {
-                std.debug.print("SEG budget: {s}/{s} island saturation hit the round bound ({d} e-graph rounds)\n", .{ dir, spec, stats.egraph_rounds });
+                std.debug.print("SEG budget: {s}/{s} island saturation did not reach a true fixpoint ({d} e-graph rounds)\n", .{ dir, spec, stats.egraph_rounds });
                 return error.TestUnexpectedResult;
             }
             files += 1;

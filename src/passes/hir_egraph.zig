@@ -45,12 +45,18 @@
 //!   operand / region root encoding in turn — **never a switch on the
 //!   opcode**. A subtree that fails any of the three returns `null` and
 //!   keeps its original shape (the caller never sees it).
-//! - **saturate** — bounded rounds of (rules → rebuild), stopping when a
-//!   whole round changes nothing. This is a **bounded-round contract, not
-//!   a decreasing-measure one**: every admitted rule
-//!   preserves semantics, so any round prefix is a correct program and a
-//!   bound hit only forfeits further unions. `Stats.converged` reports
-//!   which exit was taken.
+//! - **saturate** — rounds of (rules → rebuild), stopping when a whole
+//!   round changes nothing. This is a **stable-canonical-order contract,
+//!   not a bounded-round one and not a global decreasing measure**: every
+//!   admitted rule preserves semantics and rule-node synthesis is
+//!   idempotent (a candidate is looked up before it is appended), so a
+//!   quiet round is a true fixpoint. The arena's only unbounded-direction
+//!   moves are canonical-term interning — at most once per distinct `Bag`
+//!   multiset — and monotone, finite class merges; the AC search's
+//!   near-linear per-round cost (`planAcWork` / `acChainCanonical` /
+//!   `bagInto` / `bagOf` / `finalizeBag`) is a *cost* bound, not what makes
+//!   the loop terminate. No numeric round cap is needed. `Stats.converged`
+//!   is `true` at that exit.
 //! - **select** — the cost model (item 22). After saturation, every
 //!   e-class is given the member extraction must emit: the one with the
 //!   least total cost under `CostModel`, computed bottom-up over the
@@ -92,14 +98,21 @@ const Ref = u32;
 /// An e-node id (index into `Island.nodes`).
 const NodeId = u32;
 
+/// One entry of an AC `Bag`: a distinct leaf class and how many times it
+/// occurs in the AC multiset. `Bag` is kept sorted ascending by the stable
+/// key `acRep` (the class's lowest member `NodeId`), so it is a canonical,
+/// union-order-independent representation of an AC chain.
+const BagEntry = struct { cls: Ref, count: u64 };
+const Bag = []BagEntry;
+
 /// What one island's saturation did — folded into `hir_seg.Stats`, the
 /// per-rule counts split into the recognized-redex (matched) and the
 /// applied halves (docs/todo.md 23).
 pub const Stats = struct {
     /// Saturation rounds this island ran (a quiet round counts).
     rounds: u64 = 0,
-    /// `true` when a round changed nothing (a fixpoint of the rule set
-    /// within `Config.max_rounds`); `false` on a bound hit.
+    /// `true` when a round changed nothing (the rule set's fixpoint; there
+    /// is no longer a bound-hit path).
     converged: bool = true,
     /// Live e-classes after saturation.
     eclasses: usize = 0,
@@ -217,8 +230,6 @@ pub const Config = struct {
         ac: bool = true,
     };
 
-    /// Bound on saturation rounds (the caller's `max_iterations`).
-    max_rounds: u32 = 8,
     /// Which union rules this island may apply.
     rules: Rules = .{},
 };
@@ -297,7 +308,6 @@ pub const Island = struct {
     arena: std.mem.Allocator,
     pr: *hir.Program,
     analysis: *hir_effects.Analysis,
-    max_rounds: u32,
     rules: Config.Rules = .{},
 
     classes: std.ArrayList(EClass) = .empty,
@@ -319,11 +329,42 @@ pub const Island = struct {
     choice_node: []NodeId = &.{},
     choice_cost: []u64 = &.{},
 
+    /// AC worklist for the current `saturate` round: the AC e-nodes
+    /// `ruleAcRegroup` may visit at all. Rebuilt by `planAcWork` from the
+    /// current class structure at the top of every round. An e-node
+    /// created later in the same round is a canonical chain sub-term the
+    /// rule itself synthesized, so it needs no regroup; leaving it out of
+    /// the worklist is the saturation fixpoint, not a missed rule.
+    ac_work: std.AutoHashMapUnmanaged(NodeId, void) = .empty,
+
+    /// AC leaf-multiset memo shared across every `ruleAcRegroup` visit in a
+    /// `saturate` round, keyed by `(class root, op, ty)` (a class can be an
+    /// operand of two different AC ops). `planAcWork` empties it at the top
+    /// of a round and `unionRoots` clears the whole map on every class merge
+    /// (conservative and correct: a merge can change any cached bag's root),
+    /// so a cached bag is only ever read while the class structure that
+    /// produced it is unchanged.
+    bag_memo: std.AutoHashMapUnmanaged(u128, Bag) = .empty,
+
+    /// Class roots a round's flatten must treat as *shared*: referenced as
+    /// an operand class by two or more AC e-nodes (a repeated operand of one
+    /// e-node counts twice). A shared class's bag is materialized once and
+    /// memoized; a single-use class is inlined straight into its parent's
+    /// accumulator, which is what makes a wide distinct-leaf chain linear
+    /// instead of copying a growing prefix at every level.
+    ac_shared: std.AutoHashMapUnmanaged(Ref, void) = .empty,
+
+    /// Test-only work meter (never a production cap or comparison): leaf /
+    /// memoized-bag entries appended by `bagInto` over the island's
+    /// lifetime. A wide distinct-leaf chain must append O(N) entries across
+    /// all rounds, not O(N²); the regression test pins it.
+    ac_flatten_appends: u64 = 0,
+
     stats: Stats = .{},
     written: std.ArrayList(hir.ExprId) = .empty,
 
     pub fn init(arena: std.mem.Allocator, pr: *hir.Program, analysis: *hir_effects.Analysis, config: Config) Island {
-        return .{ .arena = arena, .pr = pr, .analysis = analysis, .max_rounds = config.max_rounds, .rules = config.rules };
+        return .{ .arena = arena, .pr = pr, .analysis = analysis, .rules = config.rules };
     }
 
     // -----------------------------------------------------------------
@@ -375,6 +416,10 @@ pub const Island = struct {
             self.classes.items[ra].preferred = pb.preferred;
             self.classes.items[ra].preferred_prio = pb.preferred_prio;
         }
+        // The class structure changed: every memoized leaf multiset may now
+        // reference a stale root, so drop them all. This is a handle reset,
+        // not a per-entry walk.
+        self.bag_memo.clearRetainingCapacity();
         return ra;
     }
 
@@ -415,6 +460,13 @@ pub const Island = struct {
     /// preferred e-node — the shape every union rule's result takes.
     fn redirectToClass(self: *Island, cls: Ref, target: Ref) Error!bool {
         const root = self.find(target);
+        // These rules (constant fold / algebra / condition / projection)
+        // can union a class with a value it did not structurally contain, so
+        // post-order no longer bounds the invalidation: drop the whole bag
+        // memo. `unionRoots` clears the same whole map for every merge
+        // (including the AC regroup's `redirect`), so this is a conservative
+        // whole-memo reset, never a targeted key eviction.
+        self.bag_memo.clearRetainingCapacity();
         return self.redirect(self.find(cls), root, self.classes.items[root].preferred);
     }
 
@@ -430,17 +482,32 @@ pub const Island = struct {
         return nid;
     }
 
-    fn addConstNode(self: *Island, ty: hir.HIRTypeId, value: meta.ConstValue) Error!NodeId {
-        return self.addNode(.{
+    /// The e-node a constant of `ty` / `value` encodes to; the caller
+    /// interns it through `internCandidate`.
+    fn constCandidate(self: *Island, ty: hir.HIRTypeId, value: meta.ConstValue) ENode {
+        return .{
             .op = hir.opId("const").?,
             .ty = ty,
             .payload = .{ .const_value = value },
-            .operands = try self.arena.alloc(Ref, 0),
-            .regions = try self.arena.alloc(RegionTerm, 0),
+            .operands = &.{},
+            .regions = &.{},
             .access_hops = &.{},
             .origin = null,
             .full_expr = self.island_fe,
-        });
+        };
+    }
+
+    /// The idempotence primitive for rule synthesis: reuse an
+    /// already-interned structurally equal e-node if there is one, else
+    /// append it and hash-cons it. Returns the class the candidate lives
+    /// in. A rule that matches a node already equivalent to an existing
+    /// one therefore appends nothing and unions nothing, which is what
+    /// lets a saturated island be a true fixpoint instead of churning a
+    /// fresh copy of the same node every round.
+    fn internCandidate(self: *Island, cand: ENode) Error!Ref {
+        if (try self.lookupNode(cand)) |other| return self.find(self.nodes.items[other].cls);
+        const nid = try self.addNode(cand);
+        return try self.internNode(nid);
     }
 
     /// Hash-cons `nid`: return the class whose content it already equals,
@@ -710,12 +777,19 @@ pub const Island = struct {
     // saturation
     // -----------------------------------------------------------------
 
-    /// Bounded-round saturation (hir.md §8.2): rules → congruence close,
-    /// repeated until a round changes nothing or the bound is hit.
+    /// Saturation (hir.md §8.2): rules → congruence close, repeated until a
+    /// round changes nothing — a true fixpoint, not a bounded prefix and not
+    /// a global decreasing measure. Rule synthesis is idempotent (a
+    /// candidate is looked up before it is appended) and the only
+    /// unbounded-direction moves are canonical-term interning (once per
+    /// distinct `Bag`) and monotone, finite class merges, so a quiet round
+    /// is reached without any numeric round cap.
     pub fn saturate(self: *Island) Error!void {
-        var round: u32 = 0;
-        while (round < self.max_rounds) : (round += 1) {
+        while (true) {
             self.stats.rounds += 1;
+            // Select the AC e-nodes this round may regroup before mutating
+            // the class structure (`planAcWork` reads `find` / `acExpand`).
+            if (self.rules.ac) try self.planAcWork();
             var changed = false;
             var i: usize = 0;
             while (i < self.nodes.items.len) : (i += 1) {
@@ -723,9 +797,8 @@ pub const Island = struct {
             }
             if (try self.rebuild()) changed = true;
             if (!changed) break;
-        } else {
-            self.stats.converged = false;
         }
+        self.stats.converged = true;
         // The class set is final here, so the cost model runs once at the
         // end of saturation rather than per round.
         try self.select();
@@ -778,8 +851,11 @@ pub const Island = struct {
             // No fold / algebra / `eq`-`ne` swap landed; the AC regroup
             // (`add` / `mul` / …) is the last rule tried. The one-rule-per-
             // node discipline holds: `ruleNumeric` returning true returns
-            // here, and the next round sees the merged class.
-            if (self.rules.ac) return self.ruleAcRegroup(nid);
+            // here, and the next round sees the merged class. `ac_work`
+            // restricts the regroup to the maximal / fingerprint-shared
+            // nodes `planAcWork` selected for this round (a sound pruning,
+            // see there).
+            if (self.rules.ac and self.ac_work.contains(nid)) return self.ruleAcRegroup(nid);
             return false;
         }
         const base = baseName(d.name);
@@ -819,7 +895,7 @@ pub const Island = struct {
                     // value computed); whether the union below lands is the
                     // applied half (`folds`).
                     self.stats.folds_matched += 1;
-                    const cc = try self.internNode(try self.addConstNode(n.ty, value));
+                    const cc = try self.internCandidate(self.constCandidate(n.ty, value));
                     if (try self.redirectToClass(cls, cc)) {
                         self.stats.folds += 1;
                         return true;
@@ -851,9 +927,12 @@ pub const Island = struct {
         if (self.rules.ac and n.operands.len == 2 and isIntegerRep(rep) and
             isCommutativeInt(base) and !isAssociativeInt(base))
         {
-            const c0 = self.find(n.operands[0]);
-            const c1 = self.find(n.operands[1]);
-            if (c0 > c1) {
+            // Sort by the stable `acRep` key (the class's lowest member
+            // `NodeId`), not the union-find root id: `unionRoots` renames
+            // root ids as classes merge, so an order keyed on them can flip
+            // back and forth, while `acRep` only decreases across unions and
+            // makes the swap monotone.
+            if (self.acRep(n.operands[0]) > self.acRep(n.operands[1])) {
                 const tmp = n.operands[0];
                 n.operands[0] = n.operands[1];
                 n.operands[1] = tmp;
@@ -881,7 +960,7 @@ pub const Island = struct {
                             .u64 => intCV(u64, 0),
                             else => unreachable, // isIntegerRep gates above
                         };
-                        break :blk try self.internNode(try self.addConstNode(n.ty, zero));
+                        break :blk try self.internCandidate(self.constCandidate(n.ty, zero));
                     } else if (is_band) n.operands[0] else n.operands[1];
                     if (try self.redirectToClass(cls, target)) {
                         self.stats.algebra += 1;
@@ -904,7 +983,7 @@ pub const Island = struct {
                     }
                 },
                 .value => |value| {
-                    const cc = try self.internNode(try self.addConstNode(n.ty, value));
+                    const cc = try self.internCandidate(self.constCandidate(n.ty, value));
                     if (try self.redirectToClass(cls, cc)) {
                         self.stats.algebra += 1;
                         return true;
@@ -914,24 +993,22 @@ pub const Island = struct {
                     // `0 - x → neg x` belongs to the AC bundle (`rules.ac`):
                     // with AC disabled the identity stays a `sub`.
                     if (!self.rules.ac) return false;
-                    // Mirror `addConstNode` but unary. The
-                    // created node cannot trigger further creation, and
-                    // later visits no-op at `redirectToClass` — bounded
-                    // churn, same as the fold path.
+                    // The unary `neg` candidate is interned through the same
+                    // lookup-first path, so a later visit reuses it instead
+                    // of appending a fresh copy.
                     const neg_op = negOpId(rep) orelse return false;
                     const ops = try self.arena.alloc(Ref, 1);
                     ops[0] = n.operands[idx];
-                    const nn = try self.addNode(.{
+                    const cc = try self.internCandidate(.{
                         .op = neg_op,
                         .ty = n.ty,
                         .payload = .none,
                         .operands = ops,
-                        .regions = try self.arena.alloc(RegionTerm, 0),
+                        .regions = &.{},
                         .access_hops = &.{},
                         .origin = null,
                         .full_expr = self.island_fe,
                     });
-                    const cc = try self.internNode(nn);
                     if (try self.redirectToClass(cls, cc)) {
                         self.stats.algebra += 1;
                         return true;
@@ -945,68 +1022,6 @@ pub const Island = struct {
     // -----------------------------------------------------------------
     // AC regroup (associativity + commutativity)
     // -----------------------------------------------------------------
-
-    /// Budget on the leaf multiset `flattenAc` may build for one node
-    /// (hir.md §8.2). Without it the flatten has no bound: a shared add /
-    /// mul DAG expands with full multiplicity, so a tree that CSE shares k
-    /// times (`c_i = add(c_{i-1}, c_{i-1})`, the "diamond" a nested
-    /// `(x + x)` source produces) has `2^k` leaves and the regroup
-    /// materializes `2^k - 1` chain nodes — `k = 8` seconds, `k = 10`
-    /// minutes, `k = 11` an effective hang, all from legal source. The cap
-    /// removes that exponential: a node whose flatten would exceed it is
-    /// left alone, so the regroup's cost stays linear in source size times
-    /// a constant factor. It is a guard on the search, not a compile-time
-    /// promise — the SEG arena's own residual cost still dominates at large
-    /// k (hir.md §11).
-    ///
-    /// On exceeding the budget `flattenAc` abandons the walk and
-    /// `ruleAcRegroup` returns without creating nodes or redirecting: the
-    /// node is simply left uncanonicalized. That is sound — skipping a
-    /// canonicalization only forgoes an optimization, never changes
-    /// semantics — and it contains the cost, because a node whose flatten
-    /// is over budget re-abandons in a handful of appends on every later
-    /// visit. 32 clears every corpus program's widest real chain while
-    /// keeping the `2^k` blowup out of reach of the compiler.
-    const max_ac_leaves: usize = 32;
-
-    /// Flatten one operand class into the leaf multiset of the AC chain
-    /// rooted at it: while the class has a member with the same `op` /
-    /// `ty`, recurse through that member's operands (lowest-`NodeId`
-    /// member, deterministic). `path` holds the classes on the current
-    /// expansion path, so a cycle is emitted as a leaf instead of looping;
-    /// a class reached twice through the DAG is expanded twice (it really
-    /// is two occurrences in the multiset). Abandons (set `aborted`) once
-    /// `out` would pass `max_ac_leaves`: the caller then leaves the node
-    /// uncanonicalized.
-    fn flattenAc(
-        self: *Island,
-        op: hir.OpId,
-        ty: hir.HIRTypeId,
-        c: Ref,
-        path: *std.AutoHashMapUnmanaged(Ref, void),
-        out: *std.ArrayList(Ref),
-        aborted: *bool,
-    ) Error!void {
-        if (out.items.len >= max_ac_leaves) {
-            aborted.* = true;
-            return;
-        }
-        const root = self.find(c);
-        if (path.contains(root)) {
-            try out.append(self.arena, root);
-            return;
-        }
-        const m = self.acExpand(root, op, ty) orelse {
-            try out.append(self.arena, root);
-            return;
-        };
-        try path.put(self.arena, root, {});
-        for (self.nodes.items[m].operands) |o| {
-            try self.flattenAc(op, ty, o, path, out, aborted);
-            if (aborted.*) break;
-        }
-        _ = path.remove(root);
-    }
 
     /// The lowest-`NodeId` member of `root` that is the same AC op and
     /// type, or null when the class is a leaf for this chain.
@@ -1040,85 +1055,450 @@ pub const Island = struct {
         return self.acRep(a) < self.acRep(b);
     }
 
-    /// Full AC search for one integer binary AC node (hir.md §8.2):
-    /// flatten the chain, rebuild the leaves in canonical order as a fixed
-    /// left-deep chain, and union the chain root into the node's class so
-    /// extraction can pick the canonical bracketing.
+    /// Whether `n` is an integer binary associative-commutative node — the
+    /// exact `ruleAcRegroup` admission predicate, hoisted so `planAcWork`
+    /// classifies the same nodes the rule would.
+    fn isAcNode(n: ENode) bool {
+        const d = hir.registry.get(n.op);
+        const rep = d.rep orelse return false;
+        if (n.operands.len != 2 or !isIntegerRep(rep)) return false;
+        return isAcInt(baseName(d.name));
+    }
+
+    /// One AC e-node's multiset fingerprint: a commutative leaf-class hash
+    /// plus the total leaf count, both combined under addition so operand
+    /// order and bracketing vanish. This is only a *scheduler* for
+    /// `planAcWork`; a false match costs a `bagOf` visit and never
+    /// correctness, because a scheduled node is still canonicalized by the
+    /// exact bag path (and two classes with different bags build two
+    /// different canonical roots). A cycle yields `null` (undefined
+    /// multiset) and never schedules.
+    fn acSig(
+        self: *Island,
+        nid: NodeId,
+        memo: *std.AutoHashMapUnmanaged(u128, ?u128),
+        on_path: *std.AutoHashMapUnmanaged(Ref, void),
+    ) Error!?u128 {
+        const n = self.nodes.items[nid];
+        const cls = self.find(n.cls);
+        // Key by `(class root, op, ty)`, not the root alone: a class can hold
+        // both `add` and `mul` e-nodes (an `integerAlgebra` fold such as
+        // `mul(add(a,b), 1)` merges its class with the kept operand's), and
+        // the signature below expands with `acExpand(oroot, n.op, n.ty)`.
+        // Keying on the root alone let whichever op was visited first serve
+        // the other the wrong fingerprint. `bagOf` / `bagKey` key the same
+        // way. Scheduling-only either way, but consistent.
+        const key = bagKey(cls, n.op, n.ty);
+        if (memo.get(key)) |v| return v;
+        if (on_path.contains(cls)) return null;
+        try on_path.put(self.arena, cls, {});
+        var acc: u64 = 0;
+        var size: u64 = 0;
+        var ok = true;
+        for (n.operands) |o| {
+            const oroot = self.find(o);
+            if (self.acExpand(oroot, n.op, n.ty)) |m| {
+                const child = try self.acSig(m, memo, on_path);
+                if (child) |cs| {
+                    // Raw addition, compressed nowhere along the way: the
+                    // fingerprint must be a pure function of the leaf
+                    // multiset, independent of the tree's bracketing.
+                    acc = acc +% @as(u64, @truncate(cs));
+                    size +|= @as(u64, @truncate(cs >> 64));
+                } else {
+                    ok = false;
+                    break;
+                }
+            } else {
+                const lk = self.acRep(oroot);
+                acc = acc +% std.hash.Wyhash.hash(0, std.mem.asBytes(&lk));
+                size +|= 1;
+            }
+        }
+        _ = on_path.remove(cls);
+        const val: ?u128 = if (ok) (@as(u128, size) << 64) | acc else null;
+        try memo.put(self.arena, key, val);
+        return val;
+    }
+
+    /// A sound *sufficient* test that node `nid` already is its class's
+    /// canonical left-deep chain: a left spine whose right operands are
+    /// distinct leaves in strictly descending `acRep` order, bottoming out
+    /// in an ascending leaf pair. That is exactly the tree
+    /// `buildCanonical` folds for a bag of distinct count-1 leaves, so a
+    /// `true` answer means no redirect. A `false` answer only sends the
+    /// node to the exact `bagOf` path; it never claims a non-canonical node
+    /// is canonical.
+    fn acChainCanonical(self: *Island, nid: NodeId, op: hir.OpId, ty: hir.HIRTypeId) bool {
+        var cur = self.nodes.items[nid];
+        var last: ?NodeId = null;
+        // Termination (no explicit visited set needed): each step descends
+        // the left spine and records the right operand key in `last`, and
+        // the `rkey >= lk` guard forces those right keys to strictly
+        // descend. There are finitely many distinct `acRep` keys, so the
+        // loop runs finitely many steps; a left-spine cycle must eventually
+        // present a right key it already saw and exit through that guard.
+        while (true) {
+            if (cur.op != op or cur.ty != ty or cur.operands.len != 2) return false;
+            const rc = self.find(cur.operands[1]);
+            if (self.acExpand(rc, op, ty) != null) return false;
+            const rkey = self.acRep(rc);
+            if (last) |lk| {
+                if (rkey >= lk) return false;
+            }
+            last = rkey;
+            const lc = self.find(cur.operands[0]);
+            if (self.acExpand(lc, op, ty)) |m| {
+                cur = self.nodes.items[m];
+                continue;
+            }
+            return self.acRep(lc) < rkey;
+        }
+    }
+
+    /// Rebuild `ac_work` for one `saturate` round. Scheduled are every
+    /// *maximal* AC e-node — one not the representative operand of another
+    /// same-(op,ty) AC e-node — plus every AC e-node that shares its
+    /// multiset fingerprint with a different e-node.
     ///
-    /// Termination: the target form is a deterministic function of the leaf
-    /// multiset, and classes only grow (unions are monotone), so a given
-    /// class yields at most one canonical root per distinct leaf multiset;
-    /// the rule fires only while the class does not already hold that root
-    /// (`nodeEql` false and `find(chain_root) != find(n.cls)`), so
-    /// saturation reaches a fixpoint. It deliberately does NOT `propose`
-    /// unconditionally: those guards return before `redirect`, keeping an
-    /// already-canonical chain at `preferred_prio == 0` and identity
-    /// extraction intact. `max_rounds` remains the outer bound, and
-    /// `max_ac_leaves` bounds the flatten so a shared DAG cannot turn a
-    /// legal program into a hang.
+    /// An interior e-node with a unique fingerprint is deliberately left
+    /// out. The load-bearing fact is the HIR tree invariant (§3.7: no DAG):
+    /// a class with two or more parents necessarily holds two or more
+    /// same-`(op, ty)` e-nodes (each parent occupies one tree position), so
+    /// the fingerprint sees it through `counts` and schedules it. A
+    /// single-e-node interior class is instead covered by the enclosing
+    /// maximal node's `acChainCanonical` spine check, whose canonical build
+    /// reaches through the interior. Skipping is therefore a sound missed
+    /// optimization, and it makes a left-associated chain of N distinct
+    /// leaves cost O(N) instead of the Σ depth = O(N²) of visiting every
+    /// interior chain node. A shared fingerprint keeps an interior node
+    /// scheduled exactly when it has an AC-equal sibling elsewhere: both
+    /// then run the exact bag path and land in one e-class (the
+    /// `(a+b)+c` / `a+(b+c)` case). The fingerprint only *schedules*; it
+    /// never merges, so a collision is extra work, never a wrong union.
+    fn planAcWork(self: *Island) Error!void {
+        self.ac_work.clearRetainingCapacity();
+        self.bag_memo.clearRetainingCapacity();
+        var memo = std.AutoHashMapUnmanaged(u128, ?u128).empty;
+        var on_path = std.AutoHashMapUnmanaged(Ref, void).empty;
+        var counts = std.AutoHashMapUnmanaged(u128, u32).empty;
+        for (self.nodes.items, 0..) |n, i| {
+            if (!isAcNode(n)) continue;
+            const sig = try self.acSig(@intCast(i), &memo, &on_path);
+            if (sig) |s| {
+                const gop = try counts.getOrPut(self.arena, s);
+                if (!gop.found_existing) gop.value_ptr.* = 0;
+                gop.value_ptr.* += 1;
+            }
+        }
+        var interior = std.AutoHashMapUnmanaged(NodeId, void).empty;
+        for (self.nodes.items) |n| {
+            if (!isAcNode(n)) continue;
+            for (n.operands) |o| {
+                if (self.acExpand(self.find(o), n.op, n.ty)) |rep| {
+                    try interior.put(self.arena, rep, {});
+                }
+            }
+        }
+        for (self.nodes.items, 0..) |n, i| {
+            if (!isAcNode(n)) continue;
+            const nid: NodeId = @intCast(i);
+            var schedule = !interior.contains(nid);
+            if (!schedule) {
+                if (try self.acSig(nid, &memo, &on_path)) |s| {
+                    if ((counts.get(s) orelse 0) >= 2) schedule = true;
+                }
+            }
+            if (schedule) try self.ac_work.put(self.arena, nid, {});
+        }
+        // Operand fan-out: a class expanded by two or more AC e-nodes (or
+        // twice by one) needs its bag materialized once and shared; a
+        // single-use class is inlined straight into its parent's flatten.
+        self.ac_shared.clearRetainingCapacity();
+        var fanout = std.AutoHashMapUnmanaged(Ref, u32).empty;
+        for (self.nodes.items) |n| {
+            if (!isAcNode(n)) continue;
+            for (n.operands) |o| {
+                if (self.acExpand(self.find(o), n.op, n.ty) == null) continue;
+                const gop = try fanout.getOrPut(self.arena, self.find(o));
+                if (!gop.found_existing) gop.value_ptr.* = 0;
+                gop.value_ptr.* += 1;
+            }
+        }
+        var it = fanout.iterator();
+        while (it.next()) |e| {
+            if (e.value_ptr.* >= 2) try self.ac_shared.put(self.arena, e.key_ptr.*, {});
+        }
+    }
+
+    /// Order two `Bag` entries by the stable `acRep` key; classes are
+    /// distinct within a bag, so the key alone is a strict order.
+    fn bagLess(self: *Island, a: BagEntry, b: BagEntry) bool {
+        return self.acLeafLess(a.cls, b.cls);
+    }
+
+    /// A one-member bag for a leaf class.
+    fn singleBag(self: *Island, cls: Ref) Error!Bag {
+        const out = try self.arena.alloc(BagEntry, 1);
+        out[0] = .{ .cls = cls, .count = 1 };
+        return out;
+    }
+
+    /// The memo key of a class's bag under one `(op, ty)`: a class can be
+    /// an operand of two different AC ops, whose expansions differ, so the
+    /// root alone is not enough.
+    fn bagKey(root: Ref, op: hir.OpId, ty: hir.HIRTypeId) u128 {
+        return (@as(u128, root) << 64) | (@as(u128, op) << 32) | @as(u128, ty);
+    }
+
+    /// Sort a raw `(class, count)` accumulator ascending by `acRep` and
+    /// coalesce equal classes, summing counts (an overflowing sum sets
+    /// `overflow`, and the caller refuses the rewrite). The flatten appends
+    /// raw leaf / memoized entries without maintaining sortedness, so this
+    /// one sort per materialized bag replaces the per-merge copy of a sorted
+    /// left fold.
+    fn finalizeBag(self: *Island, entries: *std.ArrayList(BagEntry), overflow: *bool) Error!Bag {
+        if (entries.items.len == 0) return &.{};
+        std.mem.sort(BagEntry, entries.items, self, bagLess);
+        var n: usize = 0;
+        var i: usize = 0;
+        while (i < entries.items.len) {
+            const cls = entries.items[i].cls;
+            const key = self.acRep(cls);
+            var j = i + 1;
+            while (j < entries.items.len and self.acRep(entries.items[j].cls) == key) : (j += 1) {
+                const sum = @addWithOverflow(entries.items[i].count, entries.items[j].count);
+                if (sum[1] != 0) overflow.* = true;
+                entries.items[i].count = sum[0];
+            }
+            entries.items[n] = entries.items[i];
+            n += 1;
+            i = j;
+        }
+        const out = try self.arena.alloc(BagEntry, n);
+        @memcpy(out, entries.items[0..n]);
+        return out;
+    }
+
+    /// Append `c`'s leaf multiset (under `op`/`ty`) to `list`. A class the
+    /// round marked *shared* (`ac_shared`) is materialized once and spliced
+    /// in from the memo; every other AC class is expanded in place, so a
+    /// single-use chain contributes its leaves without re-copying a growing
+    /// prefix. A cycle sets `cut`, exactly as before.
+    fn bagInto(
+        self: *Island,
+        op: hir.OpId,
+        ty: hir.HIRTypeId,
+        c: Ref,
+        list: *std.ArrayList(BagEntry),
+        on_path: *std.AutoHashMapUnmanaged(Ref, void),
+        cut: *bool,
+        overflow: *bool,
+    ) Error!void {
+        const root = self.find(c);
+        if (cut.*) {
+            self.ac_flatten_appends += 1;
+            try list.append(self.arena, .{ .cls = root, .count = 1 });
+            return;
+        }
+        if (on_path.contains(root)) {
+            cut.* = true;
+            self.ac_flatten_appends += 1;
+            try list.append(self.arena, .{ .cls = root, .count = 1 });
+            return;
+        }
+        if (self.ac_shared.contains(root)) {
+            const b = try self.bagOf(op, ty, root, on_path, cut, overflow);
+            if (cut.*) {
+                self.ac_flatten_appends += 1;
+                try list.append(self.arena, .{ .cls = root, .count = 1 });
+                return;
+            }
+            self.ac_flatten_appends += b.len;
+            try list.appendSlice(self.arena, b);
+            return;
+        }
+        const m = self.acExpand(root, op, ty) orelse {
+            self.ac_flatten_appends += 1;
+            try list.append(self.arena, .{ .cls = root, .count = 1 });
+            return;
+        };
+        try on_path.put(self.arena, root, {});
+        for (self.nodes.items[m].operands) |o| {
+            try self.bagInto(op, ty, o, list, on_path, cut, overflow);
+            if (cut.*) break;
+        }
+        _ = on_path.remove(root);
+    }
+
+    /// Materialize the `acRep`-sorted, coalesced bag of class `c` under
+    /// `op`/`ty`, memoized by `(root, op, ty)` so a DAG-shared chain
+    /// (`E_k = E_{k-1} ⊕ E_{k-1}`) costs O(k), not `2^k`, while a
+    /// single-use chain flattens linearly through `bagInto` without ever
+    /// copying a growing prefix. A cycle sets `cut` and returns a partial
+    /// bag without memoizing; the rule then refuses the rewrite (sound: it
+    /// only forgoes an optimization, and no canonical node is built, so the
+    /// arena cannot grow the cycle away — bounded with no numeric budget).
+    fn bagOf(
+        self: *Island,
+        op: hir.OpId,
+        ty: hir.HIRTypeId,
+        c: Ref,
+        on_path: *std.AutoHashMapUnmanaged(Ref, void),
+        cut: *bool,
+        overflow: *bool,
+    ) Error!Bag {
+        const root = self.find(c);
+        if (cut.*) return self.singleBag(root);
+        const key = bagKey(root, op, ty);
+        if (self.bag_memo.get(key)) |m| return m;
+        if (on_path.contains(root)) {
+            cut.* = true;
+            return self.singleBag(root);
+        }
+        try on_path.put(self.arena, root, {});
+        var list = std.ArrayList(BagEntry).empty;
+        if (self.acExpand(root, op, ty)) |mn| {
+            for (self.nodes.items[mn].operands) |o| {
+                try self.bagInto(op, ty, o, &list, on_path, cut, overflow);
+                if (cut.*) break;
+            }
+        } else {
+            try list.append(self.arena, .{ .cls = root, .count = 1 });
+        }
+        _ = on_path.remove(root);
+        if (cut.*) return self.singleBag(root);
+        const bag = try self.finalizeBag(&list, overflow);
+        // Do not cache a bag whose counts wrapped: a later memo hit would
+        // return it without re-flagging `overflow`, and the rule would then
+        // accept a malformed multiset. (The count is source-bounded, so this
+        // is the defensive branch, not a reachable one.)
+        if (!overflow.*) try self.bag_memo.put(self.arena, key, bag);
+        return bag;
+    }
+
+    /// The total number of leaf occurrences a bag describes.
+    fn bagTotal(bag: Bag) u64 {
+        var total: u64 = 0;
+        for (bag) |e| total = total +| e.count;
+        return total;
+    }
+
+    /// Construct one AC e-node from two operand nodes, reusing an
+    /// already-interned equal node if there is one and otherwise appending
+    /// and hash-consing it. Returns the (possibly pre-existing) node id.
+    fn mkAcNode(self: *Island, n: ENode, l: NodeId, r: NodeId) Error!NodeId {
+        const ops = try self.arena.alloc(Ref, 2);
+        ops[0] = self.find(self.nodes.items[l].cls);
+        ops[1] = self.find(self.nodes.items[r].cls);
+        const cand = ENode{
+            .op = n.op,
+            .ty = n.ty,
+            .payload = n.payload,
+            .operands = ops,
+            .regions = &.{},
+            .access_hops = &.{},
+            .origin = null,
+            .full_expr = n.full_expr,
+        };
+        if (try self.lookupNode(cand)) |other| return other;
+        const nid = try self.addNode(cand);
+        _ = try self.internNode(nid);
+        return nid;
+    }
+
+    /// Materialize `count` copies of leaf class `c` as a balanced DAG with a
+    /// shared operand at every level: `count == 1` is the representative
+    /// node, an even count is `h ⊕ h` for `h = buildRun(count/2)`, and an
+    /// odd count is `buildRun(count-1) ⊕ leaf`. O(log count) nodes.
+    fn buildRun(self: *Island, n: ENode, c: Ref, count: u64) Error!NodeId {
+        if (count <= 1) return self.acRep(c);
+        if (count % 2 == 0) {
+            const h = try self.buildRun(n, c, count / 2);
+            return try self.mkAcNode(n, h, h);
+        }
+        const h = try self.buildRun(n, c, count - 1);
+        return try self.mkAcNode(n, h, self.acRep(c));
+    }
+
+    /// The canonical AC term of a bag: one `buildRun` per `(leaf, count)`
+    /// entry, left-folded in `acRep` order, so `a ⊕ b ⊕ c` becomes
+    /// `(a ⊕ b) ⊕ c` and the result is a deterministic pure function of the
+    /// bag. Every segment is reused from the arena when already interned,
+    /// so a re-visit appends nothing.
+    const Canonical = struct { cls: Ref, node: NodeId };
+    fn buildCanonical(self: *Island, n: ENode, bag: Bag) Error!?Canonical {
+        if (bag.len == 0) return null;
+        var acc = try self.buildRun(n, bag[0].cls, bag[0].count);
+        for (bag[1..]) |e| {
+            const run = try self.buildRun(n, e.cls, e.count);
+            acc = try self.mkAcNode(n, acc, run);
+        }
+        return .{ .cls = self.find(self.nodes.items[acc].cls), .node = acc };
+    }
+
+    /// Full AC search for one integer binary AC node (hir.md §8.2): collect
+    /// the canonical leaf `Bag`, materialize its canonical term, and union
+    /// that term's class into the node's class so extraction can pick the
+    /// canonical bracketing.
+    ///
+    /// Termination: the target term is a deterministic function of the leaf
+    /// bag, and classes only grow (unions are monotone), so a given class
+    /// yields at most one canonical root per distinct bag; the rule fires
+    /// only while the class does not already hold that root (`nodeEql`
+    /// false and `find(chain_root) != find(n.cls)`), so saturation reaches a
+    /// fixpoint. It deliberately does NOT `propose` unconditionally: those
+    /// guards return before `redirect`, keeping an already-canonical chain
+    /// at `preferred_prio == 0` and identity extraction intact. There is no
+    /// flatten budget: `bagOf` memoizes a shared DAG and `buildRun`
+    /// materializes an O(log count) shared tree. A cyclic AC class (one
+    /// reachable from itself) is left uncanonicalized — sound, since it
+    /// only forgoes an optimization, and it keeps the search bounded.
     fn ruleAcRegroup(self: *Island, nid: NodeId) Error!bool {
         const n = self.nodes.items[nid];
         const d = hir.registry.get(n.op);
         const rep = d.rep orelse return false;
         if (n.operands.len != 2 or !isIntegerRep(rep)) return false;
         if (!isAcInt(baseName(d.name))) return false;
+        // Already the canonical left-deep chain? Then the exact `bagOf`
+        // walk below would rebuild this very node and return without a
+        // redirect. Detecting it structurally keeps a wide distinct-leaf
+        // chain linear (the Σ depth flatten is the quadratic blowup).
+        if (self.acChainCanonical(nid, n.op, n.ty)) return false;
         const cls = self.find(n.cls);
 
-        var leaves = std.ArrayList(Ref).empty;
-        defer leaves.deinit(self.arena);
-        var path = std.AutoHashMapUnmanaged(Ref, void).empty;
-        defer path.deinit(self.arena);
-        var aborted = false;
+        var on_path = std.AutoHashMapUnmanaged(Ref, void).empty;
+        defer on_path.deinit(self.arena);
+        var cut = false;
+        var overflow = false;
+        var list = std.ArrayList(BagEntry).empty;
+        // Both operand subtrees flatten into one accumulator: a single-use
+        // subtree is inlined straight in (no growing-prefix copy), a shared
+        // one is spliced from the memo. The memo is Island-wide and emptied
+        // by `planAcWork` / `unionRoots`, so a later e-node reuses the
+        // flatten of each distinct shared subtree.
         for (n.operands) |c| {
-            try self.flattenAc(n.op, n.ty, c, &path, &leaves, &aborted);
-            if (aborted) break;
+            try self.bagInto(n.op, n.ty, c, &list, &on_path, &cut, &overflow);
+            if (cut) break;
         }
-        // Over budget (a DAG-shared chain): leave the node uncanonicalized
-        // rather than build an exponential number of chain nodes.
-        if (aborted) return false;
-        // Two operands each append at least one leaf; this is defensive.
-        if (leaves.items.len < 2) return false;
-        std.mem.sort(Ref, leaves.items, self, acLeafLess);
-
-        // Build the canonical left-deep chain leaf-first: each piece's left
-        // operand is the running accumulator, its right the next sorted
-        // leaf. A piece already interned (index re-rooted by the previous
-        // `rebuild`) is reused through its raw hash, so a no-op visit
-        // appends nothing and the guards below return; only a genuinely
-        // absent piece is created and `internNode` registers it.
-        var acc = leaves.items[0];
-        var root_nid: NodeId = undefined;
-        for (leaves.items[1..]) |leaf| {
-            const ops = try self.arena.alloc(Ref, 2);
-            ops[0] = self.find(acc);
-            ops[1] = self.find(leaf);
-            const cand = ENode{
-                .op = n.op,
-                .ty = n.ty,
-                .payload = n.payload,
-                .operands = ops,
-                .regions = &.{},
-                .access_hops = &.{},
-                .origin = null,
-                .full_expr = n.full_expr,
-            };
-            if (try self.lookupNode(cand)) |other| {
-                root_nid = other;
-                acc = self.find(self.nodes.items[other].cls);
-                continue;
-            }
-            root_nid = try self.addNode(cand);
-            acc = try self.internNode(root_nid);
-        }
-        // Nothing to regroup when the canonical chain is already this
-        // node's content: a class split here is a stale-hash artifact that
-        // the round's `rebuild` closes, and redirecting would needlessly
-        // raise `preferred_prio` (and, on an identical shape, churn every
-        // round without changing the tree).
-        if (self.nodeEql(self.nodes.items[root_nid], n)) return false;
-        if (self.find(acc) == cls) return false; // canonical form already present
-        self.nodes.items[root_nid].ac_root = true;
-        if (try self.redirect(acc, cls, root_nid)) {
+        // A cycle in the AC class: refuse to canonicalize (sound, and it
+        // stops the arena from growing the cycle away).
+        if (cut) return false;
+        if (overflow) return false;
+        const bag = try self.finalizeBag(&list, &overflow);
+        if (overflow) return false;
+        // Two operands each contribute at least one leaf; defensive.
+        if (bagTotal(bag) < 2) return false;
+        const built = (try self.buildCanonical(n, bag)) orelse return false;
+        // Nothing to regroup when the canonical term is already this node's
+        // content: a class split here is a stale-hash artifact that the
+        // round's `rebuild` closes, and redirecting would needlessly raise
+        // `preferred_prio` (and, on an identical shape, churn every round
+        // without changing the tree).
+        if (self.nodeEql(self.nodes.items[built.node], n)) return false;
+        if (self.find(built.cls) == cls) return false; // canonical form already present
+        self.nodes.items[built.node].ac_root = true;
+        if (try self.redirect(built.cls, cls, built.node)) {
             self.stats.assoc += 1;
             return true;
         }
@@ -1208,8 +1588,7 @@ pub const Island = struct {
             best[i] = self.classes.items[i].preferred;
         }
         var changed = true;
-        var rounds: usize = 0;
-        while (changed and rounds <= n) : (rounds += 1) {
+        while (changed) {
             changed = false;
             for (self.nodes.items, 0..) |nd, ni| {
                 const node: NodeId = @intCast(ni);
@@ -2237,7 +2616,7 @@ test "AC: integer min/max are commuted and regrouped" {
 test "AC: an operand class merge across rounds still converges and canonicalizes" {
     // `(a + b) + ((b + a) + c)`: the inner `a+b` and `b+a` merge in an
     // early round, which changes the outer flatten's leaf multiset — the
-    // search must still reach a fixpoint inside the bound.
+    // search must still reach a quiet-round fixpoint (no numeric bound).
     var f = try fixture(i32ty, "fn (B0: i32, B1: i32, B2: i32) { add.i32(add.i32(%B0, %B1), add.i32(add.i32(%B1, %B0), %B2)) }");
     defer f.deinit();
     const pr = f.pr();
@@ -2309,45 +2688,40 @@ test "AC: DAG-shared multiplicity (x + x, x = a + b) regroups the four leaves, n
     }
 }
 
-test "AC: an over-budget DAG never builds the exponential chain" {
-    // `k` nested `add(x, x)` levels with CSE sharing each level: the leaf
-    // multiset is `2^k`. Past `max_ac_leaves` (32 leaves, i.e. `k = 6`) the
-    // flatten must abort. The e-node count is the proof: an exponential
-    // build would add `2^k − 1` chain nodes per level; the cap keeps the
-    // island at a small polynomial in `k`. Inner nodes may still regroup
-    // (the cap stops the exponential chain build, not the rule), so this
-    // asserts size, not `assoc == 0`.
+test "AC: a shared DAG diamond completes with no flatten budget" {
+    // `k` nested `add(x, x)` levels: the *source* doubles each level, so
+    // the encoded e-node count is exponential in `k` before CSE — that is
+    // the parser/driver, not the AC build. The old `max_ac_leaves` budget
+    // existed for the *flatten* expanding the shared DAG into `2^k` leaves;
+    // that is gone: `bagOf` memoizes to the single entry `(x, 2^k)` and
+    // `buildRun` materializes it as the O(k) shared doubling tree the
+    // source already is. So the rewrite adds nothing, `k = 11` no longer
+    // hangs, and no numeric budget is needed.
     const k6 = try diamondEnodes(testing.allocator, 6);
     const k8 = try diamondEnodes(testing.allocator, 8);
-    // Unbounded, each level's `2^i`-leaf flatten materializes `2^i − 1`
-    // chain nodes: dozens of millions for `k = 8` alone, and seconds of
-    // compile time. The cap keeps the whole island in the low thousands,
-    // growing only polynomially in `k` (measured 285 → 1053 from k=6 to
-    // k=8, i.e. under 4× for +2 levels — nowhere near the 4×-per-level an
-    // exponential build would show).
+    const k11 = try diamondEnodes(testing.allocator, 11);
     try testing.expect(k6 < 512);
     try testing.expect(k8 < 2048);
-    try testing.expect(k8 < 4 * k6);
+    try testing.expect(k11 < 16384);
 
-    // The same shape *inside* the budget regroups at the root, proving the
-    // cap — not an unavailable rule — is what stopped the big ones.
-    const small = 4; // 16 leaves: inside the budget
-    var e2 = std.ArrayList(u8).empty;
-    defer e2.deinit(testing.allocator);
-    try e2.appendSlice(testing.allocator, "add.i32(%B0, %B0)");
-    for (0..small) |_| {
-        const next = try std.fmt.allocPrint(testing.allocator, "add.i32({s}, {s})", .{ e2.items, e2.items });
-        e2.clearRetainingCapacity();
-        try e2.appendSlice(testing.allocator, next);
-        testing.allocator.free(next);
-    }
-    const text2 = try std.fmt.allocPrint(testing.allocator, "fn (B0: i32) {{ {s} }}", .{e2.items});
-    defer testing.allocator.free(text2);
-    var f2 = try fixture(i32ty, text2);
-    defer f2.deinit();
-    const body2 = f2.pr().region(f2.pr().regionsOf(f2.root())[0]).root;
-    const r2 = try optimizeIsland(f2.arena.allocator(), f2.pr(), f2.analysis, body2, .{});
-    try testing.expect(r2.stats.assoc > 0);
+    // The source diamond is already the canonical balanced run, so the rule
+    // never redirects (`assoc == 0`), the root keeps its identity, and a
+    // forced extra round appends no e-nodes.
+    const text = try diamondText(testing.allocator, 8);
+    defer testing.allocator.free(text);
+    var f = try fixture(i32ty, text);
+    defer f.deinit();
+    const body = f.pr().region(f.pr().regionsOf(f.root())[0]).root;
+    var it = f.island();
+    const root_cls = (try it.encode(f.root())).?;
+    try it.saturate();
+    try testing.expect(it.stats.converged);
+    try testing.expectEqual(@as(usize, 0), it.stats.assoc);
+    try testing.expect(it.classOfOrigin(body) != null);
+    try testing.expectEqual(@as(usize, 0), it.classes.items[root_cls].preferred_prio);
+    const d = try forcedRound(&it);
+    try testing.expectEqual(@as(isize, 0), d.nodes);
+    try testing.expectEqual(@as(usize, 0), d.unions);
 }
 
 /// The e-node count `optimizeIsland` reached for a `k`-level shared add
@@ -2377,18 +2751,24 @@ fn diamondText(allocator: std.mem.Allocator, k: usize) ![]u8 {
     return std.fmt.allocPrint(allocator, "fn (B0: i32) {{ {s} }}", .{expr.items});
 }
 
-/// Force one more `applyRules`-over-every-node + `rebuild` pass and return
-/// the change in `nodes.items.len`. On a saturated (canonical) island every
-/// rule visit and congruence close is a no-op, so this is 0; a rewrite that
-/// re-appends a canonical chain node every rebuild shows up as positive.
-fn forcedRoundDelta(it: *Island) !isize {
-    const before: isize = @intCast(it.nodes.items.len);
+/// Force one more `applyRules`-over-every-node + `rebuild` pass over a
+/// saturated island and return the change in e-node count and in
+/// `stats.unions`. Both must be zero: a saturated arena appends no node and
+/// performs no union. A rewrite that re-appends a canonical chain node every
+/// rebuild shows up as a positive node delta.
+const ForcedRound = struct { nodes: isize, unions: usize };
+fn forcedRound(it: *Island) !ForcedRound {
+    const before_nodes: isize = @intCast(it.nodes.items.len);
+    const before_unions = it.stats.unions;
     var i: usize = 0;
     while (i < it.nodes.items.len) : (i += 1) {
         _ = try it.applyRules(@intCast(i));
     }
     _ = try it.rebuild();
-    return @as(isize, @intCast(it.nodes.items.len)) - before;
+    return .{
+        .nodes = @as(isize, @intCast(it.nodes.items.len)) - before_nodes,
+        .unions = it.stats.unions - before_unions,
+    };
 }
 
 test "AC: a forced extra round over a canonical island appends no e-nodes" {
@@ -2406,10 +2786,12 @@ test "AC: a forced extra round over a canonical island appends no e-nodes" {
         try it.saturate();
         try testing.expect(it.stats.converged);
         try testing.expect(it.stats.assoc > 0);
-        try testing.expectEqual(@as(isize, 0), try forcedRoundDelta(&it));
+        const d = try forcedRound(&it);
+        try testing.expectEqual(@as(isize, 0), d.nodes);
+        try testing.expectEqual(@as(usize, 0), d.unions);
     }
-    // The over-budget DAG is the case that appended a chain node per level
-    // per round before the fix.
+    // The DAG diamond is the case that used to append a chain node per
+    // level per round when the flatten budget was in play.
     {
         const text = try diamondText(testing.allocator, 6);
         defer testing.allocator.free(text);
@@ -2419,7 +2801,9 @@ test "AC: a forced extra round over a canonical island appends no e-nodes" {
         _ = (try it.encode(f.root())).?;
         try it.saturate();
         try testing.expect(it.stats.converged);
-        try testing.expectEqual(@as(isize, 0), try forcedRoundDelta(&it));
+        const d = try forcedRound(&it);
+        try testing.expectEqual(@as(isize, 0), d.nodes);
+        try testing.expectEqual(@as(usize, 0), d.unions);
     }
     // The reversed-operand chain is the shape that materializes one
     // transient equivalent node on its *first* visit (the index is not yet
@@ -2432,7 +2816,244 @@ test "AC: a forced extra round over a canonical island appends no e-nodes" {
         _ = (try it.encode(f.root())).?;
         try it.saturate();
         try testing.expect(it.stats.converged);
-        try testing.expectEqual(@as(isize, 0), try forcedRoundDelta(&it));
+        const d = try forcedRound(&it);
+        try testing.expectEqual(@as(isize, 0), d.nodes);
+        try testing.expectEqual(@as(usize, 0), d.unions);
+    }
+}
+
+test "AC bag: {a:2, b:2} materializes the canonical term and re-visits no-op" {
+    // `add(add(a,b), add(a,b))`: CSE puts both operands in one class, so
+    // the bag is the two-entry `{a:2, b:2}` (`Bag` length counts distinct
+    // leaves, not occurrences).
+    var f = try fixture(i32ty, "fn (B0: i32, B1: i32) { add.i32(add.i32(%B0, %B1), add.i32(%B0, %B1)) }");
+    defer f.deinit();
+    const body = f.pr().region(f.pr().regionsOf(f.root())[0]).root;
+    var it = f.island();
+    const root = (try it.encode(body)).?;
+    const add_op = hir.opId("add.i32").?;
+    const ty = it.nodes.items[it.acRep(root)].ty;
+    var on_path = std.AutoHashMapUnmanaged(Ref, void).empty;
+    defer on_path.deinit(it.arena);
+    var cut = false;
+    var overflow = false;
+    const bag = try it.bagOf(add_op, ty, root, &on_path, &cut, &overflow);
+    try testing.expect(!cut);
+    try testing.expect(!overflow);
+    try testing.expectEqual(@as(usize, 2), bag.len);
+    try testing.expectEqual(@as(u64, 2), bag[0].count);
+    try testing.expectEqual(@as(u64, 2), bag[1].count);
+    try testing.expectEqual(@as(u64, 4), Island.bagTotal(bag));
+    // The first build interns the canonical term; an identical second build
+    // appends nothing because every segment is looked up first.
+    const n = it.nodes.items[it.acRep(root)];
+    const built1 = (try it.buildCanonical(n, bag)).?;
+    const after_first = it.nodes.items.len;
+    const built2 = (try it.buildCanonical(n, bag)).?;
+    try testing.expectEqual(built1.node, built2.node);
+    try testing.expectEqual(after_first, it.nodes.items.len);
+}
+
+test "AC bag: a count-4 run shares its (x+x) middle" {
+    // `((x + x) + x) + x` flattens to `{x:4}`; the canonical run is
+    // `(x+x)+(x+x)` with the middle built once (both operands one class).
+    var f = try fixture(i32ty, "fn (B0: i32) { add.i32(add.i32(add.i32(%B0, %B0), %B0), %B0) }");
+    defer f.deinit();
+    const body = f.pr().region(f.pr().regionsOf(f.root())[0]).root;
+    var it = f.island();
+    const root = (try it.encode(body)).?;
+    try it.saturate();
+    try testing.expect(it.stats.converged);
+    const nd = it.nodes.items[it.chosen(root)];
+    try testing.expectEqualStrings("add.i32", hir.registry.get(nd.op).name);
+    try testing.expectEqual(@as(usize, 2), nd.operands.len);
+    try testing.expectEqual(it.find(nd.operands[0]), it.find(nd.operands[1]));
+    const d = try forcedRound(&it);
+    try testing.expectEqual(@as(isize, 0), d.nodes);
+    try testing.expectEqual(@as(usize, 0), d.unions);
+}
+
+test "AC bag: a cyclic AC class terminates" {
+    // Force a cycle by merging the add class with one of its own operand
+    // classes, so expanding the add reaches itself. The on-path guard must
+    // treat the back-edge as a leaf and finish.
+    var f = try fixture(i32ty, "fn (B0: i32, B1: i32) { add.i32(%B0, %B1) }");
+    defer f.deinit();
+    const body = f.pr().region(f.pr().regionsOf(f.root())[0]).root;
+    var it = f.island();
+    const root = (try it.encode(body)).?;
+    const operand_cls = it.find(it.nodes.items[it.acRep(root)].operands[0]);
+    _ = try it.unionRoots(root, operand_cls);
+    try it.saturate();
+    try testing.expect(it.stats.converged);
+}
+
+/// Source of a right-associated `add.i32(%B0, add.i32(%B1, … %B{n-1}))`
+/// chain of `n` distinct leaves — the association `buildCanonical`
+/// reshapes, so the rule cannot take the `acChainCanonical` shortcut and
+/// really does flatten the whole chain.
+fn rightChainText(allocator: std.mem.Allocator, n: usize) ![]u8 {
+    var expr = try std.fmt.allocPrint(allocator, "%B{d}", .{n - 1});
+    var i = n - 1;
+    while (i > 0) {
+        i -= 1;
+        const next = try std.fmt.allocPrint(allocator, "add.i32(%B{d}, {s})", .{ i, expr });
+        allocator.free(expr);
+        expr = next;
+    }
+    var params = std.ArrayList(u8).empty;
+    defer params.deinit(allocator);
+    for (0..n) |k| {
+        if (k > 0) try params.appendSlice(allocator, ", ");
+        const p = try std.fmt.allocPrint(allocator, "B{d}: i32", .{k});
+        defer allocator.free(p);
+        try params.appendSlice(allocator, p);
+    }
+    const text = try std.fmt.allocPrint(allocator, "fn ({s}) {{ {s} }}", .{ params.items, expr });
+    allocator.free(expr);
+    return text;
+}
+
+test "AC: a wide distinct-leaf chain flattens in near-linear work" {
+    // A quadratic flatten copies Σ depth = O(N²) accumulator entries to
+    // build the leaf multiset (the old left-fold `bagUnion`). The
+    // single-use/shared split appends O(N): each leaf is inlined once into
+    // the maximal node's accumulator. 120 → 240 is the scaling guard: both
+    // must stay a small multiple of N, so an accidental return to
+    // per-merge copying (which would quadruple) fails here.
+    inline for ([_]usize{ 120, 240 }) |n| {
+        const text = try rightChainText(testing.allocator, n);
+        defer testing.allocator.free(text);
+        var f = try fixture(i32ty, text);
+        defer f.deinit();
+        var it = f.island();
+        _ = (try it.encode(f.root())).?;
+        try it.saturate();
+        try testing.expect(it.stats.converged);
+        // Non-vacuous: the right-deep source really was regrouped.
+        try testing.expect(it.stats.assoc > 0);
+        // 2N in practice (one append per leaf); 4N leaves headroom while
+        // still failing the old Σ depth = O(N²) left fold.
+        try testing.expect(it.ac_flatten_appends <= 4 * n);
+    }
+}
+
+test "AC scheduler: per-op signature keys and exact-bag unions" {
+    // (a) A fold-merged class holds both an `add` and a `mul` e-node:
+    // `mul(add(a,b), 1)` folds through `integerAlgebra` `.keep` and
+    // `redirectToClass` merges the `mul` class into the `add` class. `acSig`
+    // keys its memo on `(class root, op, ty)`, so each op gets its own
+    // signature; keying on the root alone let whichever op was visited
+    // first serve the other the wrong fingerprint (scheduling-only, but
+    // wrong). This pins both visit orders.
+    {
+        var f = try fixture(i32ty, "fn (B0: i32, B1: i32) { mul.i32(add.i32(%B0, %B1), 1i32) }");
+        defer f.deinit();
+        const pr = f.pr();
+        const body = pr.region(pr.regionsOf(f.root())[0]).root;
+        const add_expr = pr.operands(body)[0];
+        var it = f.island();
+        _ = (try it.encode(f.root())).?;
+        try it.saturate();
+        try testing.expect(it.stats.converged);
+        try testing.expect(it.stats.algebra > 0);
+
+        // The merged class really holds both source ops.
+        const cls = it.classOfOrigin(body).?;
+        var add_nid: ?NodeId = null;
+        var mul_nid: ?NodeId = null;
+        for (it.classes.items[cls].members.items) |m| {
+            if (it.nodes.items[m].origin) |o| {
+                if (o == add_expr) add_nid = m;
+                if (o == body) mul_nid = m;
+            }
+        }
+        try testing.expect(add_nid != null and mul_nid != null);
+
+        // Per-op fingerprints under one class, computed in both orders over
+        // fresh memos. The add node is the two-leaf multiset; the mul node's
+        // operand is the merged class itself, a cycle whose signature is
+        // null. A root-only key returns the add signature for the mul node
+        // in one order and null for the add in the other, so the equalities
+        // below fail both ways.
+        var memo1 = std.AutoHashMapUnmanaged(u128, ?u128).empty;
+        defer memo1.deinit(it.arena);
+        var path1 = std.AutoHashMapUnmanaged(Ref, void).empty;
+        defer path1.deinit(it.arena);
+        const add_first = try it.acSig(add_nid.?, &memo1, &path1);
+        const mul_second = try it.acSig(mul_nid.?, &memo1, &path1);
+
+        var memo2 = std.AutoHashMapUnmanaged(u128, ?u128).empty;
+        defer memo2.deinit(it.arena);
+        var path2 = std.AutoHashMapUnmanaged(Ref, void).empty;
+        defer path2.deinit(it.arena);
+        const mul_first = try it.acSig(mul_nid.?, &memo2, &path2);
+        const add_second = try it.acSig(add_nid.?, &memo2, &path2);
+
+        try testing.expect(add_first != null);
+        try testing.expectEqual(add_first, add_second);
+        try testing.expect(mul_first == null);
+        try testing.expectEqual(mul_first, mul_second);
+    }
+
+    // (b) The fingerprint only schedules: `planAcWork` alone changes no
+    // class structure. The union that later lands comes from
+    // `ruleAcRegroup`'s exact `bagOf` path, and the two source classes'
+    // bags are equal before the merge — that is the union's justification,
+    // so a fingerprint collision could add scheduling work but could not
+    // merge differing multisets. `assoc` counts exactly the landed
+    // redirects (one `ac_root` node per landed rule).
+    {
+        const text = "fn (B0: i32, B1: i32, B2: i32) { add.i32(add.i32(add.i32(%B0, %B1), %B2), add.i32(%B0, add.i32(%B1, %B2))) }";
+        var f = try fixture(i32ty, text);
+        defer f.deinit();
+        const pr = f.pr();
+        const body = pr.region(pr.regionsOf(f.root())[0]).root;
+        const left = pr.operands(body)[0];
+        const right = pr.operands(body)[1];
+        var it = f.island();
+        _ = (try it.encode(f.root())).?;
+        const add_op = hir.opId("add.i32").?;
+        const ty = it.nodes.items[it.acRep(it.classOfOrigin(left).?)].ty;
+
+        const left_cls = it.classOfOrigin(left).?;
+        const right_cls = it.classOfOrigin(right).?;
+        try testing.expect(left_cls != right_cls);
+        // The exact bags match and each is the three-leaf multiset.
+        var cut_l = false;
+        var overflow_l = false;
+        var path_l = std.AutoHashMapUnmanaged(Ref, void).empty;
+        defer path_l.deinit(it.arena);
+        const bag_l = try it.bagOf(add_op, ty, left_cls, &path_l, &cut_l, &overflow_l);
+        var cut_r = false;
+        var overflow_r = false;
+        var path_r = std.AutoHashMapUnmanaged(Ref, void).empty;
+        defer path_r.deinit(it.arena);
+        const bag_r = try it.bagOf(add_op, ty, right_cls, &path_r, &cut_r, &overflow_r);
+        try testing.expect(!cut_l and !cut_r and !overflow_l and !overflow_r);
+        try testing.expectEqual(@as(u64, 3), Island.bagTotal(bag_l));
+        try testing.expectEqual(@as(u64, 3), Island.bagTotal(bag_r));
+        try testing.expectEqual(bag_l.len, bag_r.len);
+        for (bag_l, bag_r) |a, b| {
+            try testing.expectEqual(a.cls, b.cls);
+            try testing.expectEqual(a.count, b.count);
+        }
+
+        // Planning schedules; it never unions.
+        try it.planAcWork();
+        try testing.expectEqual(@as(usize, 0), it.stats.assoc);
+        try testing.expectEqual(@as(usize, 0), it.stats.unions);
+        try testing.expect(it.classOfOrigin(left).? != it.classOfOrigin(right).?);
+
+        try it.saturate();
+        try testing.expect(it.stats.converged);
+        try testing.expect(it.stats.assoc > 0);
+        try testing.expectEqual(it.classOfOrigin(left).?, it.classOfOrigin(right).?);
+        var ac_roots: usize = 0;
+        for (it.nodes.items) |n| {
+            if (n.ac_root) ac_roots += 1;
+        }
+        try testing.expectEqual(it.stats.assoc, ac_roots);
     }
 }
 

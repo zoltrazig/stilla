@@ -93,14 +93,16 @@ The detailed probes cover the source-reachable operation/type matrix:
   island-external `let` binder. The refusal sits here too: a may-trap
   initializer is no island member, so its α-equal products never merge.
   More AC cases: `(a + b) + (b + a)` merges via the
-  commutativity/associativity search (one evaluation materialized),
+  commutativity/associativity search (the memoized `Bag` / shared-DAG
+  canonicalization, one evaluation materialized),
   `(a * b) - (b * a)` collapses to 0 (AC plus the `x - x → 0` identity
   compound), `0 - a` rewrites to `neg` (AIR-text change only; `neg` and
   `sub` cost the same), and `(a == b) == (b == a)` exercises the
   commutative-but-not-associative `eq` / `ne` in-place swap (never
   regrouped)
-- `egraph_ac.st`: the **full associativity** search's flatten → stable-sort
-  → left-deep regroup ([hir.md](hir.md) §8.2, the `egraph_ac` toggle), on a
+- `egraph_ac.st`: the **full associativity** search's memoized `Bag` →
+  canonical `acRep` order → shared-DAG regroup (`buildRun` /
+  `buildCanonical`, [hir.md](hir.md) §8.2, the `egraph_ac` toggle), on a
   program whose only SEG-eligible rewrite is that search. `(a + b) + c` and
   `a + (b + c)` are structurally different, so hash-consing and the
   commutativity swap alone leave them in two classes; the regroup unions
@@ -112,6 +114,21 @@ The detailed probes cover the source-reachable operation/type matrix:
   so the probe's printed output is `1` with AC on **and** off — the on/off
   runtime differential is intentionally flat, and the real assertion is the
   AIR canonicalization in `src/hir_seg_tests.zig`, not the output
+- `ac_shared_dag.st`: the DAG-safe AC canonicalization past the old
+  `max_ac_leaves = 32` budget ([hir.md](hir.md) §8.2). A CSE-shared,
+  left-associative chain of 32 `(a + b)` terms: hash-consing collapses the
+  repeated term to one e-class, so the AC chain is a DAG whose flattened leaf
+  multiset is 64 occurrences (32 `a` + 32 `b`) — twice the old cap, so the
+  deleted flatten walk would have abandoned the node. The memoized `Bag`
+  instead collapses the DAG to the two entries `(a, 32)` and `(b, 32)`, and
+  `buildRun` / `buildCanonical` materialize the canonical grouped chain in
+  O(log count) e-nodes instead of `2^k`; the source association is
+  deliberately non-canonical (the canonical `acRep` order groups the runs by
+  leaf), so extraction's cost model changes the AIR. It runs through the
+  normal SEG differential (its only SEG rewrite is AC): with `egraph_ac` off
+  the AIR keeps the source chain and is byte-identical to `seg` off.
+  **Added in Stage 3** of the stable-canonical-order change; it is the
+  runnable SEG probe that exercises the DAG-safe canonicalization.
 - `never_suffix.st`: the `never_returns` must fact's suffix deletion
   ([effects.md](effects.md) §10.1) — a structurally-never callee
   (`builtin.panic` behind a `void` signature) deletes the statements after
@@ -189,6 +206,19 @@ inlining a whole Stilla program in a test body.
   provider refuses, and a `Top` operand's wildcard accesses would be
   refused even by the hierarchy instance. `hir_seg_tests.zig` pins both
   the precise summary and the fired rewrite.
+- `simplify_anf_many_operands.st`: selective ANF's round count past the
+  removed numeric cap ([hir.md](hir.md) §5.7, [effects.md](effects.md)
+  §12.1). `combine` takes nine host `read()` operands; with `app.read`
+  declared a `Write` read each is observable and so not
+  `canFloatAsTree`, and selective ANF hoists one per round (the
+  synthesized `local` left behind is floatable, so the
+  first-non-floatable index strictly advances). Nine operands therefore
+  need nine changing rounds plus the quiet round that sets `converged`.
+  `hir_simplify_tests.zig` pins `iterations > 8`, `converged`, exactly
+  nine `hoists`, and a byte-identical second run that rewrites nothing —
+  the regression proof that the old `max_iterations = 8` cap (which
+  truncated the chain at eight hoists and exited with
+  `converged == false`) is gone.
 
 Some LLIR instructions have no one-to-one source construct. `spill_take`,
 `spill_put`, `result_take`, argument-window instructions, `jal`/`jalr`/`jr`,

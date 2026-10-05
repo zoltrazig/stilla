@@ -753,6 +753,19 @@ let B0: i32 = call(fnref H0) in       // host binding：effectful → 提为 let
 > §10.3 / §12.1），`tryAnf` 在选中首个不可浮动 operand 后由 `check` 消费。
 > 合成 `let` 与源级 `let` 不同，init 沿用父节点的 FE（不跨边界），故
 > `anf_rule` 不声明 `maps_full_expr`。
+>
+> **终止契约（无轮数上界）。** 三条规则共用同一驱动：每轮构造全新的
+> `hir_effects.Analysis` 并在树上原位重写（HIR 是 arena 追加的树），调用方事后
+> 重校验；循环为 `while (true)`，以**安静轮（`changed == false`）**退出——对未
+> 变树重做分析结果逐位相同，故安静轮即真不动点，`hir_simplify.Stats.converged` 报告该退出
+> （与 hir_seg.zig 的稳定规范序契约同形，§8.2；`Config.max_iterations` 已删除）。
+> 各规则严格推进、无振荡：dead-let 以 body 覆盖 `let` 节点（严格移除一个
+> binder），`never_returns` 后缀删除截断 / 删除节点（严格减少）；selective ANF
+> 每轮只提 `strict_ltr` 父节点的**第一个**不可浮动 operand，并在该槽留下合成
+> `local`——`local` 是 `.atom` / 纯且 `canFloatAsTree(local) == true`，故第一个
+> 不可浮动 operand 的下标严格前进，每个父节点至多 #operands 次提升（有限）。
+> 没有规则重建另一条的 redex（ANF 合成绑定总被使用，dead-let 删不掉），故不
+> 来回摆动。
 
 ## 6. ownership、效果与借用
 
@@ -962,7 +975,7 @@ alias 在进 SEG **之前**彻底展开：SEG 中不出现 `UserId` 与 `int32` 
 
 > **现状：union 规则跑在 slotted e-graph arena 里。** `hir_egraph.zig` 是
 > e-class 表 + union-find：`encode` 把 island 编成 e-node（binder 进 `.slot`，
-> region 记成 binder term），`saturate` 有界地跑 union 规则（常折叠 / 整数代数 /
+> region 记成 binder term），`saturate` 反复跑 union 规则直到安静轮（不设轮数上界）（常折叠 / 整数代数 /
 > 常量条件 / 聚合投影）并在每轮后 `rebuild` 做同余合并，`extract` 按每类的
 > preferred e-node 把饱和形态写回 HIR。`hir_seg.zig` 仍是驱动：`computeIslands`
 > 标 island，boundary rewrite（β / η / `let` 三族）与 known-variant `match`
@@ -1050,38 +1063,48 @@ class 给、缺省回退到节点计数（§8.2 末的落地清单）。
   规则外的形态（β 的 `let` 链、多 payload `match` 的绑定叶、materialize 出的
   合成 `let`）不在 arena 里，由驱动按各自契约准入。
 - **integer 交换-结合律（AC 全搜索，`egraph_ac` 开关，默认开）**：`ruleNumeric` 仍先对
-  base 属于交换集但**不**属于结合集的算子（`eq` / `ne`）做原位规范化交换：`find(op0) !=
-  find(op1)` 时交换 operand 使 `find(op0) < find(op1)`（`n.operands` 是 per-node arena
-  切片，原地改写安全；每轮 `rebuild()` 清空并重建全部 index bucket，过期 bucket 只多一次
-  `nodeEql` 比较），随后同一轮的 `rebuild()` hash-cons 把两个现已同形的节点并成一类——零
-  新建节点。不做镜像 e-node（镜像自身也可交换，saturate 的 `while` 循环永不终止）。对 base
-  属于 **AC 集**（`add` / `mul` / `band` / `bor` / `bxor` / `min` / `max`，即既结合又交换）、
-  rep 为 integer 的二元节点，则改由 `ruleAcRegroup` 做完整重结合搜索：
-  1. **展平**：把该节点每个 operand 类中「有同 `op`、同 `ty` 成员」的类递归展开成该成员
-     （取最低 `NodeId` 者，确定性）的 operand 类，得到叶子类的**多重集**；同一类经 DAG
-     重复到达会展开多次，只有回到当前展开路径上的类（环）才当叶子，故展平只依赖 arena
-     当前状态、与 union 顺序无关。展平有预算 `max_ac_leaves = 32`：若无上界，CSE 共享的
-     add / mul DAG 会按全多重度展开（k 层 `c_i = add(c_{i-1}, c_{i-1})` 的叶子数是 `2^k`，
-     重分组要物化 `2^k − 1` 个链节点），合法源码即可把编译器拖成秒级 / 分钟级。超预算时
-     展平中止、`ruleAcRegroup` 不建节点也不重定向，节点**保持未规范化**——跳过一条规范化
-     只是放弃一次优化，绝不改语义，且该节点后续每次访问都在少量 append 内再次中止，代价有
-     界。语料里最宽的链都远在预算内。
-  2. **规范序**：按**稳定 key** 给叶子排序——key 取该类的最低 `NodeId` 成员（e-node
-     索引；节点只增不删，故在 union 增长下单调不增、稳定，不随 `unionRoots` 改写 class id
-     而漂移）。extraction 按此序写回 operand，`encode` 又按 DFS 左到右发 `NodeId`，故
-     重编码的规范链重现同一次序，是不动点而非振荡。
-  3. **重分组**：对排序后的叶子做**固定左深折叠**（`a ⊕ b ⊕ c` 归约为 `(a ⊕ b) ⊕ c`），
-     经 `lookupNode` / `addNode` + `internNode` 建链（已 intern 的链段直接复用，no-op
-     访问不追加节点，hash-cons 会与既有等价节点合并），再把链根类 `redirect` 进原节点
-     的类。目标形唯一、类单调增长，故每个叶子多重集至多产生一个规范节点，规则到达不动
-     点；它只在「链根与当前节点内容不同」（`nodeEql` 为假）且「该类尚未包含规范形」
-     （`find(链根) != find(原类)`）时触发，绝不无条件 `propose`——已规范的链保持
-     `preferred_prio == 0`，identity extraction 不回归。
-     这条规则对**每个** AC 节点都跑（含纯二元交换，如 `b + a`）：旧的「按 class id 原地
+  base 属于交换集但**不**属于结合集的算子（`eq` / `ne`）做原位规范化交换：比较**稳定
+  key** `acRep`（该类的最低 `NodeId` 成员）而非 union-find 的 `find()` class id；
+  `acRep(op0) > acRep(op1)` 时交换 operand 使 `acRep(op0) < acRep(op1)`（`n.operands`
+  是 per-node arena 切片，原地改写安全；每轮 `rebuild()` 清空并重建全部 index bucket，
+  过期 bucket 只多一次 `nodeEql` 比较），随后同一轮的 `rebuild()` hash-cons 把两个现已
+  同形的节点并成一类——零新建节点。`acRep` 只取类成员的最低 `NodeId`，节点只增不删、
+  union 只做成员并集，故它在 union 增长下单调不增、且在每个存活类上单射：交换按「键」而
+  非易漂移的 class id 排序，因此与 union 顺序无关且终止。不做镜像 e-node（镜像自身也可
+  交换，saturate 的 `while` 循环永不终止）。对 base 属于 **AC 集**（`add` / `mul` /
+  `band` / `bor` / `bxor` / `min` / `max`，即既结合又交换）、rep 为 integer 的二元节点，
+  则改由 `ruleAcRegroup` 做完整重结合搜索，靠一个 memoized **`Bag`**（按 `acRep` 排序
+  的 `(叶子类, 计数)` 向量）实现，不再展平出多重集：
+  1. **`bagOf` 归纳**：`bagOf(cls)` / `bagInto` 递归地展开该类中**同 `op`、同 `ty` 且
+     `NodeId` 最低**的那个成员（`acExpand` 只取最低者，不是每个同形成员），把它的
+     operand 类计数并入结果，同一叶子类只留一条 `(叶子类, 计数)`（计数累加）；一旦归纳触及当前
+     路径上的类（环），`bagOf` 即置 `cut` 并中止，`ruleAcRegroup` 随后拒绝为这个 AC 类
+     重结合（不物化规范形、不 redirect）——只放弃一次规范化机会，因此健全，且不会为环类
+     建链，使搜索的工作量有界。同一类经 DAG 重复到达只贡献计数而不展开，故 `bagOf` 只
+     依赖 arena 当前状态、与 union 顺序无关，且对同一类至多算一次（memo 表）。`Bag` 因此
+     是与 union 顺序无关的规范多重集表示，长度受不同叶子类数（而非叶子总数）约束。
+  2. **规范序**：`Bag` 的项按**稳定 key** `acRep`（该类的最低 `NodeId` 成员）排序
+     （`acLeafLess` / `bagLess` 只比 `acRep`；同一个 `Bag` 内类互不相同，故键本身就
+     构成严格全序，计数不参与排序）；extraction 按此序写回
+     operand，`encode` 又按 DFS 左到右发 `NodeId`，故重编码的规范链重现同一次序，是不动
+     点而非振荡。
+  3. **规范物化**：把排序后的 `(叶子, 计数)` 逐个物化——`buildRun` 用**共享的倍增树**把
+     `count` 片同一叶子折成一棵 DAG（`E_{k+1} = E_k ⊕ E_k`，O(log count) 个节点且每层
+     复用同一子节点），`buildCanonical` 再对所有 run 做**确定性左折叠**（`a ⊕ b ⊕ c`
+     归约为 `(a ⊕ b) ⊕ c`），整棵规范树经 `lookupNode` / `addNode` + `internNode` 建出
+     （已 intern 的链段直接复用，no-op 访问不追加节点，hash-cons 会与既有等价节点合并），
+     再把链根类 `redirect` 进原节点的类。`E_k = E_{k-1} ⊕ E_{k-1}` 的 `Bag` 只有一条
+     `(base, 2^k)`，故只物化 **O(k)** 个节点，而不是展平多重集的 `2^k`；目标形唯一、
+     类单调增长，故每个 `Bag` 至多产生一个规范节点，规则到达不动点。它只在「链根与当前
+     节点内容不同」（`nodeEql` 为假）且「该类尚未包含规范形」（`find(链根) != find(原类)`）
+     时触发，绝不无条件 `propose`——已规范的链保持 `preferred_prio == 0`，identity
+     extraction 不回归。
+     这条规则对**每个被调度**的 AC 节点都跑（见下：极大节点 + 指纹相同节点；纯二元
+     交换如 `b + a` 因此也走本路径）：旧的「按 class id 原地
      交换 operand」只保留给 `eq` / `ne`（交换但不结合），因为两条键不同的原地序会互相
      打架而不收敛。故默认开启时纯二元整数交换也走本路径（`probes/redundancy.st` 的
      `joined` operand 序因此翻转、CFG 随之改变），`Stats.assoc` 把这些退化的触发也计入。
-     为避免已经规范的宽节点每轮重做展平 / 排序 / 建链，建链的每一段先用 raw
+     为避免已经规范的宽节点每轮重做建链，`buildRun` / `buildCanonical` 的每一段先用 raw
      `lookupNode`（按该段 operand 的**真实 class root** 散列）探测是否已在 arena：上一次
      `rebuild` 已把每段的 operand 重新 root，故已存在的链段能被命中并复用，no-op 访问
      不追加节点——否则 saturation 的「节点边增长边遍历」循环永不收敛。链建完后用两道
@@ -1091,9 +1114,27 @@ class 给、缺省回退到节点计数（§8.2 末的落地清单）。
      `rebuild` 之后是当前的：某节点若在其 operand 类于同轮稍后被 union 之前已入索引，
      本轮会漏命中而多物化一个结构等价的链节点，随后 `internNode` 把它并入同类；这是一次
      性、等价且不破坏收敛的，绝非每轮追加的重复漂移。）
-  4. **extraction 取规范形**：链根 e-node 标记为 AC 规范根；`select` 的 `improvesChoice`
-     在等 cost 时优先规范根，故 `(a + b) + c` 与 `a + (b + c)` 归入同一 e-class 后抽取
-     稳定的规范括号形（非规范源链会因此深拷贝成规范形）。
+  4. **extraction 取规范形**：链根 e-node 标记为 AC 规范根（`ac_root`）；`select` 的
+     `improvesChoice` 在等 cost 时优先规范根，故 `(a + b) + c` 与 `a + (b + c)` 归入同
+     一 e-class 后抽取稳定的规范括号形（非规范源链会因此深拷贝成规范形）。
+  亚二次调度与展平（`planAcWork` / `bagInto`，无任何数值上限）：
+  - **只访问极大节点 + 指纹去重**：每轮 `saturate` 先算一遍各 AC 节点的交换-结合指纹
+    （叶子类哈希与计数按加法合并，树形无关；碰撞只会多算一次，绝不误并），`ruleAcRegroup`
+    只访问「极大 AC 节点」（不是别的同 `(op, ty)` AC 节点的 operand 代表）与「指纹与
+    另一节点相同的节点」。指纹唯一的内层节点被跳过，依据的是 HIR 的树不变量（§3.7 禁 DAG）：
+    一个 class 若有 ≥2 个父节点，则每个父节点在树里各占一个位置，它必然持有 ≥2 个同 `(op, ty)`
+    的 e-node，指纹因此经 `counts` 照常调度它；只剩单个 e-node 的内层 class 则由包围它的极大
+    节点的 `acChainCanonical` 脊柱检查覆盖（规范物化跨过该内层节点），故跳过只放弃一次优化
+    （健全）。这使宽的左结合链从 Σ depth = O(N²) 降到 O(N)。指纹相同的内层节点仍会访问，
+    故 `(a+b)+c` 与 `a+(b+c)` 这类 AC 等价对
+    照旧并类。
+  - **结构化快路径**：`acChainCanonical` 直接判定节点本身已是规范左深链（右操作数依次
+    为严格降序的不同叶子、最内层升序），命中即不展平。
+  - **近线性展平**：`bagInto` 只对被两个及以上 AC 节点引用的类走材质化 + memo（键为
+    `(class root, op, ty)`，`unionRoots` / `planAcWork` 失效），单次引用的类直接内联进
+    父累加器；累加器不维持有序，物化时一次排序 + 合并（`finalizeBag`），因此宽链建
+    `Bag` 是 O(N log N)（实测每叶一次 append），而不是旧左折叠的 O(N²) 元素拷贝。
+  - **环**：沿用 `cut` 拒绝对待（循环类不物化、不 redirect）。
   结合律的健全边界：整数 `add` / `mul` 按 mod 2^n 环绕（不 trap），`band` / `bor` /
   `bxor` 是精确位运算，`min` / `max` 精确，故重结合保语义；`sub` / `div` / `rem` /
   `shl` / `shr` 非结合（且 `div` / `rem` 可能 trap）被排除，`eq` / `ne` 交换但不结合，
@@ -1123,8 +1164,9 @@ class 给、缺省回退到节点计数（§8.2 末的落地清单）。
   节点引用 ≥2 次，且 preferred e-node 不是 trivial atom（const / local / fn_ref）
   时，合成 `let` 挂在父节点处（§8.3）；trivial atom 直接复制到两个使用点——
   否则「合并后用一次求值」与「复制原子」会互相改写而不动点。
-- **`Stats` 报告退出方式与代价**：`rounds` / `converged`（saturation 的不动点，
-  撞界则 `converged == false`）与 `eclasses` / `enodes` / `merges` / `unions` /
+- **`Stats` 报告退出方式与代价**：`rounds` / `converged`（saturation 的**唯一**退出
+  方式是安静轮，即真不动点，`converged` 恒为 `true`；不再有「撞界」路径）与
+  `eclasses` / `enodes` / `merges` / `unions` /
   `folds` / `algebra` / `conds` / `projects` / `materialized` / `copied` /
   `written`，外加 `extract_cost`（抽取选中形态的 DAG 总 cost，第 22 项）；驱动
   聚合成 `hir_seg.Stats.egraph_*` 与 `egraph_extract_cost`（§11 的基线逐项
@@ -1141,20 +1183,40 @@ class 给、缺省回退到节点计数（§8.2 末的落地清单）。
   arity 证明准入，CSE sharing（§8.3）按 `isDuplicable` 与同 FE 准入——多 payload
   的 `match`（每个绑定叶合成一个 `let`）与 CSE（materialize 共享子项）节点数
   可能不降，它们不在 arena 里竞争。
-- **终止契约：有界轮数，非严格递减度量。** SEG **不**给出全局递减度量：`match`
-  与 CSE 可增节点，要对含 β 克隆在内的整个规则集证明一个严格递减的势函数既
-  不可行又有正确性风险。契约是**两层的同一个界**——驱动 `hir_seg.optimize`
-  至多跑 `Config.max_iterations`（默认 8）轮「重导效果分析 → 重写」，每个
-  island 的 saturation 也以同一个界封顶（`Config.max_rounds`），撞界的
-  saturation 取当前已饱和的形态。`hir_seg.Stats.converged` / `Stats.egraph_converged`
-  分别报告两层退出方式（安静轮 = 当前规则集的不动点；否则是撞到轮界）。撞界
-  **永远安全**：每条准入重写都保语义，故任一「分析 → 重写」轮前缀仍是正确
-  程序，提前停止只是放弃后续重写，是错过优化的上界而非正确性上界。默认界在实践
-  中的充分性来自各规则自身的消耗性守卫：每个 λ 至多内联一次（`beta_done`，β
-  按 λ 记录有界）、每个 `match` 节点只被消费一次、CSE 合成的绑定至少两处使用
-  且 init 非平凡（`ruleLet` 无法撤销），arena 的 union 规则严格减小 preferred
-  节点数，其余规则严格减小节点数。编译时间预算（[todo.md](todo.md) 第 12 项）
-  即建立在该界之上。
+- **终止契约：稳定规范序，无轮数上界。** SEG 的终止不再依赖任何数值界
+  （`Config.max_iterations` / `Config.max_rounds` / `max_ac_leaves` / `max_eta_chain`
+  与 `select` 的 `rounds <= n` 均已删除）。这里分两件事说清楚：**为什么不需要迭代
+  上界**，与 **AC 每轮的工作量为何近线性**（后者是 Stage A 的调度 / 展平设计，不是
+  终止上界）。
+  - **规则合成是幂等的。** 所有 union 规则的建节点路径都先 `lookupNode` 再 `addNode`
+    （`buildCanonical` / `mkAcNode` / `buildRun` 逐段探测已 intern 的等价节点，命中即
+    复用、no-op 访问不追加节点）。因此一条匹配到既有等价节点的规则本轮**什么也不
+    追加**，安静轮信号是真的。
+  - **arena 只朝有界方向增长。** arena 里唯一「无界方向」的动作是规范项 intern 与
+    class 合并：规范项按多重集去重——每个不同的 `Bag`（连同 `(op, ty)`）至多物化一个
+    规范根（`ruleAcRegroup` 只在 `find(链根) != find(原类)` 且 `nodeEql` 为假时
+    `redirect`），故规范项总数受不同多重集数约束；class 合并是并集、单调且有限，绝不
+    拆分。`eq` / `ne` 的就地交换按稳定键 `acRep`（类内最低 `NodeId`）排序——它在
+    union 下单调不增且在每个存活类上单射，因此交换按不漂移的键排一次，与 union 顺序
+    无关，不会来回震荡。**不要把这条读成「规范化严格减小节点数或存活类数」**：AC
+    规范化首次触发时会先物化一个规范项、再把它并入原类，节点数与存活类数在那一瞬是
+    **增加**的；它之所以收敛，靠的是规范的**幂等性**（同多重集只建一次，此后
+    `nodeEql` 与 `find` 两道判定在 `redirect` 之前返回），而不是任何单调下降量。
+  - **驱动层规则的消耗 / 单调性守卫**（非 cap，全部保留）：`beta_done` 使每个 λ 至多
+    内联一次；`ruleMatch` 一次性消费一个 `match` 节点；CSE 合成的绑定至少两处使用且
+    init 非平凡（`ruleLet` 无法撤销）；`reorder` 只在严格逆序（`rowLess(b, a)`）时交换、
+    使该父节点的 `rowLess` 逆序数严格减一；η 的 visited-set 按函数记录数收敛，不砍合法
+    长链。
+  - **安静轮即真不动点。** 某一轮报告 `changed == false` 时，对未变树重做分析结果逐位
+    相同，这按定义就是不动点，故 `optimize` / `saturate` 用 `while (true)` 循环、以安静轮
+    退出，**收敛与该轮之前的任何数值无关**。
+  与上述终止论证分开，**AC 搜索的每轮工作量**由 Stage A 的调度与展平设计约束为近似
+  线性：`planAcWork` 只调度「极大 AC 节点」加上「与另一节点指纹相同的节点」，
+  `acChainCanonical` 对已是规范左深链的节点直接短路，`bagInto` / `bagOf` / `finalizeBag`
+  对单次引用的类内联、对多次引用的类才 memo 物化并一次排序合并，故宽链不再走旧左折叠的
+  O(N²) 元素拷贝。这是每轮的**代价**界，不是终止上界。每条准入重写都保语义，故任一
+  「分析 → 重写」轮前缀仍是正确程序；停止只发生在安静轮（真不动点），既无数值上界也无
+  「撞界」路径，编译时间不再由界保证，而由上述有限增长 + 守卫保证收敛，实测基线见 §11。
 
 ### 8.3 重写规则集
 
@@ -1172,9 +1234,9 @@ class 给、缺省回退到节点计数（§8.2 末的落地清单）。
 | aggregate projection | ✅ | `field_get(C(v0, …, vn), i) → vi`（`C` = `struct_make` / `tuple_make` / `list_make`；已知下标；越界 / 非构造基拒绝）。`struct_make` 的 operand 按声明序，`tuple_make` / `list_make` 按位置序，payload `field` 是字段 / 元素下标——即 `hir_build_expr.fieldRead` 的索引。乱序书写的 struct 构造被 builder 的临时 `let` 链隔开（§5.6），故不触发。list 的 `idx < operand len` 就是边界证明：只有 `list_make` 基的已知常量下标在界内时才归约，与 `hir_effects.fieldGetOwn` 的「界内不 trap」细化一致（`field_get` 的 list 基否则保守 `Top`）。**tuple / list 投影是 IR 级规则**：Stilla 没有元素读取后缀（Core Expression Binding Power Table），元素只经解构 pattern 读取，源码不产生 tuple / list 的 `field_get`；两者由白盒规则测试覆盖 |
 | α-equivalence | ✅* | island 内由 arena 的 hash-consing + `rebuild` 同余合并承担（α-相等子树自然同类）；β 克隆时的**捕获规避** fresh-binder 重映射仍由驱动做 |
 | CSE-style sharing | ✅ | 同一 island 内、同一 `strict_ltr` 无 region 节点的 operand 列表里，两个**同类**且 `isDuplicable` 的纯子树由 extraction materialize 成一个合成 `let`，非平凡原子才 materialize、trivial atom 直接复制（详见下） |
-| operand reorder | ✅* | 相邻 operand 对交换、按 `rowLess` 规范序（`canSwapOperands` / `reorder_rule`，§8.8）；仅当实例下该对 `orderCompatible`——默认 flat 空 registry 上从不触发，`hierarchy` 实例下兄弟域读对可交换（docs/effects.md §10.3–§10.5） |
-| integer commutativity | ✅ | `ruleNumeric` 对**交换但不结合**的二元 integer rep 节点（`eq` / `ne`）做原位规范化：`find(op0) > find(op1)` 时交换 operand，使同类节点 hash-cons 合并。结合交换算子（`add` / `mul` / `band` / `bor` / `bxor` / `min` / `max`）的交换由下一行的 AC 搜索统一处理（**含纯二元交换**：`b + a` 也走 `ruleAcRegroup`，`Stats.assoc` 计入这类退化触发），不再单独原地交换；排除浮点（NaN payload / ±0 可观察）与排序比较（`a < b` 是 `b > a`，另一条规则）；合法性由 island 的 `isSegSafe` 准入（total / 无 observable_effect / deterministic / Copy）保证，LTR 求值顺序不可观察 |
-| associativity + commutativity (AC) | ✅ | `egraph_ac` 下的 `ruleAcRegroup`：展平 AC 链成叶子类多重集（预算 `max_ac_leaves = 32`，超预算则放弃该节点、保持未规范化）、按最低 `NodeId` 稳定序规范排序、固定左深重分组，链根 e-node 标记为 AC 规范根供 extraction 在等 cost 时优先；仅 integer rep 的 `add` / `mul` / `band` / `bor` / `bxor` / `min` / `max`（`eq`/`ne` 交换不结合，`sub`/`div`/`rem`/`shl`/`shr` 非结合，均不重结合）；合法性同样由 island 的 `isSegSafe` 准入保证，详见 §8.2 |
+| operand reorder | ✅* | 相邻 operand 对**仅在严格逆序**（`rowLess(b, a)`，行相等不交换）时交换、使 `rowLess` 逆序数单调下降（`canSwapOperands` / `reorder_rule`，§8.8）；仅当实例下该对 `orderCompatible`——默认 flat 空 registry 上从不触发，`hierarchy` 实例下兄弟域读对可交换（docs/effects.md §10.3–§10.5） |
+| integer commutativity | ✅ | `ruleNumeric` 对**交换但不结合**的二元 integer rep 节点（`eq` / `ne`）做原位规范化：`acRep(op0) > acRep(op1)` 时交换 operand（按稳定 key `acRep` 而非 `find()` 的 class id，见 §8.2），使同类节点 hash-cons 合并。结合交换算子（`add` / `mul` / `band` / `bor` / `bxor` / `min` / `max`）的交换由下一行的 AC 搜索统一处理（**含纯二元交换**：`b + a` 也走 `ruleAcRegroup`，`Stats.assoc` 计入这类退化触发），不再单独原地交换；排除浮点（NaN payload / ±0 可观察）与排序比较（`a < b` 是 `b > a`，另一条规则）；合法性由 island 的 `isSegSafe` 准入（total / 无 observable_effect / deterministic / Copy）保证，LTR 求值顺序不可观察 |
+| associativity + commutativity (AC) | ✅ | `egraph_ac` 下的 `ruleAcRegroup`：把 AC 链归纳成按 `acRep`（最低 `NodeId`）排序的 memoized `Bag`（`(叶子类, 计数)`），经 `buildRun`（共享倍增树）与 `buildCanonical`（确定性左折叠）物化规范 DAG（`E_k = E_{k-1} ⊕ E_{k-1}` 只需 O(k) 个节点，不再有展平预算）、链根 e-node 标记为 `ac_root` 供 extraction 在等 cost 时优先；仅 integer rep 的 `add` / `mul` / `band` / `bor` / `bxor` / `min` / `max`（`eq`/`ne` 交换不结合，`sub`/`div`/`rem`/`shl`/`shr` 非结合，均不重结合）；合法性同样由 island 的 `isSegSafe` 准入保证，详见 §8.2 |
 | Unique rewrite | ❌ | 需线性等式系统 |
 | host calls / `drop` / consuming match / panic 重排 | ⚠️/❌ | 仅**序兼容对**可重排（`reorder` 规则，§8.8）；`drop` / consuming match / panic 不重排 |
 
@@ -1320,8 +1382,9 @@ body call 的摘要（`isTotal ∧ observable_effect_free`；`callBound` 与实�
 `fn_ref` 值），所以规则的操作形式是**重定向值位置的 `fn_ref` payload**，而不是
 改写 λ 记录根——后者会破坏 lowering 的「函数根是 λ」不变量。它是与 β 并列的
 boundary rewrite：`fn_ref` 无 SEG 编码（`encOf` 恒 false），故不经过 island 门，
-由上面的契约 `tryEta` 准入。链 `fid → F → G` 在**一次调用内**解析到终点，
-`max_eta_chain` 轮的界拒绝环 / 超长链，因此每轮幂等、不会来回震荡。
+由上面的契约 `tryEta` 准入。链 `fid → F → G` 在**一次调用内**用一个显式 visited-set
+解析到终点，访问过的记录再次入集即判为真 `fn_ref` 环并拒绝（不再有 `max_eta_chain`
+轮数上界，因此也不砍「超长但合法」的链），每轮幂等、不会来回震荡。
 
 v1 契约实例（`eta_rule` 声明，`tryEta` 消费）：
 
@@ -1339,7 +1402,7 @@ eta_rule = RewriteRule {
 
 `tryEta` 的匹配层保留结构性 applicability：`fn_ref` opcode、λ 记录 / 单 region
 / arity、`wrapper_ty.eql(callee_ty)`、`redexTotal`（`isTotal ∧
-observable_effect_free`）与链界；`EvaluationCountPreserved` 是值重定向的结构
+observable_effect_free`）与 visited-set 环判定；`EvaluationCountPreserved` 是值重定向的结构
 证书（两侧都是不求值的 `fn_ref`）。
 
 ### 8.6 match 高层保留与 consuming match 排除
@@ -1389,7 +1452,7 @@ init（这时已是 `%B0`）是 island 成员、与本轮分析一致，故下�
 `cleanup_free_subtree` 证明准入，搬移的子树重新盖上 FE2，结果就是 `%B0`。
 轮次上：FE1 内的重写（β → let 折叠）本轮先把 init 的**内容**改成 `%B0`，
 而 island 表是本轮开始时的快照（那时 init 还是 `call`），所以外层的折叠等到
-下一轮（重新计算 island 后才生效）——这也是 §8.2 的有界轮数契约在
+下一轮（重新计算 island 后才生效）——这也是 §8.2 的稳定规范序在
 `let` 上的代价：延后一轮，不是放弃。
 
 ### 8.8 operand reorder（`reorder_rule`）
@@ -1404,9 +1467,17 @@ ownership-gated、`eng.orderCompatible`）且当前序不是规范序时，交�
 `reorder` 把它们摆回规范序，而默认 `flat` 实例（未声明异域冲突）绝不触发
 （SEG 空 registry 上 reorder 计数恒为 0）。
 
-**termination 与守卫。** `rowLess` 是全序，交换只朝规范序移动，配对不会摆动，
-round bound（`max_iterations`）兜底。只考察**非空** access 行的 pair（纯对
-不入列），且行必须互异（相等行规范序平凡）。交换在 `expr_buffer` 内完成——
+**termination 与守卫。** `rowLess` 是全序，且交换**只在严格逆序**时发生
+（`rowLess(b, a)` 为真；`!rowLess(a, b)` 不再等价于可交换，因为两个相等的行同时
+满足 `!rowLess(a, b)` 与 `!rowLess(b, a)`）。每次交换把该父节点下的 `rowLess` 逆序数
+严格减一，逆序数是非负整数、下界 0，故这条规则自身终止**不需要轮数上界**，
+`tryReorder` 因此没有 `max_iterations` 兜底（§8.2 的终止论证把这条守卫列为驱动层
+守卫之一）。只考察**非空** access 行的 pair（纯对不入列）；相等行的 pair 不交换
+（严格逆序判定为假），故**同一资源的两次读**（行相等，如
+`sensor.read(x) + sensor.read(x)` 里两个 host(2) 读）不会来回摆动。（`example_hierarchy`
+的 host(1) 与 host(2) 是**不同资源**——host(2) 的父是 host(1)——行不相等，本就不是这个
+反例；会自交换的反例是同资源同行的两个读。）
+交换在 `expr_buffer` 内完成——
 operands 是连续 Range，两个条目互换即整个树内改动，再 `markDirty` 交给下一轮
 重分析。
 
@@ -1517,9 +1588,10 @@ lowering。可选变换每轮原位重写后重新跑结构 + 效果校验（§2
   （精确 `drop_effect(T)`）、hir_effects_const.zig（module-const 检查）、
   hir_effects_queries.zig（派生查询 / capability / 清理门）与之协作；
 - 消费者：hir_simplify.zig（`hir` 门，默认关；dead-let / selective ANF /
-  `never_returns` 后缀删除）、hir_seg.zig（island 准入 / boundary rewrite / 轮循环；
-  `seg` 门可执行文件默认开、库默认关）+ hir_egraph.zig（slotted e-graph
-  arena：e-class 表 / union-find / encode / 有界 saturation / extraction）+
+  `never_returns` 后缀删除；驱动无数值轮界、安静轮即真不动点，§5.7）、
+  hir_seg.zig（island 准入 / boundary rewrite / 轮循环；`seg` 门可执行文件
+  默认开、库默认关）+ hir_egraph.zig（slotted e-graph
+  arena：e-class 表 / union-find / encode / 稳定序 saturation / extraction）+
   hir_egraph_rules.zig（纯哈希 / 相等 / 常量折叠 / 整数代数 helpers，从 e-graph
   驱动层拆出、对驱动层 / e-graph 环无回依赖，经文件作用域别名复用）；
 - lowering hir_lower.zig（+ hir_lower_expr / `_control` / `_call` / `_pattern`），
@@ -1527,8 +1599,38 @@ lowering。可选变换每轮原位重写后重新跑结构 + 效果校验（§2
 - 测试：hir_tests.zig / hir_simplify_tests.zig / hir_seg_tests.zig。
 
 **SEG 编译时间 / 轮数基线**（第 12 项验收；`hir_seg_tests.zig` 的 `SEG budget`
-测试在 CI 每次打印，基线取 2026-09-14、macOS/arm64 的一次运行）：`probes/` +
-`examples/` 全语料 **60 个程序 / 4732 个可达节点**，SEG 接受 **2558 个
+测试在 CI 每次打印，基线取 2026-10-05、macOS/arm64 的一次运行）。
+
+> **稳定规范序契约下的重录。** 本轮删除了 SEG 的全部数值界（`max_iterations` /
+> `Config.max_rounds` / `max_ac_leaves` / `max_eta_chain` 与 `select` 的
+> `rounds <= n`，§8.2），并把 AC 从展平改成 DAG 安全的 memoized `Bag`
+> 规范化。下面的新基线在此之上又加入了 Stage A 的 AC worklist 调度与近线性展平
+> （`planAcWork` / `acChainCanonical` / `bagInto` / `bagOf` / `finalizeBag`），
+> 是当前实测；紧随其后的「前一次重录」是加入该调度之前的稳定规范序基线，再往后的
+> 各段是**有界轮数 / `max_ac_leaves = 32` 时代**的历史数字，均保留供对照，不要
+> 据此断言新契约。
+
+新基线（2026-10-05、macOS/arm64；Stage A AC worklist）：`probes/` + `examples/` 全语料
+**63 个文件 / 5002 个可达节点**，SEG 接受 **2762 个 island 成员（≈55%）**，共
+**96 轮**、**122 次重写**，外层 arena 跑 **2121 轮 saturation**（**51 次 union /
+421 次同余 merges / 129 个写回拷贝**），抽取选中项的总 cost **5300**（第 22 项的
+`Stats.egraph_extract_cost`），第 23 项起基线行另打印规则引擎的**匹配 / 应用**两半
+（**87 个匹配 redex / 43 次应用**）；`eq` / `ne` 原位交换 **1** 次、AC 重结合
+**8** 次（调度只访问极大 / 指纹相同的节点后大幅下降）。总编译时间 **≈90 ms**，最慢
+`probes/seg`（7 ms / 3 轮 / 130 islands）。每个程序与每个 island 都到达**真不动点**
+（安静轮退出，无任何数值界，`Stats.converged` / `Stats.egraph_converged` 均为
+`true`）；测试断言两层收敛（CI 稳定），时间仅记录、不断言。
+
+前一次重录（历史，稳定规范序契约、AC 尚未加入 worklist 调度）：`probes/` + `examples/`
+全语料 **63 个文件 / 5002 个可达节点**，SEG 接受 **2762 个 island 成员（≈55%）**，
+共 **96 轮**、**122 次重写**，外层 arena 跑 **2123 轮 saturation**（**83 次 union /
+425 次同余 merges / 129 个写回拷贝**），抽取选中项的总 cost **5300**；规则引擎
+**87 个匹配 redex / 43 次应用**；`eq` / `ne` 原位交换 **1** 次、AC 重结合 **40** 次。
+总编译时间 **≈96 ms**，最慢 `probes/ac_shared_dag`（12 ms / 2 轮 / 133 islands）。
+每个程序与每个 island 都到达**真不动点**，测试断言两层收敛，时间仅记录、不断言。
+
+旧基线（历史，有界轮数 / `max_ac_leaves = 32` 时代）：`probes/` + `examples/` 全语料
+**60 个程序 / 4732 个可达节点**，SEG 接受 **2558 个
 island 成员（≈54%）**，共 **91 轮**、**109 次重写**，外层 arena 跑 **2061 轮
 saturation**（**41 次 union / 322 次同余 merges / 82 个写回拷贝**），抽取选中项
 的总 cost **5089**（第 22 项的 `Stats.egraph_extract_cost`，单位是 `CostModel`
@@ -1536,8 +1638,8 @@ saturation**（**41 次 union / 322 次同余 merges / 82 个写回拷贝**）�
 四个 union 规则在语料上合计 **83 个匹配 redex / 41 次应用**（匹配 ≥ 应用，差即
 「已近优、重投无变化」的静态饱和信号，也证明规则真在空跑之上运转）。总编译时间
 **≈112 ms**（单文件最慢 ≈12 ms，`examples/fold` 与 `probes/seg` 之间随计时抖动）；
-每个程序都在 `hir_seg.Config.max_iterations` 界内收敛（`Stats.converged == true`），
-每个 island 的 saturation 也在同一个界内到达不动点（`Stats.egraph_converged == true`）。
+全语料每个程序都到达**真不动点**（`Stats.converged == true`，安静轮退出，无任何数值
+界），每个 island 的 saturation 同样以安静轮到达不动点（`Stats.egraph_converged == true`）。
 测试断言两层收敛（CI 稳定），时间仅记录、不断言（CI 计时不是稳定 oracle）。
 §8.3 的跨 FE `let` 折叠把 70 轮 / 51 次重写推到 85 轮 / 94 次：它新增的
 重写是 let 三规则，新增的轮数是在 island 表快照之外的那一轮（§8.7）。第 19 项
@@ -1566,8 +1668,9 @@ cost model（§8.2）：全语料 `rounds` / `unions` / `merges` / `copies` 四�
 `probes/egraph.st` 增一个 `eq` / `ne` 反向用例以覆盖交换路径，新增
 `probes/egraph_ac.st` 单独覆盖重结合路径——`(a+b)+c` 与 `a+(b+c)` 归入同一 e-class、
 extraction 取规范左深形（`==` 两侧抽到同一值），关闭 `egraph_ac` 时保留两个源括号形且与
-整段 `seg` 关闭逐字节一致（该程序的唯一 SEG 重写就是 AC 搜索）。评审又补了 `max_ac_leaves
-= 32` 展平预算（超预算的共享 DAG 保持未规范化，不再物化 `2^k − 1` 个链节点），并删除了
+整段 `seg` 关闭逐字节一致（该程序的唯一 SEG 重写就是 AC 搜索）。评审随后又补了 `max_ac_leaves
+= 32` 展平预算（超预算的共享 DAG 保持未规范化，不再物化 `2^k − 1` 个链节点；**该预算已在
+本轮删除，改由 O(k) 的共享 DAG 规范化取代，见 §8.2**），并删除了
 最初那版按「操作数类代表元」作键的链根早退探测：该探测按 `chainPieces` 的残缺占位根
 （`op(leaf_last, leaf_last)`）散列、从不命中，且其 group-hash 注册不随 `rebuild` 存活，故每
 轮追加重复链节点；改为建链时对每段**真实 class root** 做 raw `lookupNode`，再用建链后的
@@ -1578,7 +1681,8 @@ regroups / 5234 extract cost**；相对 `egraph_ac.st` 之前（61 / 4832 / 2608
 2099 / 56 / 343 / 109 / 97 / 46 / 1 / 10 / 5186）随新程序与 AC 全搜索增长（+1 程序 /
 +29 节点 / +21 island / +2 轮 / +1 重写 / +13 arena 轮 / +2 union / +5 merges /
 +6 copies / +2 assoc regroups / +48 cost），rule matches / applies 与 ac swaps 不变。
-两层收敛断言仍成立（每个程序与每个 island 都在界内到达不动点），时间仅记录、不断言。
+两层收敛断言仍成立（每个程序与每个 island 都以安静轮到达真不动点，不再有数值界），
+时间仅记录、不断言。
 
 k 层 diamond（合法源码，CSE 逐层共享：`E_0 = a + b`，`E_{i+1} = E_i + E_i`，k=10 / 11 打印
 `3072` / `6144`）的编译时间（本机 macOS/arm64，ReleaseSafe 构建，即 CI 的 `-Doptimize`
@@ -1595,11 +1699,13 @@ k 层 diamond（合法源码，CSE 逐层共享：`E_0 = a + b`，`E_{i+1} = E_i
 0.013 / 0.027 / 0.083 / 0.309 s，差异在计时抖动内）；就 k 层 diamond 而言 HEAD 的 AC-lite
 本就不改写它，故 `egraph_ac` 关、HEAD 默认、HEAD `egraph_ac` 关三者输出逐字节相同。残余的
 k=10 / 11 代价**在 SEG arena 自身**：`egraph_ac` 关（≈HEAD）仍要 0.096 / 0.351 s，而整段
-`seg` 关只耗时 0.010 / 0.014 s——两者之差就是 arena 的 encode / 有界 saturation（展平 / 排序 /
-hash-cons）/ extraction 成本，不是 `cfg` / 前端（`seg` 关那一列同时含二者的非 SEG 部分）。
+`seg` 关只耗时 0.010 / 0.014 s——两者之差就是 arena 的 encode / saturation / `rebuild`
+同余合并 / 规范化 hash-cons / extraction 成本，不是 `cfg` / 前端（`seg` 关那一列同时含
+二者的非 SEG 部分）。
 默认开的 0.224 / 0.846 s 相对 `egraph_ac` 关只多约 2×，AC 全搜索不再是主导项；k 层 diamond
-的 `2^k` 爆炸已被预算消除，但 arena 的残余成本仍随源码线性增长（见下）。**不做「亚秒」承诺**：
-预算法把 `2^k` 的部分从分钟级 / 挂起拉回线性，绝对耗时仍随 k 与优化模式变化。runtime 输出
+的 `2^k` 爆炸已被 O(k) 的共享 DAG 规范化消除，但 arena 的残余成本仍随源码线性增长（见下）。
+**不做「亚秒」承诺**：DAG 规范化把 `2^k` 的部分从分钟级 / 挂起拉回线性，绝对耗时仍随 k
+与优化模式变化。runtime 输出
 在 `egraph_ac` 开/关与 `seg` 开/关四种组合下逐字相同（k=10 → `3072`，k=11 → `6144`）。
 
 
@@ -1609,7 +1715,7 @@ hash-cons）/ extraction 成本，不是 `cfg` / 前端（`seg` 关那一列同�
 | --- | --- | --- |
 | M1a | 结构 HIR：AST→HIR 构建、结构校验、HIR→CFG lowering；直降路径删除后成为唯一前端路径 | hir_build.zig / hir_validate.zig / hir_lower.zig |
 | M1b | 效果基础设施：`SemanticInfo.effect`、可插拔格引擎（默认实例 = 固定乘积格，第二实例 `hierarchy`）、transfer、cleanup 门、派生查询、host 语义注册表 | effects_lattice.zig / effects_engine.zig / hir_effects*.zig |
-| M2a | SEG 规则子集（β / η / let / 常折叠 / 整数代数 / 聚合投影 / known-variant match / CSE sharing）；union 规则在 slotted e-graph arena 里走 encode → 有界 saturation → extraction，β / η / let / match 是驱动层的 boundary rewrite；`seg` 门可执行文件默认开 | hir_seg.zig / hir_egraph.zig / hir_egraph_rules.zig |
+| M2a | SEG 规则子集（β / η / let / 常折叠 / 整数代数 / 聚合投影 / known-variant match / CSE sharing）；union 规则在 slotted e-graph arena 里走 encode → 稳定规范序 saturation → extraction，β / η / let / match 是驱动层的 boundary rewrite；`seg` 门可执行文件默认开 | hir_seg.zig / hir_egraph.zig / hir_egraph_rules.zig |
 | M2b | 摘要化消费者：函数摘要 SCC least fixpoint、精确 `drop_effect(T)`、module-const 检查、dead-let / selective ANF / `never_returns` 后缀删除 | hir_effects*.zig / hir_simplify.zig |
 
 **尚未实现**（完整清单见 [todo.md](todo.md)）：

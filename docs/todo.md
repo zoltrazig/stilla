@@ -9,12 +9,32 @@
 
 ## 近期（建议顺序）
 
-暂无。第 28 项已完成并归档；后续工作从「长期探索」提升时按第 29 项续编号。
+暂无。第 29 项已完成并归档；后续工作从「长期探索」提升时按第 30 项续编号。
 
-## 已完成（归档，原「近期」第 1–28 项；近期完成者在前，早期项在后）
+## 已完成（归档，原「近期」第 1–29 项；近期完成者在前，早期项在后）
 
 > 以下条目均已落地，按完成时的编号保留，供 [effects.md](effects.md) 等正文
-> 交叉引用；新工作从第 29 项编号续起。
+> 交叉引用；新工作从第 30 项编号续起。
+
+- [x] **29. M2b 消费者的终止契约：删除 `hir_simplify` 的数值轮界**
+      （2026-10-06；[hir.md](hir.md) §5.7 / §11、[effects.md](effects.md) §12）
+  - 范围：`hir_simplify.zig`（M2b 消费者，`hir` 门，默认关；dead-let /
+    selective ANF / `never_returns` 后缀删除）此前随驱动层共用
+    `Config.max_iterations` 作轮数兜底；终止性现由各规则自身的单调性保证，
+    删除该数值界。
+  - 已完成：驱动改为 `while (true)`，以**安静轮（`changed == false`）退出即真
+    不动点**——某轮无改写时对未变树重做分析结果逐位相同（每轮构造全新的
+    `hir_effects.Analysis`、HIR 树原位 arena 追加重写，调用方事后重校验）。
+    三条规则各自严格推进：dead-let 以 body 覆盖 `let` 节点（严格移除一个
+    binder）、`never_returns` 后缀删除截断 / 删除节点（严格减少）、selective
+    ANF 只提 `strict_ltr` 父节点的**第一个**不可浮动 operand 并在该槽留下合成
+    `local`（`.atom` / 纯、`canFloatAsTree(local) == true`，故首个不可浮动
+    operand 的下标严格前进，每个父节点至多 #operands 次提升，有限）；无规则
+    重建他人的 redex（ANF 合成绑定总被使用，dead-let 删不掉），故无振荡。
+    `hir_simplify.Stats.converged` 报告安静轮退出。与 SEG 的**稳定规范序**契约
+    （「已完成」第 11 项 / [hir.md](hir.md) §8.2）同一形态：无轮数上界、安静轮
+    即真不动点。`hir_simplify` 无语料基线，不新增实测数字。
+  - 依赖：无。
 
 - [x] **28. SEG 的 associativity / commutativity 全搜索**（[hir.md](hir.md) §8）
   - 现状：结构相等的 CSE sharing 已落地（「已完成」第 10 项），但没有
@@ -24,7 +44,7 @@
     处理与 cost model 的交互。
   - 依赖：无。
   - 验收：`(a+b)+c` 与 `a+(b+c)` 归入同一 e-class；extraction 取规范 / 最小
-    cost 形态；有界轮内收敛；新 probe 实际触发该规则。
+    cost 形态；到达真不动点（无轮数上界）；新 probe 实际触发该规则。
   - 已完成：谓词与规则落地（`hir_egraph_rules.zig` / `hir_egraph.zig`）：
     `isAssociativeInt` = `{add, mul, band, bor, bxor, min, max}`；
     `isCommutativeInt` 扩入 `min` / `max`；`isAcInt` 合成二者。
@@ -36,7 +56,10 @@
     `preferred_prio == 0` 与 identity 抽取）。展平预算 `max_ac_leaves = 32`：
     超预算即中止展平、跳过本轮规范化（只放弃一次优化，sound），关掉 CSE 共享
     嵌套 `(E)+(E)` 的指数 DoS——按全多重度重分组曾物化 `2^k − 1` 个链节点，
-    k=11 挂死编译（>300 s），预算后同款 DAG 远低于 1 s。extraction 经
+    k=11 挂死编译（>300 s），预算后同款 DAG 远低于 1 s。**该预算已在 2026-10-05
+    的稳定规范序阶段删除**：AC 改为 memoized `Bag` + `buildRun` / `buildCanonical`
+    的共享 DAG 物化，`E_k = E_{k-1} ⊕ E_{k-1}` 只需 O(k) 个节点，不再需要任何叶子
+    预算（[hir.md](hir.md) §8.2）。extraction 经
     `ENode.ac_root` + `improvesChoice` 的 tie-break 确定性选中规范左深形。
     原位交换只留给 `eq` / `ne`（`Stats.ac` 只计这两类），新增 `Stats.assoc` /
     `hir_seg.Stats.egraph_assoc` 计一切 AC 规范化（含二元纯交换的退化触发）。
@@ -48,18 +71,22 @@
     fixpoint`」「`AC: a forced extra round over a canonical island appends no
     e-nodes`」（强制额外一轮零新增，覆盖被删坏守卫回归、超预算 DAG 与反序链三
     形态）「`AC: DAG-shared multiplicity (x + x, x = a + b) regroups the four
-    leaves, not two`」「`AC: an over-budget DAG never builds the exponential
-    chain`」「`AC: an operand class merge across rounds still converges and
+    leaves, not two`」「`AC: a shared DAG diamond completes with no flatten
+    budget`」「`AC: an operand class merge across rounds still converges and
     canonicalizes`」「`AC: non-associative and eq/ne ops are never regrouped`」
     「`AC: integer min/max are commuted and regrouped`」及 commutative / float /
     `x - x` / `0 - x` 诸条；黑盒「`SEG arena — integer associativity
     (egraph_ac) canonicalizes the AC chain in the AIR`」（`egraph_assoc > 0`、
     `==` 两侧抽到同一节点、AC 关逐字节等于整段 `seg` 关、on/off 运行输出同为
     `1`）与「`SEG arena — integer commutativity (egraph_ac) is observable in
-    the AIR`」。`SEG budget` 基线重录为 62 / 4861 / 2629 / 94 / 117 / 2112 轮
-    （58 union / 348 merges / 115 copies）/ 97 matches / 46 applies / 1 ac swap
-    / 12 assoc regroups / 5234 cost，`total_ac > 0` / `total_assoc > 0` 非空跑
-    断言保留。验证：全套 1317/1317；关 `egraph_ac` 对 HEAD（`d8fa77f`）全语料
+    the AIR`」。`SEG budget` 基线（Stage A AC worklist 调度后重录）为 63 / 5002 /
+    2762 / 96 / 122 / 2121 轮（51 union / 421 merges / 129 copies）/ 87 matches /
+    43 applies / 1 ac swap / 8 assoc regroups / 5300 cost；加入该调度前
+    （稳定规范序阶段、AC 尚未调度）为 63 / 5002 / 2762 / 96 / 122 / 2123 轮
+    （83 union / 425 merges / 129 copies）/ 87 matches / 43 applies / 1 ac swap /
+    40 assoc regroups / 5300 cost（历史）。`total_ac > 0` / `total_assoc > 0`
+    非空跑断言保留。验证：全套 1323/1323（本轮新增 `ac_shared_dag` 差分测试前为 1322）；
+    关 `egraph_ac` 对 HEAD（`d8fa77f`）全语料
     逐字节一致（375 个文件 374 个相同；唯一例外是既有崩溃 fixture
     `probes/cases/lowering_multi_payload_borrow_variant.st`，两侧同样 segfault、
     栈迹只差 ASLR 地址与构建布局）；`--simplify` × `--seg` 四组合差分不变；
@@ -207,8 +234,9 @@
     探针测试补 `egraph_algebra_matched` / `egraph_projects_matched` 非零且
     ≥ 应用计数，`SEG budget` 断言 rule matches / rule applies 非零（非空跑）
     且 matched ≥ applied。`zig build -fincremental test` 全绿（1232/1232）。
-  - 验收：`SEG budget` 对全语料断言 e-graph 引擎也在轮界内收敛（`egraph_converged`，
-    原有）且计数非零（rule matches / rule applies 均 > 0，新增）；`Stats` 各字段
+  - 验收：`SEG budget` 对全语料断言 e-graph 引擎也到达真不动点（`egraph_converged`，
+    安静轮退出，始终 `true`）且计数非零（rule matches / rule applies 均 > 0，新增）；
+    `Stats` 各字段
     语义在 `hir_seg.zig` 的 doc 注释说明（已完成 (a)）；新基线记入 [hir.md](hir.md)
     （§11 增补 rule matches / rule applies 两项聚合，§8.2 落匹配 / 应用口径）。
 
@@ -639,9 +667,11 @@
   - 范围：以 `Stats` 与 `probes/` + `examples/` 全语料为输入，度量 SEG 编译时间、
     轮数与 island 覆盖并形成预算；据此把 SEG 从 `--seg` 翻为默认开启（保留 opt-out）。
   - 已完成：`hir_seg_tests.zig` 新增 `SEG budget` 测试——逐语料文件 `buildText`
-    - `hir_seg.optimize`，断言每个程序都在 `Config.max_iterations` 界内收敛
-    （`Stats.converged == true`，CI 稳定 oracle），并汇总时间 / 轮数 / island
-    覆盖；实测基线（2026-09-13、macOS/arm64，记录于 [hir.md](hir.md) §11）：56 个程序 /
+    - `hir_seg.optimize`，断言每个程序都到达**真不动点**（`Stats.converged == true`，
+    安静轮退出、无任何数值界，CI 稳定 oracle），并汇总时间 / 轮数 / island
+    覆盖；实测基线（2026-09-13、macOS/arm64，历史；当前基线见
+    [hir.md](hir.md) §11：63 files / 5002 nodes / 2762 islands / 96 rounds /
+    122 rewrites / 2121 e-graph rounds / 5300 extract cost）：56 个程序 /
     4306 个可达节点，2347 个 island 成员（≈54%），69 轮、51 次重写，总时间
     ≈70 ms，单文件最慢 `examples/fold`（10 ms / 2 轮）。据此 `stilla` 可执行文件
     默认开启 SEG：`main.zig` 的 `Options.seg` 默认 true，新增 `--no-seg` 保留
@@ -653,9 +683,19 @@
     AIR 做 standalone parser round-trip；probes 测试断言 simplify-only 与 seg-only
     两个组合都至少改写了一个程序，避免空跑。CI 实测 `zig build test` 由基线
     ≈108 s 降至 ≈92 s（去重后的运行次数少于旧的 SEG-on/off 两次执行，未回归）。
-  - 依赖：**第 11 项**（已落地：有界轮数契约）。
+  - 依赖：**第 11 项**（终止性现由稳定规范序契约保证）。
 
 - [x] **11. SEG 终止性：有界轮数契约**（[hir.md](hir.md) §8.2、hir_seg.zig）
+  - ⚠️ **已被取代（2026-10-05）：** 下述「有界轮数契约」由**稳定规范序**契约取代：
+    终止不再靠任何数值界，而靠规则合成的幂等性、arena 增长方向的有限性与各驱动的消耗 /
+    单调性守卫，安静轮即真不动点（[hir.md](hir.md) §8.2）；`acRep` 稳定键与
+    `acChainCanonical` / `bagInto` / `bagOf` / `finalizeBag` 另把每轮 AC 工作量约束为
+    近似线性（不再有展平预算）。并修正 `tryReorder` 只在严格逆序时交换——原实现在
+    `!rowLess(a, b)` 时即交换，把相等的行对也算可交换，**同一资源的两次读**（如 host(2)
+    读两次）因此每轮自交换，只靠 `max_iterations` 兜底。现删除
+    `Config.max_iterations` / `Config.max_rounds` / `Rewriter.max_egraph_rounds` /
+    `max_ac_leaves` / `max_eta_chain` 与 `select` 的 `rounds <= n`，saturation 用
+    `while (true)`、安静轮退出即真不动点。以下为被取代的历史记录。
   - 范围：为 v1 规则集显式选定终止性契约——每轮严格递减的度量，或「有界轮数、
     非不动点」的显式契约。
   - 已完成：选定**有界轮数契约**，不引入递减度量。度量方案要对含 β 克隆、多
@@ -730,8 +770,9 @@
     实参是自己的参数、按序各恰好一次（同时即捕获条件，`fn_ref` 不闭包
     binder）；wrapper fn type 与 callee 的 `meta.Type.eql`（含参数模式）；
     body call 的摘要 `isTotal ∧ observable_effect_free`（`callBound` 与实参
-    无关，即 callee 的摘要 / host 声明）。链 `fid → F → G` 一次调用内解析，
-    `max_eta_chain` 拒绝环 / 超长链，故每轮幂等。`Stats.etas` 计重定向数。
+    无关，即 callee 的摘要 / host 声明）。链 `fid → F → G` 一次调用内用显式 visited-set
+    解析到终点，记录再入即拒绝真 `fn_ref` 环（不再有 `max_eta_chain` 轮界，也不砍合法
+    长链），故每轮幂等。`Stats.etas` 计重定向数。
     测试：正例（值位置重定向到 member、链式解析到终点、λ 记录根仍是 `lambda`、
     二次运行是 fixpoint）与负例（trap callee / 非 `fn_ref` callee（call 结果）/
     参数顺序不符 / 篡改的 fn type 不符 / 跨模块 access 链回 `Top`）；
@@ -780,8 +821,9 @@
     单轮 `let` 链（次序实证）与 malformed HIR（越界 tag、arity 不匹配），
     以及 examples/probes 全语料的 `--seg` 编译 + AIR round-trip +
     SEG-on/off bundle-loader 解释器差分（含 panic 前输出与终止）。
-    注：多 payload 时节点数可能不降，终止由 `max_iterations` 轮界保证
-    （不保证收敛到不动点）。
+    注：多 payload 时节点数可能不降，但终止由 [hir.md](hir.md) §8.2 的稳定规范序
+    契约保证（`ruleMatch` 一次性消费 + 各驱动守卫），安静轮即真不动点；不再有
+    `max_iterations` 轮界。
 
 - [x] **2. host ABI 余项：缓存指纹 + 回调参数化**（[effects.md](effects.md) §13）
   - 已落地：`StillaExecution = Forbidden | MayExecute | Unknown`（缺失 =

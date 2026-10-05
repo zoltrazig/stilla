@@ -2,8 +2,8 @@
 //! union rules (docs/hir.md §8, §11 M2a; docs/effects.md §12.3). In: a
 //! built HIR program whose every reachable node carries a *validated*
 //! `ready` effect summary (`hir_effects.Analysis`). Out: the same program
-//! with its admissible pure-Copy islands rewritten, iterated to a bounded
-//! fixpoint, with every root still structurally valid and its annotations
+//! with its admissible pure-Copy islands rewritten, iterated to a fixpoint,
+//! with every root still structurally valid and its annotations
 //! re-derivable.
 //!
 //! **Two engines.** The *union* rules (constant folding, integer algebra,
@@ -67,21 +67,34 @@
 //!   known-variant `match` reduction by its coverage / arity proof. Two
 //!   rules may *add* nodes: the `match` rule splices one `let` per bound
 //!   payload and CSE sharing materializes a shared subterm, so a wide
-//!   constructor / a shared subtree can grow the tree. SEG therefore offers
-//!   a **bounded-round contract, not a decreasing-measure one**: `optimize`
-//!   runs at most `Config.max_iterations` analysis→rewrite rounds, and the
-//!   same bound caps one island's e-graph saturation. `Stats.converged` and
-//!   `Stats.egraph_converged` report which exit each engine took — `true`
-//!   for a quiet round (a fixpoint of the current rule set), `false` for a
-//!   bound hit. Stopping early is always safe: every admitted rewrite
-//!   preserves semantics, so any round prefix is a correct program and a
-//!   bound hit only forfeits further rewrites. The per-rule guards that keep
-//!   the default bound sufficient in practice: each λ is inlined at most
-//!   once (`beta_done`, so β fires at most once per λ record), each `match`
-//!   node is consumed once, each CSE binding has at least two uses and a
-//!   non-trivial init (no let rule can undo it), an arena union rule always
-//!   moves a class or its preferred node (else it is the fixpoint), and
-//!   every other rule strictly reduces the extraction cost.
+//!   constructor / a shared subtree can grow the tree. SEG therefore has
+//!   **no numeric round cap**, and its termination is *not* a global
+//!   decreasing measure (hir.md §8.2): rule-node synthesis is idempotent
+//!   (every build path does its `lookupNode` before the matching
+//!   `addNode`, so a rule that matches an already-interned node appends
+//!   nothing), the arena's only unbounded-direction moves are
+//!   canonical-term interning — at most once per distinct `Bag` multiset —
+//!   and monotone, finite class merges, and each driver rule carries a
+//!   consumption / monotonicity guard: β fires at most once per λ
+//!   (`beta_done`), `match` consumes its node once, a CSE binding has at
+//!   least two uses and a non-trivial init (no let rule can undo it), and
+//!   `reorder` only swaps a strictly reversed pair (`rowLess(b, a)`),
+//!   decreasing that parent's `rowLess` inversion count by one. So
+//!   `optimize` runs analysis→rewrite rounds until one reports no change.
+//!   `Stats.converged` reports that quiet-round exit (always `true` on
+//!   return). `Stats.egraph_converged` reports the same for one island's
+//!   arena saturation: `saturate` runs to a quiet round too, under the same
+//!   stable-canonical-order contract. Stopping early is always safe: every
+//!   admitted rewrite preserves semantics, so any round prefix is a correct
+//!   program and a quiet round is the fixpoint. Separately, AC search
+//!   *work* is bounded near-linearly per round — `planAcWork` schedules
+//!   only maximal / fingerprint-shared nodes, `acChainCanonical`
+//!   short-circuits an already-canonical chain, and `bagInto` / `bagOf` /
+//!   `finalizeBag` inline single-use classes and memoize + one-shot
+//!   sort/merge shared ones — but that O(N log N) is a **cost** bound on
+//!   each round, not a termination measure: it says nothing about the
+//!   arena's growth direction and does not by itself bound the number of
+//!   rounds.
 //! - **Re-verification** — each iteration re-derives the effect analysis
 //!   from scratch before rewriting; the caller re-validates structurally
 //!   and by effects after the pass. No transform is allowed to rely on
@@ -89,7 +102,7 @@
 //! - **Default-on in the executable** — the `stilla` CLI enables this gate
 //!   by default (`--no-opt seg` opts out); the library default stays off
 //!   (`frontend.OptimizeConfig.seg`), matching the `hir` gate, so embedders
-//!   and tests keep explicit control. The compile-time / round budget that
+//!   and tests keep explicit control. The compile-time baseline that
 //!   justifies the default is recorded in docs/hir.md §11.
 //!
 //! The boundary rewrites stay deliberately in-place: HIR is an append-only
@@ -110,10 +123,6 @@ const hir_egraph = @import("hir_egraph.zig");
 const rewrite_contract = @import("rewrite_contract.zig");
 
 pub const Error = hir.Program.InternTypeError;
-
-/// A `fn_ref` chain longer than this is a cycle or a pathological tower
-/// and is refused rather than followed (hir.md §8.5).
-const max_eta_chain: usize = 32;
 
 /// β's declared rule + boundary-rewrite contract (docs/effects.md §10.3–
 /// §10.4). The *match* layer stays inline in `tryBeta` — the λ shape, the
@@ -198,8 +207,8 @@ const let_atom_rule = rewrite_contract.RewriteRule{
 /// the `fn_ref` it forwards to, so nothing is evaluated, discarded,
 /// duplicated or reordered and no cleanup registration moves. The *match*
 /// layer stays inline in `tryEta` — the `fn_ref` opcode, the λ / arity /
-/// type shape, the totality gate and the chain bound are structural
-/// applicability, not legality.
+/// type shape, the totality gate and the visited-set cycle guard are
+/// structural applicability, not legality.
 const eta_rule = rewrite_contract.RewriteRule{
     .name = "eta",
     .applicability = .shape,
@@ -213,7 +222,9 @@ const eta_rule = rewrite_contract.RewriteRule{
 /// consumer of the `swap_operands` legality. It canonicalizes the operand
 /// order of a `strict_ltr` parent under the *active lattice instance*:
 /// two adjacent operands swap when `canSwapOperands` admits the move and
-/// the pair is not already in canonical summary order. This is the rule
+/// the pair is strictly reversed in canonical summary order (`rowLess`
+/// says the second operand sorts before the first; equal rows never
+/// swap). This is the rule
 /// through which a second lattice instance produces *different* AIR — a
 /// `hierarchy` provider that places two host domains as disjoint sibling
 /// subtrees proves reads of them reorderable where the flat instance sees
@@ -235,10 +246,10 @@ pub const Stats = struct {
     /// Analysis→rewrite rounds this pass ran (each round re-derives the
     /// effect analysis before rewriting).
     iterations: u32 = 0,
-    /// `true` when the last round was quiet — the pass reached a fixpoint of
-    /// the current rule set within the bound. `false` when the
-    /// `max_iterations` bound was hit first (pass header's termination
-    /// contract; a bound hit is safe, only a missed optimization).
+    /// `true` when `optimize` exited on a quiet round — the pass reached a
+    /// fixpoint of the current rule set. `false` only from the test-only
+    /// single-round entry point (`optimizeOnce`), which cannot observe the
+    /// quiet-round exit.
     converged: bool = false,
     /// Reachable nodes that passed recursive island admission.
     islands: usize = 0,
@@ -280,8 +291,8 @@ pub const Stats = struct {
     egraph_islands: usize = 0,
     /// Saturation rounds summed over those islands.
     egraph_rounds: u64 = 0,
-    /// Whether every island's saturation reached a quiet round inside the
-    /// bound.
+    /// Whether every island's saturation reached a quiet round (its true
+    /// fixpoint; there is no numeric bound to hit).
     egraph_converged: bool = true,
     /// Class merges from congruence / encode-time hash-consing (CSE).
     egraph_merges: usize = 0,
@@ -345,9 +356,6 @@ pub const Config = struct {
     /// rewrite dirtied. Null = a private, never-armed cache (a full solve
     /// every round), leaving direct white-box callers unchanged.
     cache: ?*hir_effects.SummaryCache = null,
-    /// Bound on analysis→rewrite rounds (each round re-derives effects).
-    /// The same bound caps one island's e-graph saturation rounds.
-    max_iterations: u32 = 8,
     // Boundary rewrites (driver-level, admitted by rewrite_contract).
     beta: bool = true,
     eta: bool = true,
@@ -368,63 +376,94 @@ pub const Config = struct {
 };
 
 /// Rewrite every function body and constant initializer in place to the
-/// SEG normal form, iterating analysis/rewrite to a bounded fixpoint. The
+/// SEG normal form, iterating analysis/rewrite to a fixpoint. The
 /// union rules run in the e-graph arena (`hir_egraph.zig`) at each island
 /// root; the boundary rewrites (β / η / the `let` folds) and the
 /// known-variant `match` reduction stay in this driver. The caller owns
 /// `built` and the arena; on return every root is rewritten but not yet
 /// re-validated (the caller runs `hir.validate` + a fresh
 /// `Analysis.analyze`/`.validate`).
+///
+/// Termination has no numeric round cap and no global decreasing measure:
+/// rule synthesis is idempotent (build paths look up before they append, so
+/// a rule that matches an already-interned node adds nothing), the arena's
+/// only unbounded-direction moves are canonical-term interning (at most
+/// once per distinct `Bag`) and finite, monotone class merges, and each
+/// driver rule has a consumption / monotonicity guard (β once per λ via
+/// `beta_done`, `match` once per node, a CSE binding with ≥2 uses and a
+/// non-trivial init, `reorder` only on a strict `rowLess` reversal). Every
+/// round reporting `changed == false` is therefore a true fixpoint
+/// (re-analysis of an unchanged tree is identical), so the loop reaches a
+/// quiet round (`docs/hir.md` §8.2). `Stats.converged` records that exit.
 pub fn optimize(arena: std.mem.Allocator, built: *hir.BuiltProgram, config: Config) Error!Stats {
     var stats = Stats{};
     // A λ record is inlined at most once per compile: this bounds β
     // against recursive / mutually-recursive λ values (hir.md §8.4 does
     // not promise multi-site inlining) and keeps the fixpoint finite.
     var beta_done = std.AutoHashMapUnmanaged(hir.FuncId, void).empty;
-    var iter: u32 = 0;
-    while (iter < config.max_iterations) : (iter += 1) {
-        var analysis = try hir_effects.Analysis.init(arena, built, .{ .graph = config.graph, .host_decls = config.host_decls, .resources = config.resources, .engine = config.engine, .cache = config.cache });
-        try analysis.analyze();
-        var rw = Rewriter{
-            .arena = arena,
-            .built = built,
-            .analysis = &analysis,
-            .beta_done = &beta_done,
-            .max_egraph_rounds = config.max_iterations,
-            .cfg = config,
-        };
-        const changed = try rw.run();
-        stats.iterations += 1;
-        stats.islands = @max(stats.islands, rw.island_count);
-        stats.beta += rw.beta;
-        stats.etas += rw.etas;
-        stats.folds += rw.folds;
-        stats.algebra += rw.algebra;
-        stats.lets += rw.lets;
-        stats.conds += rw.conds;
-        stats.matches += rw.matches;
-        stats.projects += rw.projects;
-        stats.shares += rw.shares;
-        stats.reorders += rw.reorders;
-        stats.egraph_islands += rw.egraph_islands;
-        stats.egraph_rounds += rw.egraph_rounds;
-        stats.egraph_converged = stats.egraph_converged and rw.egraph_converged;
-        stats.egraph_merges += rw.egraph_merges;
-        stats.egraph_unions += rw.egraph_unions;
-        stats.egraph_copies += rw.egraph_copies;
-        stats.egraph_extract_cost += rw.egraph_extract_cost;
-        stats.egraph_folds_matched += rw.egraph_folds_matched;
-        stats.egraph_algebra_matched += rw.egraph_algebra_matched;
-        stats.egraph_conds_matched += rw.egraph_conds_matched;
-        stats.egraph_projects_matched += rw.egraph_projects_matched;
-        stats.egraph_ac += rw.egraph_ac;
-        stats.egraph_assoc += rw.egraph_assoc;
+    while (true) {
+        const changed = try runRound(arena, built, config, &stats, &beta_done);
         if (!changed) {
             stats.converged = true;
             break;
         }
     }
     return stats;
+}
+
+/// Test-only: run exactly one analysis→rewrite round, without the outer
+/// fixpoint loop. `segOnce` needs a rule's immediate output to survive
+/// long enough to be inspected before later rounds simplify it away.
+/// `Stats.converged` stays `false`: a single round cannot observe the
+/// quiet-round exit.
+pub fn optimizeOnce(arena: std.mem.Allocator, built: *hir.BuiltProgram, config: Config) Error!Stats {
+    var stats = Stats{};
+    var beta_done = std.AutoHashMapUnmanaged(hir.FuncId, void).empty;
+    _ = try runRound(arena, built, config, &stats, &beta_done);
+    return stats;
+}
+
+/// One analysis→rewrite round: a fresh `hir_effects.Analysis`, one
+/// `Rewriter` pass over the program, and the round's per-rule counts
+/// folded into `stats`. Returns whether the round changed anything — the
+/// outer loop's quiet-round signal. `beta_done` is shared across rounds.
+fn runRound(arena: std.mem.Allocator, built: *hir.BuiltProgram, config: Config, stats: *Stats, beta_done: *std.AutoHashMapUnmanaged(hir.FuncId, void)) Error!bool {
+    var analysis = try hir_effects.Analysis.init(arena, built, .{ .graph = config.graph, .host_decls = config.host_decls, .resources = config.resources, .engine = config.engine, .cache = config.cache });
+    try analysis.analyze();
+    var rw = Rewriter{
+        .arena = arena,
+        .built = built,
+        .analysis = &analysis,
+        .beta_done = beta_done,
+        .cfg = config,
+    };
+    const changed = try rw.run();
+    stats.iterations += 1;
+    stats.islands = @max(stats.islands, rw.island_count);
+    stats.beta += rw.beta;
+    stats.etas += rw.etas;
+    stats.folds += rw.folds;
+    stats.algebra += rw.algebra;
+    stats.lets += rw.lets;
+    stats.conds += rw.conds;
+    stats.matches += rw.matches;
+    stats.projects += rw.projects;
+    stats.shares += rw.shares;
+    stats.reorders += rw.reorders;
+    stats.egraph_islands += rw.egraph_islands;
+    stats.egraph_rounds += rw.egraph_rounds;
+    stats.egraph_converged = stats.egraph_converged and rw.egraph_converged;
+    stats.egraph_merges += rw.egraph_merges;
+    stats.egraph_unions += rw.egraph_unions;
+    stats.egraph_copies += rw.egraph_copies;
+    stats.egraph_extract_cost += rw.egraph_extract_cost;
+    stats.egraph_folds_matched += rw.egraph_folds_matched;
+    stats.egraph_algebra_matched += rw.egraph_algebra_matched;
+    stats.egraph_conds_matched += rw.egraph_conds_matched;
+    stats.egraph_projects_matched += rw.egraph_projects_matched;
+    stats.egraph_ac += rw.egraph_ac;
+    stats.egraph_assoc += rw.egraph_assoc;
+    return changed;
 }
 
 // ---------------------------------------------------------------------------
@@ -495,10 +534,6 @@ const Rewriter = struct {
     /// it, so the moved body's destruction boundary follows the call
     /// into its destination full expression.
     clone_fe: hir.FullExprId = 0,
-
-    /// Saturation-round bound handed to the e-graph arena (mirrors
-    /// `Config.max_iterations`).
-    max_egraph_rounds: u32 = 8,
 
     /// Which rewrites this pass may apply (beta/eta/let/match/reorder and
     /// the e-graph arena's own rule toggles, forwarded per island).
@@ -650,7 +685,7 @@ const Rewriter = struct {
             self.p(),
             self.analysis,
             id,
-            .{ .max_rounds = self.max_egraph_rounds, .rules = .{
+            .{ .rules = .{
                 .fold = self.cfg.egraph_fold,
                 .algebra = self.cfg.egraph_algebra,
                 .cond = self.cfg.egraph_cond,
@@ -922,9 +957,13 @@ const Rewriter = struct {
     ///
     /// The redirect is idempotent and lattice-monotone: a chain
     /// `fid → F → G` resolves in one call, and once a `fn_ref` names a
-    /// non-wrapper the loop breaks immediately. A chain at the
-    /// `max_eta_chain` bound (a cycle, or a pathological tower) is
-    /// refused, so the rule never oscillates across rounds.
+    /// non-wrapper the loop breaks immediately. The walk carries an
+    /// explicit visited set of function records: a target already seen is
+    /// a genuine `fn_ref` cycle and is refused, while an acyclic chain
+    /// that reaches a non-wrapper (or a host / out-of-range / non-λ
+    /// record) terminates normally. The walk length is therefore bounded
+    /// by the number of function records, not a magic constant, so the
+    /// rule never oscillates across rounds.
     fn tryEta(self: *Rewriter, id: hir.ExprId) Error!bool {
         const pr = self.p();
         const n = pr.node(id);
@@ -936,20 +975,24 @@ const Rewriter = struct {
         if (!try rewrite_contract.check(self.analysis, eta_rule.legality, .{ .expr = id })) return false;
         const start = n.payload.func;
         var target = start;
-        var steps: usize = 0;
-        while (steps < max_eta_chain) : (steps += 1) {
+        var visited = std.AutoHashMapUnmanaged(hir.FuncId, void).empty;
+        defer visited.deinit(self.arena);
+        while (true) {
             const fid = switch (target) {
                 .func => |f| f,
                 .host => break,
             };
             if (fid >= self.built.funcs.items.len) break;
+            // Revisiting a function record means the chain closed on
+            // itself: refuse the redirect rather than loop.
+            if (visited.contains(fid)) return false;
+            try visited.put(self.arena, fid, {});
             const rec = self.built.funcs.items[fid];
             if (rec.kind != .lambda) break;
             const callee = self.etaRedexCallee(rec.root, n.ty) orelse break;
             if (!self.redexTotal(rec.root)) break;
             target = pr.node(callee).payload.func;
         }
-        if (steps >= max_eta_chain) return false; // cycle / over-long chain: refuse
         if (std.meta.eql(target, start)) return false;
         pr.exprs.items[id].payload = .{ .func = target };
         return true;
@@ -1103,20 +1146,25 @@ const Rewriter = struct {
 
     /// The reorder rule (docs/effects.md §10.3–§10.5): canonicalize the
     /// operand order of a `strict_ltr` parent by swapping an adjacent pair
-    /// that is order-compatible under the active lattice instance and not
-    /// already in canonical summary order. This is the production consumer
-    /// of `rewrite_contract.swap_operands` — the rule through which a
-    /// second lattice instance changes *AIR*, not just a legality verdict:
-    /// a `hierarchy` provider that proves two sibling host reads disjoint
-    /// admits the swap the flat instance refuses.
+    /// that is order-compatible under the active lattice instance and is
+    /// *strictly reversed* relative to the canonical summary order. This is
+    /// the production consumer of `rewrite_contract.swap_operands` — the
+    /// rule through which a second lattice instance changes *AIR*, not just
+    /// a legality verdict: a `hierarchy` provider that proves two sibling
+    /// host reads disjoint admits the swap the flat instance refuses.
     ///
-    /// Termination contract: `rowLess` is a strict total order on the rows
-    /// the pair is compared by, so each swap moves that pair one step
-    /// closer to the canonical order and the pass's `max_iterations` bound
-    /// caps the loop — reordering, like the other rules, offers a
-    /// bounded-round contract, not a decreasing-measure one. The only
-    /// operands considered are effect-bearing (a non-empty canonical row),
-    /// so a pure pair never churns under any instance.
+    /// Termination contract: swap only when `rowLess(b_s, a_s)` — the
+    /// second operand strictly sorts before the first. `rowLess` is a
+    /// strict total order on the rows the pair is compared by, so each
+    /// adjacent swap strictly decreases that parent's `rowLess` inversion
+    /// count; the count is a non-negative integer, so this is a monotonicity
+    /// guard on the rule (`docs/hir.md` §8.2 lists it among the driver-layer
+    /// guards), not a global measure over the whole pass. Equal rows satisfy
+    /// neither `rowLess(a, b)` nor
+    /// `rowLess(b, a)`, so they are left untouched — in particular a
+    /// declared-stable same-domain host read pair cannot swap back and
+    /// forth. The only operands considered are effect-bearing (a non-empty
+    /// canonical row), so a pure pair never churns under any instance.
     fn tryReorder(self: *Rewriter, id: hir.ExprId) Error!bool {
         const pr = self.p();
         const n = pr.node(id);
@@ -1134,9 +1182,14 @@ const Rewriter = struct {
             // flat instance's no-op (every numeric op would otherwise be a
             // candidate and the corpus would churn).
             if (a_s.accesses.isEmpty() or b_s.accesses.isEmpty()) continue;
-            // Already in canonical order — nothing to do. Equal rows are
-            // trivially canonical and `canSwapOperands` refuses them too.
-            if (rowLess(a_s, b_s)) continue;
+            // Swap only on a *strict* reversal: the second operand must
+            // sort strictly before the first. Equal rows satisfy neither
+            // direction, so they are canonical already and are left alone
+            // (`canSwapOperands` would admit the equal pair, so an
+            // equal-row swap here would oscillate forever); this keeps each
+            // reorder a strict `rowLess` inversion-count decrease (a driver
+            // guard, not a global measure).
+            if (!rowLess(b_s, a_s)) continue;
             if (!try rewrite_contract.check(
                 self.analysis,
                 reorder_rule.legality,
@@ -1419,9 +1472,9 @@ const Rewriter = struct {
             // A node rewritten earlier this round has a dead shape behind
             // its cached island verdict; defer the fold to next round's
             // fresh analysis.
-            // ponytail: one-round deferral (bounded by `max_iterations`), not
-            // a mid-round island rebuild; revisit if a program ever needs the
-            // fold inside the bound.
+            // ponytail: one-round deferral (the outer loop has no round cap),
+            // not a mid-round island rebuild; revisit if a program ever needs
+            // the fold inside the same round.
             if (init < self.enc.len and self.dirty.contains(init)) return false;
             if (!try rewrite_contract.check(self.analysis, let_forward_rule.legality, .{ .expr = init })) return false;
             if (!try rewrite_contract.checkCleanup(let_forward_rule, self.analysis, .{ .cleanup_free_subtree = init })) return false;

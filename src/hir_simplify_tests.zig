@@ -299,6 +299,44 @@ test "M2b: two fresh builds produce the same text (deterministic)" {
     try testing.expectEqualStrings(try funcText(&b1, "app.f"), try funcText(&b2, "app.f"));
 }
 
+test "M2b: a many-operand ANF hoist reaches a true fixpoint (no round cap)" {
+    // `simplify_anf_many_operands.st`'s `combine` has nine `app.read()`
+    // operands. A read declared `Write` is observable, so
+    // `canFloatAsTree` is false for each; selective ANF hoists exactly
+    // one (the first non-floatable) per round, because the synthesized
+    // `local` left behind is floatable and the first-non-floatable index
+    // strictly advances. Nine operands therefore need **nine** changing
+    // rounds plus the quiet round that sets `converged` — ten iterations,
+    // more than the removed `max_iterations = 8` cap could ever run. The
+    // old cap truncated the chain at eight hoists and exited with
+    // `converged == false`, so this count is the removal's regression
+    // proof (docs/hir.md §5.7, docs/effects.md §12.1).
+    const src = try probe_corpus.read(testing.allocator, "probes/cases", "simplify_anf_many_operands");
+    defer testing.allocator.free(src);
+    var b = try buildText("app", &.{.{ "app", src }});
+    defer b.deinit();
+    // The read must be observable: a `Write` host summary is what keeps
+    // it out of `canFloatAsTree` (docs/effects.md §13).
+    const write_read = try effects.summaryOf(b.arena.allocator(), &.{.{ .resource = .{ .host = 1 }, .mode = .write }});
+    const decls = [_]effects.HostDecl{
+        .{ .key = "app.read", .summary = write_read, .stilla_execution = .forbidden },
+    };
+
+    // Nine non-floatable operands in one StrictLTR parent ⇒ nine hoists.
+    const hoists: usize = 9;
+
+    const first = try simplifyAllWith(&b, &decls);
+    try testing.expect(first.iterations > 8);
+    try testing.expect(first.converged);
+    try testing.expectEqual(hoists, first.hoists);
+
+    const after = try funcText(&b, "app.f");
+    const second = try simplifyAllWith(&b, &decls);
+    try testing.expectEqual(@as(usize, 0), second.dead_lets + second.hoists + second.suffix_deletions);
+    try testing.expect(second.converged);
+    try testing.expectEqualStrings(after, try funcText(&b, "app.f"));
+}
+
 // ---------------------------------------------------------------------------
 // Whole-pipeline: opt-in flag, AIR validation + round-trip,
 // interpreter differential.

@@ -45,8 +45,36 @@
 //!
 //! Like SEG (`hir_seg.zig`), the pass re-derives the effect analysis each
 //! round and rewrites in place (the HIR is a tree, every node a single
-//! parent, arena-append only). The caller re-validates structure and
-//! effects afterwards (docs/hir.md §2.4).
+//! parent, arena-append only), and iterates to a **quiet-round fixpoint**:
+//! `optimize` runs analysis → rewrite rounds until one reports no change
+//! (`Stats.converged`), with no numeric round cap. A round over an unchanged
+//! tree re-analyzes to the same conclusions and rewrites nothing, so a quiet
+//! round is a true fixpoint; a program that does not quiesce is a hang, not a
+//! bound stop.
+//!
+//! Termination is structural, not budgeted. Each rule moves a strictly
+//! finite, monotone resource and no rule recreates another's redex, so the
+//! round relation cannot cycle:
+//!
+//! - **dead-let** removes a `let` node; nothing re-introduces one, and a
+//!   removed binding cannot be re-deadened later.
+//! - **never-returns suffix deletion** removes an unreachable straight-line
+//!   suffix; nothing re-synthesizes it.
+//! - **selective ANF** hoists the *first* operand of a `strict_ltr` parent
+//!   that is not `canFloatAsTree`. The operands before it remain floatable
+//!   and move into their own positions; crucially the synthesized `local`
+//!   is itself floatable (`canFloatAsTree(local) == true`), so on the next
+//!   round the first-non-floatable index strictly advances. Each parent
+//!   therefore admits at most one hoist per operand position — at most
+//!   (#operands) hoists — and the per-parent measure is finite.
+//!
+//! **The ANF termination argument rests on `local` remaining floatable.** If
+//! a synthesized `local` ever failed `canFloatAsTree`, the rule would hoist
+//! it again as the new first non-floatable operand and loop forever; the
+//! derived query is what forbids that, not a counter.
+//!
+//! The caller re-validates structure and effects afterwards (docs/hir.md
+//! §2.4).
 
 const std = @import("std");
 const cfg = @import("stilla").cfg;
@@ -110,6 +138,11 @@ const anf_rule = rewrite_contract.RewriteRule{
 pub const Stats = struct {
     /// Analysis → rewrite rounds actually run.
     iterations: u32 = 0,
+    /// `true` when `optimize` exited on a quiet round — the pass reached a
+    /// true fixpoint of the current rule set. There is no numeric bound that
+    /// can be hit, so a program that never quiesces is a hang, not a bounded
+    /// stop.
+    converged: bool = false,
     /// Dead `let`s removed.
     dead_lets: usize = 0,
     /// Operands materialized into `let`s.
@@ -145,8 +178,6 @@ pub const Config = struct {
     /// rewrite dirtied. Null = a private, never-armed cache (a full solve
     /// every round), leaving direct white-box callers unchanged.
     cache: ?*hir_effects.SummaryCache = null,
-    /// Bound on analysis → rewrite rounds (each round re-derives effects).
-    max_iterations: u32 = 8,
     /// Run dead-let elimination.
     dead_let: bool = true,
     /// Run selective A-Normal Form (operand materialization).
@@ -156,14 +187,14 @@ pub const Config = struct {
 };
 
 /// Apply the M2b consumers to every function body and constant
-/// initializer in place, iterating analysis/rewrite to a bounded
+/// initializer in place, iterating analysis/rewrite to a quiet-round
 /// fixpoint. The caller owns `built` and the arena; on return every root
 /// is rewritten but not yet re-validated (the caller runs `hir.validate`
-/// plus a fresh `Analysis.analyze`/`.validate`).
+/// plus a fresh `Analysis.analyze`/`.validate`). `Stats.converged` records
+/// the quiet-round exit; there is no numeric round cap.
 pub fn optimize(arena: std.mem.Allocator, built: *hir.BuiltProgram, config: Config) Error!Stats {
     var stats = Stats{};
-    var iter: u32 = 0;
-    while (iter < config.max_iterations) : (iter += 1) {
+    while (true) {
         var analysis = try hir_effects.Analysis.init(arena, built, .{ .graph = config.graph, .host_decls = config.host_decls, .resources = config.resources, .engine = config.engine, .cache = config.cache });
         try analysis.analyze();
         var rw = Rewriter{ .arena = arena, .built = built, .analysis = &analysis, .cfg = config };
@@ -172,7 +203,10 @@ pub fn optimize(arena: std.mem.Allocator, built: *hir.BuiltProgram, config: Conf
         stats.dead_lets += rw.dead_lets;
         stats.hoists += rw.hoists;
         stats.suffix_deletions += rw.suffix_deletions;
-        if (!changed) break;
+        if (!changed) {
+            stats.converged = true;
+            break;
+        }
     }
     return stats;
 }

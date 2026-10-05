@@ -172,8 +172,9 @@ EvalPolicy =
   通过 `isSegSafe` 时准入（effects.md §12.3），island 内每个节点与 operand 都满足
   `total ∧ observable_effect_free ∧ Q = 0 ∧ Copy ∧ cleanup-free ∧ ownership 门`，
   故 LTR 求值顺序与结合方式在该上下文中**不可观察**。`hir_egraph.zig` 的整数
-  交换-结合律搜索（`egraph_ac`：展平、规范排序、重分组）据此直接对 operand 排序、
-  重结合，**不**查询 `reorderable(a, b)`；顺序可观察的表达式永远无法准入，也就
+  交换-结合律搜索（`egraph_ac`：`Bag` 归纳、按 `acRep` 规范排序、`buildRun` /
+  `buildCanonical` 重结合）据此直接对 operand 排序、重结合，**不**查询
+  `reorderable(a, b)`；顺序可观察的表达式永远无法准入，也就
   永远不会被交换或重结合。非结合算子（`sub` / `div` / `rem` / `shl` / `shr`）与
   交换但不结合的 `eq` / `ne` 都不参与重结合：前者重结合会改变语义（`div` / `rem`
   还可能 trap），后者根本不结合。
@@ -999,11 +1000,13 @@ tie-break）即交换两个 operand 槽。`legality = { swap_operands }` +
 `effect = { PreservesEvaluationCount | MayReorder }`：不删除、不复制，每个
 operand 仍按新序精确求值一次；同一父节点的同一 FE 内交换，无 scope / FE /
 cleanup 义务。两个守卫保证默认实例零扰动：只考察**非空** access 行的 operand
-（纯对从不入列），且行必须互异（相等行规范序平凡、`canSwapOperands` 也拒
-绝）；默认 flat 实例下未声明的异域读呈 conflict，`orderCompatible` 恒否，故
+（纯对从不入列），且交换只在**严格逆序**（`rowLess(b, a)`）时发生——相等的行对
+`rowLess(a, b)` 与 `rowLess(b, a)` 同为假，故既不交换也不会来回摆动；默认 flat
+实例下未声明的异域读呈 conflict，`orderCompatible` 恒否，故
 `reorder` 在空 registry 上从不触发（SEG budget 的 rewrite 计数不变）。termination
-是 `max_iterations` 界的单调排序：`rowLess` 是全序，每次交换把该对推向规范序，
-配对不会反复摆动。
+是**严格逆序的单调排序、无需轮数上界**：`rowLess` 是全序，交换只在严格逆序
+（`rowLess(b, a)`；相等行不交换）时发生，每次把该 pair 的 `rowLess` 逆序数严格减一，
+逆序数非负、下界 0，故配对不会反复摆动，也不再依赖 `max_iterations`。
 
 `(fn(x) { x + 1 })(host.read())` 整体仍不能进纯 term 的 equality saturation
 ——但 β 本身不删除、不复制、不重排 `arg`，契约（求值次数 / 序 / scope / FE /
@@ -1294,6 +1297,16 @@ planner / CFG 层生成。effect 系统保证 DCE 不会误删带重要 destruct
 特判**。dead-let 与 selective ANF、`never_returns` 后缀删除在 hir_simplify.zig
 （`hir` 门，默认关），SEG 准入在 hir_seg.zig（`seg` 门可执行文件默认开、库默认关）。
 
+三者共用同一驱动，也共用同一终止契约：每轮构造全新的 `hir_effects.Analysis`
+并在树上原位重写；循环为 `while (true)`，以**安静轮（`changed == false`）**退出
+——对未变树重做分析结果逐位相同，故安静轮即真不动点，**无任何数值轮界**
+（`Config.max_iterations` 已删除），`hir_simplify.Stats.converged` 报告该退出。
+各规则严格推进、无振荡：dead-let 以 body 覆盖 `let` 节点、`never_returns` 后缀
+删除截断 / 删除节点（均严格移除）；selective ANF 每轮只提 `strict_ltr` 父节点的
+首个不可浮动 operand，合成 `local` 恒可浮动（`canFloatAsTree(local) == true`），
+故首个不可浮动 operand 的下标严格前进、每个父节点至多 #operands 次提升；没有
+规则重建另一条的 redex（ANF 合成绑定总被使用，dead-let 删不掉）。
+
 ### 12.1 Selective A-Normal Form
 
 ```text
@@ -1369,7 +1382,8 @@ drop / move Unique             ❌
 
 `isSegSafe` 同时是 arena 内**重写合法性**的依据，而不只是准入过滤：整数
 交换-结合律搜索（AC，hir.md §8.2）对可交换 / 结合的整数二元节点排序 operand、
-展平链并重结合，其正确性正是由 island 全员 `isSegSafe` 保证的。因为每个 operand
+把链归纳成 memoized `Bag` 并重结合（`buildRun` / `buildCanonical`），其正确性正是
+由 island 全员 `isSegSafe` 保证的。因为每个 operand
 都已证明 `total`（不 trap）、无 `observable_effect`（不打印 / 不 host 调用）、
 `Q = 0`（deterministic）、`Copy`（无 move / drop 顺序）、cleanup-free 且过
 ownership 门，重排 LTR 求值顺序、改变结合括号都不改变任何可观察行为——因此该
