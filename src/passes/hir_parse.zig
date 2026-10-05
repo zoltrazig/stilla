@@ -14,7 +14,7 @@
 //! the binder being defined inside its own init fails here (the §5.3
 //! init-exclusion rule at text level). Function/lambda boundaries are not
 //! enforced at parse time: capture-shaped references parse and are left
-//! for the structural validator (S3) to reject.
+//! for the structural validator to reject.
 //!
 //! Reference resolution (`fnref Fk` / `fnref Hk` / `module Ck`) goes
 //! through the `#refs:` dictionary line plus `hir.SerCtx` stable keys
@@ -23,7 +23,7 @@
 //! Aggregate identity (`struct_make` / `field_get` / `variant_make`) is
 //! resolved through the bracket member + annotated type against the
 //! fixture `SerCtx` decls (hir.md §4.4); a member that does not resolve
-//! is rejected here, never silently degraded. The S2 boundary that
+//! is rejected here, never silently degraded. The serialization boundary that
 //! remains is a value-position module access chain leaf, whose hop
 //! identities have no text form.
 

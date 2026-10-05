@@ -1,6 +1,6 @@
-//! Test file: `frontend LLIR normalize` — Phase 3.2 normalization
+//! Test file: `frontend LLIR normalize` — normalization
 //! verification (the frozen records of every normalization family) plus
-//! the `MiniVm` frame-contract state model, and Phase 3.3 the corpus
+//! the `MiniVm` frame-contract state model, and the corpus
 //! normalization harness. Split out of the former `src/frontend_tests.zig`;
 //! `MiniVm` and the normalization helpers are local to this file.
 //!
@@ -24,7 +24,7 @@ const irText = helpers.irText;
 const compileOpt = helpers.compileOpt;
 const findFunc = helpers.findFunc;
 // ---------------------------------------------------------------------------
-// Phase 3.2 — normalization verification (TODO 3.2): the frozen LLIR
+// Normalization verification: the frozen LLIR
 // records of every normalization family (arithmetic, construct, direct /
 // value calls, syscall, phi edge copies and swap cycles, switch,
 // multi-result destructure, tailcall, cleanup, dynamic drop) plus a
@@ -209,7 +209,7 @@ const MiniVm = struct {
     }
 
     /// A self-tailcall (spec §5.5): same frame — `fp` preserved.
-    /// Phase 5: the compiler has already emitted explicit copy records
+    /// The compiler has already emitted explicit copy records
     /// to place each argument in its target param slot. tailcall_self
     /// is now a pure jump — no staging, no hidden writes.
     fn tailcallSelf(self: *MiniVm) void {
@@ -246,7 +246,7 @@ const MiniVm = struct {
 /// value a `zero` read yields (spec §3.1). Every one of them is the 0
 /// word, which is exactly what a real interpreter must materialize for a
 /// `zero` source: `int32` 0, `uint32` 0, `float32` 0.0, `byte` 0, `bool`
-/// false. `str`/`any`/`hostdata` are never `zero`-readable (phase-3
+/// false. `str`/`any`/`hostdata` are never `zero`-readable (the
 /// validator rejects them).
 fn zeroOf(prim: llir.PrimitiveId) u64 {
     return switch (prim) {
@@ -283,20 +283,20 @@ fn countOpcode(image: *const llir.LlirProgram, op: llir.Opcode) usize {
     return n;
 }
 
-/// The shared phase-3.2 normalization invariants for one lowered image:
-/// every record is exactly 8 bytes, every reference validates (the 3.1
+/// The shared normalization invariants for one lowered image:
+/// every record is exactly 8 bytes, every reference validates (the
 /// validator — the acceptance's "all references legal"), and the
 /// required opcode families are present.
 fn checkNormalized(name: []const u8, image: llir.LlirProgram, expects: []const OpcodeMin) !void {
     try testing.expectEqual(@as(usize, 4), @sizeOf(llir.Instr));
     if (try llir_validate.validate(&image, testing.allocator)) |m| {
-        std.log.err("3.2 {s}: normalized image rejected: {s}", .{ name, m });
+        std.log.err("{s}: normalized image rejected: {s}", .{ name, m });
         return error.TestUnexpectedResult;
     }
     for (expects) |e| {
         const n = countOpcode(&image, e.op);
         if (n < e.min) {
-            std.log.err("3.2 {s}: expected at least {d} {s} record(s), found {d}", .{ name, e.min, llir.opInfo(e.op).name, n });
+            std.log.err("{s}: expected at least {d} {s} record(s), found {d}", .{ name, e.min, llir.opInfo(e.op).name, n });
             return error.TestUnexpectedResult;
         }
     }
@@ -338,12 +338,12 @@ fn expectTextNormalizes(name: []const u8, ir: []const u8, expects: []const Opcod
     try checkNormalized(name, image, expects);
 }
 
-test "3.2 LLIR normalization matrix: every record family normalizes to a valid 8-byte image" {
-    // One fixture per normalization family (TODO 3.2); each is lowered
-    // and checked for the 8-byte record invariant, a fully-valid image
-    // (3.1), an unmodified input CFG, and the family's records.
+test "LLIR normalization matrix: every record family normalizes to a valid 8-byte image" {
+    // One fixture per normalization family; each is lowered
+    // and checked for the 8-byte record invariant, a fully-valid image,
+    // an unmodified input CFG, and the family's records.
 
-    // arithmetic — register ops plus an immediate fusion (2.14).
+    // arithmetic — register ops plus an immediate fusion.
     const src_arithmetic = try helpers.probeSource("probes/cases", "norm_arithmetic");
     defer testing.allocator.free(src_arithmetic);
     try expectSourceNormalizes(
@@ -359,8 +359,7 @@ test "3.2 LLIR normalization matrix: every record family normalizes to a valid 8
 
     // construct — a struct literal is one record + a descriptor; the
     // move-destructure back is `unpack_struct` (the single-result
-    // `read_field` projections are documented placeholders, TODO 2.15
-    // summary).
+    // `read_field` projections are documented placeholders).
     const src_construct = try helpers.probeSource("probes/cases", "norm_construct");
     defer testing.allocator.free(src_construct);
     try expectSourceNormalizes(
@@ -455,7 +454,7 @@ test "3.2 LLIR normalization matrix: every record family normalizes to a valid 8
     );
 
     // phi swap cycle — a three-cycle breaks as stage + 3 transfers
-    // through a type-matched scratch slot (2.8).
+    // through a type-matched scratch slot.
     try expectTextNormalizes(
         "phi swap cycle",
         \\module "app" {
@@ -509,7 +508,7 @@ test "3.2 LLIR normalization matrix: every record family normalizes to a valid 8
     );
 
     // dynamic drop — a definitely-owned unique `any` is dropped
-    // unconditionally by the residual runtime `drop` (2.13).
+    // unconditionally by the residual runtime `drop`.
     const src_dynamic_drop = try helpers.probeSource("probes/cases", "norm_dynamic_drop");
     defer testing.allocator.free(src_dynamic_drop);
     try expectSourceNormalizes(
@@ -519,7 +518,7 @@ test "3.2 LLIR normalization matrix: every record family normalizes to a valid 8
     );
 }
 
-test "3.2 special-register contract: zero reads, zero writes, traps and side effects survive, void and zero returns" {
+test "special-register contract: zero reads, zero writes, traps and side effects survive, void and zero returns" {
     // A hand-built two-callee image: `f1` returns zero (`ret zero` on a
     // non-void signature), `f2` is void. The caller's records exercise
     // the special-register rules; the MiniVm drives them. (The image is
@@ -704,7 +703,7 @@ test "3.2 special-register contract: zero reads, zero writes, traps and side eff
     try testing.expectEqual(@as(u32, 0), stack[vm.fp + 1]); // real zero in the real return slot
 }
 
-test "3.2 frame contract: direct and value calls — header, params, pc/sp/fp transitions, resume rebuild" {
+test "frame contract: direct and value calls — header, params, pc/sp/fp transitions, resume rebuild" {
     // Direct call: main -> add3(1, 2, 3). The MiniVm drives the call
     // record and the callee's ret, asserting every transition of spec
     // §5.3/§5.4 and the FunctionDesc rebuild after the resume.
@@ -854,7 +853,7 @@ test "3.2 frame contract: direct and value calls — header, params, pc/sp/fp tr
     try testing.expectEqual(image2.functions[apply2], vm2.function());
 }
 
-test "3.2 frame contract: executing the emitted argument moves into the window" {
+test "frame contract: executing the emitted argument moves into the window" {
     // An argument live across another call cannot be homed in the
     // window, so both call sites emit a real argument move (spec §5.3).
     // The MiniVm executes the move record, then the call; the callee
@@ -921,8 +920,8 @@ test "3.2 frame contract: executing the emitted argument moves into the window" 
     try testing.expectEqual(@as(u32, 3), stack[llir.headerBase(vm.fp) + 0]); // saved_fp = the caller's frame base (root fp = 3)
 }
 
-test "3.2 frame contract: tailcall_self reuses the frame as a pure jump" {
-    // The self-tailcall (spec §5.5): same fp; Phase 5 emits explicit
+test "frame contract: tailcall_self reuses the frame as a pure jump" {
+    // The self-tailcall (spec §5.5): same fp; the lowering emits explicit
     // copies to r0..r(P-1) before the jump, so the instruction itself
     // only resets sp to the frame end and pc back to the entry.
     var t = try cfg_parse.parseText(
@@ -975,7 +974,7 @@ test "3.2 frame contract: tailcall_self reuses the frame as a pure jump" {
     vm.tailcallSelf();
     // fp preserved — no new frame, no header.
     try testing.expectEqual(fp_before, vm.fp);
-    // Phase 5: the compiler emitted explicit copies before the tailcall,
+    // The compiler emitted explicit copies before the tailcall,
     // so the args are already in r0..r(P-1). tailcallSelf is a pure
     // jump — no staging, no hidden writes.
     try testing.expectEqual(@as(u32, 5), stack[vm.fp + 0]);
@@ -986,7 +985,7 @@ test "3.2 frame contract: tailcall_self reuses the frame as a pure jump" {
 }
 
 // ---------------------------------------------------------------------------
-// Phase 3.2 — frame contract, part 2 (TODO 3.5): the three-cell header with
+// Frame contract, part 2: the three-cell header with
 // the argument/result slot-0 overlap — zero-parameter non-void (A = 1),
 // argument-0 ownership consumption before result publication, take
 // adjacency to its call, and call-entry validation failure atomicity. These
@@ -1000,7 +999,7 @@ test "3.2 frame contract: tailcall_self reuses the frame as a pure jump" {
 // aliases slot 0 as its F0 (r0). `slot_move` is the argument move; the
 // call writes the three-cell header; `ret` publishes slot 0; the take
 // clears it.
-test "3.2 frame contract: zero-param non-void and the argument/result slot-0 overlap" {
+test "frame contract: zero-param non-void and the argument/result slot-0 overlap" {
     // f0 (caller): () -> int32, W = 3 + A = 4 (A = 1 for the 1-param
     // callee). F0 = result slot.
     //   pc 0: slot_move F0?? — no: the caller has no argument, so the
@@ -1108,7 +1107,7 @@ test "3.2 frame contract: zero-param non-void and the argument/result slot-0 ove
     try testing.expectEqual(@as(u32, 7), stack[2 + 0]);
 }
 
-test "3.2 frame contract: argument-0 owner is consumed before the result publishes" {
+test "frame contract: argument-0 owner is consumed before the result publishes" {
     // The value area is A cells; slot 0 is both the first argument and
     // the unique result. When the callee returns, `returnFrom` publishes
     // the result to slot 0 — but the arg-0 *owner* must already have
@@ -1162,7 +1161,7 @@ test "3.2 frame contract: argument-0 owner is consumed before the result publish
     _ = main;
 }
 
-test "3.2 frame contract: every call's take is adjacent with the result-alias source" {
+test "frame contract: every call's take is adjacent with the result-alias source" {
     // Static `jal ra` calls: a non-void callee must have a `take`
     // immediately at pc+1 whose source is the result alias
     // `F(L+3+O-A)`; a void callee must see no take at its fallthrough.
@@ -1205,7 +1204,7 @@ test "3.2 frame contract: every call's take is adjacent with the result-alias so
     try testing.expectEqual(@as(usize, 2), calls);
 }
 
-test "3.2 frame contract: call-entry validation failure leaves no half frame" {
+test "frame contract: call-entry validation failure leaves no half frame" {
     // `tryEnterCall` validates the callee entry, window capacity, and
     // the take contract before committing. On any failure the
     // caller's fp/sp/pc are byte-identical and no header is written.
@@ -1295,10 +1294,10 @@ test "3.2 frame contract: call-entry validation failure leaves no half frame" {
 }
 
 // ---------------------------------------------------------------------------
-// Phase 3.3 — corpus normalization harness (TODO 3.3): the LLIR
-// projection wired into the optimizer corpus harness (8.9). Every
+// Corpus normalization harness: the LLIR
+// projection wired into the optimizer corpus harness. Every
 // example compiles through the executable pipeline (optimizer + drop
-// lowering), lowers to LLIR, and is validated (3.1) and measured:
+// lowering), lowers to LLIR, and is validated and measured:
 // instruction count, the serialized bytes of the fixed records (the
 // 8-byte instructions plus the per-function/per-block descriptors) vs
 // the side tables (every flat row, descriptors broken out), the frame
@@ -1317,7 +1316,7 @@ fn fixedRecordBytes(image: *const llir.LlirProgram) usize {
 /// Serialized bytes of the descriptor side tables — the
 /// syscall/construct/destructure/switch/cleanup descriptors and
 /// their row tables (Instruction Set §7). "Descriptor bytes" in the
-/// 3.3 report. (`call_descs` is gone in v9 — direct calls are
+/// report. (`call_descs` is gone in v9 — direct calls are
 /// `jal ra`, indirect `jalr`, neither carrying a descriptor.)
 fn descriptorBytes(image: *const llir.LlirProgram) usize {
     return image.call_args.len * @sizeOf(llir.ValueReg) +
@@ -1355,7 +1354,7 @@ fn sideTableBytes(image: *const llir.LlirProgram) usize {
         image.strings.len;
 }
 
-test "3.3 LLIR normalization harness: corpus normalize, validate, and measure" {
+test "LLIR normalization harness: corpus normalize, validate, and measure" {
     // The v9-corpus subset used by the normalization measurement.
     const corpus = [_][]const u8{
         "examples/ownership.st", "examples/match.st", "examples/floats.st",
@@ -1379,11 +1378,11 @@ test "3.3 LLIR normalization harness: corpus normalize, validate, and measure" {
         var b = cfg_lower_llir.Builder.init(arena.allocator(), program);
         const image = try b.lowerLlir();
 
-        // The corpus normalizes: every image is fully valid (3.1 — all
+        // The corpus normalizes: every image is fully valid (all
         // references legal) and every record passes the schema check
         // under its function's frame.
         if (try llir_validate.validate(&image, testing.allocator)) |m| {
-            std.log.err("3.3 {s}: rejected: {s}", .{ path, m });
+            std.log.err("{s}: rejected: {s}", .{ path, m });
             return error.TestUnexpectedResult;
         }
         var image_max_frame: u32 = 0;
@@ -1406,11 +1405,11 @@ test "3.3 LLIR normalization harness: corpus normalize, validate, and measure" {
         total_side += side;
         total_desc += desc;
         // The report distinguishes the fixed records from the side
-        // tables (descriptors broken out); gated on a TTY like 8.9 —
+        // tables (descriptors broken out); gated on a TTY —
         // under `zig build test` stderr is a captured pipe.
         if (tty) {
             std.log.info(
-                "3.3 {s}: {d} instr, {d} B fixed records, {d} B side tables ({d} B descriptors), max frame {d} slots, {d} B image",
+                "{s}: {d} instr, {d} B fixed records, {d} B side tables ({d} B descriptors), max frame {d} slots, {d} B image",
                 .{ path, image.instructions.len, fixed, side, desc, image_max_frame, fixed + side },
             );
         }
@@ -1423,14 +1422,14 @@ test "3.3 LLIR normalization harness: corpus normalize, validate, and measure" {
     try testing.expect(total_side > total_desc);
     if (tty) {
         std.log.info(
-            "3.3 corpus: {d} instr, {d} B fixed + {d} B side tables = {d} B; {d} frame slots (max {d})",
+            "corpus: {d} instr, {d} B fixed + {d} B side tables = {d} B; {d} frame slots (max {d})",
             .{ total_instrs, total_fixed, total_side, total_fixed + total_side, total_slots, max_frame },
         );
     }
 }
 
-test "3.2 LLIR normalization: host syscalls and any dynamic types normalize together" {
-    // Phase 6: a program mixing `any` packing/recovery of a 64-bit
+test "LLIR normalization: host syscalls and any dynamic types normalize together" {
+    // A program mixing `any` packing/recovery of a 64-bit
     // payload with builtin syscalls lowers to a valid image carrying
     // the payload TypeIds on the any instructions and the binding
     // signature on the syscall.

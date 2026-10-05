@@ -17,7 +17,7 @@
 //! discriminator. As is dynamically indexed `read_index` (bounds):
 //! removing a dead trap changes observable behavior. Fixed projections
 //! and `tail` are also outside the candidate set without being
-//! classified as trapping (see TODO.md's audit: no ownership impediment
+//! classified as trapping (the trap audit: no ownership impediment
 //! for Copy results, adoption gated on a measured corpus case).
 //! Shifts and bitwise ops never trap (Runtime §7.2) and are candidates.
 //! `num_cast` is removable because casts never trap (Runtime §7.2): float-to-int

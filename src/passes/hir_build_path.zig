@@ -106,7 +106,7 @@ fn buildStructConstruct(b: *hir_build.Builder, info: *moduleinfo.ModuleInfo, e: 
     const sd = moduleinfo.structDecl(b.resolve, info, name) orelse
         return b.fail(p.span, "unknown struct type '{s}'", .{name});
     // Core §8.1: every declared field exactly once, in any order — the
-    // the direct lowering's struct-construct rule (direct path removed in S6b);
+    // the direct lowering's struct-construct rule (direct path removed);
     // the HIR seam must reject at build with the same diagnostics.
     const seen = try b.arena.alloc(bool, sd.fields.len);
     @memset(seen, false);

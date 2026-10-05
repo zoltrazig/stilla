@@ -1,4 +1,4 @@
-//! Pass: HIR → CFG AIR lowering (docs/hir.md §9; PROGRESS S5). In:
+//! Pass: HIR → CFG AIR lowering (docs/hir.md §9). In:
 //! Lowerer + a built HIR program (`hir_build.buildProgram`). Out: the
 //! same `cfg.IrProgram` the direct annotated-AST lowering produces —
 //! byte-identical `cfg.print` text over the corpus is the §10.3 gate.
@@ -13,16 +13,16 @@
 //! intrinsic tables) is reused unchanged, so both paths share one
 //! emission discipline.
 //!
-//! Scope rule (PROGRESS S5 设计定案): a HIR root whose op is `let`/`seq`
+//! Scope rule (docs/hir.md §9): a HIR root whose op is `let`/`seq`
 //! was an AST block with bindings/statements — the direct lowering pushed
 //! a destruction scope for it; every other root (empty or single-result
 //! block, bare region) binds nothing and gets no scope. Full-expression
 //! boundaries (dropCreatedRange) fire around every lowered operand —
 //! exactly where the direct path lowers a sub-expression.
 //!
-//! M1a limits (recorded): HIR nodes carry no source spans (S4 kept only
+//! Lowering limits: HIR nodes carry no source spans (the builder kept only
 //! function-declaration spans), so lowering diagnostics use the zero
-//! span; S5's gate is textual equality, and spans never print (air.md §9).
+//! span; the lowering gate is textual equality, and spans never print (air.md §9).
 
 const std = @import("std");
 const cfg = @import("stilla").cfg;
@@ -47,7 +47,7 @@ const Lowerer = lower.Lowerer;
 const FuncState = lower.FuncState;
 const LowerError = lower.LowerError;
 
-/// The zero span: HIR nodes carry no source spans in M1a (see header).
+/// The zero span: HIR nodes carry no source spans (see header).
 pub const no_span = meta.Span.init(0, 0, 0);
 
 /// Per-function lowering context: the built program plus the binder →
@@ -246,8 +246,8 @@ fn lowerFuncRecord(self: *Lowerer, built: *hir.BuiltProgram, info: *moduleinfo.M
     const binder_ids = built.program.params(rid);
 
     if (rec.kind == .intrinsic) {
-        // A first-class intrinsic wrapper (intrinsic plan, phase 3):
-        // the body forwards the parameters raw to the host syscall —
+        // A first-class intrinsic wrapper: the body forwards the
+        // parameters raw to the host syscall —
         // no arg lowering, no effective modes, no ownership scopes
         // (the moved-in arguments transfer at the call boundary; the
         // direct `synthIntrinsicFunc` binds no locals either). The

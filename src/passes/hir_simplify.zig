@@ -1,5 +1,5 @@
 //! Pass: effect-driven HIR consumers — dead-let and selective
-//! A-Normal Form (docs/hir.md §11 M2b, §5.7, §8.3; docs/effects.md §12).
+//! A-Normal Form (docs/hir.md §11, §5.7, §8.3; docs/effects.md §12).
 //! In: a built HIR program whose effect annotations are `ready`. Out: the
 //! same tree with dead bindings removed and non-floatable operands
 //! materialized into `let`s, in place.
@@ -186,7 +186,7 @@ pub const Config = struct {
     never_suffix: bool = true,
 };
 
-/// Apply the M2b consumers to every function body and constant
+/// Apply the effect-driven consumers to every function body and constant
 /// initializer in place, iterating analysis/rewrite to a quiet-round
 /// fixpoint. The caller owns `built` and the arena; on return every root
 /// is rewritten but not yet re-validated (the caller runs `hir.validate`

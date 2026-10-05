@@ -115,9 +115,8 @@ pub fn materialize(self: *Builder, raw: *RawModule) !void {
                 .type_ = sig,
                 .decl = .{ .func = f },
                 // `host` = a bodyless declaration outside the embedded
-                // bundle: a genuine host binding (intrinsic plan,
-                // phase 4 — a bodyless bundle declaration is an
-                // intrinsic, never a host binding).
+                // bundle: a genuine host binding (a bodyless bundle
+                // declaration is an intrinsic, never a host binding).
                 .host = f.body == null and !info.bundle_origin,
                 .class = memberClass(info, f.body == null),
             });

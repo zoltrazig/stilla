@@ -1,6 +1,6 @@
-//! Test file: `frontend LLIR ops, wide & casts` — LLIR lowering post-stage-2
-//! specialization: the 2.6 branchless select, the A2 frame-limit and
-//! long-branch expansions, Phase 5 64-bit/f64/wide ops, and 3.1 directed
+//! Test file: `frontend LLIR ops, wide & casts` — LLIR lowering
+//! specialization: the branchless select, frame-limit and
+//! long-branch expansions, 64-bit/f64/wide ops, and directed
 //! casts and comparisons. Split out of `frontend_llir_ops_tests.zig`;
 //! no file-local helpers.
 //!
@@ -29,7 +29,7 @@ const findBlock = helpers.findBlock;
 const blockIdx = helpers.blockIdx;
 const findFunc = helpers.findFunc;
 
-test "2.6 LLIR lowering: a select emits copy cond_reg + cmov" {
+test "LLIR lowering: a select emits copy cond_reg + cmov" {
     // The branchless select (air.md §5.2) lowers to two records:
     // `copy cond_reg, %cond` loads the bool condition into the
     // condition register, then `cmov dst, %a, %b` moves the selected
@@ -71,12 +71,12 @@ test "2.6 LLIR lowering: a select emits copy cond_reg + cmov" {
 }
 
 // ---------------------------------------------------------------------------
-// shorten-intr.md A2 acceptance: the 32-bit emission layer's limits.
+// The 32-bit emission layer's bounds: the frame cap and long-branch expansion.
 // ---------------------------------------------------------------------------
 
-test "A2 LLIR lowering: a frame over frame_count_max fails with ProgramTooLarge" {
-    // A function whose parameters alone exceed the 224-slot frame cap
-    // (shorten-intr.md §4: F0–F223). The allocator's checked limit —
+test "LLIR lowering: a frame over frame_count_max fails with ProgramTooLarge" {
+    // A function whose parameters alone exceed the frame-count cap
+    // (`frame_count_max`, Instruction Set §3.1). The allocator's checked limit —
     // never a silent truncation — fails the lowering with
     // `error.ProgramTooLarge`.
     var src = std.ArrayList(u8).empty;
@@ -98,7 +98,7 @@ test "A2 LLIR lowering: a frame over frame_count_max fails with ProgramTooLarge"
     try testing.expectEqual(@as(usize, 230), t.program.funcs[0].params.len);
 }
 
-test "A2 LLIR lowering: long-branch expansion — inverted branch + j, iterated to convergence" {
+test "LLIR lowering: long-branch expansion — inverted branch + j, iterated to convergence" {
     // A branch whose target lies beyond the compare-and-branch's ±512
     // reach expands to `b<inverted> a, b, +2` followed by a link-less `j`
     // (the Instruction Set §11.1 safety net). The layout below forces
@@ -163,7 +163,7 @@ test "A2 LLIR lowering: long-branch expansion — inverted branch + j, iterated 
     try testing.expectEqual(@as(u32, 3), b.expansion_rounds);
     if (try llir_validate.validate(&image, testing.allocator)) |msg| {
         defer testing.allocator.free(msg);
-        std.log.err("A2 expanded image rejected: {s}", .{msg});
+        std.log.err("expanded image rejected: {s}", .{msg});
         return error.TestUnexpectedResult;
     }
 
@@ -212,10 +212,10 @@ test "A2 LLIR lowering: long-branch expansion — inverted branch + j, iterated 
 }
 
 // ---------------------------------------------------------------------------
-// Phase 5 — 64-bit widths in frontend lowering (TODO.md 阶段 5)
+// 64-bit widths in frontend lowering
 // ---------------------------------------------------------------------------
 
-test "Phase 5 LLIR lowering: 64-bit integer and f64 ops specialize by type" {
+test "LLIR lowering: 64-bit integer and f64 ops specialize by type" {
     const src = try helpers.probeSource("probes/cases", "wide_int64_f64_ops");
     defer testing.allocator.free(src);
     var c = try compileText("app", &.{.{ "app", src }});
@@ -228,7 +228,7 @@ test "Phase 5 LLIR lowering: 64-bit integer and f64 ops specialize by type" {
     const image = try b.lowerLlir();
 
     // Walk every non-phi instruction and check its record against the
-    // phase-4/5 matrix: i64/u64 get the typed integer opcodes (the
+    // typed matrix: i64/u64 get the typed integer opcodes (the
     // `u` rep split for div/rem/ordering), f64 its own opcode block,
     // and every comparison is a C-Type family member writing the
     // implicit `cond`, materialized by `copy dst, cond` (le/gt are the
@@ -338,10 +338,10 @@ test "Phase 5 LLIR lowering: 64-bit integer and f64 ops specialize by type" {
             }
         }
     }
-    // Every distinct opcode of the phase-5 matrix was selected at
+    // Every distinct opcode of the typed matrix was selected at
     // least once (the count varies with inlining, so coverage is the
     // assertion, not the total).
-    // The exact set the phase-5 source emits: the typed members carry
+    // The exact set the wide source emits: the typed members carry
     // the operand rep — `iadd` is `add.i64`, `usub` `sub.u64`, `udiv`
     // `div.u64`, `ineg` `neg.i64`, `ishl` `shl.i64`, `ushr` `shr.u64`
     // — the bitwise ops stay widthless, and every comparison is a
@@ -384,8 +384,8 @@ test "Phase 5 LLIR lowering: 64-bit integer and f64 ops specialize by type" {
     }
 }
 
-test "Phase 5 LLIR lowering: f64 conversions carry the explicit cvt opcode" {
-    // The eight directed pairs involving f64 (the phase-5 additions to
+test "LLIR lowering: f64 conversions carry the explicit cvt opcode" {
+    // The eight directed pairs involving f64 (the 64-bit additions to
     // the five-type conversion matrix): v9 spells each pair as its own
     // C-Type opcode `cvt.<src>.<dst>` (a = dst, b = src) — no
     // `c` discriminator rides in the record.
@@ -463,7 +463,7 @@ test "Phase 5 LLIR lowering: f64 conversions carry the explicit cvt opcode" {
     }
 }
 
-test "Phase 5 LLIR lowering: 64-bit comparison branches test the full cell" {
+test "LLIR lowering: 64-bit comparison branches test the full cell" {
     // `a < b` with a = 2^32, b = 5: false at 64 bits, but a low-word
     // compare (0 < 5) would take the branch. The branch record must be
     // a bool test (`beq`/`bne cond, zero` — 64-bit comparisons never
@@ -518,9 +518,9 @@ test "Phase 5 LLIR lowering: 64-bit comparison branches test the full cell" {
     }
 }
 
-test "Phase 5: i64/u64 integer casts lower to the 64-bit cvt opcodes" {
+test "i64/u64 integer casts lower to the 64-bit cvt opcodes" {
     // The conversion family includes `i64`/`u64` destinations — the
-    // 64-bit milestone — so `i64 as int32` and `u64 as f64` lower to
+    // 64-bit family — so `i64 as int32` and `u64 as f64` lower to
     // their explicit `cvt.<src>.<dst>` records and validate.
     const src1 = try helpers.probeSource("probes/cases", "wide_i64_cast_to_i32");
     defer testing.allocator.free(src1);
@@ -551,7 +551,7 @@ test "Phase 5: i64/u64 integer casts lower to the 64-bit cvt opcodes" {
     try testing.expect(std.mem.indexOf(u8, asm2, "cvt.u64.f64") != null);
 }
 
-test "Phase 5 LLIR lowering: u64 constants materialize through move-wide sequences" {
+test "LLIR lowering: u64 constants materialize through move-wide sequences" {
     // Each u64 constant lowers to 1–4 move-wide records (the
     // deterministic starter + movwk fixes), writes no ConstRecord row,
     // and the validator + interpreter agree with the source bit
@@ -677,7 +677,7 @@ test "Phase 5 LLIR lowering: u64 constants materialize through move-wide sequenc
 
     // No u64 constant writes a ConstRecord row (the constants side
     // table holds only the non-move-wide constants; i64/f64 keep the
-    // typed `const` path — covered by the phase-4 tests).
+    // typed `const` path — covered by the i64/f64 constant tests).
     var u64_ty: ?u32 = null;
     for (image.types, 0..) |row, i| {
         if (row.kind == .primitive and row.a == @intFromEnum(llir.PrimitiveId.uint64)) u64_ty = @intCast(i);
@@ -735,12 +735,12 @@ test "Phase 5 LLIR lowering: u64 constants materialize through move-wide sequenc
 }
 
 // ---------------------------------------------------------------------------
-// 3.1 — typed lowering: the 20-cast matrix, the 6-rep comparison
+// Typed lowering: the 20-cast matrix, the 6-rep comparison
 // families, the le/gt swap aliases, the byte→u32 comparison variant,
 // and the `copy dst, cond` bool materialization.
 // ---------------------------------------------------------------------------
 
-test "3.1 LLIR lowering: all 20 directed casts carry the explicit cvt opcode" {
+test "LLIR lowering: all 20 directed casts carry the explicit cvt opcode" {
     // The Core §16.3 five-type conversion matrix (b, i32, u32, f32, f64)
     // minus the identities: every directed pair spells its own C-Type
     // opcode `cvt.<src>.<dst>` (a = dst, b = src) — no `c` discriminator
@@ -805,7 +805,7 @@ test "3.1 LLIR lowering: all 20 directed casts carry the explicit cvt opcode" {
     }
 }
 
-test "3.1 LLIR lowering: seq/sne/slt/sle over all six reps write cond, then copy dst, cond" {
+test "LLIR lowering: seq/sne/slt/sle over all six reps write cond, then copy dst, cond" {
     // The C-Type comparison families: `seq`/`sne`/`slt`/`sle` over the
     // six reps (i32, u32, i64, u64, f32, f64) — 24 opcodes. Each
     // comparison writes the implicit `cond` and the lowering materializes
@@ -880,7 +880,7 @@ test "3.1 LLIR lowering: seq/sne/slt/sle over all six reps write cond, then copy
     }
 }
 
-test "3.1 LLIR lowering: gt and integer le swap operands; float le is the direct sle" {
+test "LLIR lowering: gt and integer le swap operands; float le is the direct sle" {
     // `a > b` ≡ `slt b, a`; integer `le` synthesizes `not(slt b, a)`;
     // float `le` is the direct `sle a, b` primitive (no `sge` opcode —
     // `a >= b` ≡ `sle b, a`). The operand swaps preserve the NaN
@@ -935,7 +935,7 @@ test "3.1 LLIR lowering: gt and integer le swap operands; float le is the direct
     try testing.expectEqual(@as(usize, 4), n_cmp);
 }
 
-test "3.1 LLIR lowering: byte comparisons lower through the u32 variants" {
+test "LLIR lowering: byte comparisons lower through the u32 variants" {
     // `byte` has no comparison rep of its own: every byte predicate is
     // the corresponding `u32` family member (the byte value occupies one
     // host cell).

@@ -1,5 +1,5 @@
-//! Test file: `frontend LLIR ops, branch &amp; codec` — LLIR lowering stage
-//! 3.3 (immediate &amp; branch relaxation): fused-arithmetic windows, B-type
+//! Test file: `frontend LLIR ops, branch &amp; codec` — LLIR lowering:
+//! immediate &amp; branch relaxation: fused-arithmetic windows, B-type
 //! windows, tbz/tbnz recognition, branch inversions and operand-swap
 //! aliases, far-branch trampolines, and the offs10/imm20 codec windows.
 //! Split out of `frontend_llir_ops_tests.zig`; the `branchOfFunc`,
@@ -31,7 +31,7 @@ const blockIdx = helpers.blockIdx;
 const findFunc = helpers.findFunc;
 
 // ---------------------------------------------------------------------------
-// 3.3 — immediate & branch relaxation (TODO.md §3.3). These tests pin the
+// immediate & branch relaxation. These tests pin the
 // fused-immediate windows (R-type signed `[-64,63]` / unsigned `[0,127]`,
 // B-type imm7 signed/unsigned), the `tbz`/`tbnz` bit-index recognition
 // (0..63, sign-bit masks as raw cell bits), the operand-swap aliases and
@@ -112,7 +112,7 @@ fn check_trampoline(
     try testing.expectEqual(far_target_pc, llir.jalTarget(br_pc + 2, far.imm20));
 }
 
-test "3.3 LLIR lowering: fused arithmetic immediates pin the signed/unsigned windows" {
+test "LLIR lowering: fused arithmetic immediates pin the signed/unsigned windows" {
     // i32 `add`: -64 and 63 fuse to `addi` (raw imm7: -64 → 0x40);
     // -65 and 64 fall back to register-form `add`. u32 `add`: 127
     // fuses to `addiu`, 128 stays `add` (Instruction Set §3.3,
@@ -176,7 +176,7 @@ test "3.3 LLIR lowering: fused arithmetic immediates pin the signed/unsigned win
     try testing.expectEqual(@as(usize, 1), n_u); // 127 fuses
 }
 
-test "3.3 LLIR lowering: B-type immediate windows — signed [-64,63], unsigned [0,127]" {
+test "LLIR lowering: B-type immediate windows — signed [-64,63], unsigned [0,127]" {
     // `lt a, K` with K in the imm7 window fuses to `blti`/`bltiu`;
     // out-of-window constants fall back to the general bool test
     // (`beq`/`bne cond, zero` — never a register `blt`/`bltu`, which
@@ -303,7 +303,7 @@ test "3.3 LLIR lowering: B-type immediate windows — signed [-64,63], unsigned 
     }
 }
 
-test "3.3 LLIR lowering: tbz/tbnz bit-test recognition — 0, 30, 63; multi-bit masks fall back" {
+test "LLIR lowering: tbz/tbnz bit-test recognition — 0, 30, 63; multi-bit masks fall back" {
     // `(x & 2^k) ==/!= 0` recognizes a single-bit mask as a bit-test
     // branch: bit 0 and bit 30 (int32 cell), and bit 63 on a u64 whose
     // sign-bit mask is a negative constant read as raw cell bits. A mask
@@ -391,7 +391,7 @@ test "3.3 LLIR lowering: tbz/tbnz bit-test recognition — 0, 30, 63; multi-bit 
     try testing.expectEqual(@as(u8, 0), bm.b);
 }
 
-test "3.3 LLIR lowering: branch inversions and operand-swap aliases before expansion" {
+test "LLIR lowering: branch inversions and operand-swap aliases before expansion" {
     // The trailing-jal elimination inverts the branch when the then-block
     // is next in the layout (`beq↔bne` with no operand change; the integer
     // ordering `blt↔ble`/`bltu↔bleu` exchange operands — `!(a<b) ≡
@@ -613,7 +613,7 @@ test "3.3 LLIR lowering: branch inversions and operand-swap aliases before expan
     try testing.expectEqual(@as(u8, 0), d_bt.b);
 }
 
-test "3.3 LLIR lowering: far branches — the non-inverting trampoline (float, blti-bltiu) and inverted +2-skip forms" {
+test "LLIR lowering: far branches — the non-inverting trampoline (float, blti-bltiu) and inverted +2-skip forms" {
     // A branch whose carried target lies beyond ±512 expands: the
     // invertible predicates (`beq`/`bne`, `tbz`/`tbnz`, integer ordering)
     // invert and gain a link-less `j` (`b<inverted> +2`); the complement-less
@@ -727,7 +727,7 @@ test "3.3 LLIR lowering: far branches — the non-inverting trampoline (float, b
     // rep-based fixup bug corrupts).
     if (try llir_validate.validate(&image, testing.allocator)) |msg| {
         defer testing.allocator.free(msg);
-        std.log.err("3.3 far-branch image rejected: {s}", .{msg});
+        std.log.err("far-branch image rejected: {s}", .{msg});
         return error.TestUnexpectedResult;
     }
     try testing.expect(b.expansion_rounds > 1);
@@ -765,7 +765,7 @@ test "3.3 LLIR lowering: far branches — the non-inverting trampoline (float, b
     try testing.expectEqual(t_fartbz, llir.jalTarget(br_fartbz + 1, far_tbz.imm20));
 }
 
-test "3.3 LLIR lowering: offs10 and imm20 signed windows at the codec boundary" {
+test "LLIR lowering: offs10 and imm20 signed windows at the codec boundary" {
     // The lowering funnels every B-type branch through `fit10Signed` and
     // every `jal` through `fit20Signed`; the exact two's-complement ranges
     // are the contract (Instruction Set §11 / §9): offs10 ∈ [-512, 511],

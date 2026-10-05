@@ -1,10 +1,10 @@
 //! Pass: HIR effect analysis — docs/hir.md §6.2/§10.1 level two and
-//! docs/effects.md §6–§12 (M1b: effect infrastructure). In: a built HIR
+//! docs/effects.md §6–§12 (effect infrastructure). In: a built HIR
 //! program (`hir_build.buildProgram`). Out: every reachable node carries a
-//! `ready` interned `EffectSummary`, plus the legality queries the M2
-//! consumers will drive.
+//! `ready` interned `EffectSummary`, plus the legality queries the
+//! effect-driven consumers will drive.
 //!
-//! M1b scope (docs/hir.md §11, docs/effects.md §14):
+//! Effect scope (docs/hir.md §11, docs/effects.md §14):
 //!
 //! - **Transfer** (docs/effects.md §6.1) composes each node's summary from
 //!   its descriptor (`OpDescriptor.own_effect` + `TransferKind`) and its
@@ -14,7 +14,7 @@
 //! - **Function summaries** propagate through **direct** calls only, by
 //!   DFS. A recursive dependency (a callee already on the visit stack)
 //!   yields conservative `Top`, which propagates to callers; the SCC
-//!   least fixpoint of docs/effects.md §8.2 is **M2b**, not here. Missing
+//!   least fixpoint of docs/effects.md §8.2 is deferred, not here. Missing
 //!   bodies, indirect targets, and undeclared host effects are `Top`
 //!   (docs/effects.md §9.1/§9.3/§13).
 //! - **Pending / Ready** (docs/effects.md §8.2, §10.5) is outside the
@@ -34,12 +34,12 @@
 //! - **Derived queries** (docs/effects.md §10.1) combine effects with
 //!   operand uses, result capability/view, and ownership/lifetime gates.
 //!   The *semantic* SEG-safety predicate (`isSegSafe`) is separate from
-//!   encoding support (`hasSegEncoding`, all false until M2a) — admission
+//!   encoding support (`hasSegEncoding`, all false until the SEG pass) — admission
 //!   needs both.
 //!
 //! This pass does **not** transform the HIR and does not touch the CFG:
 //! annotations are additive metadata, so canonical printing and the
-//! lowered AIR stay identical. `modules`-level concerns deferred to M2b:
+//! lowered AIR stay identical. `modules`-level concerns are deferred:
 //! the SCC fixpoint, module-const init/teardown summary checks, and the
 //! exact drop planner.
 
@@ -322,7 +322,7 @@ pub const Analysis = struct {
     }
 
     /// Validate stored annotations against a fresh derivation
-    /// (docs/hir.md §10.1, M1b level). Returns null when every reachable
+    /// (docs/hir.md §10.1). Returns null when every reachable
     /// node is `ready` and `derived ≤ stored` (a sound over-
     /// approximation, including `Top`), or the first violation message,
     /// owned by `allocator`. A `pending` annotation and an out-of-range
@@ -353,7 +353,7 @@ pub const Analysis = struct {
         while (work.pop()) |cur| {
             const sid = switch (self.p().effectOf(cur)) {
                 .pending => {
-                    const msg = try std.fmt.allocPrint(allocator, "node {d} in '{s}': effect annotation is still pending (M1b requires every reachable node ready)", .{ cur, label });
+                    const msg = try std.fmt.allocPrint(allocator, "node {d} in '{s}': effect annotation is still pending (every reachable node must be ready)", .{ cur, label });
                     return msg;
                 },
                 .ready => |id| id,
@@ -887,7 +887,7 @@ test "hir_effects: pending facts fail queries closed; queries read annotations" 
     try testing.expect(try an.isDuplicable(body));
     try testing.expect(try an.isSegSafe(body));
     try testing.expect(try an.canFloatAsTree(body));
-    // Semantic safety is separate from encoding support (M2a registers
+    // Semantic safety is separate from encoding support (the SEG pass registers
     // the island set, so this `add.i32` body is both safe and encodable).
     try testing.expect(an.hasSegEncoding(f.built.program.node(body).op));
     try testing.expect(try an.isSegAdmissible(body));
@@ -923,7 +923,7 @@ test "hir_effects: stored annotations are sound over-approximations; tampering i
 }
 
 test "hir_effects: SCC-fixpoint summaries are re-derived; a call annotation cannot under-approximate them" {
-    // M2b: the validator re-runs the SCC least fixpoint (docs/effects.md
+    // The validator re-runs the SCC least fixpoint (docs/effects.md
     // §8.2/§8.3), so a call node annotated below the callee's derived
     // summary is rejected.
     var f = try build("app", &.{.{
@@ -2436,9 +2436,9 @@ test "hir_effects: the validator rejects a mis-anchored scope-end token" {
 }
 
 test "hir_effects: a list_make index read in range is trap-free, out of range stays Top" {
-    // No source-level list indexing reaches `field_get` yet (docs/todo.md
-    // item 19), so the shape is hand-built: it guards `fieldGetOwn`'s
-    // bounds proof directly rather than through the parser.
+    // No source-level list indexing reaches `field_get` yet, so the shape is
+    // hand-built: it guards `fieldGetOwn`'s bounds proof directly rather than
+    // through the parser.
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();

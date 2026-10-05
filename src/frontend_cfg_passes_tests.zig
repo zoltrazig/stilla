@@ -1,7 +1,7 @@
 //! Test file: `frontend cfg passes` — the mid-level optimizer Pass 8.6
 //! drop elision, 8.7 phi simplification, 8.8 jump threading, and the 8.9
 //! measurement harness; the post-optimization drop lowering
-//! (`cfg_lower_drop`); Phase 0 (self-contained AIR: concrete TypeDecls,
+//! (`cfg_lower_drop`); self-contained AIR (concrete TypeDecls,
 //! module member tables, syscall signatures); and the AIR validator
 //! (`cfg_validate`, air.md §13). Split out of the former
 //! `src/frontend_tests.zig`; `countOccurrences` and the block/type
@@ -545,8 +545,8 @@ test "Pass 8.4 module/member CSE reuses identical loads in a block" {
     // and module storage is written only by `store_member` inside @init
     // (cfg_validate rejects stores elsewhere), so both fold to one.
     // A user-module constant member keeps this pass's load-CSE coverage:
-    // a bundle intrinsic constant materializes instead (intrinsic plan,
-    // phase 2 — see frontend_intrinsic_tests.zig).
+    // a bundle intrinsic constant materializes instead (intrinsic
+    // constants — see frontend_intrinsic_tests.zig).
     const app_src = try helpers.probeSource("probes/cases", "cfgpass_cse_module_member");
     defer testing.allocator.free(app_src);
     const lib_src = try helpers.probeSource("probes/cases", "cfgpass_cse_module_member_lib");
@@ -686,7 +686,7 @@ test "Pass 8.7 dead-instruction elimination is trap-aware for div/rem" {
 test "Pass 8.7 dead-instruction elimination keeps unique results and views" {
     // Ownership: a `copy` of an unique value (`any`) has an unique result
     // whose refcount bump is observable, and a `tail` view is outside the
-    // candidate set (TODO.md's audit: no impediment for Copy results, but
+    // candidate set (the trap audit: no impediment for Copy results, but
     // adoption is gated on a measured case) — neither is removed.
     var t = try cfg_parse.parseText(
         \\module "app" {
@@ -897,7 +897,7 @@ test "float fold to inf survives the optimizer round-trip" {
 }
 
 // ---------------------------------------------------------------------------
-// Phase 0 — self-contained AIR: concrete TypeDecls, the module
+// Self-contained AIR: concrete TypeDecls, the module
 // member table, and syscall signatures, all queryable from `IrProgram`
 // alone (air.md §9.1, §7, §8.2).
 // ---------------------------------------------------------------------------

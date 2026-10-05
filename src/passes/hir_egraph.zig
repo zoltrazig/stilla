@@ -1,4 +1,4 @@
-//! Pass: SEG — the *slotted e-graph* arena behind the M2a rule subset
+//! Pass: SEG — the *slotted e-graph* arena behind the rule subset
 //! (docs/hir.md §8, §11; docs/effects.md §12.3). In: one HIR island root
 //! whose whole subtree already passes the recursive admission predicate
 //! (`OpDescriptor.seg` registered + `isSegSafe` + every operand / region
@@ -107,7 +107,7 @@ const Bag = []BagEntry;
 
 /// What one island's saturation did — folded into `hir_seg.Stats`, the
 /// per-rule counts split into the recognized-redex (matched) and the
-/// applied halves (docs/todo.md 23).
+/// applied halves.
 pub const Stats = struct {
     /// Saturation rounds this island ran (a quiet round counts).
     rounds: u64 = 0,

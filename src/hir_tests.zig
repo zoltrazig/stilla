@@ -1,5 +1,5 @@
 //! HIR black-box suite — cross-module tests of the AST→HIR builder and
-//! the built-program container (hir.md §11 M1a, phase S4; PROGRESS.md).
+//! the built-program container (hir.md §11).
 //! White-box shape tests live in `passes/hir_build.zig` (and hir.zig);
 //! this file compiles real modules through phase 1 (module graph) +
 //! phase 2 (checker) and builds + validates the HIR over the results.
@@ -58,7 +58,7 @@ fn buildText(entry: []const u8, texts: []const struct { []const u8, []const u8 }
     return .{ .arena = arena, .built = built, .graph = graph };
 }
 
-/// Validate every function root of the built program (S3 acceptance:
+/// Validate every function root of the built program (acceptance:
 /// builder output is structurally valid).
 fn expectValidAll(built: *const hir.BuiltProgram) !void {
     for (built.funcs.items) |f| {
@@ -71,7 +71,7 @@ fn expectValidAll(built: *const hir.BuiltProgram) !void {
     }
 }
 
-/// M1b black-box acceptance (hir.md §11, effects.md §14): run the effect
+/// Black-box acceptance (hir.md §11, effects.md §14): run the effect
 /// analysis over a built program and validate the annotations. This is
 /// the seam the frontend runs between HIR build and HIR→CFG lowering.
 fn expectEffectsAll(built: *hir.BuiltProgram, graph: *moduleinfo.ModuleGraph) !void {
@@ -97,7 +97,7 @@ fn expectEffectsAll(built: *hir.BuiltProgram, graph: *moduleinfo.ModuleGraph) !v
     }
 }
 
-test "S4: build fib-class module and validate every function root" {
+test "build: build fib-class module and validate every function root" {
     var b = try buildText("app", &.{
         .{
             "app",
@@ -138,7 +138,7 @@ fn reachableNodes(alloc: std.mem.Allocator, pr: *const hir.Program, root: hir.Ex
     return out;
 }
 
-test "S4: source spans — built nodes carry their AST span, synthetics none" {
+test "build: source spans — built nodes carry their AST span, synthetics none" {
     var b = try buildText("app", &.{
         .{ "lib", "fn twice(n: int32) -> int32 { n + n }" },
         .{
@@ -270,7 +270,7 @@ fn corpusList(dir: []const u8) !void {
 }
 
 // ---------------------------------------------------------------------------
-// M2b: module-constant init/teardown dependency check (docs/effects.md §7).
+// Module-constant init/teardown dependency check (docs/effects.md §7).
 // The check moved out of the checker's AST-level `InitOrder` walk and is now
 // driven by the function summaries + whole-chain `drop_effect`; these cases
 // are the AST-walk suite relocated to the phase-3 seam that owns the rule.
@@ -314,14 +314,14 @@ fn expectModuleOk(text: []const u8) !void {
     }
 }
 
-test "M2b: rejects reading a later module constant (summary-driven)" {
+test "consumers: rejects reading a later module constant (summary-driven)" {
     try expectModuleDiag(
         \\const a: int32 = b;
         \\const b: int32 = 1;
     , "module constant initializer reads 'b' declared later");
 }
 
-test "M2b: rejects transitively reading a later module constant" {
+test "consumers: rejects transitively reading a later module constant" {
     try expectModuleDiag(
         \\const a: int32 = f();
         \\fn f() -> int32 { b }
@@ -329,14 +329,14 @@ test "M2b: rejects transitively reading a later module constant" {
     , "which reads module constant 'b' declared later");
 }
 
-test "M2b: accepts reading an earlier module constant" {
+test "consumers: accepts reading an earlier module constant" {
     try expectModuleOk(
         \\const a = 1;
         \\const b = a;
     );
 }
 
-test "M2b: accepts an indirect call reading an earlier module constant" {
+test "consumers: accepts an indirect call reading an earlier module constant" {
     // The callable is a `let`-bound local, so the §9.2 target narrowing
     // resolves it to `pick` and the initializer's read set is `Read(a)` —
     // not the unknown read set an unresolved indirect call would carry
@@ -349,7 +349,7 @@ test "M2b: accepts an indirect call reading an earlier module constant" {
     );
 }
 
-test "M2b: a function reading a later constant is fine when nothing calls it" {
+test "consumers: a function reading a later constant is fine when nothing calls it" {
     try expectModuleOk(
         \\const a = 1;
         \\fn f() -> int32 { b }
@@ -357,7 +357,7 @@ test "M2b: a function reading a later constant is fine when nothing calls it" {
     );
 }
 
-test "M2b: rejects a drop hook reading a later module constant" {
+test "consumers: rejects a drop hook reading a later module constant" {
     try expectModuleDiag(
         \\struct File { fd: int32; drop(f) { let _ = later_msg; } }
         \\const log: File = File{ fd: 1 };
@@ -365,7 +365,7 @@ test "M2b: rejects a drop hook reading a later module constant" {
     , "drop hook of module constant 'log' reads 'later_msg' declared later");
 }
 
-test "M2b: rejects a drop hook transitively reading a later module constant" {
+test "consumers: rejects a drop hook transitively reading a later module constant" {
     try expectModuleDiag(
         \\fn tell() -> str { later_msg }
         \\struct File { fd: int32; drop(f) { let _ = tell(); } }
@@ -374,7 +374,7 @@ test "M2b: rejects a drop hook transitively reading a later module constant" {
     , "which reads module constant 'later_msg' declared later");
 }
 
-test "M2b: accepts a drop hook reading an earlier module constant" {
+test "consumers: accepts a drop hook reading an earlier module constant" {
     try expectModuleOk(
         \\const earlier: str = "hi";
         \\struct File { fd: int32; drop(f) { let _ = earlier; } }
@@ -382,7 +382,7 @@ test "M2b: accepts a drop hook reading an earlier module constant" {
     );
 }
 
-test "M2b: a mutual call cycle reading no constants is fine" {
+test "consumers: a mutual call cycle reading no constants is fine" {
     try expectModuleOk(
         \\const a: int32 = f();
         \\fn f() -> int32 { g() }
@@ -390,7 +390,7 @@ test "M2b: a mutual call cycle reading no constants is fine" {
     );
 }
 
-test "M2b: a recursive SCC's transitive read is caught (fixpoint drives the check)" {
+test "consumers: a recursive SCC's transitive read is caught (fixpoint drives the check)" {
     // docs/effects.md §7.1/§8.2: the read is only in `g`, reachable from
     // the initializer through a recursive SCC — the fixed-point summary of
     // `f` must still carry it.
@@ -402,13 +402,13 @@ test "M2b: a recursive SCC's transitive read is caught (fixpoint drives the chec
     , "which reads module constant 'b' declared later");
 }
 
-test "M2b: rejects a module constant reading itself" {
+test "consumers: rejects a module constant reading itself" {
     try expectModuleDiag(
         \\const a: int32 = a;
     , "reads 'a' before it is initialized");
 }
 
-test "M2b: rejects a module constant reading itself through a call" {
+test "consumers: rejects a module constant reading itself through a call" {
     try expectModuleDiag(
         \\const a: int32 = f();
         \\fn f() -> int32 { a }
@@ -442,7 +442,7 @@ fn expectSubtreeFe(pr: *const hir.Program, root: hir.ExprId, fe: hir.FullExprId)
     }
 }
 
-test "S4: node-level full expressions split on let initializers (hir.md §5.6)" {
+test "build: node-level full expressions split on let initializers (hir.md §5.6)" {
     var b = try buildText("app", &.{.{
         "app",
         \\fn same(x: int32) -> int32 { (x + 1) + (x + 2) }
@@ -478,7 +478,7 @@ test "S4: node-level full expressions split on let initializers (hir.md §5.6)" 
     try testing.expectEqual(let_fe, pr.node(split.root).full_expr);
 }
 
-test "S4: a cleanup token whose origin node left its full expression is rejected" {
+test "build: a cleanup token whose origin node left its full expression is rejected" {
     var b = try buildText("app", &.{.{
         "app",
         \\struct Token { id: int32; drop(t) { let x = t.id; } }
@@ -508,19 +508,19 @@ test "S4: a cleanup token whose origin node left its full expression is rejected
     }
 }
 
-test "S4: HIR corpus — examples/*.st build and validate" {
+test "build: HIR corpus — examples/*.st build and validate" {
     try corpusList("examples");
 }
 
-test "S4: HIR corpus — probes/*.st build and validate" {
+test "build: HIR corpus — probes/*.st build and validate" {
     try corpusList("probes");
 }
 
 // ---------------------------------------------------------------------------
-// S2 round-trip (hir.md §4.9): every built function root of the corpus
-// prints to canonical text that re-parses to an α-equivalent program
-// that passes the structural validator. Covers box types, aggregate
-// member identity, and destructuring lets (phase 16).
+// Canonical-text round-trip (hir.md §4.9): every built function root of
+// the corpus prints to canonical text that re-parses to an α-equivalent
+// program that passes the structural validator. Covers box types,
+// aggregate member identity, and destructuring lets.
 // ---------------------------------------------------------------------------
 
 fn corpusRoundTrip(dir: []const u8) !void {
@@ -564,21 +564,18 @@ fn corpusRoundTrip(dir: []const u8) !void {
     }
 }
 
-test "S2: HIR canonical text round-trips over examples/*.st" {
+test "text: HIR canonical text round-trips over examples/*.st" {
     try corpusRoundTrip("examples");
 }
 
-test "S2: HIR canonical text round-trips over probes/*.st" {
+test "text: HIR canonical text round-trips over probes/*.st" {
     try corpusRoundTrip("probes");
 }
 // ---------------------------------------------------------------------------
-// S5→S6b: canonical-AIR seam checks (hir.md §10.3/§11 M1a, PROGRESS S5/S6).
-// The S5 §10.3 differential (direct vs HIR byte-identical `cfg.print`
-// over the corpus) ran green through S6a; S6b deletes the direct path,
-// so the corpus gate becomes what remains checkable without an oracle:
-// every corpus file compiles through the HIR seam into canonical AIR
-// that CFG-validates (inside `frontend.compile`) and round-trips the
-// standalone cfg parser.
+// Canonical-AIR seam checks (hir.md §10.3/§11). The corpus gate checks what
+// remains verifiable without an oracle: every corpus file compiles through
+// the HIR seam into canonical AIR that CFG-validates (inside
+// `frontend.compile`) and round-trips the standalone cfg parser.
 // ---------------------------------------------------------------------------
 
 const cfg = @import("cfg.zig");
@@ -597,9 +594,9 @@ fn compileText(entry: []const u8, text: []const u8) ![]u8 {
     // A failed compile (an unsupported form or a lowering bug) must
     // surface its diagnostic, not panic on the null program.
     if (comp.diag) |d| {
-        std.debug.print("S5 corpus compile failed: {s}\n", .{d.message});
+        std.debug.print("canonical-AIR corpus compile failed: {s}\n", .{d.message});
     } else {
-        std.debug.print("S5 corpus compile failed (no diagnostic)\n", .{});
+        std.debug.print("canonical-AIR corpus compile failed (no diagnostic)\n", .{});
     }
     return error.TestUnexpectedResult;
 }
@@ -611,7 +608,7 @@ fn airRoundTrip(dir: []const u8, spec: []const u8) !void {
     const path = try probe_corpus.path(testing.allocator, dir, spec);
     defer testing.allocator.free(path);
     const text = probe_corpus.read(testing.allocator, dir, spec) catch |err| {
-        std.debug.print("S5 corpus: cannot read {s} ({s})\n", .{ path, @errorName(err) });
+        std.debug.print("canonical-AIR corpus: cannot read {s} ({s})\n", .{ path, @errorName(err) });
         return error.TestUnexpectedResult;
     };
     defer testing.allocator.free(text);
@@ -621,11 +618,11 @@ fn airRoundTrip(dir: []const u8, spec: []const u8) !void {
     var p = cfg.Parser.init(testing.allocator);
     defer p.deinit();
     const prog = p.parse(air) catch |err| {
-        std.debug.print("S5 corpus: {s} canonical AIR does not round-trip ({s})\n", .{ path, @errorName(err) });
+        std.debug.print("canonical-AIR corpus: {s} canonical AIR does not round-trip ({s})\n", .{ path, @errorName(err) });
         return error.TestUnexpectedResult;
     };
     if (prog.funcs.len == 0) {
-        std.debug.print("S5 corpus: {s} canonical AIR has no functions\n", .{path});
+        std.debug.print("canonical-AIR corpus: {s} canonical AIR has no functions\n", .{path});
         return error.TestUnexpectedResult;
     }
 }
@@ -636,16 +633,16 @@ fn airRoundTripAll(dir: []const u8) !void {
     for (corpus.names) |spec| try airRoundTrip(dir, spec);
 }
 
-test "S5: canonical-AIR seam — examples/*.st compile and round-trip" {
+test "seam: canonical-AIR seam — examples/*.st compile and round-trip" {
     try airRoundTripAll("examples");
 }
 
-test "S5: canonical-AIR seam — probes/*.st compile and round-trip" {
+test "seam: canonical-AIR seam — probes/*.st compile and round-trip" {
     try airRoundTripAll("probes");
 }
 
 // ---------------------------------------------------------------------------
-// S6a+ (now the only place module-value chains are textually checked):
+// The only place module-value chains are textually checked:
 // the corpus has no dotted module path with module-valued members
 // (`lib.math.sqrt`, `lists.builtin.print`). The HIR seam records the
 // resolved access path on the value leaf and replays `module_ref` +
@@ -665,26 +662,26 @@ fn airMarkers(entry: []const u8, modules: []const struct { []const u8, []const u
     var hc = try frontend.compile(testing.allocator, .{ .entry = entry, .sources = sources, .entry_fn = "main" });
     defer hc.deinit();
     if (hc.program == null) {
-        std.debug.print("S5 air markers: compile failed: {s}\n", .{if (hc.diag) |d| d.message else "(no diagnostic)"});
+        std.debug.print("canonical-AIR markers: compile failed: {s}\n", .{if (hc.diag) |d| d.message else "(no diagnostic)"});
         return error.TestUnexpectedResult;
     }
     const hir_text = try cfg.print(&hc.program.?, testing.allocator);
     defer testing.allocator.free(hir_text);
     for (needles) |n| {
         if (std.mem.indexOf(u8, hir_text, n) == null) {
-            std.debug.print("S5 air markers: missing '{s}' in canonical AIR\n", .{n});
+            std.debug.print("canonical-AIR markers: missing '{s}' in canonical AIR\n", .{n});
             return error.TestUnexpectedResult;
         }
     }
     for (absent) |n| {
         if (std.mem.indexOf(u8, hir_text, n) != null) {
-            std.debug.print("S5 air markers: unexpected '{s}' in canonical AIR\n", .{n});
+            std.debug.print("canonical-AIR markers: unexpected '{s}' in canonical AIR\n", .{n});
             return error.TestUnexpectedResult;
         }
     }
 }
 
-test "S6b: module-value chains replay in canonical AIR" {
+test "seam: module-value chains replay in canonical AIR" {
     // lib.math.sqrt: the hop `lib.math` loads through lib's member row;
     // the final member loads on that value — never a fresh module ref.
     try airMarkers("app", &.{

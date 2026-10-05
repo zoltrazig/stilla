@@ -103,8 +103,7 @@ test "moduleinfo resolves the stdbundle standard-library modules" {
     try testing.expect(math.source != null);
     // The math module's members are all intrinsics — bodyless bundle
     // declarations are intrinsic (Intrinsics §2), never host bindings:
-    // `host` is true only for bodyless declarations outside the bundle
-    // (intrinsic plan, phase 4).
+    // `host` is true only for bodyless declarations outside the bundle.
     try testing.expect(math.values.len > 0);
     var all_intrinsic = true;
     for (math.values) |*vm| {

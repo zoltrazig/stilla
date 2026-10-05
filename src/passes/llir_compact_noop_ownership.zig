@@ -4,7 +4,7 @@
 //! destination) are deleted block-locally, and the block's non-phi
 //! record count is re-derived so the budget bookkeeping stays exact.
 //! In: the `Builder` after `llir_fusion.peephole`. Out: compacted
-//! record lists; PCs still do not exist (2.16 linearizes afterward).
+//! record lists; PCs still do not exist (linearization assigns them afterward).
 const std = @import("std");
 const llir = @import("stilla").llir;
 const lower = @import("cfg_lower_llir.zig");

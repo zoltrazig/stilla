@@ -33,7 +33,8 @@
 //! text form's first block must have no predecessors (air.md §13), a
 //! no-pred trampoline forwards the entry to the header. Values are
 //! renumbered in text order; the chain blocks the rewrite leaves
-//! unreachable are removed by dead-block elimination (8.5), which runs
+//! unreachable are removed by dead-block elimination (`cfg_dead_block.zig`),
+//! which runs
 //! after this pass. Allocations use the program's backing allocator (the
 //! arena); the pass frees nothing.
 

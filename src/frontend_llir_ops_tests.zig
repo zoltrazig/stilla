@@ -1,5 +1,5 @@
-//! Test file: `frontend LLIR ops` — LLIR lowering stages
-//! 2.8–2.13 (back-edge scratch cycles, direct/indirect/self-tail calls,
+//! Test file: `frontend LLIR ops` — LLIR lowering
+//! (back-edge scratch cycles, direct/indirect/self-tail calls,
 //! syscalls, construct/destructure/switch descriptors, explicit
 //! copy/move slot ops, cleanup cells). Split out of the former
 //! `src/frontend_tests.zig`; `checkImageEdge` and `checkDestructure` are
@@ -31,7 +31,7 @@ const findBlock = helpers.findBlock;
 const blockIdx = helpers.blockIdx;
 const findFunc = helpers.findFunc;
 
-test "2.8 LLIR lowering: back-edge cycles use type-matched scratch slots" {
+test "LLIR lowering: back-edge cycles use type-matched scratch slots" {
     var t = try cfg_parse.parseText(
         \\module "app" {
         \\func @cycle() -> int32 {
@@ -81,7 +81,7 @@ test "2.8 LLIR lowering: back-edge cycles use type-matched scratch slots" {
     const cfd = image.functions[cf];
     const clist = try b.edgeCopyList(cbody, cbody);
     try testing.expectEqual(@as(usize, 4), clist.len);
-    // Phase 4: the staging slot may be a dead value slot or a scratch
+    // The staging slot may be a dead value slot or a scratch
     // slot — derive it from the actual emitted copies, not from
     // cycleStagingSlot (which may re-resolve differently).
     const cstage = clist[0].dst;
@@ -91,7 +91,7 @@ test "2.8 LLIR lowering: back-edge cycles use type-matched scratch slots" {
     try testing.expectEqual(clist[0].src, clist[2].dst); // staged value's slot refilled
     for (clist) |c| try testing.expectEqual(llir.Opcode.copy, c.op);
     // v1: staging cells are untyped F cells — no type rows exist.
-    // The back-edge copies live in the LLIR-only edge block (stage 7):
+    // The back-edge copies live in the LLIR-only edge block:
     // the body block holds only its terminator, and the edge block
     // carries the 4-cycle records + its final `j`.
     const cedge = b.targetForEdge(cbody, cbody);
@@ -130,7 +130,7 @@ test "2.8 LLIR lowering: back-edge cycles use type-matched scratch slots" {
 
     // The emitted image records match the edge lists exactly (opcode,
     // dst, src; c == 0) at the reserved positions, and the image carries
-    // no phi opcode. Under stage 7 the copies live in each edge's edge
+    // no phi opcode. The copies live in each edge's edge
     // block, so the walk starts at the edge block's start PC.
     for (program.funcs, 0..) |_, fi| {
         const range = b.block_ranges.items[fi];
@@ -148,7 +148,7 @@ test "2.8 LLIR lowering: back-edge cycles use type-matched scratch slots" {
     }
 }
 
-/// The record base of an edge's effects: the stage-7 edge block's start
+/// The record base of an edge's effects: the edge block's start
 /// PC when the edge routes through one, else the predecessor's inline
 /// edge position (an effect-free edge has an empty list either way).
 fn edgeBase(b: *const cfg_lower_llir.Builder, pred: *const cfg.BasicBlock, succ: *const cfg.BasicBlock) u32 {
@@ -171,7 +171,7 @@ fn checkImageEdge(b: *const cfg_lower_llir.Builder, image: llir.LlirProgram, pre
     return p;
 }
 
-test "2.9 LLIR lowering: direct calls, void/value returns, recursion" {
+test "LLIR lowering: direct calls, void/value returns, recursion" {
     const src = try helpers.probeSource("probes/cases", "ops_direct_calls");
     defer testing.allocator.free(src);
     var c = try compileText("app", &.{.{ "app", src }});
@@ -192,7 +192,7 @@ test "2.9 LLIR lowering: direct calls, void/value returns, recursion" {
             var pc = b.pcOf(blk);
             for (blk.instrs) |ins| {
                 if (std.meta.activeTag(ins.op) == .phi) continue;
-                if (b.isFusedConst(ins)) continue; // 2.14 fused its record away
+                if (b.isFusedConst(ins)) continue; // fused its record away
                 switch (ins.op) {
                     .call => |call| {
                         const moves = try b.callArgMoves(blk, ins);
@@ -216,7 +216,7 @@ test "2.9 LLIR lowering: direct calls, void/value returns, recursion" {
                         const rec = llir.decode(image.instructions[pc + @as(u32, @intCast(moves.len))]).?;
                         // v10: the direct call is `jal ra, addr` — the fixed
                         // link register `ra`, the pc-relative target resolved
-                        // by 2.16 to the callee's `entry_pc`; there is no
+                        // to the callee's `entry_pc`; there is no
                         // destination field (a non-void callee's result is
                         // published by `ret` into the caller register
                         // `F(L+3+O-A)` and taken by the generic `take` right
@@ -287,7 +287,7 @@ test "2.9 LLIR lowering: direct calls, void/value returns, recursion" {
     try testing.expectEqual(llir.zero_reg, llir.decode(image.instructions[noop_desc.start_pc]).?.a);
 }
 
-test "2.9 Step 8: direct-call result coalescing — take dropped only when safe" {
+test "direct-call result coalescing — take dropped only when safe" {
     // Step 8 (spec §4.1, §5.4): a non-void direct call whose result is
     // consumed before any other call is coalesced onto the result alias
     // `F(L+3+O-A)` — no `take` record. A result live across another
@@ -349,7 +349,7 @@ test "2.9 Step 8: direct-call result coalescing — take dropped only when safe"
     }
 }
 
-test "2.9 LLIR lowering: indirect calls through function values" {
+test "LLIR lowering: indirect calls through function values" {
     const src = try helpers.probeSource("probes/cases", "ops_indirect_calls");
     defer testing.allocator.free(src);
     var c = try compileText("app", &.{.{ "app", src }});
@@ -439,7 +439,7 @@ test "2.9 LLIR lowering: indirect calls through function values" {
     try testing.expect(!@hasField(llir.Opcode, "phi"));
 }
 
-test "2.9 LLIR lowering: register-window argument moves and elision" {
+test "LLIR lowering: register-window argument moves and elision" {
     // `apply` passes its own parameters straight through to the indirect
     // call: the arguments' intervals are call-free, so the allocator
     // homes them in their window slots and the argument moves elide —
@@ -499,7 +499,7 @@ test "2.9 LLIR lowering: register-window argument moves and elision" {
     try testing.expectEqual(@as(usize, 2), n_twice_moves);
 }
 
-test "2.9 LLIR lowering: all four slot_* ownership modes on one call's argument path" {
+test "LLIR lowering: all four slot_* ownership modes on one call's argument path" {
     // v10 keeps the `slot_*` writers unchanged — names, encodings,
     // semantics. One call whose four parameters force each transfer
     // mode: the unique `move` box installs `slot_move`, the borrowed
@@ -546,7 +546,7 @@ test "2.9 LLIR lowering: all four slot_* ownership modes on one call's argument 
     try testing.expectEqual(@as(usize, 1), seen[3]); // int32 → slot_copy
 }
 
-test "2.9 LLIR lowering: self tailcall reuses the frame as a pure jump" {
+test "LLIR lowering: self tailcall reuses the frame as a pure jump" {
     var t = try cfg_parse.parseText(
         \\module "app" {
         \\func @count(n: int32, acc: int32) -> int32 {
@@ -577,7 +577,7 @@ test "2.9 LLIR lowering: self tailcall reuses the frame as a pure jump" {
     const tpc = b.pcOf(rec_blk) + b.non_phi_counts.items[@intCast(blockIdx(blocks, "rec"))] + b.edge_copy_counts.items[@intCast(blockIdx(blocks, "rec"))];
     const rec = llir.decode(image.instructions[tpc]).?;
     // tailcall_self: a = b = 0 — no header, no return dst, no
-    // descriptor (Phase 5: the compiler emitted explicit copies to place
+    // descriptor (the compiler emitted explicit copies to place
     // args in r0..r(P-1); tailcall_self is now a pure jump).
     try testing.expectEqual(llir.Opcode.tailcall_self, rec.op);
     try testing.expectEqual(@as(u32, 0), rec.a);
@@ -590,7 +590,7 @@ test "2.9 LLIR lowering: self tailcall reuses the frame as a pure jump" {
     try testing.expectEqual(llir.frameReg(1), llir.decode(image.instructions[done_pc]).?.a); // ret %1 (acc)
 }
 
-test "2.10 LLIR lowering: syscalls carry host binding, specialized signature, and args" {
+test "LLIR lowering: syscalls carry host binding, specialized signature, and args" {
     const src = try helpers.probeSource("probes/cases", "ops_syscall_bindings");
     defer testing.allocator.free(src);
     var c = try compileText("app", &.{.{ "app", src }});
@@ -680,7 +680,7 @@ test "2.10 LLIR lowering: syscalls carry host binding, specialized signature, an
     try testing.expectEqual(print_descs.items[0], print_descs.items[1]);
 }
 
-/// 2.11: one multi-result destructure record's shape — the opcode, the
+/// One multi-result destructure record's shape — the opcode, the
 /// base slot, the variant tag (c), and the descriptor's `destructure_dsts`
 /// range naming one slot per result in result order.
 fn checkDestructure(b: *const cfg_lower_llir.Builder, image: llir.LlirProgram, pc: u32, op: llir.Opcode, kind: llir.DestructureKind, base: *const cfg.Value, tag: u32, ins: *const cfg.Instr) !void {
@@ -714,7 +714,7 @@ fn checkDestructure(b: *const cfg_lower_llir.Builder, image: llir.LlirProgram, p
     }
 }
 
-test "2.11 LLIR lowering: construct/destructure/switch descriptors stay atomic" {
+test "LLIR lowering: construct/destructure/switch descriptors stay atomic" {
     // Every n-ary aggregate form lowers to one fixed record + a
     // descriptor — no binary-chain splitting: struct/tuple/list/union
     // `construct`, the multi-result `unpack_struct`/`unpack_tuple`/
@@ -854,7 +854,7 @@ test "2.11 LLIR lowering: construct/destructure/switch descriptors stay atomic" 
     try testing.expectEqual(nothing_descs.items[0], nothing_descs.items[1]);
 }
 
-test "2.11 LLIR lowering: switch arm targets are signed pc-relative offsets, backward arms negative" {
+test "LLIR lowering: switch arm targets are signed pc-relative offsets, backward arms negative" {
     // Arm targets are signed offsets from the switch instruction's own
     // pc (Instruction Set §11–§12). A raw-AIR switch whose arm jumps
     // back to `entry` — the first block in the layout, so its pc lies
@@ -933,7 +933,7 @@ test "2.11 LLIR lowering: switch arm targets are signed pc-relative offsets, bac
     try testing.expect(saw_backward);
 }
 
-test "2.12 LLIR lowering: explicit copy/move from source lower to distinct fast slot ops" {
+test "LLIR lowering: explicit copy/move from source lower to distinct fast slot ops" {
     const src = try helpers.probeSource("probes/cases", "ops_explicit_move");
     defer testing.allocator.free(src);
     var c = try compileText("app", &.{.{ "app", src }});
@@ -1006,7 +1006,7 @@ test "2.12 LLIR lowering: explicit copy/move from source lower to distinct fast 
     // the CFG at all — the on-the-fly copy propagation elides `copy` of
     // a Copy value (air.md §5.4), so compiled output carries no `.copy`
     // instruction. The `copy` opcode is exercised by text-AIR (below)
-    // and by the 2.7 phi-edge records.
+    // and by the phi-edge records.
     try testing.expectEqual(@as(usize, 0), n_copy);
     // v1: the unique transfer into the call travels as a `slot_move`
     // preparation record (Instruction Set §5). The CFG-level `.move_`
@@ -1047,7 +1047,7 @@ test "2.12 LLIR lowering: explicit copy/move from source lower to distinct fast 
     try testing.expectEqualStrings(before, after);
 }
 
-test "2.12 LLIR lowering: text-AIR copy/borrow/move instructions are one explicit slot op each" {
+test "LLIR lowering: text-AIR copy/borrow/move instructions are one explicit slot op each" {
     var t = try cfg_parse.parseText(
         \\module "app" {
         \\func @app.f(a: int32) -> int32 {
@@ -1127,7 +1127,7 @@ test "2.12 LLIR lowering: text-AIR copy/borrow/move instructions are one explici
     try testing.expectEqualStrings(before, after);
 }
 
-test "2.12: borrow-root move/drop are rejected by the input CFG validator (Core §10.7)" {
+test "borrow-root move/drop are rejected by the input CFG validator (Core §10.7)" {
     // The lowering relies on the input CFG validator: a borrow root
     // used after a move/drop never reaches the LLIR, so `emitOwnership`
     // needs no runtime guard. Prove the validator rejects both forms.
@@ -1166,7 +1166,7 @@ test "2.12: borrow-root move/drop are rejected by the input CFG validator (Core 
     try testing.expect(std.mem.indexOf(u8, err2.?, "Core §10.7") != null);
 }
 
-test "2.13 LLIR lowering: maybe-unique path arms one cleanup cell, disarm + conditional drop" {
+test "LLIR lowering: maybe-unique path arms one cleanup cell, disarm + conditional drop" {
     const src = try helpers.probeSource("probes/cases", "ops_maybe_unique_cleanup");
     defer testing.allocator.free(src);
     var c = try compileText("app", &.{.{ "app", src }});
@@ -1225,7 +1225,7 @@ test "2.13 LLIR lowering: maybe-unique path arms one cleanup cell, disarm + cond
     try testing.expectEqual(@as(usize, 0), seen_token_op);
 }
 
-test "2.13 LLIR lowering: definitely-released path disarms on every branch, no cleanup_drop" {
+test "LLIR lowering: definitely-released path disarms on every branch, no cleanup_drop" {
     const src = try helpers.probeSource("probes/cases", "ops_definitely_released");
     defer testing.allocator.free(src);
     var c = try compileText("app", &.{.{ "app", src }});
@@ -1269,7 +1269,7 @@ test "2.13 LLIR lowering: definitely-released path disarms on every branch, no c
     try testing.expectEqual(@as(usize, 0), main_drops);
 }
 
-test "2.13 LLIR lowering: definitely-owned path is a plain drop, no cleanup cells" {
+test "LLIR lowering: definitely-owned path is a plain drop, no cleanup cells" {
     const src = try helpers.probeSource("probes/cases", "ops_definitely_owned_drop");
     defer testing.allocator.free(src);
     var c = try compileText("app", &.{.{ "app", src }});
@@ -1315,7 +1315,7 @@ test "2.13 LLIR lowering: definitely-owned path is a plain drop, no cleanup cell
     try testing.expectEqual(@as(usize, 0), n_cleanup);
 }
 
-test "2.10 LLIR lowering: lifecycle planning resolves name-only direct-call parameter modes" {
+test "LLIR lowering: lifecycle planning resolves name-only direct-call parameter modes" {
     // The non-optimized pipeline leaves `Call.callee.direct.func` null
     // (resolveDirectCalls runs only in the optimizer), so lifecycle
     // planning resolves direct callees by name through the prepare-stage
@@ -1361,7 +1361,7 @@ test "2.10 LLIR lowering: lifecycle planning resolves name-only direct-call para
     try testing.expectEqual(@as(usize, 2), n_call);
 }
 
-test "2.10 LLIR lowering: a signature-less text-AIR syscall is a named lowering error" {
+test "LLIR lowering: a signature-less text-AIR syscall is a named lowering error" {
     var t = try cfg_parse.parseText(
         \\module "m" {
         \\    func @init() -> void {

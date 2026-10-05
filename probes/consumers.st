@@ -1,4 +1,4 @@
-// consumers — the opt-in M2b effect-driven HIR consumers (hir.md §11)
+// consumers — the opt-in effect-driven HIR consumers (hir.md §11)
 // reachable from source: dead-let of a discardable scalar call and of a
 // discardable Unique constructor, plus selective A-Normal Form hoisting
 // of a Unique call result out of a consuming argument and of an

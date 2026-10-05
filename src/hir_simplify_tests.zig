@@ -1,5 +1,5 @@
-//! HIR M2b black-box suite — the effect-driven consumers (dead-let +
-//! selective A-Normal Form, docs/hir.md §11 M2b, docs/effects.md §12).
+//! HIR black-box suite — the effect-driven consumers (dead-let +
+//! selective A-Normal Form, docs/hir.md §11, docs/effects.md §12).
 //! White-box rule tests live in `passes/hir_simplify.zig`; this file runs
 //! the pass over real modules through the checker + HIR builder,
 //! re-validates structure and effects, checks the acceptance negative
@@ -68,7 +68,7 @@ fn buildText(entry: []const u8, texts: []const struct { []const u8, []const u8 }
     return .{ .arena = arena, .built = built, .graph = graph };
 }
 
-/// Run the M2b consumers + the §2.4 re-validation; return the stats.
+/// Run the effect-driven consumers + the §2.4 re-validation; return the stats.
 fn simplifyAll(b: *Built) !hir_simplify.Stats {
     const stats = try hir_simplify.optimize(b.arena.allocator(), b.built, .{ .graph = b.graph });
     for (b.built.funcs.items) |f| {
@@ -159,7 +159,7 @@ fn expectFlat(expected: []const u8, actual: []const u8) !void {
 // Rule coverage
 // ---------------------------------------------------------------------------
 
-test "M2b: dead let with a discardable init is eliminated" {
+test "consumers: dead let with a discardable init is eliminated" {
     const src = try probe_corpus.read(testing.allocator, "probes/cases", "simplify_dead_let_discardable");
     defer testing.allocator.free(src);
     var b = try buildText("app", &.{.{ "app", src }});
@@ -169,7 +169,7 @@ test "M2b: dead let with a discardable init is eliminated" {
     try expectFlat("fn (B0: i32) { 7i32 }", try funcText(&b, "app.f"));
 }
 
-test "M2b: a trapping division is kept (may-trap is not discardable)" {
+test "consumers: a trapping division is kept (may-trap is not discardable)" {
     const src = try probe_corpus.read(testing.allocator, "probes/cases", "simplify_trapping_div_kept");
     defer testing.allocator.free(src);
     var b = try buildText("app", &.{.{ "app", src }});
@@ -182,7 +182,7 @@ test "M2b: a trapping division is kept (may-trap is not discardable)" {
     );
 }
 
-test "M2b: a host call is kept (observable effect)" {
+test "consumers: a host call is kept (observable effect)" {
     const src = try probe_corpus.read(testing.allocator, "probes/cases", "simplify_host_call_kept");
     defer testing.allocator.free(src);
     var b = try buildText("app", &.{.{ "app", src }});
@@ -191,7 +191,7 @@ test "M2b: a host call is kept (observable effect)" {
     try testing.expectEqual(@as(usize, 0), stats.dead_lets);
 }
 
-test "M2b: an unused Unique binding with a purely-reading destructor is dropped" {
+test "consumers: an unused Unique binding with a purely-reading destructor is dropped" {
     // `let unused = make(id); 0`: the binding is dead and its destructor
     // only reads `t.id`, so the scope-end destruction is discardable and
     // dead-let removes the binding with it (docs/effects.md §11.2 — the
@@ -206,7 +206,7 @@ test "M2b: an unused Unique binding with a purely-reading destructor is dropped"
     try expectFlat("fn (B0: i32) { 0i32 }", try funcText(&b, "app.f"));
 }
 
-test "M2b: ANF hoists the first non-floatable operand and keeps LTR" {
+test "consumers: ANF hoists the first non-floatable operand and keeps LTR" {
     const src = try probe_corpus.read(testing.allocator, "probes/cases", "simplify_anf_hoist_ltr");
     defer testing.allocator.free(src);
     var b = try buildText("app", &.{.{ "app", src }});
@@ -222,7 +222,7 @@ test "M2b: ANF hoists the first non-floatable operand and keeps LTR" {
     try testing.expectEqualStrings("local", opName(pr, pr.operands(inner)[1]));
 }
 
-test "M2b: ANF does not hoist a pure tree" {
+test "consumers: ANF does not hoist a pure tree" {
     const src = try probe_corpus.read(testing.allocator, "probes/cases", "simplify_anf_pure_tree");
     defer testing.allocator.free(src);
     var b = try buildText("app", &.{.{ "app", src }});
@@ -231,7 +231,7 @@ test "M2b: ANF does not hoist a pure tree" {
     try testing.expectEqual(@as(usize, 0), stats.hoists);
 }
 
-test "M2b: ANF materializes a Unique operand the parent transfers" {
+test "consumers: ANF materializes a Unique operand the parent transfers" {
     const src = try probe_corpus.read(testing.allocator, "probes/cases", "simplify_anf_unique_transfer");
     defer testing.allocator.free(src);
     var b = try buildText("app", &.{.{ "app", src }});
@@ -250,7 +250,7 @@ test "M2b: ANF materializes a Unique operand the parent transfers" {
     try testing.expectEqualStrings("local", opName(pr, pr.operands(inner)[1]));
 }
 
-test "M2b: ANF leaves a Unique operand the parent only borrows in place" {
+test "consumers: ANF leaves a Unique operand the parent only borrows in place" {
     const src = try probe_corpus.read(testing.allocator, "probes/cases", "simplify_anf_unique_borrow");
     defer testing.allocator.free(src);
     var b = try buildText("app", &.{.{ "app", src }});
@@ -261,7 +261,7 @@ test "M2b: ANF leaves a Unique operand the parent only borrows in place" {
     try testing.expectEqualStrings("call", opName(&b.built.program, body));
 }
 
-test "M2b: lazy-branch regions are not hoisted across" {
+test "consumers: lazy-branch regions are not hoisted across" {
     const src = try probe_corpus.read(testing.allocator, "probes/cases", "simplify_lazy_branch");
     defer testing.allocator.free(src);
     var b = try buildText("app", &.{.{ "app", src }});
@@ -274,7 +274,7 @@ test "M2b: lazy-branch regions are not hoisted across" {
     try testing.expectEqualStrings("if", opName(&b.built.program, body));
 }
 
-test "M2b: consumers are a fixpoint (second run rewrites nothing)" {
+test "consumers: consumers are a fixpoint (second run rewrites nothing)" {
     const src = try probe_corpus.read(testing.allocator, "probes/cases", "simplify_fixpoint");
     defer testing.allocator.free(src);
     var b = try buildText("app", &.{.{ "app", src }});
@@ -287,7 +287,7 @@ test "M2b: consumers are a fixpoint (second run rewrites nothing)" {
     try testing.expectEqualStrings(after, try funcText(&b, "app.f"));
 }
 
-test "M2b: two fresh builds produce the same text (deterministic)" {
+test "consumers: two fresh builds produce the same text (deterministic)" {
     const src = try probe_corpus.read(testing.allocator, "probes/cases", "simplify_fixpoint");
     defer testing.allocator.free(src);
     var b1 = try buildText("app", &.{.{ "app", src }});
@@ -299,7 +299,7 @@ test "M2b: two fresh builds produce the same text (deterministic)" {
     try testing.expectEqualStrings(try funcText(&b1, "app.f"), try funcText(&b2, "app.f"));
 }
 
-test "M2b: a many-operand ANF hoist reaches a true fixpoint (no round cap)" {
+test "consumers: a many-operand ANF hoist reaches a true fixpoint (no round cap)" {
     // `simplify_anf_many_operands.st`'s `combine` has nine `app.read()`
     // operands. A read declared `Write` is observable, so
     // `canFloatAsTree` is false for each; selective ANF hoists exactly
@@ -360,7 +360,7 @@ fn compileAir(spec: []const u8, text: []const u8, simplify: bool) ![]u8 {
     return error.TestUnexpectedResult;
 }
 
-test "M2b: off by default; enabling rewrites the AIR; both round-trip" {
+test "consumers: off by default; enabling rewrites the AIR; both round-trip" {
     const src = try probe_corpus.read(testing.allocator, "probes/cases", "simplify_off_by_default_air");
     defer testing.allocator.free(src);
     const off = try compileAir("app", src, false);
@@ -376,7 +376,7 @@ test "M2b: off by default; enabling rewrites the AIR; both round-trip" {
     }
 }
 
-test "M2b: the never-suffix rule rewrites the AIR of probes/never_suffix.st" {
+test "consumers: the never-suffix rule rewrites the AIR of probes/never_suffix.st" {
     // The CLI enables the CFG optimizer, whose inlining + dead-code
     // removal masks this rule; the pre-optimizer AIR proves the pass
     // actually fires (docs/effects.md §10.1).
@@ -416,7 +416,7 @@ fn capture(text: []const u8, simplify: bool) ![]u8 {
     return testing.allocator.dupe(u8, state.buffer[0..state.len]);
 }
 
-test "M2b: consumers-on and consumers-off execute identically" {
+test "consumers: consumers-on and consumers-off execute identically" {
     const src = try probe_corpus.read(testing.allocator, "probes/cases", "simplify_consumers_exec_identical");
     defer testing.allocator.free(src);
     const off = try capture(src, false);
@@ -428,9 +428,9 @@ test "M2b: consumers-on and consumers-off execute identically" {
     try testing.expect(on.len > 0);
 }
 
-test "M2b: a materialized discarded Unique still drops at its statement" {
+test "consumers: a materialized discarded Unique still drops at its statement" {
     // `make(1);` is an anonymous Unique temporary discarded at its full
-    // expression. Phase 4 binds it to a synthesized `let`; the sequence's
+    // expression. The pass binds it to a synthesized `let`; the sequence's
     // in-place discard must fire the destructor *before* the following
     // statement, not at the enclosing scope end (docs/effects.md §11.2).
     const src = try probe_corpus.read(testing.allocator, "probes/cases", "simplify_unique_discard_statement");
@@ -562,7 +562,7 @@ fn corpusDiff(dir: []const u8, spec: []const u8, expect_panic: bool) !void {
     }
 }
 
-test "M2b corpus — examples/*.st compile+round-trip and consumers-on/off agree" {
+test "consumers corpus — examples/*.st compile+round-trip and consumers-on/off agree" {
     var corpus = try probe_corpus.list(testing.allocator, "examples");
     defer corpus.deinit();
     for (corpus.names) |spec| {
@@ -571,7 +571,7 @@ test "M2b corpus — examples/*.st compile+round-trip and consumers-on/off agree
     }
 }
 
-test "M2b corpus — probes/*.st compile+round-trip and consumers-on/off agree" {
+test "consumers corpus — probes/*.st compile+round-trip and consumers-on/off agree" {
     var corpus = try probe_corpus.list(testing.allocator, "probes");
     defer corpus.deinit();
     for (corpus.names) |spec| {
@@ -580,7 +580,7 @@ test "M2b corpus — probes/*.st compile+round-trip and consumers-on/off agree" 
     }
 }
 
-test "M2b: an observable read declared Write is kept; a Q-only read is discarded" {
+test "consumers: an observable read declared Write is kept; a Q-only read is discarded" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
@@ -627,7 +627,7 @@ test "M2b: an observable read declared Write is kept; a Q-only read is discarded
 // Full-expression cleanup-token remapping (docs/effects.md §11.2)
 // ---------------------------------------------------------------------------
 
-test "M2b: ANF remaps the cleanup token of a hoisted Unique parent" {
+test "consumers: ANF remaps the cleanup token of a hoisted Unique parent" {
     const src = try probe_corpus.read(testing.allocator, "probes/cases", "simplify_cleanup_token_remap");
     defer testing.allocator.free(src);
     var b = try buildText("app", &.{.{ "app", src }});
@@ -676,7 +676,7 @@ test "M2b: ANF remaps the cleanup token of a hoisted Unique parent" {
     }
 }
 
-test "M2b: a Unique binding with a discardable destructor may be dropped" {
+test "consumers: a Unique binding with a discardable destructor may be dropped" {
     const src = try probe_corpus.read(testing.allocator, "probes/cases", "simplify_unique_discardable_dtor");
     defer testing.allocator.free(src);
     var b = try buildText("app", &.{.{ "app", src }});
@@ -686,7 +686,7 @@ test "M2b: a Unique binding with a discardable destructor may be dropped" {
     try expectFlat("fn (B0: i32) { 7i32 }", try funcText(&b, "app.f"));
 }
 
-test "M2b: a Unique binding with an observable destructor is kept" {
+test "consumers: a Unique binding with an observable destructor is kept" {
     const hostmod_src = try probe_corpus.read(testing.allocator, "probes/cases", "simplify_unique_observable_dtor_hostmod");
     defer testing.allocator.free(hostmod_src);
     const app_src = try probe_corpus.read(testing.allocator, "probes/cases", "simplify_unique_observable_dtor_app");
@@ -708,7 +708,7 @@ test "M2b: a Unique binding with an observable destructor is kept" {
 // interface" landed in `passes/rewrite_contract.zig`) answers every
 // requirement through a derived query — never an opcode — and fails closed
 // when a declared cleanup proof gets a subject of the wrong kind.
-test "M2b: the legality engine agrees with the derived queries" {
+test "consumers: the legality engine agrees with the derived queries" {
     var b = try buildText("app", &.{.{
         "app",
         \\fn pure(x: int32) -> int32 { x + 1 }
@@ -791,7 +791,7 @@ test "M2b: the legality engine agrees with the derived queries" {
     try testing.expect(!(try rewrite_contract.checkCleanup(rule, &an, .{ .cleanup_free_subtree = call_id })));
 }
 
-test "M2b: the materializable requirement routes through canMaterializeOperand" {
+test "consumers: the materializable requirement routes through canMaterializeOperand" {
     // `.materializable` is selective ANF's ownership/lifetime obligation
     // (docs/effects.md §10.3 / §12.1): a Unique argument is materializable
     // only when the parent transfers it (`Consume`); a borrowed argument

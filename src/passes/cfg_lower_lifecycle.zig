@@ -1,6 +1,6 @@
 //! Pass: LLIR v1 lifecycle planning — counted-value `release` placement
 //! and tailcall leftover consumption (Instruction Set §4, §4.3, §5.1). In: the
-//! `Builder` after 2.3 slot allocation (value slots fixed). Out: the
+//! `Builder` after slot allocation (value slots fixed). Out: the
 //! per-instruction trailing destroy records, the per-edge kill records
 //! folded into the edge-copy lists, and the per-tailcall leftover kills.
 //!
@@ -78,7 +78,7 @@ const FnCtx = struct {
     /// Counted values read by this block's non-consuming terminator
     /// (`br.cond`, `switch.disc`); `ret` and `tailcall` reads are
     /// excluded — those transfer/consume, they never need an edge
-    /// release. Stage-7: a value whose only use is such a read must be
+    /// release. A value whose only use is such a read must be
     /// released on the outgoing edges, after the terminator, not before
     /// it.
     term_reads: []std.DynamicBitSet,
@@ -192,7 +192,7 @@ fn scanUses(ctx: *FnCtx) error{OutOfMemory}!void {
             .j, .trap => {},
         }
         // Terminator reads (`br.cond`, `switch.disc`) — the non-consuming
-        // reads that must happen BEFORE any edge release (stage 7). `ret`
+        // reads that must happen BEFORE any edge release. `ret`
         // transfers the value out and `tailcall` consumes its args into
         // the window, so neither needs an edge release.
         switch (blk.terminator) {
@@ -330,8 +330,7 @@ fn placeReleases(ctx: *FnCtx) error{OutOfMemory}!void {
         // touch (born-and-dies-here values included — they need not be
         // live-in). A value read by this block's terminator is NOT
         // released here — the terminator reads the slot after the last
-        // body touch, so the release must wait for the outgoing edges
-        // (stage 7).
+        // body touch, so the release must wait for the outgoing edges.
         for (last_touch, 0..) |t, i| {
             if (ctx.live_out[bi].isSet(i)) continue;
             const touch = t orelse continue; // terminator-only use: deferred to edges

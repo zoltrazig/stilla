@@ -1,7 +1,7 @@
 //! The Stilla frontend compiler: Stilla source → AIR (air.md text
 //! form), the canonical HIR text with `--emit-hir` (hir.md §4), the
-//! symbolic LLIR assembly with `--emit-asm` (5.1), or the LLIR binary
-//! (bytecode) with `--emit-bin <file>` (6.3) — or, with `--run`, an
+//! symbolic LLIR assembly with `--emit-asm`, or the LLIR binary
+//! (bytecode) with `--emit-bin <file>` — or, with `--run`, an
 //! interpreter: a source file compiles and runs, an input starting with
 //! the LLIR magic loads via `readBin` and runs from its header entry id.
 //!
@@ -31,8 +31,8 @@ const usage =
     \\
     \\Compile a Stilla source module and print its AIR (air.md text form) —
     \\or, with --emit-hir, the canonical HIR text (hir.md §4), or with
-    \\--emit-asm, the symbolic LLIR assembly (5.3), or with --emit-bin
-    \\<file>, the LLIR binary (bytecode, 6.3); `<input>` is the source file
+    \\--emit-asm, the symbolic LLIR assembly, or with --emit-bin
+    \\<file>, the LLIR binary (bytecode); `<input>` is the source file
     \\or a binary produced by --emit-bin. With --run, compile (or load) and
     \\execute.
     \\Options precede the input
@@ -45,8 +45,8 @@ const usage =
     \\                    of the AIR; mutually exclusive with --emit-asm,
     \\                    --emit-bin, and --run
     \\  --emit-asm        emit the LLIR assembly (symbolic) instead of
-    \\                    the AIR (5.1)
-    \\  --emit-bin <file> emit the LLIR binary (bytecode) to <file> (6.3);
+    \\                    the AIR
+    \\  --emit-bin <file> emit the LLIR binary (bytecode) to <file>;
     \\                    mutually exclusive with --emit-hir, --emit-asm
     \\                    and --output
     \\  --run             compile (or load, for an input starting with the
@@ -80,14 +80,14 @@ const Options = struct {
     /// the `main` default): an explicit name that does not exist is an error.
     entry_fn_explicit: bool = false,
     /// True when `--emit-asm` was given: print the symbolic LLIR
-    /// assembly (5.3) instead of the AIR (5.1, passes/llir_asm.zig).
+    /// assembly (passes/llir_asm.zig) instead of the AIR.
     emit_asm: bool = false,
     /// True when `--emit-hir` was given: print the canonical HIR text
     /// (hir.md §4) instead of the AIR. Mutually exclusive with the other
     /// emission modes, which lower past the HIR seam.
     emit_hir: bool = false,
-    /// The `--emit-bin <file>` target: write the LLIR binary (bytecode,
-    /// 6.1) to <file> instead of any text output. Mutually exclusive with
+    /// The `--emit-bin <file>` target: write the LLIR binary (bytecode)
+    /// to <file> instead of any text output. Mutually exclusive with
     /// `--emit-hir`, `--emit-asm`, and `--output` (the flag carries its
     /// own file).
     emit_bin: ?[]const u8 = null,
@@ -145,7 +145,7 @@ fn run(io: std.Io, gpa: std.mem.Allocator, args: []const []const u8) u8 {
     if (compilation.program) |*program| {
         if (opts.emit_bin) |path| {
             // The binary mode: lower to the frozen LLIR image and
-            // serialize it (6.1). The bytes are written to the flag's own
+            // serialize it. The bytes are written to the flag's own
             // file — binary output never goes to stdout (the text sink).
             const bytes = renderBin(arena, program) catch return 1;
             std.Io.Dir.cwd().writeFile(io, .{ .sub_path = path, .data = bytes }) catch |err| {
@@ -229,7 +229,7 @@ fn lowerWithEntry(
     return .{ .image = image, .entry = if (program.entry) |e| b.func_ids.get(e) else null };
 }
 
-/// The `--run` mode (interpreter-vm.md §13 M5): execute the input.
+/// The `--run` mode (interpreter-vm.md §13): execute the input.
 /// An input starting with the LLIR magic is a self-contained binary
 /// (D3): `readBin` → `validateLlir` → run from the header's symbolic
 /// entry member. Anything else compiles and runs — through the
@@ -325,7 +325,7 @@ fn runProgram(io: std.Io, gpa: std.mem.Allocator, arena: std.mem.Allocator, opts
 
 /// Produce the output text for the compiled program: the AIR decorated
 /// with `;`-source comments (the historical default), or the symbolic
-/// LLIR assembly when `--emit-asm` (5.3). Both sinks — stdout and
+/// LLIR assembly when `--emit-asm`. Both sinks — stdout and
 /// `--output` — write this buffer verbatim, so the two paths share the
 /// same content contract.
 fn renderProgram(
@@ -337,7 +337,7 @@ fn renderProgram(
     var out = std.ArrayList(u8).empty;
     if (opts.emit_asm) {
         // Lower the CFG to the frozen LLIR image, then project it to
-        // assembly (5.1). The image is read-only here; names are resolved
+        // assembly. The image is read-only here; names are resolved
         // from `program` (the image itself carries no names).
         var b = stilla.lower.LlirBuilder.init(arena, program);
         const image = try b.lowerLlir();
@@ -367,7 +367,7 @@ fn renderProgram(
 /// text of that function's root expression. The dump is a multi-root
 /// inspection surface, not one parseable HIR expression. Pure: it writes
 /// no sink, so a failure leaves every destination untouched.
-/// `hir.print`'s S2 boundary rejects the nodes whose text cannot carry
+/// `hir.print`'s serialization boundary rejects the nodes whose text cannot carry
 /// member identity (a value-position module access chain): on that error
 /// `failed_label` names the offending function and the whole dump is
 /// abandoned — never a silently degraded or partial output.
@@ -434,7 +434,7 @@ fn renderHir(
     };
 }
 
-/// Produce the LLIR binary (bytecode) for the compiled program (6.1):
+/// Produce the LLIR binary (bytecode) for the compiled program:
 /// lower the CFG to the frozen image and serialize it with
 /// `lower.emitBinWithEntry`, so the header records the resolved entry
 /// `FunctionId` (D3) — a binary this CLI writes is self-contained and
@@ -816,8 +816,8 @@ test "parseArgs defaults --emit-asm off" {
 // `renderProgram` buffer, and the stdout-path selection is covered by the
 // parseArgs tests above; the real stdout run is verified by CLI probe.
 test "run --emit-asm --output writes the LLIR assembly to the file" {
-    const src_name = "5.3_emit_asm_probe.st";
-    const out_name = "5.3_emit_asm_probe.s";
+    const src_name = "emit_asm_probe.st";
+    const out_name = "emit_asm_probe.s";
     defer std.Io.Dir.cwd().deleteFile(testing.io, src_name) catch {};
     defer std.Io.Dir.cwd().deleteFile(testing.io, out_name) catch {};
 
@@ -838,8 +838,8 @@ test "run --emit-asm --output writes the LLIR assembly to the file" {
 test "run --output writes the AIR (default mode) to the file" {
     // Regression guard for the non-asm path: without --emit-asm the file
     // gets the source-decorated AIR, not the assembly.
-    const src_name = "5.3_ir_probe.st";
-    const out_name = "5.3_ir_probe.ir";
+    const src_name = "emit_air_probe.st";
+    const out_name = "emit_air_probe.ir";
     defer std.Io.Dir.cwd().deleteFile(testing.io, src_name) catch {};
     defer std.Io.Dir.cwd().deleteFile(testing.io, out_name) catch {};
 
@@ -885,7 +885,7 @@ test "parseArgs SEG defaults on; --no-opt seg opts out" {
     try testing.expect(o3.optimize.seg);
 }
 
-test "parseArgs --opt hir enables the M2b consumers; defaults off" {
+test "parseArgs --opt hir enables the effect-driven consumers; defaults off" {
     var o1 = (try parseArgs(std.Io.failing, testing.allocator, &.{ "stilla", "--opt", "hir", "app.st" })).?;
     defer o1.search_dirs.deinit(testing.allocator);
     try testing.expect(o1.optimize.hir);
@@ -936,8 +936,8 @@ test "parseArgs --emit-hir conflicts with the other emission modes" {
 // parse -> read source -> compile (through the HIR seam) -> render the
 // canonical HIR dump -> write the file.
 test "run --emit-hir --output writes the canonical HIR dump to the file" {
-    const src_name = "4.10_emit_hir_probe.st";
-    const out_name = "4.10_emit_hir_probe.hir";
+    const src_name = "emit_hir_probe.st";
+    const out_name = "emit_hir_probe.hir";
     defer std.Io.Dir.cwd().deleteFile(testing.io, src_name) catch {};
     defer std.Io.Dir.cwd().deleteFile(testing.io, out_name) catch {};
 
@@ -966,7 +966,7 @@ test "run --emit-hir --output writes the canonical HIR dump to the file" {
 }
 
 test "renderHirBuffer renders aggregate member identity and destructuring lets" {
-    // Phase 16 (hir.md §4.4): struct_make / field_get / variant_make carry
+    // hir.md §4.4: struct_make / field_get / variant_make carry
     // their member identity in the text form, so a struct program dumps.
     var sources = stilla.moduleinfo.Sources{};
     var smap = std.StringHashMapUnmanaged([]const u8).empty;
@@ -1040,9 +1040,9 @@ test "run --emit-bin writes the LLIR binary; CLI bytes equal a direct serializat
     // -> read the source -> compile -> lower to LLIR -> serialize -> write
     // the file. The acceptance is that the CLI bytes equal a direct
     // serialization of the same compile, and that the file reads back as
-    // a valid image (6.2/6.3).
-    const src_name = "6.3_emit_bin_probe.st";
-    const bin_name = "6.3_emit_bin_probe.bc";
+    // a valid image.
+    const src_name = "emit_bin_probe.st";
+    const bin_name = "emit_bin_probe.bc";
     defer std.Io.Dir.cwd().deleteFile(testing.io, src_name) catch {};
     defer std.Io.Dir.cwd().deleteFile(testing.io, bin_name) catch {};
 
@@ -1083,7 +1083,7 @@ test "run --emit-bin writes the LLIR binary; CLI bytes equal a direct serializat
     try testing.expectEqual(want_range.start, got_entry[0]);
     try testing.expectEqual(want_range.len, got_entry[1]);
 
-    // ...and the binary reads back as a valid image (6.2).
+    // ...and the binary reads back as a valid image.
     var read_arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer read_arena.deinit();
     const back = try stilla.lower.readBin(read_arena.allocator(), bytes);
@@ -1145,7 +1145,7 @@ test "run --run executes a source file and exits 0" {
     // the test-runner's protocol pipe, so a printing program belongs to
     // the build.zig CLI probe. A program that terminates without
     // printing still exercises compile -> lower -> resolve entry -> run.
-    const src_name = "13_m5_run_probe.st";
+    const src_name = "run_probe.st";
     defer std.Io.Dir.cwd().deleteFile(testing.io, src_name) catch {};
 
     try std.Io.Dir.cwd().writeFile(testing.io, .{ .sub_path = src_name, .data =
@@ -1159,8 +1159,8 @@ test "run --run loads and executes a self-contained binary from its header entry
     // validateLlir -> run from the header's entry id. `helper` lowers
     // before `main` and would panic if it ran, so exit 0 proves the
     // header entry (main, not function 0) is honored.
-    const src_name = "13_m5_bin_src.st";
-    const bin_name = "13_m5_bin_probe.bc";
+    const src_name = "run_bin_src.st";
+    const bin_name = "run_bin_probe.bc";
     defer std.Io.Dir.cwd().deleteFile(testing.io, src_name) catch {};
     defer std.Io.Dir.cwd().deleteFile(testing.io, bin_name) catch {};
 

@@ -1,6 +1,6 @@
 //! Pass: pattern shape queries shared with the HIR seam. The direct AST
 //! pattern lowering (bindPattern / destructureStruct/Tuple/List/Variant
-//! and their helpers) was removed in PROGRESS S6b — the HIR seam lowers
+//! and their helpers) was removed — the HIR seam lowers
 //! patterns from `hir.Pattern` (see hir_lower_pattern.zig) with the
 //! same atomic `unpack_*`/`split_list`/`read_*` semantics. Only the
 //! AST-shape query the builder still needs survives here.

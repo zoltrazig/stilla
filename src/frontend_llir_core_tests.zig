@@ -1,7 +1,7 @@
-//! Test file: `frontend LLIR core` — the phase-1 frozen LLIR
+//! Test file: `frontend LLIR core` — the frozen LLIR
 //! model (spec/Stilla LLIR Specification.md) exercised through its
-//! public API over a hand-built toy image, plus LLIR lowering stages
-//! 2.1–2.7 (dense-id skeleton, code ranges, slot mapping, interning,
+//! public API over a hand-built toy image, plus LLIR lowering
+//! (dense-id skeleton, code ranges, slot mapping, interning,
 //! type specialization, phi edge copies). Split out of the former
 //! `src/frontend_tests.zig`; `checkEdgeCopies` is local to this file.
 //!
@@ -27,9 +27,9 @@ const irText = helpers.irText;
 const findBlock = helpers.findBlock;
 const blockIdx = helpers.blockIdx;
 // ---------------------------------------------------------------------------
-// LLIR — black-box: the phase-1 frozen model (spec/Stilla LLIR
+// LLIR — black-box: the frozen model (spec/Stilla LLIR
 // Specification.md) exercised through its public API over a hand-built toy
-// image. The real CFG → LLIR lowering is phase 2; these tests pin the
+// image. The real CFG → LLIR lowering is separate; these tests pin the
 // model contracts (instruction size, pc→function resolution, frame/header
 // arithmetic for nested calls, tailcall fp reuse, schema checks) that the
 // lowering and the interpreter will rely on.
@@ -157,14 +157,14 @@ test "LLIR model: nested call/ret frame contract over a toy image" {
 }
 
 // ---------------------------------------------------------------------------
-// Phase 2 — LLIR normalization: the CFG → `llir.LlirProgram`
-// projection (Stilla LLIR Specification §1). 2.1 — the lowering
+// LLIR normalization: the CFG → `llir.LlirProgram`
+// projection (Stilla LLIR Specification §1). The lowering
 // skeleton: dense `FunctionId`/`BlockId` allocation in module/function
 // order and `cfg.BlockOrder`, skipping the block-id holes the optimizer
 // leaves; the input CFG is never modified.
 // ---------------------------------------------------------------------------
 
-test "2.1 LLIR lowering skeleton: dense function/block ids, entry-first order, CFG unmodified" {
+test "LLIR lowering skeleton: dense function/block ids, entry-first order, CFG unmodified" {
     const src = try helpers.probeSource("probes/cases", "core_lowering_skeleton_pick_main");
     defer testing.allocator.free(src);
     var c = try compileText("app", &.{.{ "app", src }});
@@ -219,7 +219,7 @@ test "2.1 LLIR lowering skeleton: dense function/block ids, entry-first order, C
     try testing.expectEqualStrings(before, after);
 }
 
-test "2.1 LLIR lowering skeleton: optimizer block id holes never reach the LLIR" {
+test "LLIR lowering skeleton: optimizer block id holes never reach the LLIR" {
     // A dead block between two live blocks: dead-block elimination prunes
     // it without renumbering the survivors, so the input `BasicBlock.id`
     // space has a hole. The lowering iterates the surviving blocks in
@@ -269,7 +269,7 @@ test "2.1 LLIR lowering skeleton: optimizer block id holes never reach the LLIR"
     try testing.expectEqual(@as(u32, @intCast(f.blocks.len)), b.block_ranges.items[0].len);
 }
 
-test "2.2 LLIR lowering: function code ranges ordered, non-overlapping, covering the image" {
+test "LLIR lowering: function code ranges ordered, non-overlapping, covering the image" {
     const src = try helpers.probeSource("probes/cases", "core_lowering_skeleton_pick_main");
     defer testing.allocator.free(src);
     var c = try compileText("app", &.{.{ "app", src }});
@@ -303,7 +303,7 @@ test "2.2 LLIR lowering: function code ranges ordered, non-overlapping, covering
 
     // BlockDesc rows tile each function's range; a block's width is its
     // budget (non-phi instructions + the terminator), and its last record
-    // is the control-flow terminator (2.2 emits those). Stage-7 edge
+    // is the control-flow terminator. Edge
     // blocks are part of the expanded block order, so the total counts
     // both the CFG blocks and the LLIR-only edge blocks.
     var total_blocks: usize = 0;
@@ -343,7 +343,7 @@ test "2.2 LLIR lowering: function code ranges ordered, non-overlapping, covering
                 },
                 else => 0,
             };
-            // Width == budget: non-phi instrs + 2.7 edge copies +
+            // Width == budget: non-phi instrs + edge copies +
             // terminator records (a `br` lowers to one when a target
             // is the next block in the layout — the trailing-j
             // elimination — else to the compare-and-branch + `j` pair,
@@ -379,7 +379,7 @@ test "2.2 LLIR lowering: function code ranges ordered, non-overlapping, covering
     try testing.expectEqual(image.blocks.len, bi);
 }
 
-test "2.2 LLIR lowering: branch and jump targets are signed offsets to block starts in range" {
+test "LLIR lowering: branch and jump targets are signed offsets to block starts in range" {
     var t = try cfg_parse.parseText(
         \\module "app" {
         \\func @f(a: int32, b: int32) -> int32 {
@@ -490,7 +490,7 @@ test "2.2 LLIR lowering: branch and jump targets are signed offsets to block sta
     try testing.expect(std.mem.indexOf(u8, text, "br %2 ? then : else") != null);
 }
 
-test "2.2 LLIR lowering: trailing-j elimination — fall-through else, inverted then, and the pair fallback" {
+test "LLIR lowering: trailing-j elimination — fall-through else, inverted then, and the pair fallback" {
     // A CFG `br` lowers to a compare-and-branch + `jal` pair unless one
     // target is the next block in the layout: then the trailing `jal` is
     // redundant and the lowering emits the branch alone — with the
@@ -589,7 +589,7 @@ test "2.2 LLIR lowering: trailing-j elimination — fall-through else, inverted 
     try testing.expectEqual(@as(?[]const u8, null), try llir_validate.validate(&image, testing.allocator));
 }
 
-test "2.2 LLIR lowering: inverted-branch reach to a backward target is a signed distance" {
+test "LLIR lowering: inverted-branch reach to a backward target is a signed distance" {
     // The inverted trailing-j form (then body falls through, the branch
     // carries else) computes the else target's distance from the end of
     // the cond block to decide whether the ±512 reach holds. The else
@@ -637,7 +637,7 @@ test "2.2 LLIR lowering: inverted-branch reach to a backward target is a signed 
     try testing.expectEqual(@as(?[]const u8, null), try llir_validate.validate(&image, testing.allocator));
 }
 
-test "2.3 LLIR lowering: physical slot mapping and frame layout" {
+test "LLIR lowering: physical slot mapping and frame layout" {
     const src = try helpers.probeSource("probes/cases", "core_physical_slot_mapping");
     defer testing.allocator.free(src);
     var c = try compileText("app", &.{.{ "app", src }});
@@ -674,7 +674,7 @@ test "2.3 LLIR lowering: physical slot mapping and frame layout" {
     }
 }
 
-test "2.3 LLIR lowering: scratch budget covers phi swap-cycle staging" {
+test "LLIR lowering: scratch budget covers phi swap-cycle staging" {
     var t = try cfg_parse.parseText(
         \\module "app" {
         \\func @join(a: int32, b: int32) -> int32 {
@@ -762,14 +762,14 @@ test "2.3 LLIR lowering: scratch budget covers phi swap-cycle staging" {
 }
 
 // ---------------------------------------------------------------------------
-// Stage 7 — path-specific edge effects (TODO.md 阶段 7)
+// Path-specific edge effects
 // ---------------------------------------------------------------------------
 
-test "stage 7.1: br arms with different phi copies route through per-arm edge blocks" {
+test "br arms with different phi copies route through per-arm edge blocks" {
     // A `br` whose two arms are both phi-bearing blocks with DIFFERENT
-    // incoming sources. Under the pre-stage-7 inline model both arms'
+    // incoming sources. Under the pre-edge-block inline model both arms'
     // copies ran unconditionally in the predecessor — the last write won
-    // even on the untaken path. Stage 7 routes each arm through an
+    // even on the untaken path. The edge lowering routes each arm through an
     // LLIR-only edge block that executes only its own edge's ordered
     // copies.
     var t = try cfg_parse.parseText(
@@ -799,7 +799,7 @@ test "stage 7.1: br arms with different phi copies route through per-arm edge bl
     const image = try b.lowerLlir();
     if (try llir_validate.validate(&image, testing.allocator)) |m| {
         defer testing.allocator.free(m);
-        std.log.err("stage7 br image rejected: {s}", .{m});
+        std.log.err("br image rejected: {s}", .{m});
         return error.TestUnexpectedResult;
     }
     const f = t.program.funcs[0];
@@ -830,12 +830,12 @@ test "stage 7.1: br arms with different phi copies route through per-arm edge bl
     try testing.expectEqual(llir.Opcode.j, llir.decode(eb_recs.items[1]).?.op);
 }
 
-test "stage 7: a br back-edge phi swap-cycle stages inside the edge block" {
+test "a br back-edge phi swap-cycle stages inside the edge block" {
     // A loop whose back-edge is a `br` arm carrying a phi swap-cycle
     // (`%3 ↔ %4`). The cycle staging lives in the LLIR-only edge block
     // (not inline in the loop header), and the header emits no inline
-    // back-edge copies. This exercises the stage-7 edge-block path for
-    // cycle staging (TODO.md 7.4).
+    // back-edge copies. This exercises the edge-block path for
+    // cycle staging.
     var t = try cfg_parse.parseText(
         \\module "app" {
         \\func @swp(x: int32, y: int32) -> int32 {
@@ -859,7 +859,7 @@ test "stage 7: a br back-edge phi swap-cycle stages inside the edge block" {
     const image = try b.lowerLlir();
     if (try llir_validate.validate(&image, testing.allocator)) |m| {
         defer testing.allocator.free(m);
-        std.log.err("stage7 cycle image rejected: {s}", .{m});
+        std.log.err("cycle image rejected: {s}", .{m});
         return error.TestUnexpectedResult;
     }
     const f = t.program.funcs[0];
@@ -878,7 +878,7 @@ test "stage 7: a br back-edge phi swap-cycle stages inside the edge block" {
     try testing.expectEqual(llir.Opcode.j, llir.decode(recs.items[recs.items.len - 1]).?.op);
 }
 
-test "stage 7.3: a counted value read only by the switch terminator releases on its edge blocks" {
+test "a counted value read only by the switch terminator releases on its edge blocks" {
     // A counted `list[int32]` parameter read ONLY by the `switch`
     // discriminant (a defensive-lowering shape — a real source program
     // rarely switches on a counted value, but the lifecycle must still
@@ -888,7 +888,7 @@ test "stage 7.3: a counted value read only by the switch terminator releases on 
     // never inline before the terminator (which would read a released
     // cell), never leaking. This is a text-AIR structural regression for
     // that mechanism; the executable lifecycle release path is covered by
-    // the stage-7.2 interpreter test.
+    // the interpreter's edge-release test.
     var t = try cfg_parse.parseText(
         \\module "app" {
         \\func @g(x: list[int32]) -> int32 {
@@ -910,7 +910,7 @@ test "stage 7.3: a counted value read only by the switch terminator releases on 
     const image = try b.lowerLlir();
     if (try llir_validate.validate(&image, testing.allocator)) |m| {
         defer testing.allocator.free(m);
-        std.log.err("stage7 switch image rejected: {s}", .{m});
+        std.log.err("switch image rejected: {s}", .{m});
         return error.TestUnexpectedResult;
     }
     const f = t.program.funcs[0];
@@ -949,7 +949,7 @@ fn valueCellCount(f: *const cfg.IrFunc) u32 {
     return @intCast(f.values.len);
 }
 
-test "2.4 LLIR lowering: constants and ID-operand records are interned integers" {
+test "LLIR lowering: constants and ID-operand records are interned integers" {
     const src = try helpers.probeSource("probes/cases", "core_lowering_skeleton_pick_main");
     defer testing.allocator.free(src);
     var c = try compileText("app", &.{.{ "app", src }});
@@ -1099,7 +1099,7 @@ test "2.4 LLIR lowering: constants and ID-operand records are interned integers"
     try testing.expectEqual(@as(usize, 0), image.module_slots.len);
 }
 
-test "2.4 LLIR lowering: module_ref/load_member/fn_ref/type_is/store_member records and string dedup" {
+test "LLIR lowering: module_ref/load_member/fn_ref/type_is/store_member records and string dedup" {
     var t = try cfg_parse.parseText(
         \\module "builtin" {
         \\}
@@ -1138,7 +1138,7 @@ test "2.4 LLIR lowering: module_ref/load_member/fn_ref/type_is/store_member reco
     // The artifact header records the module's @init function id.
     try testing.expectEqual(b.func_ids.get(program.funcs[0]).?, image.init);
 
-    // M1: the artifact's own symbol is its module specifier — the
+    // The artifact's own symbol is its module specifier — the
     // identity a host dispatches host bindings by (Instruction Set §13).
     const self_range = image.symbols[image.self_symbol];
     try testing.expect(std.mem.eql(u8, "app", image.strings[self_range.start..][0..self_range.len]));
@@ -1244,7 +1244,7 @@ test "2.4 LLIR lowering: module_ref/load_member/fn_ref/type_is/store_member reco
     try testing.expect(seven_cid != null);
 }
 
-test "2.4 LLIR lowering: named instantiation interning and generic template decls" {
+test "LLIR lowering: named instantiation interning and generic template decls" {
     const src = try helpers.probeSource("probes/cases", "core_generic_option_unwrap");
     defer testing.allocator.free(src);
     var c = try compileText("app", &.{.{ "app", src }});
@@ -1319,7 +1319,7 @@ test "2.4 LLIR lowering: named instantiation interning and generic template decl
     try testing.expect(saw_unwrap);
 }
 
-test "2.5 LLIR lowering: generic arithmetic specializes by concrete type" {
+test "LLIR lowering: generic arithmetic specializes by concrete type" {
     const src = try helpers.probeSource("probes/cases", "core_generic_arithmetic_ops");
     defer testing.allocator.free(src);
     var c = try compileText("app", &.{.{ "app", src }});
@@ -1420,7 +1420,7 @@ test "2.5 LLIR lowering: generic arithmetic specializes by concrete type" {
     try testing.expect(@intFromEnum(llir.Opcode.add_i32) != @intFromEnum(llir.Opcode.add_f32));
 }
 
-test "2.5 LLIR lowering: hand-written arithmetic records carry dst/src slots and the full opcode table" {
+test "LLIR lowering: hand-written arithmetic records carry dst/src slots and the full opcode table" {
     var t = try cfg_parse.parseText(
         \\module "app" {
         \\    func @arith32(a: int32, b: int32) -> int32 {
@@ -1514,7 +1514,7 @@ test "2.5 LLIR lowering: hand-written arithmetic records carry dst/src slots and
     try testing.expect(seen.isSet(@intFromEnum(llir.Opcode.rem_f32)));
 }
 
-test "2.5 LLIR lowering: abs/min/max/clz/popcount specialize by type and carry dst/src slots" {
+test "LLIR lowering: abs/min/max/clz/popcount specialize by type and carry dst/src slots" {
     // The extended numeric families (Instruction Set §5): `abs` wraps on
     // int32_min (modulo 2³², never traps) and clears the sign bit on
     // f32; the signed/unsigned/IEEE `min`/`max`; and the unified
@@ -1604,7 +1604,7 @@ test "2.5 LLIR lowering: abs/min/max/clz/popcount specialize by type and carry d
     try testing.expectEqual(want.len, count);
 }
 
-test "2.6 LLIR lowering: generic comparisons and casts specialize by type" {
+test "LLIR lowering: generic comparisons and casts specialize by type" {
     const src = try helpers.probeSource("probes/cases", "core_comparisons_and_casts");
     defer testing.allocator.free(src);
     var c = try compileText("app", &.{.{ "app", src }});
@@ -1785,7 +1785,7 @@ test "2.6 LLIR lowering: generic comparisons and casts specialize by type" {
     try testing.expect(@intFromEnum(llir.Opcode.cvt_i32_u32) != @intFromEnum(llir.Opcode.cvt_u32_i32));
 }
 
-test "2.6 LLIR lowering: hand-written comparison and cast records, full opcode table" {
+test "LLIR lowering: hand-written comparison and cast records, full opcode table" {
     var t = try cfg_parse.parseText(
         \\module "app" {
         \\    func @cmp32(a: int32, b: int32) -> bool {
@@ -1994,7 +1994,7 @@ test "2.6 LLIR lowering: hand-written comparison and cast records, full opcode t
     try testing.expect(!@hasField(llir.Opcode, "str_lt"));
 }
 
-test "2.7 LLIR lowering: phi elimination emits copy/borrow edge records, no phi opcode" {
+test "LLIR lowering: phi elimination emits copy/borrow edge records, no phi opcode" {
     const src = try helpers.probeSource("probes/cases", "core_phi_elimination_borrowed_field");
     defer testing.allocator.free(src);
     var c = try compileText("app", &.{.{ "app", src }});
@@ -2007,7 +2007,7 @@ test "2.7 LLIR lowering: phi elimination emits copy/borrow edge records, no phi 
     const image = try b.lowerLlir();
 
     // Verify every phi's edge elimination: on each predecessor edge, the
-    // records of the edge's LLIR-only edge block (stage 7) must be
+    // records of the edge's LLIR-only edge block must be
     // exactly `edgeCopyList(pred, succ)` — right opcode (`copy` for a
     // Copy source, `borrow` for a borrowed view), right dst/src slots,
     // ordered so sources are read before destinations are written.
@@ -2060,7 +2060,7 @@ fn checkEdgeCopies(b: *const cfg_lower_llir.Builder, image: llir.LlirProgram, pr
     }
 }
 
-/// The record base of an edge's effects: the stage-7 edge block's start
+/// The record base of an edge's effects: the edge block's start
 /// PC when the edge routes through one (its copies occupy its own list,
 /// non_phi = 0), else the predecessor's inline edge position (an
 /// effect-free edge has an empty list either way).
@@ -2070,7 +2070,7 @@ fn edgeBlockBase(b: *const cfg_lower_llir.Builder, pred: *const cfg.BasicBlock, 
     return b.pcOf(pred) + b.non_phi_counts.items[b.block_ids.get(pred).?];
 }
 
-test "2.3 LLIR lowering: a threaded join's phi keeps a slot its branch-edge copy cannot clobber" {
+test "LLIR lowering: a threaded join's phi keeps a slot its branch-edge copy cannot clobber" {
     // Jump threading re-keys a join's phi to the branching predecessor:
     // `if (c) { a } else { b }` with a trivial then lowers to a `br` that
     // targets the join directly, and the then-incoming's edge copy sits
@@ -2118,7 +2118,7 @@ test "2.3 LLIR lowering: a threaded join's phi keeps a slot its branch-edge copy
     try testing.expectEqual(b.slotOf(then_v), b.slotOf(phi_v));
     try testing.expect(b.slotOf(phi_v) != b.slotOf(else_v));
     // The else edge carries a real copy into the phi slot — now in the
-    // LLIR-only edge block (stage 7) that routes the else→join edge.
+    // LLIR-only edge block that routes the else→join edge.
     const eblk = b.targetForEdge(else_blk, join_blk);
     const bid = b.block_ids.get(eblk).?;
     const d = image.blocks[bid];
@@ -2132,7 +2132,7 @@ test "2.3 LLIR lowering: a threaded join's phi keeps a slot its branch-edge copy
     try testing.expect(saw_copy);
 }
 
-test "2.7 LLIR lowering: hand-written edge copies — reverse-topo ordering, move joins, self-loop elision, scratch-staged swap" {
+test "LLIR lowering: hand-written edge copies — reverse-topo ordering, move joins, self-loop elision, scratch-staged swap" {
     var t = try cfg_parse.parseText(
         \\module "app" {
         \\func @dep(a: int32, b: int32) -> int32 {
@@ -2225,7 +2225,7 @@ test "2.7 LLIR lowering: hand-written edge copies — reverse-topo ordering, mov
     try testing.expectEqual(@as(u32, 1), sl_blocks_desc.end_pc - sl_blocks_desc.start_pc);
 
     // -- @swap: the 2-cycle on the back edge breaks through one int32
-    // scratch slot (2.8): stage y → scratch, x → y, scratch → x — 3 records; the
+    // scratch slot: stage y → scratch, x → y, scratch → x — 3 records; the
     // entry edge has 0 copies because phi merging reuses param slots.
     const sw = b.func_ids.get(program.funcs[3]).?;
     const sw_range = b.block_ranges.items[sw];
@@ -2237,15 +2237,15 @@ test "2.7 LLIR lowering: hand-written edge copies — reverse-topo ordering, mov
     // The staging record writes the scratch slot; the final record reads
     // it back — the swap is serialized through exactly one int32 scratch slot.
     const sw_copies = try b.edgeCopyList(sw_body, sw_body);
-    // Phase 4: derive the staging slot from the actual copies.
+    // Derive the staging slot from the actual copies.
     const sw_staging = sw_copies[0].dst;
     try testing.expectEqual(sw_staging, sw_copies[2].src);
     try testing.expectEqual(sw_copies[1].dst, sw_copies[0].src); // the cycle copy refills the staged slot
     try testing.expectEqual(sw_copies[0].op, llir.Opcode.copy);
     try testing.expectEqual(sw_copies[1].op, llir.Opcode.copy);
     try testing.expectEqual(sw_copies[2].op, llir.Opcode.copy);
-    // body's back-edge copies now live in the LLIR-only edge block (stage
-    // 7): body holds just its `j`, and the edge block carries the 3-cycle
+    // body's back-edge copies now live in the LLIR-only edge block:
+    // body holds just its `j`, and the edge block carries the 3-cycle
     // + its final `j`; entry has just `j`.
     const sw_entry_desc = image.blocks[sw_range.start + @as(u32, @intCast(blockIdx(sw_blocks, "entry")))];
     try testing.expectEqual(@as(u32, 1), sw_entry_desc.end_pc - sw_entry_desc.start_pc);
@@ -2256,7 +2256,7 @@ test "2.7 LLIR lowering: hand-written edge copies — reverse-topo ordering, mov
     try testing.expectEqual(@as(u32, 1), sw_body_desc.end_pc - sw_body_desc.start_pc);
 }
 
-test "3.1 LLIR lowering: F-bank exhaustion spills the peak-live chain into X" {
+test "LLIR lowering: F-bank exhaustion spills the peak-live chain into X" {
     // A straight-line chain whose register demand exceeds the direct bank:
     // 115 constants %0..%114 are all live together when the add chain
     // starts (peak liveness = 115 cells > 109 F), so 115 - (109 - 1
@@ -2330,7 +2330,7 @@ test "3.1 LLIR lowering: F-bank exhaustion spills the peak-live chain into X" {
     }
 }
 
-test "3.1 LLIR lowering: zero emission — void results write the zero register" {
+test "LLIR lowering: zero emission — void results write the zero register" {
     // A void expression in a register position lowers to a write of the
     // zero register (Instruction Set §5): the `ret` of a void function,
     // and the result of a void-typed const. The lowering never names a
@@ -2378,7 +2378,7 @@ test "3.1 LLIR lowering: zero emission — void results write the zero register"
     try testing.expect(saw_zero_ret);
 }
 
-test "3.1 LLIR lowering: inline member-desc IDs — 127 fits, 128 is IdOutOfRange" {
+test "LLIR lowering: inline member-desc IDs — 127 fits, 128 is IdOutOfRange" {
     // Member descriptors are inline dense IDs in the read_field record's
     // 7-bit field (Instruction Set §10). 128 distinct member references
     // intern descs 0..127 — the last fits — and the 129th (index 128)

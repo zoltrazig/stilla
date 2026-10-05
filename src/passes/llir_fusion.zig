@@ -1,7 +1,7 @@
-//! Pass: LLIR instruction fusion — the 2.14 const+op immediate fusion
-//! and the 2.15 `read_indexi` / fused multiply-accumulate peepholes
+//! Pass: LLIR instruction fusion — the const+op immediate fusion
+//! and the `read_indexi` / fused multiply-accumulate peepholes
 //! (Stilla LLIR Instruction Set §5). In: the `Builder` after every
-//! emission stage (2.1–2.13) — each block's record list fully written
+//! emission stage — each block's record list fully written
 //! (instructions, edge copies, terminator), PCs still deferred. Out:
 //! the same lists compacted block-locally: fused sites folded to their
 //! immediate variants (`*_i`, `read_indexi`, `*_madd`/`*_maddi`), dead
@@ -9,8 +9,8 @@
 //! `consumed_instrs` marks plus the `last_fusion` density report
 //! populated. The input CFG is never rewritten — only image records
 //! change, and only within their own block, so no absolute-PC
-//! reference ever needs a re-backfill (2.16 linearizes the compacted
-//! lists afterward).
+//! reference ever needs a re-backfill (linearization numbers the
+//! compacted lists afterward).
 const std = @import("std");
 const cfg = @import("stilla").cfg;
 const meta = @import("stilla").meta;
@@ -22,7 +22,7 @@ const typed = @import("cfg_lower_typed.zig");
 const Builder = lower.Builder;
 const FusionMetrics = lower.FusionMetrics;
 
-// --- 2.14 const+op fusion helpers ------------------------------------------
+// --- const+op fusion helpers ------------------------------------------
 
 /// The binary op family of a CFG binary instruction, as a
 /// `llir.TypedKind` (the operand-type index `typedOpcodeImm` keys
@@ -109,9 +109,9 @@ fn immOf(cv: meta.ConstValue, kind: llir.TypedKind, t: meta.Type) ?u8 {
 }
 
 /// Count one operand reference toward a value's use count. Every value
-/// is tracked — the 2.15 multiply-accumulate preconditions (a mul
+/// is tracked — the multiply-accumulate preconditions (a mul
 /// result and its accumulator must each be consumed by exactly the
-/// fused `add`) need full counts, and the 2.14 const-deletion decision
+/// fused `add`) need full counts, and the const-deletion decision
 /// only consults the entries of const values.
 fn noteUse(uses: *std.AutoHashMapUnmanaged(*const cfg.Value, u32), arena: std.mem.Allocator, v: *const cfg.Value) error{OutOfMemory}!void {
     const gop = try uses.getOrPut(arena, v);
@@ -127,7 +127,7 @@ fn decrementUse(uses: *std.AutoHashMapUnmanaged(*const cfg.Value, u32), v: *cons
 }
 
 /// Count every constant operand referenced by an instruction, including
-/// phi incoming values (the 2.7 edge copies read the incoming slot, so
+/// phi incoming values (the edge copies read the incoming slot, so
 /// a phi-fed constant keeps its record unless every edge use fused).
 fn countOpUses(op: cfg.Op, uses: *std.AutoHashMapUnmanaged(*const cfg.Value, u32), arena: std.mem.Allocator) error{OutOfMemory}!void {
     return switch (op) {
@@ -216,12 +216,12 @@ fn countTermUses(term: cfg.Terminator, uses: *std.AutoHashMapUnmanaged(*const cf
     };
 }
 
-/// 2.14: the const+op fusion peephole's before/after density report —
+/// The const+op fusion peephole's before/after density report —
 /// instruction counts and image bytes (4 per instruction record, spec
 /// §2) of the emitted code table, before and after the pass compacts
 /// away the fused `const` records (Instruction Set §5: a fused site is
 /// 4 image bytes versus 8 for its `const` + op expansion).
-/// 2.14: the const+op fusion peephole — an independent pass over the
+/// The const+op fusion peephole — an independent pass over the
 /// emitted image, running after every emit stage and before `finish`
 /// (Instruction Set §5, Immediate arithmetic/equality/ordering). It
 /// folds a `const` + typed op pair into one immediate variant
@@ -258,7 +258,7 @@ fn countTermUses(term: cfg.Terminator, uses: *std.AutoHashMapUnmanaged(*const cf
 /// decode.
 ///
 /// One record's position in the per-block lists: the block's dense
-/// `BlockId` plus the block-local record index — the 2.14–2.15
+/// `BlockId` plus the block-local record index — the fusion
 /// peephole's delete target.
 const RecPos = struct {
     bi: u32,
@@ -269,7 +269,7 @@ const RecPos = struct {
 /// deleted — but only when every use of the constant was folded. The
 /// deletion is per-block: the pass marks dead records and retains
 /// each block's survivors, so no record outside the block moves and
-/// no PC, target, or range is ever re-backfilled (2.16 linearizes
+/// no PC, target, or range is ever re-backfilled (linearization numbers
 /// the compacted lists afterward). `last_fusion` records the
 /// before/after density report for the corpus metric.
 pub fn peephole(b: *Builder) error{OutOfMemory}!FusionMetrics {
@@ -331,7 +331,7 @@ pub fn peephole(b: *Builder) error{OutOfMemory}!FusionMetrics {
             try countTermUses(blk.terminator, &uses, b.arena);
         }
 
-        // Pass 2a (2.15): the multiply-accumulate and immediate-index
+        // Pass 2a: the multiply-accumulate and immediate-index
         // fusion. A `mul` followed by an `add` whose operand is the
         // mul result folds to `*_madd` (`dst = dst + b * c` — the
         // accumulator is read-modify-written in place, so it must be
@@ -371,7 +371,7 @@ pub fn peephole(b: *Builder) error{OutOfMemory}!FusionMetrics {
             }
         }
 
-        // Pass 2b (2.14): the const+op immediate fusion. Instructions
+        // Pass 2b: the const+op immediate fusion. Instructions
         // consumed by pass 2a are skipped — their records were
         // deleted or rewritten already.
         for (r.start..r.start + r.len) |bi| {
@@ -397,9 +397,10 @@ pub fn peephole(b: *Builder) error{OutOfMemory}!FusionMetrics {
             }
         }
 
-        // 2.15 results were coalesced during allocation, so all
-        // instruction and descriptor operands already use the final
-        // accumulator slot; no post-emission rewrite is needed.
+        // The fused multiply-accumulate results were coalesced during
+        // allocation, so all instruction and descriptor operands already
+        // use the final accumulator slot; no post-emission rewrite is
+        // needed.
 
         // Pass 3: a const record whose uses were all folded is dead —
         // the fused op reads its immediate, nothing reads the slot.
@@ -421,7 +422,7 @@ pub fn peephole(b: *Builder) error{OutOfMemory}!FusionMetrics {
     // passes did not mark dead. Deletions only ever remove const or
     // mul records (never an edge copy or a terminator), and the
     // compaction is block-local — no record outside the block moves,
-    // so no absolute-PC reference can go stale. 2.16 reads these
+    // so no absolute-PC reference can go stale. Linearization reads these
     // compacted lists.
     var after: u32 = 0;
     for (b.block_records.items, 0..) |*recs, bi| {
@@ -536,7 +537,7 @@ fn killFusedCmpNot(b: *Builder, bi: u32, site: u32, tag: llir.TypedKind, bin: cf
     dead[bi][site + 1] = true;
 }
 
-/// 2.15: fuse a `mul` + `add` pair into `*_madd`/`*_maddi` at the
+/// Fuse a `mul` + `add` pair into `*_madd`/`*_maddi` at the
 /// add's block-local record index (Instruction Set §5, Fused
 /// multiply-accumulate). The pattern: the add's operand that is a
 /// `mul` result — its second operand, or its first when the add is

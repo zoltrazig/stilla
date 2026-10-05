@@ -1,5 +1,5 @@
 //! Host storage for the `array` module (StdLib §2) — the contiguous
-//! buffer behind an `Array[T]` opaque handle (M3). Plain data with no VM
+//! buffer behind an `Array[T]` opaque handle. Plain data with no VM
 //! knowledge: the interpreter adapter (`hostArray` in interpreter.zig)
 //! does all heap mechanics — it retains elements on store, releases
 //! displaced cells, and frees everything through the resource-registry

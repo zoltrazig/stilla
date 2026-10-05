@@ -1,6 +1,6 @@
 //! Effect-semantics model — docs/effects.md §5 (element + lattice
 //! interface, §5.7 provider contract) and §14 (minimal scope), the
-//! HIR-side summary in docs/hir.md §6.2. This is the **M1b** effect
+//! HIR-side summary in docs/hir.md §6.2. This is the effect
 //! infrastructure: an abstract semantic resource model, a lattice
 //! *engine*, and the default product instance, independent of any pass.
 //! The HIR integration (transfer, function summaries, derived legality

@@ -49,7 +49,7 @@ The detailed probes cover the source-reachable operation/type matrix:
   / `atom_twice` fold, while a borrowed-view atom, a may-trap initializer, a
   printing call, an implicit `any` coercion and a Unique constructor result
   keep their `let`)
-- `consumers.st`: the M2b effect-driven consumers (dead-let of a discardable
+- `consumers.st`: the effect-driven consumers (dead-let of a discardable
   scalar call and of a discardable Unique constructor, selective ANF hoisting
   of a Unique call result and of a dominant effectful operand, with destructor
   placement pinned by a printing drop hook)
@@ -127,7 +127,7 @@ The detailed probes cover the source-reachable operation/type matrix:
   leaf), so extraction's cost model changes the AIR. It runs through the
   normal SEG differential (its only SEG rewrite is AC): with `egraph_ac` off
   the AIR keeps the source chain and is byte-identical to `seg` off.
-  **Added in Stage 3** of the stable-canonical-order change; it is the
+  **Added for the stable-canonical-order change**; it is the
   runnable SEG probe that exercises the DAG-safe canonicalization.
 - `never_suffix.st`: the `never_returns` must fact's suffix deletion
   ([effects.md](effects.md) §10.1) — a structurally-never callee
@@ -152,7 +152,7 @@ The detailed probes cover the source-reachable operation/type matrix:
 
 Every `probes/*.st` file is enumerated at test time by
 `src/probe_corpus.zig`, so a new probe automatically joins the HIR build
-corpus (`hir_tests.zig`), the canonical-AIR seam round-trip, the M2b
+corpus (`hir_tests.zig`), the canonical-AIR seam round-trip, the effect-driven
 consumers and `hir` × `seg` four-combination differentials
 (`hir_simplify_tests.zig`, `hir_seg_tests.zig`), the SEG corpus budget
 (`hir_seg_tests.zig`), and the per-pass smoke suite
@@ -193,7 +193,7 @@ inlining a whole Stilla program in a test body.
   provably disjoint subtrees) swaps the operands and the flat
   `product_provider` refuses them (distinct undeclared domains conflict).
   The same probe is the acceptance that a second lattice instance changes
-  the produced AIR (todo.md 24; `frontend_pass_smoke_tests.zig`,
+  the produced AIR (`frontend_pass_smoke_tests.zig`,
   `hir_seg_tests.zig`).
 - `cross_layer_drop_cycle_{app,host}.st`: the cross-layer cycle's
   precision gain made observable ([effects.md](effects.md) §11.1). `host`

@@ -1,4 +1,4 @@
-//! Pass: HIR expression lowering (docs/hir.md §9, PROGRESS S5). In:
+//! Pass: HIR expression lowering (docs/hir.md §9). In:
 //! Ctx + FuncState + an `ExprId`. Out: the CFG value of the expression
 //! (null when the expression trapped / is unreachable).
 //!

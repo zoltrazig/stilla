@@ -1,4 +1,4 @@
-//! AIR data structures — air.md §11 (frontend Phase 3/4).
+//! AIR data structures — air.md §11 (frontend Phase 3).
 //!
 //! `cfg` owns the in-memory control-flow-graph structures of air.md §11 —
 //! `IrProgram`, `IrModule`, `IrFunc`, `BasicBlock`, `Instr`, `Value`,

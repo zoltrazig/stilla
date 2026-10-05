@@ -392,7 +392,7 @@ fn validateCast(frame: *Frame, c: *const ast.Cast) CheckError!void {
 /// The numeric `as` pairs, exactly as Core §16.3 lists them. No identity
 /// casts (`int32 as int32`). This predicate is separate from the
 /// arithmetic `isNumeric` set: `byte + byte` and `uint32 + uint32` are
-/// not defined by Core §16.3 (that is Phase 5 numeric-semantics work), so
+/// not defined by Core §16.3 (that is numeric-semantics work), so
 /// enabling a cast must not enable arithmetic.
 fn validNumCast(src: meta.Type, dst: meta.Type) bool {
     if (src != .primitive or dst != .primitive) return false;

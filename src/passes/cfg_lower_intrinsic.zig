@@ -50,7 +50,7 @@ const HostEntry = struct {
 
 /// The explicit expansion table for bundle functions (Intrinsics §3 —
 /// no wildcard default): every bodyless function of the embedded bundle,
-/// one entry each (the phase-0 checklist).
+/// one entry each.
 const host_entries = [_]HostEntry{
     // builtin (Runtime §4)
     .{ .module = "builtin", .member = "print" },
@@ -121,8 +121,7 @@ const host_entries = [_]HostEntry{
 };
 
 /// One materialized-constant entry: the specified f32 bit pattern (IEEE
-/// 754; quiet NaN = 0x7FC00000), verified against Zig `std.math` in the
-/// phase-0 contract.
+/// 754; quiet NaN = 0x7FC00000), verified against Zig `std.math`.
 const ConstEntry = struct {
     module: []const u8,
     member: []const u8,
@@ -270,11 +269,11 @@ pub fn syscallTarget(self: *Lowerer, span: meta.Span, module_spec: []const u8, m
 }
 
 // -------------------------------------------------------------------------
-// First-class function values (intrinsic plan, phase 3)
+// First-class function values
 // -------------------------------------------------------------------------
 
-/// First-class use of an intrinsic function member (intrinsic plan,
-/// phase 3): synthesize — or reuse from the program-wide cache — a
+/// First-class use of an intrinsic function member: synthesize — or reuse
+/// from the program-wide cache — a
 /// wrapper `IrFunc` whose body is exactly the direct expansion (entry →
 /// parameters forwarded by mode → the same syscall → ret; `never` →
 /// trap) and emit a `fn_ref` to it. The concrete signature comes from

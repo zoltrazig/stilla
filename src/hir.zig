@@ -1,4 +1,4 @@
-//! HIR data structures — hir.md §3 core (M1a structure + M1b effects).
+//! HIR data structures — hir.md §3 core (structure + effects).
 //!
 //! This module owns the *in-memory shape* of the canonical monomorphic HIR
 //! the seam between the checker and CFG lowering is built around
@@ -6,21 +6,21 @@
 //! operands and regions are ranges into flat buffers, a registry of op
 //! descriptors, and the container the AST→HIR builder appends into.
 //!
-//! Staging. M1a (S0–S6) landed the whole seam — data structures, the
-//! canonical text printer/parser, the structural validator, the AST→HIR
-//! builder, and the HIR→CFG lowering (re-exported below); it is the only
-//! frontend lowering path. M1b adds the effect infrastructure: the
-//! `OpDescriptor` semantics rows (`uses` / `own_effect` / `transfer`),
-//! `SemanticInfo.effect` with its interned summaries and the `Program`
-//! interner, and the analysis/validation pass in `passes/hir_effects.zig`
-//! (model: `effects.zig`). Annotations are additive metadata — they do
-//! not change the canonical text or the lowered AIR.
+//! Staging. The seam comprises the data structures, the canonical text
+//! printer/parser, the structural validator, the AST→HIR builder, and the
+//! HIR→CFG lowering (re-exported below); it is the only frontend lowering
+//! path. The effect infrastructure adds the `OpDescriptor` semantics rows
+//! (`uses` / `own_effect` / `transfer`), `SemanticInfo.effect` with its
+//! interned summaries and the `Program` interner, and the
+//! analysis/validation pass in `passes/hir_effects.zig` (model:
+//! `effects.zig`). Annotations are additive metadata — they do not change
+//! the canonical text or the lowered AIR.
 //!
-//! M1b notes (hir.md §11, effects.md §14). A fresh node's effect is
+//! Effect notes (hir.md §11, effects.md §14). A fresh node's effect is
 //! `pending`, never "proved pure": `Bottom` and `Pure` share a lattice
 //! value, so "not yet derived" is carried by the `State` machine. The
 //! registry's completeness gates (hir.md §10.1 `validateRegistry`) check
-//! identity/shape and the M1b typed-op effect rows at comptime; lowering
+//! identity/shape and the typed-op effect rows at comptime; lowering
 //! and printer/parser symmetry are exercised by their own suites.
 //!
 //! Documented layout choices where the target schema (hir.md §3) leaves a
@@ -56,7 +56,7 @@
 
 const std = @import("std");
 const meta = @import("meta.zig");
-/// The effect-semantics model (docs/effects.md §5) — M1b. The HIR owns
+/// The effect-semantics model (docs/effects.md §5). The HIR owns
 /// the *interned* summaries (`Program`); the model itself is pass-free.
 pub const effects = @import("effects.zig");
 
@@ -95,7 +95,7 @@ pub const Range = struct {
 
 /// Resolved call-target identities (hir.md §3.5, category 3 — module
 /// members and host bindings are *not* ops). The numeric space is the
-/// module graph's / checker's own; the builder (S4) maps instances in.
+/// module graph's / checker's own; the builder maps instances in.
 pub const FuncId = u32;
 pub const HostBindingId = u32;
 pub const ConstId = u32;
@@ -108,7 +108,7 @@ pub const FuncRef = union(enum) {
 };
 
 // ---------------------------------------------------------------------------
-// Ownership view (hir.md §3.6) — SemanticInfo carries this only in M1a
+// Ownership view (hir.md §3.6) — SemanticInfo carries this field.
 // ---------------------------------------------------------------------------
 
 /// The value/view state of a node's result (runtime-visible).
@@ -120,7 +120,7 @@ pub const OwnershipView = enum {
     destruction_view,
 };
 
-/// M1b additive extension of hir.md §3.6: the interned effect summary
+/// Additive extension of hir.md §3.6: the interned effect summary
 /// joins the ownership view. A fresh node is `pending` — effect
 /// analysis has not run, so no query may read it as "proved pure"
 /// (docs/effects.md §8.2/§10.5). The effects pass (`hir_effects.zig`)
@@ -214,7 +214,7 @@ pub const AccessHop = struct {
 
 /// Op-specific data for ops whose identity is not carried by operands
 /// alone (hir.md §4.4). Exactly one variant is meaningful per opcode;
-/// the structural validator (S3) checks the pairing.
+/// the structural validator checks the pairing.
 pub const Payload = union(enum) {
     none,
     /// `const` — typed literal (reuses `meta.ConstValue`, so no second
@@ -240,14 +240,14 @@ pub const Payload = union(enum) {
 /// their scope ends. *Distinct from binder visibility* — regions define
 /// visibility; scopes define destruction points (hir.md §5.3). Binding →
 /// scope association and the containing-function identity arrive with the
-/// builder/lowering layout (S4/S5); no cleanup is planned here.
+/// builder/lowering layout; no cleanup is planned here.
 pub const Scope = struct {
     parent: ?ScopeId = null,
 };
 
 /// A full-expression boundary (hir.md §5.6): temporary destruction runs
-/// at the FE end, reverse creation order. S1 records identity only — every
-/// node carries `full_expr`, and S4 assigns boundaries at construction.
+/// at the FE end, reverse creation order. Nodes record identity only — every
+/// node carries `full_expr`, and the builder assigns boundaries at construction.
 /// Entry/exit and cleanup-registration metadata land with the lowering
 /// layout; this is never an executable destruction plan.
 pub const FullExpr = struct {};
@@ -341,7 +341,7 @@ pub const Pattern = union(enum) {
 
 // ---------------------------------------------------------------------------
 // Op registry (hir.md §3.5, §7.1) — one identity table: identity/shape
-// plus the M1b semantics facets (`uses` / `own_effect` / `transfer`).
+// plus the effect-semantics facets (`uses` / `own_effect` / `transfer`).
 // ---------------------------------------------------------------------------
 
 /// The scalar rep of a typed (rep-parameterized) opcode (hir.md §7.2):
@@ -386,7 +386,7 @@ pub const OpClass = enum {
     runtime,
     /// Typed (rep-parameterized) instances such as `add.i32`. hir.md §7.1
     /// lists no numeric category (its table carries the semantic core
-    /// only); the full arithmetic family lands with the builder (S4), so
+    /// only); the full arithmetic family lands with the builder, so
     /// this category is provisional until then.
     numeric,
 };
@@ -509,13 +509,13 @@ pub const SegEncoding = enum {
     numeric,
 };
 
-/// One registry entry. Facets beyond identity/shape — `verify` (S3),
-/// `print`/parser symmetry (S2), `lower_to_air` (S5), constant folding —
+/// One registry entry. Facets beyond identity/shape — `verify`,
+/// `print`/parser symmetry, `lower_to_air`, constant folding —
 /// attach to this row as their passes land; no no-op callbacks or
 /// fabricated fields are added to fake completeness.
 pub const OpDescriptor = struct {
     /// SEG encoding, when this op is in the v1 island set (hir.md §8.1,
-    /// §11 M2a). Default `null` = the operation forms an island boundary.
+    /// §11). Default `null` = the operation forms an island boundary.
     seg: ?SegEncoding = null,
     name: []const u8,
     class: OpClass,
@@ -527,7 +527,7 @@ pub const OpDescriptor = struct {
     typed: bool = false,
     rep: ?ScalarRep = null,
 
-    // --- M1b semantics (docs/effects.md §4, hir.md §3.5/§6.2) ---
+    // --- effect semantics (docs/effects.md §4, hir.md §3.5/§6.2) ---
     // These three are required (no defaults): a new opcode must state
     // its operand-use policy, its own effect, and its composition rule.
     // A silently defaulted `pure` is exactly the drift the registry
@@ -579,7 +579,7 @@ const core_descriptors = [_]OpDescriptor{
 
 /// Typed instances registered to make the rep-parameterized mechanism
 /// concrete — the sample rows of hir.md §7.2. The full arithmetic family
-/// (and every other typed opcode) registers here as the builder (S4)
+/// (and every other typed opcode) registers here as the builder
 /// needs it; adding a row is a data edit.
 const typed_descriptors = [_]OpDescriptor{
     .{ .name = "add.i32", .class = .numeric, .operands = .two, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .i32, .uses = .all_read, .own_effect = effects.pure, .transfer = .strict_ltr },
@@ -707,7 +707,7 @@ const typed_descriptors = [_]OpDescriptor{
     .{ .name = "not.bool", .class = .numeric, .operands = .one, .regions = .none, .policy = .strict_ltr, .typed = true, .rep = .bool, .uses = .all_read, .own_effect = effects.pure, .transfer = .strict_ltr },
 };
 
-/// Every typed (numeric) row is a SEG island member (hir.md §11 M2a:
+/// Every typed (numeric) row is a SEG island member (hir.md §11:
 /// "+ numeric ops"); stamp the encoding here instead of repeating it on
 /// each of the ~110 rows.
 const typed_seg_descriptors = blk: {
@@ -735,7 +735,7 @@ pub const OpRegistry = struct {
         return self.entries[op_id];
     }
 
-    /// Identity/shape + M1b effect-row consistency of the table — the
+    /// Identity/shape + effect-row consistency of the table — the
     /// part of hir.md §10.1 `validateRegistry` that is comptime-checkable
     /// here (lowering presence and printer/parser symmetry are exercised
     /// by their own suites instead of a table field).
@@ -756,7 +756,7 @@ pub const OpRegistry = struct {
                 std.debug.assert(e.rep == null);
             }
 
-            // M1b effect-row completeness (hir.md §3.5/§10.1).
+            // Effect-row completeness (hir.md §3.5/§10.1).
             // Registry rows carry no static resource access: every
             // resource read/write is dynamic (module_const, drop,
             // host metadata) and lives on the analysis. A row that
@@ -795,7 +795,7 @@ pub const OpRegistry = struct {
             std.debug.assert(!e.own_effect.may_diverge);
             std.debug.assert(!e.own_effect.nondeterministic);
 
-            // SEG encoding contract (hir.md §3.5/§8.2, §11 M2a): typed
+            // SEG encoding contract (hir.md §3.5/§8.2, §11): typed
             // rows encode as `.numeric` and only they do; every other
             // encoding kind pairs with the op class it belongs to. A row
             // outside the v1 island set carries no encoding at all.
@@ -837,7 +837,7 @@ pub fn opId(name: []const u8) ?OpId {
 // deliberately does not carry (names stay out of IR structures, §1.3).
 // These tables live here, keyed by the *checker's* numeric id spaces
 // (FuncId / ConstId / HostBindingId / cfg TypeId): the arrays are
-// index-by-id lookups. S2 tests build fixture contexts; S4/S5 wire the
+// index-by-id lookups. Tests build fixture contexts; the builder wires the
 // real module tables in (same shape).
 
 pub const SerCtx = struct {
@@ -867,7 +867,7 @@ pub const SerCtx = struct {
 // One arena-backed container: each entity has its own dense arena, and
 // ordered lists (node operands, node regions, region params) live in
 // flat id buffers addressed by `Range`. Module tables, function lifting,
-// and the type environment stay in the builder/lowering layers (S4/S5);
+// and the type environment stay in the builder/lowering layers;
 // this is the append surface they grow on.
 
 pub const Program = struct {
@@ -1285,7 +1285,7 @@ pub const Program = struct {
 // Built-program container (hir.md §3.2 container role for a whole compile)
 // ---------------------------------------------------------------------------
 //
-// The AST→HIR builder (S4, `passes/hir_build.zig`) consumes the module
+// The AST→HIR builder (`passes/hir_build.zig`) consumes the module
 // graph + checker annotation and produces one `BuiltProgram`: a single
 // node store (`Program`, shared by every module of the compile) plus
 // program-level record tables for the function inventory, module
@@ -1356,7 +1356,7 @@ pub const FuncRecord = struct {
     /// cfg-order function list (init, members, instances, hooks, then
     /// hoisted lambdas in completion order, then intrinsic wrappers).
     /// The `funcs` table itself is append-ordered (predeclared records
-    /// first, hoisted records as discovered), so S5 re-orders a
+    /// first, hoisted records as discovered), so the lowering re-orders a
     /// module's records by this field to match the direct lowering.
     order: u32 = 0,
 
@@ -1476,11 +1476,11 @@ pub const validate = @import("passes/hir_validate.zig").validate;
 // White-box tests (hir.md §10.2: owning module `test {}`)
 // ---------------------------------------------------------------------------
 //
-// S1 covers the structural layer only: fresh ids, flat-range ordering and
-// stability across growth, concrete payloads, let init-vs-body structure,
-// pattern→arm-param association, ownership views, and registry
+// The structural layer covers identity only: fresh ids, flat-range ordering
+// and stability across growth, concrete payloads, let init-vs-body
+// structure, pattern→arm-param association, ownership views, and registry
 // identity/shape. Whole-tree rejections (capture, DAGs, scope violations)
-// are the structural validator's job in S3, not S1's.
+// are the structural validator's job, not this layer's.
 
 const t = std.testing;
 
@@ -1711,8 +1711,8 @@ test "registry: typed instances carry their scalar rep" {
     try t.expectEqual(meta.Type{ .primitive = .uint64 }, ScalarRep.u64.toCfgType());
 }
 
-test "registry: the M2a SEG island set carries `seg`, nothing else does" {
-    // hir.md §11 M2a: `const / local / let / lambda / call / if / match /
+test "registry: the SEG island set carries `seg`, nothing else does" {
+    // hir.md §11: `const / local / let / lambda / call / if / match /
     // struct_make / variant_make / tuple_make / list_make / field_get` +
     // numeric ops. `match` and `variant_make` join the set for the
     // known-variant reduction (§8.6); `tuple_make` / `list_make` join it

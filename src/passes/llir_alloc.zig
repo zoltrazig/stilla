@@ -1,6 +1,6 @@
-//! Pass: LLIR register allocation — the 2.3 linear-scan value→F-cell
+//! Pass: LLIR register allocation — the linear-scan value→F-cell
 //! mapping plus the v1 per-function frame layout numbers (spec §4.1).
-//! In: the `Builder` after 2.1 dense ID allocation. Out: the
+//! In: the `Builder` after dense ID allocation. Out: the
 //! `value_slots` map, the `f_count`/`x_count`/`window_count` layout
 //! numbers, and the `value_ends` snapshot — everything the emission
 //! stages read. Parameters keep the ABI cells `F0..F(P-1)`; later values
@@ -73,8 +73,8 @@ pub fn allocateSlots(bld: *Builder) error{OutOfMemory}!void {
         }
         // Cycle staging types: detection replays the emit walk with
         // `detect_cycle_types` armed; each distinct staging type gets a
-        // dedicated cell after the value cells (the 2.8 semantics — v1
-        // keeps the cells, drops the type rows).
+        // dedicated cell after the value cells (v1 keeps the cells,
+        // drops the type rows).
         var cycle_types = std.ArrayList(*const meta.Type).empty;
         bld.detect_cycle_types = &cycle_types;
         for (f.blocks) |blk| {
@@ -291,7 +291,7 @@ fn windowSize(bld: *Builder, f: *const cfg.IrFunc) u32 {
 }
 
 // ---------------------------------------------------------------------------
-// Linear scan (2.3)
+// Linear scan
 // ---------------------------------------------------------------------------
 
 /// One function's value cells — a linear scan over liveness intervals.
@@ -424,7 +424,7 @@ fn allocateFunctionSlots(bld: *Builder, f: *const cfg.IrFunc, slots: *std.ArrayL
             // accumulator has exactly one use — this add — so its true
             // end IS the add position (`interval.start`); the
             // fixed-point overshoot must not veto the in-place reuse
-            // the 2.15 madd fusion (llir_fusion.zig) relies on, or the
+            // the madd fusion (llir_fusion.zig) relies on, or the
             // fused record writes the accumulator cell while phi edge
             // copies still read the add result's own slot.
             const madd_shape = value.def != null and std.meta.activeTag(value.def.?.op) == .add;

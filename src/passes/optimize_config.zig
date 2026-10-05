@@ -5,14 +5,14 @@ const std = @import("std");
 /// enabled for their sub-toggles to have any effect; a disabled gate ignores
 /// its children. Library defaults: every gate off, every sub-toggle on.
 pub const OptimizeConfig = struct {
-    // --- M2b effect-driven HIR consumers (hir_simplify.zig) ---
-    /// Gate: run the M2b consumers at all.
+    // --- effect-driven HIR consumers (hir_simplify.zig) ---
+    /// Gate: run the effect-driven consumers at all.
     hir: bool = false,
     dead_let: bool = true,
     anf: bool = true,
     never_suffix: bool = true,
 
-    // --- M2a SEG (hir_seg.zig + hir_egraph.zig) ---
+    // --- SEG (hir_seg.zig + hir_egraph.zig) ---
     /// Gate: run SEG at all.
     seg: bool = false,
     seg_beta: bool = true,

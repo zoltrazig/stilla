@@ -31,12 +31,13 @@ Zig implementation of the Stilla v1.3 runtime and Stilla-to-CFG-AIR compiler. Us
 
 - Update the relevant documentation before implementing code.
 - In prose, reference source and test files by filename, not repository path. Reference documents by filename rather than section number.
+- Do not reference ephemeral planning artifacts — `plan.md`, `docs/todo.md`, `PROGRESS.md`, `TODO.md`, or milestone/stage/phase labels such as `M2b`, `S5`, or `Phase 7` — from code, tests, or design docs. Comments and docs describe the system, not the work history: cite a design document by filename and section (`hir.md` §11, `effects.md` §14), or name the concrete module, pass, or test. Keep that vocabulary out of identifiers, comments, doc-comments, test names, and diagnostic strings.
 - Do not use `std.debug.print` for runtime or compiler output because stderr may be interpreted as an error. Use an explicit writer or output sink; the build-only examples summary in `build.zig` is the existing exception.
 
 ## Architecture
 
 - `root.zig` is the static-library root; `main.zig` is the compiler CLI. `build.zig` produces both artifacts and owns all test wiring.
-- Drivers are thin: `moduleinfo.zig` builds the module graph, checker passes annotate and validate it, `hir_build.zig` builds the HIR, `hir_effects.zig` annotates it, `hir_seg.zig` runs the optional M2a SEG pass, `lower.zig` produces CFG AIR, CFG passes optimize and lower drops, and LLIR passes lower, validate, assemble, and serialize it.
+- Drivers are thin: `moduleinfo.zig` builds the module graph, checker passes annotate and validate it, `hir_build.zig` builds the HIR, `hir_effects.zig` annotates it, `hir_seg.zig` runs the optional SEG pass, `lower.zig` produces CFG AIR, CFG passes optimize and lower drops, and LLIR passes lower, validate, assemble, and serialize it.
 - Keep one pass per file under `parse/` or `passes/`. Subdirectory passes import top-level modules through `@import("stilla")`, whose self-import is configured in `build.zig`.
 - CFG AIR data structures live in `cfg.zig`; its lexer, parser, printer, optimizer, validator, and lowerings live in pass files. The format and pipeline are documented in `air.md` and `frontend.md`; the canonical pass order is `passes.md`, the system map `architecture.md` (index: `docs/README.md`).
 - Standard-library sources (`std/*.st`) are compile-time embedded via `std/bundle.zig` and surfaced through the table in `src/stdbundle.zig`. Add each new `*.st` module to both files.

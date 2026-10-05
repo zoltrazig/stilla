@@ -1,10 +1,10 @@
-//! Pass: structural HIR validator — hir.md §10.1, M1a first level.
+//! Pass: structural HIR validator — hir.md §10.1, structural level.
 //! In: one root expression of a `hir.Program`. Out: null when the
 //! reachable tree satisfies the invariants, or a human-readable
 //! first-violation message.
 //!
 //! This is the structural level only: **no ownership dataflow and no SEG
-//! checks here**. The M1b effect level (every reachable node carries a
+//! checks here**. The effect level (every reachable node carries a
 //! `ready` summary that soundly over-approximates `effect_transfer`, and
 //! every `sema` id is in range) is a separate pass —
 //! `passes/hir_effects.zig` (`Analysis.validate`), run by the frontend
@@ -48,7 +48,7 @@
 //!
 //! `validate` walks the tree reachable from one root and does not
 //! require every arena entry to be reachable (a builder may leave
-//! abandoned nodes behind). S4 will validate each function root with
+//! abandoned nodes behind). The builder validates each function root with
 //! this same entry point.
 
 const std = @import("std");
@@ -576,7 +576,7 @@ const Validator = struct {
 
 // ---------------------------------------------------------------------------
 // White-box tests (owning module: hir.md §10.2). Parse-shaped acceptance
-// uses the S2 canonical texts; rejections that text cannot express
+// uses the canonical texts; rejections that text cannot express
 // (DAGs, duplicate binder ids, malformed handles) build arenas directly.
 // ---------------------------------------------------------------------------
 

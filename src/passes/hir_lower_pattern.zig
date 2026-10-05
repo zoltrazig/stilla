@@ -1,4 +1,4 @@
-//! Pass: HIR pattern lowering (docs/hir.md §9, §5.4; PROGRESS S5). In:
+//! Pass: HIR pattern lowering (docs/hir.md §9, §5.4). In:
 //! Ctx + FuncState + a `hir.Pattern` (or an arm region) + the base
 //! value. Out: bindings for the pattern's leaves, with the direct
 //! `cfg_lower_pattern` semantics — atomic `unpack_*`/`split_list` for a

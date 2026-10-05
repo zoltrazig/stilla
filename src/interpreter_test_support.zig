@@ -58,8 +58,8 @@ pub fn load(text: []const u8, optimize: bool) !Loaded {
     return loadOpts(text, optimize, false, false);
 }
 
-/// `load` with the M2a SEG toggle exposed (hir.md §11): the interpreter
-/// equivalence tests compare SEG-on vs SEG-off execution. The M2b
+/// `load` with the SEG toggle exposed (hir.md §11): the interpreter
+/// equivalence tests compare SEG-on vs SEG-off execution. The
 /// consumers toggle (`simplify`) rides the same way.
 pub fn loadOpts(text: []const u8, optimize: bool, seg: bool, simplify: bool) !Loaded {
     return loadFull(text, optimize, seg, simplify, &.{});
@@ -161,7 +161,7 @@ pub const builtin_host_decls = [_]effects.HostDecl{
     .{ .key = "builtin.str", .summary = effects.host_top, .stilla_execution = .forbidden },
 };
 
-/// A capturing print adapter shared by the M2 module tests: intercepts
+/// A capturing print adapter shared by the module tests: intercepts
 /// `builtin.print` into a buffer, delegates everything else to the
 /// default host (fd 1 is the build runner's `--listen` pipe, so stdout
 /// sinks are probed as subprocesses, never in-process — build.zig).

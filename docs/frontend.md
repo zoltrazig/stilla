@@ -188,8 +188,8 @@ See [module-graph.md](module-graph.md).
 
 **Optimization configuration (optional)** — `frontend.Options` takes
 the `OptimizeConfig` struct (`optimize_config.zig`): one boolean per
-optimization unit. The top-level gates are `hir` (the M2b
-effect-driven consumers), `seg` (the M2a SEG pass), and `cfg` (the
+optimization unit. The top-level gates are `hir` (the
+effect-driven consumers), `seg` (the SEG pass), and `cfg` (the
 mid-level CFG optimizer); each gate has a sub-toggle per rewrite, all
 on by default, while every gate is off by default in the library. The
 `stilla` executable turns `seg` and `cfg` on and leaves `hir` off, and

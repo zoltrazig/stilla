@@ -11,7 +11,6 @@ specifications (the spec suite index is [spec/README.md](../spec/README.md)).
 | --- | --- |
 | [architecture.md](architecture.md) | end-to-end map: artifacts, pipeline, boundaries, host embedding |
 | [passes.md](passes.md) | ordered inventory of every pass, with links to the detail documents |
-| [todo.md](todo.md) | the remaining HIR / effect-model work: prioritized items with scope, dependencies, and acceptance criteria |
 
 ## Compiler pipeline
 
@@ -39,8 +38,7 @@ The remaining unimplemented parts of the model are described inside the
 documents above rather than in a standalone proposal: the host ABI
 metadata wiring (effects.md §13), node-level full-expression boundary
 annotation (hir.md §5.6), and indirect-call target narrowing
-(effects.md §9.2). [todo.md](todo.md) is the prioritized work list with
-dependencies and acceptance criteria. The effect infrastructure —
+(effects.md §9.2). The effect infrastructure —
 lattice, transfer, SCC-fixpoint function summaries, precise
 `drop_effect`, cleanup gate, derived queries — is implemented, as are
 the three consumers (dead-let / selective ANF / SEG-safe) and the

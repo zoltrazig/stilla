@@ -194,7 +194,7 @@ test "probe pass smoke: optimizer + drop lowering + LLIR backend" {
 }
 
 /// Compile one probe with an explicit lattice provider through the whole
-/// effect chain: analysis → M2b consumers → SEG → re-validation.
+/// effect chain: analysis → consumers → SEG → re-validation.
 fn compileProbeWithProvider(spec: []const u8, provider: *const effects.Provider) !Compiled {
     var source_arena = std.heap.ArenaAllocator.init(testing.allocator);
     errdefer source_arena.deinit();
@@ -215,7 +215,7 @@ fn compileProbeWithProvider(spec: []const u8, provider: *const effects.Provider)
 }
 
 // The second lattice instance (docs/effects.md §5.7) must run the *whole*
-// chain — effect analysis, the M2b consumers, SEG, and every
+// chain — effect analysis, the consumers, SEG, and every
 // re-validation — not merely be selectable. Because no probe declares a
 // resource the example `hierarchy` instance places in its tree (its
 // domains are `host(1..7)`, chosen by an embedding), the difference the

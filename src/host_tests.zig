@@ -11,7 +11,7 @@ const llir_validate = @import("passes/llir_validate.zig");
 const Value = vm_types.Value;
 
 // ---------------------------------------------------------------------------
-// Phase 6 — signature-driven host adapter (TODO.md 阶段 6)
+// Signature-driven host adapter
 // ---------------------------------------------------------------------------
 
 test "host adapter: full-width 64-bit scalars reach the callback; owners transfer through the resource registry" {

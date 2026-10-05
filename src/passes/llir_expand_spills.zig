@@ -1,11 +1,11 @@
 //! Pass: X-spill expansion (pre-linearize) — the second half of the
-//! 2.3 spill decision made in `llir_alloc.zig`. In: the `Builder` after
+//! spill decision made in `llir_alloc.zig`. In: the `Builder` after
 //! every emission stage and both fusion passes, with spilled values'
 //! records carrying their reserved sentinel byte. Out: every record
 //! touching a spilled value expanded into `spill_take`/main/
 //! `spill_put` staging (Instruction Set §6). Runs immediately before
 //! linearization: block record lists grow freely here — PCs do not
-//! exist yet, branch offsets are computed by 2.16 from the final
+//! exist yet, branch offsets are computed at linearization from the final
 //! layout, and any distance growth beyond a compare-and-branch's ±512
 //! reach is covered by the long-branch expansion safety net.
 const std = @import("std");
@@ -18,7 +18,7 @@ const Builder = lower.Builder;
 /// `spill_take`/main/`spill_put` staging (Instruction Set §6). Runs after all
 /// emission stages (and fusion compaction), immediately before
 /// linearization: block record lists grow freely here — PCs do not exist
-/// yet, branch offsets are computed by 2.16 from the final layout, and
+/// yet, branch offsets are computed at linearization from the final layout, and
 /// any distance growth beyond a compare-and-branch's ±512 reach is
 /// covered by the long-branch expansion safety net.
 ///

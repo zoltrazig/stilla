@@ -1,5 +1,5 @@
-//! Test file: `frontend LLIR ops, immediates` — LLIR lowering stages
-//! 2.14–2.15 (const+op fusion to immediate variants, shift/bitwise
+//! Test file: `frontend LLIR ops, immediates` — LLIR lowering
+//! (const+op fusion to immediate variants, shift/bitwise
 //! fusion, compaction, unsigned compares, multiply-accumulate, corpus
 //! fusion metrics). Split out of `frontend_llir_ops_tests.zig`;
 //! `isImmediateFamily` and `retRecord` are local to this file.
@@ -30,7 +30,7 @@ const findBlock = helpers.findBlock;
 const blockIdx = helpers.blockIdx;
 const findFunc = helpers.findFunc;
 
-/// The v9 immediate families (the 2.14 acceptance): the integer-4
+/// The v9 immediate families: the integer-4
 /// `addi`/`subi`/`muli`/`divi`/`remi`/`maddi`, `shli`/`shri`,
 /// `andi`/`ori`/`xori` (mask semantics), and C-Type comparisons
 /// `slti`/`sgti`/`seqi`/`snei`. The rep-suffixed names make
@@ -46,7 +46,7 @@ fn isImmediateFamily(op: llir.Opcode) bool {
     return false;
 }
 
-test "2.14 LLIR lowering: compiled const+op folds to immediate variants" {
+test "LLIR lowering: compiled const+op folds to immediate variants" {
     // Source-level literals lower to `const` instructions (the printer
     // may re-inline them, but the records exist), and the peephole folds
     // each const+op pair: `a + 2` → R-Type `addi`, `3 < a` → C-Type
@@ -110,7 +110,7 @@ test "2.14 LLIR lowering: compiled const+op folds to immediate variants" {
     }
 }
 
-test "2.14 LLIR lowering: shifts lower to the unified family and fuse counts" {
+test "LLIR lowering: shifts lower to the unified family and fuse counts" {
     // The unified shift family (Instruction Set §5): `shl` shared by
     // int32/uint32 (left shift is bit-identical), `shr` arithmetic (i32,
     // sign-filling) and `shru` logical (u32, zero-filling). A constant
@@ -190,9 +190,9 @@ test "2.14 LLIR lowering: shifts lower to the unified family and fuse counts" {
     try testing.expectEqual(@as(usize, 1), n_shrui);
 }
 
-test "2.14 LLIR lowering: u32 div/rem by a const fuses to the typed immediate form" {
+test "LLIR lowering: u32 div/rem by a const fuses to the typed immediate form" {
     // The typed `div.u32` register form lowers as one record (§4), and
-    // the fusion pass (2.14) rewrites it to `divi.u32` — the immediate
+    // the fusion pass rewrites it to `divi.u32` — the immediate
     // reads the dividend's canonical cell directly; no staging record
     // exists in v10. The fused constant's record is dropped by the
     // compaction.
@@ -246,7 +246,7 @@ test "2.14 LLIR lowering: u32 div/rem by a const fuses to the typed immediate fo
     }
 }
 
-test "2.14 LLIR lowering: bitwise ops lower to the unified family and fuse" {
+test "LLIR lowering: bitwise ops lower to the unified family and fuse" {
     // The unified bitwise family (Instruction Set §5): `and`/`or`/`xor`
     // are bit-identical on int32/uint32 (no signedness distinction). A
     // constant in the second operand position fuses to the immediate
@@ -341,7 +341,7 @@ test "2.14 LLIR lowering: bitwise ops lower to the unified family and fuse" {
     try testing.expectEqual(@as(usize, 1), n_xori2);
 }
 
-test "2.14 LLIR lowering: shift constants fold at construction" {
+test "LLIR lowering: shift constants fold at construction" {
     // On-the-fly folding (cfg_lower_emit.zig): a shift over constants
     // folds to the constant — `6 << 2` is 24 and `-16 >> 2` is -4
     // (arithmetic, sign-filling); the count is masked mod 32
@@ -364,7 +364,7 @@ test "2.14 LLIR lowering: shift constants fold at construction" {
     try testing.expect(std.mem.indexOf(u8, ir, "= const -2147483648") != null); // -1 << -1 → -1 << 31
 }
 
-test "2.14 LLIR lowering: fused const in a phi-bearing block keeps its own record" {
+test "LLIR lowering: fused const in a phi-bearing block keeps its own record" {
     // Regression: the peephole's pass-1 record positions must skip phis
     // (which occupy no record). The old walk advanced the index over phis,
     // so a fully-fused const after a phi got its *neighbor's* record
@@ -431,10 +431,10 @@ test "2.14 LLIR lowering: fused const in a phi-bearing block keeps its own recor
 
     // The loop block's records are, in order: [addi, slt,
     // copy dst, cond, blt, j] — the fused const left no record; the
-    // compare-and-branch (`lt %4, %0` fused) is the two-record form
-    // (stage 7): the back-edge carries a phi copy, so it routes through
+    // compare-and-branch (`lt %4, %0` fused) is the two-record form:
+    // the back-edge carries a phi copy, so it routes through
     // the LLIR-only edge block, and the trailing `j` carries the exit
-    // (which has no effects and is reached directly). The 2.7 phi copy
+    // (which has no effects and is reached directly). The phi copy
     // now lives in the edge block, not inline.
     const bid = b.block_ids.get(loop).?;
     const d = image.blocks[bid];
@@ -456,7 +456,7 @@ test "2.14 LLIR lowering: fused const in a phi-bearing block keeps its own recor
     try testing.expectEqual(b.pcOf(loop), ed.end_pc - 1 +% @as(u32, @bitCast(llir.decode(image.instructions[ed.end_pc - 1]).?.imm20)));
 }
 
-test "2.14 LLIR lowering: immediate semantics — raw bit patterns, commute, swap+flip, no-fuse cases" {
+test "LLIR lowering: immediate semantics — raw bit patterns, commute, swap+flip, no-fuse cases" {
     // Text-AIR gives precise control: -2's 7-bit pattern (0x7e,
     // sign-extended at decode), byte immediates in range, integer
     // eq/mul commuting, ordering swap+flip, and the no-fuse cases (an
@@ -644,7 +644,7 @@ test "2.14 LLIR lowering: immediate semantics — raw bit patterns, commute, swa
     try testing.expectEqual(@as(usize, 5), n_fused);
 }
 
-test "2.14 LLIR lowering: compaction re-backfills every absolute-PC reference" {
+test "LLIR lowering: compaction re-backfills every absolute-PC reference" {
     // Deleting a fused const shifts every later record; the pass must
     // re-backfill the block/function ranges, entry_pc, and the br/j
     // targets. @q's entry fuses its only const, so the `then`/`else`
@@ -714,7 +714,7 @@ test "2.14 LLIR lowering: compaction re-backfills every absolute-PC reference" {
     }
 }
 
-test "2.14 LLIR lowering: unsigned comparisons fuse to bltu/bleu" {
+test "LLIR lowering: unsigned comparisons fuse to bltu/bleu" {
     // A `u32` ordering comparison feeding a `br` fuses to the
     // unsigned compare-and-branch (`bltu`/`bleu`), mirroring the
     // signed `blt`/`ble` fusion — the operand order carries the
@@ -794,11 +794,11 @@ test "2.14 LLIR lowering: unsigned comparisons fuse to bltu/bleu" {
     try testing.expectEqual(b.pcOf(findBlock(le.blocks, "else")), llir.bTypeTarget(le_pc + 3, le_blt.offs10));
 }
 
-test "2.14 LLIR lowering: corpus fusion metric" {
+test "LLIR lowering: corpus fusion metric" {
     // Compiles each example, lowers it, and measures the fusion density
     // (Instruction Set §5): the code table never grows, every record
     // passes the schema check, and the immediate families appear at
-    // least once across the corpus (the 2.14 acceptance).
+    // least once across the corpus.
     const corpus = [_][]const u8{
         "examples/fib.st",
         "examples/fib_tail_call.st",
@@ -842,7 +842,7 @@ test "2.14 LLIR lowering: corpus fusion metric" {
         }
         if (std.Io.File.stderr().isTty(std.testing.io) catch false) {
             std.log.info(
-                "2.14 {s}: {d} -> {d} instrs ({d} bytes -> {d} bytes)",
+                "{s}: {d} -> {d} instrs ({d} bytes -> {d} bytes)",
                 .{ path, b.last_fusion.before_instrs, b.last_fusion.after_instrs, b.last_fusion.before_bytes, b.last_fusion.after_bytes },
             );
         }
@@ -850,7 +850,7 @@ test "2.14 LLIR lowering: corpus fusion metric" {
     try testing.expect(fused_any);
 }
 
-test "2.15 LLIR lowering: compiled mul+add folds to madd/maddi, literal list read to read_indexi" {
+test "LLIR lowering: compiled mul+add folds to madd/maddi, literal list read to read_indexi" {
     const src = try helpers.probeSource("probes/cases", "imm_madd_and_list_read");
     defer testing.allocator.free(src);
     var c = try compileText("app", &.{.{ "app", src }});
@@ -955,7 +955,7 @@ test "2.15 LLIR lowering: compiled mul+add folds to madd/maddi, literal list rea
     try testing.expect(checked_call_arg);
 }
 
-test "2.15 LLIR lowering: madd semantics — preconditions, f32 rules, slot rewrite, read_indexi" {
+test "LLIR lowering: madd semantics — preconditions, f32 rules, slot rewrite, read_indexi" {
     // Text-AIR control: the fused record sits at the add's PC with the
     // accumulator slot as dst; the mul record is deleted (compaction);
     // a later use of the result reads the accumulator's slot (rewrite).
@@ -1115,7 +1115,7 @@ test "2.15 LLIR lowering: madd semantics — preconditions, f32 rules, slot rewr
     try testing.expect(b.last_fusion.after_instrs < b.last_fusion.before_instrs);
 }
 
-test "2.15 LLIR lowering: corpus fused multiply-accumulate and immediate-index metric" {
+test "LLIR lowering: corpus fused multiply-accumulate and immediate-index metric" {
     const corpus = [_][]const u8{
         "examples/fib.st",
         "examples/fib_tail_call.st",
@@ -1166,13 +1166,13 @@ test "2.15 LLIR lowering: corpus fused multiply-accumulate and immediate-index m
         }
         if (std.Io.File.stderr().isTty(std.testing.io) catch false) {
             std.log.info(
-                "2.15 {s}: {d} -> {d} instrs ({d} bytes -> {d} bytes)",
+                "{s}: {d} -> {d} instrs ({d} bytes -> {d} bytes)",
                 .{ path, b.last_fusion.before_instrs, b.last_fusion.after_instrs, b.last_fusion.before_bytes, b.last_fusion.after_bytes },
             );
         }
     }
-    // Each fused family appears at least once across the corpus (the
-    // acceptance): madd.st contributes all three.
+    // Each fused family appears at least once across the corpus:
+    // madd.st contributes all three.
     try testing.expect(n_madd >= 1);
     try testing.expect(n_maddi >= 1);
     try testing.expect(n_read_indexi >= 1);
@@ -1193,7 +1193,7 @@ fn retRecord(b: *cfg_lower_llir.Builder, image: llir.LlirProgram, f: *const cfg.
     return null;
 }
 
-test "2.15 LLIR lowering: lifecycle fusion requires release src == move dst" {
+test "LLIR lowering: lifecycle fusion requires release src == move dst" {
     var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_state.deinit();
     const arena = arena_state.allocator();

@@ -1,7 +1,7 @@
 //! Shared CFG ordering utilities for the LLIR lowering passes — the
 //! successor walk, the DFS post-order/RPO construction, and the
 //! block-index lookup. Every pass that positions instructions (the
-//! 2.3 linear scan, the Step 8 result coalescing) must derive its
+//! linear scan, the Step 8 result coalescing) must derive its
 //! positions through these exact helpers: the liveness snapshots
 //! (`value_starts`/`value_ends`) and the coalescer's call-clobber
 //! check share one position space, so the orderings must never drift.

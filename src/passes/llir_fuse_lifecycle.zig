@@ -5,7 +5,7 @@
 //! → `replace_copy d, s`, `release d; move d, s` → `replace_move d, s`,
 //! and the block-final `release x; ret result` →
 //! `release_ret result, x` — with the non-phi record counts re-derived
-//! afterward. PCs still do not exist (2.16 linearizes afterward).
+//! afterward. PCs still do not exist (linearization assigns them afterward).
 const std = @import("std");
 const llir = @import("stilla").llir;
 const lower = @import("cfg_lower_llir.zig");

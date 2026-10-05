@@ -93,7 +93,7 @@ pub const Options = struct {
     /// The lattice provider (docs/effects.md §5.7): the instance's mode
     /// set and resource partial order. `compile` interns, validates, and
     /// freezes it once, then threads that one instance through effect
-    /// analysis, the M2b consumers, SEG, and every re-validation. Null =
+    /// analysis, the effect-driven consumers, SEG, and every re-validation. Null =
     /// the default `flat` instance over `resources`. Caller-owned.
     provider: ?*const effects.Provider = null,
     /// Host-semantics registry generation/version (docs/effects.md §13),
@@ -178,7 +178,7 @@ fn failed(
 /// Re-validate a rewritten HIR (docs/hir.md §2.4): structural checks on
 /// every function and const root, then a fresh effect analysis whose
 /// annotations must be `ready` and a sound over-approximation. Used after
-/// an in-place HIR transform (M2b consumers, SEG). Returns null or the
+/// an in-place HIR transform (effect-driven consumers, SEG). Returns null or the
 /// diagnostic to report.
 fn revalidateHir(arena_alloc: std.mem.Allocator, graph: *moduleinfo.ModuleGraph, built: *hir.BuiltProgram, host_decls: []const effects.HostDecl, resources: effects.ResourceRegistry, engine: *const effects.Engine, cache: *hir_effects.SummaryCache) CompileError!?moduleinfo.Diag {
     for (built.funcs.items) |rec| {
@@ -236,7 +236,7 @@ pub fn compile(allocator: std.mem.Allocator, options: Options) CompileError!Comp
 
     // The session's lattice instance (docs/effects.md §5.7): interned
     // and validated once, here, then read-only for the rest of the
-    // compile. Every consumer below (effect analysis, the M2b consumers,
+    // compile. Every consumer below (effect analysis, the effect consumers,
     // SEG, each re-validation) is handed this same instance, so no two
     // phases can disagree about the mode set or the resource order.
     const engine = effects.Engine.init(arena_alloc, options.provider, options.resources) catch |err| return engineError(err);
@@ -282,9 +282,9 @@ pub fn compile(allocator: std.mem.Allocator, options: Options) CompileError!Comp
         else => return err,
     };
 
-    // Phase 3: CFG lowering through the HIR seam (docs/hir.md §11 M1a):
+    // Phase 3: CFG lowering through the HIR seam (docs/hir.md §11):
     // the checker output is built into the canonical monomorphic HIR
-    // (`hir_build.buildProgramDiag`) and lowered from there. S6b removed
+    // (`hir_build.buildProgramDiag`) and lowered from there. This removed
     // the direct annotated-AST lowering and the `hir_stage` toggle.
     var lowerer = lower.Lowerer.init(arena_alloc, graph, options.entry_fn, options.entry_fn_explicit, &ck.annotation);
     var built_hir: ?*hir.BuiltProgram = null;
@@ -304,11 +304,11 @@ pub fn compile(allocator: std.mem.Allocator, options: Options) CompileError!Comp
         // The session's persistent summary cache (docs/effects.md §8.3):
         // owned by the compile arena so it outlives every short-lived
         // `Analysis` the pipeline constructs below. The initial analysis
-        // arms it with a full solve; each M2b / SEG round and every
+        // arms it with a full solve; each effect-driven / SEG round and every
         // `revalidateHir` then reuse finalized summaries and re-solve only
         // the SCCs a rewriter marked dirty.
         const summary_cache = hir_effects.SummaryCache.init(arena_alloc) catch return error.OutOfMemory;
-        // M1b seam order (docs/hir.md §2.3/§10.1): structural validation
+        // Seam order (docs/hir.md §2.3/§10.1): structural validation
         // first, then effect analysis and annotation validation. The
         // structural gate is what makes the effect walk safe on a
         // malformed arena; the effect annotations are additive metadata
@@ -344,7 +344,7 @@ pub fn compile(allocator: std.mem.Allocator, options: Options) CompileError!Comp
             }}, graph, builder.loaded_sources.items);
         }
         if (options.optimize.hir) {
-            // M2b effect-driven consumers (hir.md §11): dead-let +
+            // Effect-driven consumers (hir.md §11): dead-let +
             // selective A-Normal Form, then re-validate structure and
             // effects on the rewritten program (hir.md §2.4).
             _ = hir_simplify.optimize(arena_alloc, built, .{
@@ -362,7 +362,7 @@ pub fn compile(allocator: std.mem.Allocator, options: Options) CompileError!Comp
             }
         }
         if (options.optimize.seg) {
-            // M2a SEG (hir.md §11): rewrite islands after the validated
+            // SEG (hir.md §11): rewrite islands after the validated
             // effect analysis, then re-validate structure and effects on
             // the rewritten program (hir.md §2.4 — a transform may not
             // assume the pre-rewrite static conclusions still hold).

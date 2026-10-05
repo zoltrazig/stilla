@@ -21,7 +21,7 @@ const opcodes = @import("llir_opcodes.zig");
 
 /// The symbolic assembly projection of a frozen `LlirProgram` image.
 /// Re-exported here so callers can render assembly purely through the
-/// LLIR module (5.2); the implementation lives in
+/// LLIR module; the implementation lives in
 /// `passes/llir_asm.zig` and reads names only from the source
 /// `cfg.IrProgram` (the image itself carries no names). `asm` is a Zig
 /// keyword, so the renamed binding uses the `llir.print` spelling.

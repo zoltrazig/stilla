@@ -593,7 +593,7 @@ pub fn internDestructureDesc(bld: *Builder, kind: llir.DestructureKind, base: *c
 /// Intern a switch descriptor: one arm per `cfg.SwitchArm` — tag
 /// and the arm's routed target `BlockId` (a symbolic target;
 /// linearization resolves it to the arm's signed offset from the
-/// `switch` instruction's own pc). Routing (stage 7) sends each arm
+/// `switch` instruction's own pc). Routing sends each arm
 /// through its edge block when the edge carries phi copies or lifecycle
 /// kills, so the arm's target is the LLIR-only edge block when present,
 /// else the successor block itself. From

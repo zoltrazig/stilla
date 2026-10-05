@@ -1,7 +1,7 @@
 //! Black-box object-lifecycle interpreter tests: heap pointers/provenance, string
 //! equality/hash, list/box/union construction and consuming destructure, counted
 //! release/copy_retain, drop hooks and module teardown, and the path-specific edge
-//! effects (stage 7.1/7.2) and the host-resource registry.
+//! effects and the host-resource registry.
 
 const std = @import("std");
 const llir = @import("llir.zig");
@@ -39,7 +39,7 @@ const runHandImage = support.runHandImage;
 const primType = support.primType;
 
 // ---------------------------------------------------------------------------
-// Phase 3 — full pointers, object provenance, lifecycle (TODO.md 阶段 3)
+// Full pointers, object provenance, lifecycle
 // ---------------------------------------------------------------------------
 
 test "empty list: the all-zero cell is the only legal null" {
@@ -379,15 +379,15 @@ test "release_ret fuses release+ret: the cleanup source dies with the frame" {
 }
 
 // ---------------------------------------------------------------------------
-// Stage 7 — path-specific edge effects (TODO.md 阶段 7)
+// Path-specific edge effects
 // ---------------------------------------------------------------------------
 
-test "stage 7.2: counted value released on one outgoing edge stays live on its sibling" {
+test "edge: counted value released on one outgoing edge stays live on its sibling" {
     // `s` (a counted `str`) is read only on the then path (`print`). On
     // the else path it is never read, so it dies at the merge: the
     // release must ride the `br`→else edge — an LLIR-only edge block
     // that runs after the branch — and not before the terminator. Before
-    // stage 7, per-edge kills were never emitted and `s` leaked. Run both
+    // Previously, per-edge kills were never emitted and `s` leaked. Run both
     // paths: else exercises the edge block; then the in-block trailing
     // release.
     const Sink = struct {
@@ -410,7 +410,7 @@ test "stage 7.2: counted value released on one outgoing edge stays live on its s
                     switch (t) {
                         .normal => |v| result = v,
                         .panic => |m| {
-                            std.log.err("stage7 panic: {s}", .{m});
+                            std.log.err("panic: {s}", .{m});
                             testing.allocator.free(m);
                             return error.TestUnexpectedResult;
                         },
@@ -505,13 +505,13 @@ test "chained if-else str merges: an else arm returning the previous value" {
     try testing.expectEqual(@as(Value, 1), result orelse return error.TestUnexpectedResult);
 }
 
-test "stage 7.1: a switch executes only the selected arm's effects" {
+test "switch: a switch executes only the selected arm's effects" {
     // A `match` lowers to a `switch` whose arms carry distinct effects.
-    // Stage-7 edge blocks route each arm through its own LLIR-only block,
+    // Edge blocks route each arm through its own LLIR-only block,
     // so selecting `R::A` runs only arm A's body and returns 1 — arm B's
     // effect (2) never executes. (Path-specific phi-copy separation itself
-    // is pinned structurally in frontend_llir_core_tests stage 7.1, and
-    // the lifecycle half at runtime by the stage-7.2 interpreter test.)
+    // is pinned structurally in frontend_llir_core_tests, and
+    // the lifecycle half at runtime by the edge interpreter test.)
     var l = try load(
         \\union R { A, B }
         \\fn pick(r: R) -> int32 {
@@ -532,7 +532,7 @@ test "stage 7.1: a switch executes only the selected arm's effects" {
             switch (t) {
                 .normal => |v| result = v,
                 .panic => |m| {
-                    std.log.err("stage7 switch panic: {s}", .{m});
+                    std.log.err("switch panic: {s}", .{m});
                     testing.allocator.free(m);
                     return error.TestUnexpectedResult;
                 },

@@ -6,7 +6,7 @@
 //! register/special schemas,
 //! immediate and ID bounds, branch/call targets, the take
 //! contract, block terminators, `cond` lifetime, frame layout), so the
-//! old phase-1 plan tests are gone and the stage-2 typed-matrix tests
+//! typed-matrix tests
 //! now assert structural validity of the type-specialized opcodes.
 //! `LoweredImage`, `lowerForValidation`, `firstPcOf`, and
 //! `expectRejected` are local to this file.
@@ -28,7 +28,7 @@ const helpers = @import("frontend_test_support.zig");
 const compileText = helpers.compileText;
 const compileOpt = helpers.compileOpt;
 
-/// Phase 3.1 helper: parse a text-AIR program and lower it to a LLIR
+/// Helper: parse a text-AIR program and lower it to a LLIR
 /// image, keeping both arenas alive so the tests can corrupt the image
 /// in place (via `@constCast`) and re-validate.
 const LoweredImage = struct {
@@ -71,7 +71,7 @@ fn expectRejected(image: *const llir.LlirProgram, needle: []const u8) !void {
     try testing.expect(std.mem.indexOf(u8, msg, needle) != null);
 }
 
-test "3.1 LLIR validation: valid lowered images pass" {
+test "LLIR validation: valid lowered images pass" {
     // Text AIR: arithmetic, comparison, a branch, a direct call, a
     // fn_ref, and void/value rets.
     var li = try lowerForValidation(
@@ -99,7 +99,7 @@ test "3.1 LLIR validation: valid lowered images pass" {
     defer li.arena.deinit();
     if (try llir_validate.validate(&li.image, testing.allocator)) |m| {
         defer testing.allocator.free(m);
-        std.log.err("3.1 valid image rejected: {s}", .{m});
+        std.log.err("valid image rejected: {s}", .{m});
         return error.TestUnexpectedResult;
     }
 
@@ -122,13 +122,13 @@ test "3.1 LLIR validation: valid lowered images pass" {
         const image = try b.lowerLlir();
         if (try llir_validate.validate(&image, testing.allocator)) |m| {
             defer testing.allocator.free(m);
-            std.log.err("3.1 valid image rejected for {s}: {s}", .{ path, m });
+            std.log.err("valid image rejected for {s}: {s}", .{ path, m });
             return error.TestUnexpectedResult;
         }
     }
 }
 
-test "3.1 LLIR validation: invalid FunctionId (fn_ref out of range)" {
+test "LLIR validation: invalid FunctionId (fn_ref out of range)" {
     var li = try lowerForValidation(
         \\module "app" {
         \\    func @callee() -> void {
@@ -150,7 +150,7 @@ test "3.1 LLIR validation: invalid FunctionId (fn_ref out of range)" {
     try expectRejected(&li.image, "fn_ref FunctionId");
 }
 
-test "3.1 LLIR validation: cross-function and out-of-range branch offsets" {
+test "LLIR validation: cross-function and out-of-range branch offsets" {
     var li = try lowerForValidation(
         \\module "app" {
         \\    func @callee() -> void {
@@ -189,7 +189,7 @@ test "3.1 LLIR validation: cross-function and out-of-range branch offsets" {
     try expectRejected(&li.image, "lies outside this function's code range");
 }
 
-test "3.1 LLIR validation: overlapping function code ranges" {
+test "LLIR validation: overlapping function code ranges" {
     var li = try lowerForValidation(
         \\module "app" {
         \\    func @f() -> void {
@@ -210,9 +210,9 @@ test "3.1 LLIR validation: overlapping function code ranges" {
     try expectRejected(&li.image, "does not tile");
 }
 
-test "3.1 LLIR validation: out-of-frame register operand" {
+test "LLIR validation: out-of-frame register operand" {
     // A register-register add: a `const` + op pair would be fused by
-    // the peephole (2.14) into an immediate variant, so no `add`
+    // the peephole into an immediate variant, so no `add`
     // record would exist to corrupt.
     var li = try lowerForValidation(
         \\module "app" {
@@ -234,7 +234,7 @@ test "3.1 LLIR validation: out-of-frame register operand" {
     try expectRejected(&li.image, "register operand is neither a slot nor a special register");
 }
 
-test "3.1 LLIR validation: wrong destructure descriptor kind" {
+test "LLIR validation: wrong destructure descriptor kind" {
     var li = try lowerForValidation(
         \\module "app" {
         \\    func @f(p: Pair) -> int32 {
@@ -253,7 +253,7 @@ test "3.1 LLIR validation: wrong destructure descriptor kind" {
     try expectRejected(&li.image, "destructure descriptor kind mismatch");
 }
 
-test "3.1 LLIR validation: wrong take source after a non-void call" {
+test "LLIR validation: wrong take source after a non-void call" {
     // The v10 call-shape contract: a non-void `jal ra` call must be
     // followed by `take dst, F(L+3+O-A)` — the take's source register is
     // the caller's result alias (Instruction Set §6, §14). A forged
@@ -296,7 +296,7 @@ test "3.1 LLIR validation: wrong take source after a non-void call" {
     try expectRejected(&li2.image, "non-void call take must source");
 }
 
-test "3.1 LLIR validation: register operand that is neither a slot nor a special" {
+test "LLIR validation: register operand that is neither a slot nor a special" {
     var li = try lowerForValidation(
         \\module "app" {
         \\    func @f(a: int32, b: int32) -> int32 {
@@ -317,7 +317,7 @@ test "3.1 LLIR validation: register operand that is neither a slot nor a special
     try expectRejected(&li.image, "register operand is neither a slot nor a special register");
 }
 
-test "3.1 LLIR validation: stack/frame-size overflow" {
+test "LLIR validation: stack/frame-size overflow" {
     var li = try lowerForValidation(
         \\module "app" {
         \\    func @f() -> void {
@@ -335,7 +335,7 @@ test "3.1 LLIR validation: stack/frame-size overflow" {
     try expectRejected(&li.image, "frame too big");
 }
 
-test "3.1 LLIR validation: jr is a terminator with a real-slot base and imm offset" {
+test "LLIR validation: jr is a terminator with a real-slot base and imm offset" {
     var li = try lowerForValidation(
         \\module "app" {
         \\    func @f(a: bool) -> bool {
@@ -367,7 +367,7 @@ test "3.1 LLIR validation: jr is a terminator with a real-slot base and imm offs
     try expectRejected(&li.image, "register operand is neither a slot nor a special register");
 }
 
-test "3.1 LLIR validation: auipc is not a terminator; its imm20 spans the U fields" {
+test "LLIR validation: auipc is not a terminator; its imm20 spans the U fields" {
     var li = try lowerForValidation(
         \\module "app" {
         \\    func @f(a: bool) -> bool {
@@ -396,7 +396,7 @@ test "3.1 LLIR validation: auipc is not a terminator; its imm20 spans the U fiel
     try testing.expectEqual(@as(u64, @as(u64, ret_pc) -% 4096), llir.auipcTarget(ret_pc, d.imm20));
 }
 
-test "3.1 LLIR validation: trap's reserved reason field must be zero" {
+test "LLIR validation: trap's reserved reason field must be zero" {
     var li = try lowerForValidation(
         \\module "app" {
         \\    func @f(a: int32, b: int32) -> int32 {
@@ -422,7 +422,7 @@ test "3.1 LLIR validation: trap's reserved reason field must be zero" {
     try expectRejected(&li.image, "nonzero");
 }
 
-test "3.1 LLIR validation: jalr base is schema-checked (a special is rejected)" {
+test "LLIR validation: jalr base is schema-checked (a special is rejected)" {
     // An indirect call is `jalr base, offs16`: the base is a function-
     // value register (`.src`), never a special. Rewriting it to `cond`
     // is a forged record.
@@ -444,7 +444,7 @@ test "3.1 LLIR validation: jalr base is schema-checked (a special is rejected)" 
     try expectRejected(&image, "register operand is neither a slot nor a special register");
 }
 
-test "3.1 LLIR validation: forged store_member row id is rejected before any dataflow" {
+test "LLIR validation: forged store_member row id is rejected before any dataflow" {
     // `store_member`'s member row id spans imm16; a forged id must be
     // caught by the shape check — not by an out-of-bounds
     // `member_descs` read in a later pass.
@@ -478,9 +478,9 @@ test "3.1 LLIR validation: forged store_member row id is rejected before any dat
 }
 
 // ---------------------------------------------------------------------------
-// The phase-1 typed-dataflow verifier and its execution plan were deleted
+// The typed-dataflow verifier and its execution plan were deleted
 // (v9 opcodes carry their reps; the loader validates shapes only). The
-// former phase-1 rejections (join type conflicts, T
+// former rejections (join type conflicts, T
 // staging across calls, zero-source cmovs, non-counted releases, return
 // type mismatches) have no structural counterpart and are gone. What
 // remains is structural: positive coverage of loop/phi and slot-reuse
@@ -497,7 +497,7 @@ fn primRowIn(image: *const llir.LlirProgram, p: llir.PrimitiveId) ?u32 {
     return null;
 }
 
-test "phase-1 structural: loop and slot-reuse fixtures validate" {
+test "structural: loop and slot-reuse fixtures validate" {
     // Loop: the join merges identical types on both edges; the
     // compare-and-branches and the trailing `j`s stay in range.
     var li = try lowerForValidation(
@@ -548,7 +548,7 @@ test "phase-1 structural: loop and slot-reuse fixtures validate" {
     }
 }
 
-test "phase-1 structural: forged unknown PrimitiveId type rows are rejected" {
+test "structural: forged unknown PrimitiveId type rows are rejected" {
     // A type row naming a primitive id above the frozen set (f64 is the
     // last) is a forged image — the side-table walk rejects it before
     // any instruction is interpreted.
@@ -583,12 +583,12 @@ test "phase-1 structural: forged unknown PrimitiveId type rows are rejected" {
 }
 
 // ---------------------------------------------------------------------------
-// Stage-2 — structural coverage of the type-specialized opcode families
+// Structural coverage of the type-specialized opcode families
 // (the v9 structural validation): the
 // i64/u64 integer family, the f64 family, the conversion matrix, the
 // move-wide lane opcodes, and the reserved/unassigned word rejections.
 // The hand-built images exercise the codec and the register/immediate
-// schemas; the old per-PC plan-rep assertions are gone with the plan.
+// schemas; the old per-PC rep assertions are gone.
 // ---------------------------------------------------------------------------
 
 /// Primitive type rows in row order: byte, bool, int32, uint32, float32,
@@ -737,7 +737,7 @@ fn expectValid(image: *const llir.LlirProgram) !void {
     }
 }
 
-test "stage-2 structural: move-wide legal matrix" {
+test "structural: move-wide legal matrix" {
     // movwz defines, movwk read-modify-writes, movwn complements —
     // all twelve opcodes across the four lanes, with the 0x0000 /
     // 0xffff boundaries, on one cell.
@@ -774,7 +774,7 @@ test "stage-2 structural: move-wide legal matrix" {
     try expectValid(&image2);
 }
 
-test "stage-2 structural: movw dst forbids the zero special" {
+test "structural: movw dst forbids the zero special" {
     // The move-wide destination is a real cell (`.dst_movw`): writing
     // `zero` is rejected by the register schema.
     var image5 = blk: {
@@ -788,7 +788,7 @@ test "stage-2 structural: movw dst forbids the zero special" {
     try expectRejected(&image5, "register operand is neither a slot nor a special register");
 }
 
-test "stage-2 structural: reserved and unassigned words are rejected" {
+test "structural: reserved and unassigned words are rejected" {
     var image = blk: {
         var st: ImageStorage = .{};
         break :blk buildImage(&.{
@@ -807,7 +807,7 @@ test "stage-2 structural: reserved and unassigned words are rejected" {
     try expectRejected(&image, "reserved or unknown");
 }
 
-test "stage-2 structural: i64/u64 integer family matrix" {
+test "structural: i64/u64 integer family matrix" {
     // Legal: signed ops on i64, unified ops on both widths, a C-type
     // comparison, and a 64-bit compare-and-branch.
     const image = blk: {
@@ -853,7 +853,7 @@ test "stage-2 structural: i64/u64 integer family matrix" {
     try expectRejected(&image3, "immediate out of range");
 }
 
-test "stage-2 structural: f64 family matrix" {
+test "structural: f64 family matrix" {
     // Legal: the binary/unary/comparison family on f64 operands. The
     // `gt` predicate is an operand-swap alias of `slt` (no opcode);
     // `copysign` has no direct opcode and is synthesized.
@@ -879,7 +879,7 @@ test "stage-2 structural: f64 family matrix" {
     try expectValid(&image);
 }
 
-test "stage-2 structural: cond lifetime — reads before an in-block definition" {
+test "structural: cond lifetime — reads before an in-block definition" {
     // A `copy F0, cond` with no preceding C-type comparison in the
     // block reads an undefined cond (Instruction Set §7, §14): the
     // register schema accepts the record, the lifetime check rejects
@@ -906,7 +906,7 @@ test "stage-2 structural: cond lifetime — reads before an in-block definition"
     try expectRejected(&image2, "cmov reads cond");
 }
 
-test "stage-2 structural: conversion matrix" {
+test "structural: conversion matrix" {
     // The explicit `cvt.<src>.<dst>` spellings (Instruction Set §4): the
     // 20 cast pairs among byte/i32/u32/f32/f64. C format: `a` = dst,
     // `b` = src; identity entries have no opcode.
@@ -1046,7 +1046,7 @@ test "stage-2 structural: conversion matrix" {
 }
 
 // ---------------------------------------------------------------------------
-// Stage-2 — the loader trust boundary (LLIR Specification §8.1):
+// Loader trust boundary (LLIR Specification §8.1):
 //
 // 1. Semantic-inconsistent images are ACCEPTED: `zero`'s Copy/void rules,
 //    typed-opcode vs metadata type consistency, T staging across calls,
@@ -1142,7 +1142,7 @@ fn buildCallImage(instrs: []const llir.Instr, window: u16, callee_ret: u32, st: 
     };
 }
 
-test "stage-2 semantic trust: ret zero and take zero accept any result type" {
+test "semantic trust: ret zero and take zero accept any result type" {
     // `ret zero` of a `str` return: the Copy-numeric restriction on
     // `zero` is a frontend invariant (§3.1) — the loader accepts the
     // zero source.
@@ -1205,7 +1205,7 @@ test "stage-2 semantic trust: ret zero and take zero accept any result type" {
     try expectValid(&li2.image);
 }
 
-test "stage-2 semantic trust: opcode reps are not re-derived from the type table" {
+test "semantic trust: opcode reps are not re-derived from the type table" {
     // `add` over cells whose constants are typed int32: the rep is
     // fixed by the decoded opcode and the descriptor-carried types are
     // never cross-checked (§8.1 — no typed dataflow analysis). A
@@ -1221,7 +1221,7 @@ test "stage-2 semantic trust: opcode reps are not re-derived from the type table
     try expectValid(&image);
 }
 
-test "stage-2 semantic trust: a T staging value may be live across a call" {
+test "semantic trust: a T staging value may be live across a call" {
     // `move T0, F0` stages the value into T, `jal ra` clobbers the whole
     // T bank (spec §3.2), and `ret T0` reads it afterwards: staging
     // liveness across a call is a frontend guarantee — the loader
@@ -1235,7 +1235,7 @@ test "stage-2 semantic trust: a T staging value may be live across a call" {
     try expectValid(&image);
 }
 
-test "stage-2 semantic trust: duplicate slot_move into one window cell validates" {
+test "semantic trust: duplicate slot_move into one window cell validates" {
     // Two `slot_move F0, 0` records target the same window offset: the
     // argument ownership sequence is a frontend guarantee (§8.1) — the
     // loader checks only the offset bound.
@@ -1249,7 +1249,7 @@ test "stage-2 semantic trust: duplicate slot_move into one window cell validates
     try expectValid(&image);
 }
 
-test "stage-2 semantic trust: jal ra to a signature-incompatible entry validates" {
+test "semantic trust: jal ra to a signature-incompatible entry validates" {
     // The static target must be a *function entry* (structural, §14);
     // the result-type match at a call site is the frontend's guarantee
     // (§5.2) — the loader never compares signatures. The caller is
@@ -1268,7 +1268,7 @@ test "stage-2 semantic trust: jal ra to a signature-incompatible entry validates
     try expectValid(&image);
 }
 
-test "3.1 LLIR validation: block start_pc does not tile the code range" {
+test "LLIR validation: block start_pc does not tile the code range" {
     var li = try lowerForValidation(
         \\module "app" {
         \\    func @f(a: bool) -> bool {
@@ -1289,7 +1289,7 @@ test "3.1 LLIR validation: block start_pc does not tile the code range" {
     try expectRejected(&li.image, "does not tile");
 }
 
-test "3.1 LLIR validation: entry_pc outside the code range or not a block start" {
+test "LLIR validation: entry_pc outside the code range or not a block start" {
     // A two-instruction entry block (`add` + `ret`): pc 1 is mid-block.
     var li = try lowerForValidation(
         \\module "app" {
@@ -1308,7 +1308,7 @@ test "3.1 LLIR validation: entry_pc outside the code range or not a block start"
     try expectRejected(&li.image, "outside the code range");
 }
 
-test "3.1 LLIR validation: mid-block terminator is rejected" {
+test "LLIR validation: mid-block terminator is rejected" {
     // The entry block is `add` + `ret`; rewriting the `add` to a `ret`
     // puts a terminator before the block end (the two legal mid-block
     // forms — a `jal ra` call and the long-branch `j` — are
@@ -1329,7 +1329,7 @@ test "3.1 LLIR validation: mid-block terminator is rejected" {
     try expectRejected(&li.image, "is not at the block end");
 }
 
-test "3.1 LLIR validation: jal ra target must be a function entry" {
+test "LLIR validation: jal ra target must be a function entry" {
     // A mid-block pc (1) is not any function's entry: the static call
     // target shape is structural (Instruction Set §14).
     var st: CallStorage = .{};
@@ -1340,7 +1340,7 @@ test "3.1 LLIR validation: jal ra target must be a function entry" {
     try expectRejected(&image, "is not a function entry");
 }
 
-test "3.1 LLIR validation: j target must stay inside the current function" {
+test "LLIR validation: j target must stay inside the current function" {
     // `j` is the unconditional intra-function jump: a cross-function
     // target is rejected (the callee entry at pc 2 lies in the callee's
     // range). A `jal`-with-`zero` link is not a legal jump at all
@@ -1353,7 +1353,7 @@ test "3.1 LLIR validation: j target must stay inside the current function" {
     try expectRejected(&image, "lies outside this function's code range");
 }
 
-test "3.1 LLIR validation: spill XId and arg window offsets out of range" {
+test "LLIR validation: spill XId and arg window offsets out of range" {
     // One spill cell and one window cell; both records address slot 1.
     var st: ImageStorage = .{};
     var image = buildImage(&.{
@@ -1368,7 +1368,7 @@ test "3.1 LLIR validation: spill XId and arg window offsets out of range" {
     try expectRejected(&image, "arg offset 1 outside the window");
 }
 
-test "3.1 LLIR validation: x_count beyond the imm16 addressable bound" {
+test "LLIR validation: x_count beyond the imm16 addressable bound" {
     var li = try lowerForValidation(
         \\module "app" {
         \\    func @f() -> void {
@@ -1383,7 +1383,7 @@ test "3.1 LLIR validation: x_count beyond the imm16 addressable bound" {
     try expectRejected(&li.image, "exceeds the imm16 addressable maximum");
 }
 
-test "3.1 LLIR validation: const id, forged string range, and unknown ConstKind" {
+test "LLIR validation: const id, forged string range, and unknown ConstKind" {
     // A `const` record naming a ConstId with no constants.
     var st: ImageStorage = .{};
     const empty_consts = buildImage(&.{
@@ -1411,7 +1411,7 @@ test "3.1 LLIR validation: const id, forged string range, and unknown ConstKind"
     // (frontend_llir_bin_tests.zig).
 }
 
-test "3.1 LLIR validation: per-function signature_id out of range; forged symbol ranges" {
+test "LLIR validation: per-function signature_id out of range; forged symbol ranges" {
     var li = try lowerForValidation(
         \\module "app" {
         \\    func @f() -> void {
@@ -1426,7 +1426,7 @@ test "3.1 LLIR validation: per-function signature_id out of range; forged symbol
     try expectRejected(&li.image, "signature_id");
     @constCast(li.image.functions)[0].signature_id = 0;
 
-    // M1: a forged symbol range outside the strings blob is rejected
+    // A forged symbol range outside the strings blob is rejected
     // (symbol bytes become the module identity — spec §13).
     const good_range = li.image.symbols[li.image.self_symbol];
     var mutated = li.image;
@@ -1438,7 +1438,7 @@ test "3.1 LLIR validation: per-function signature_id out of range; forged symbol
     try testing.expectEqual(@as(?[]const u8, null), try llir_validate.validate(&li.image, testing.allocator));
 }
 
-test "stage-2 structural: duplicate switch arm tags are rejected" {
+test "structural: duplicate switch arm tags are rejected" {
     var st: ImageStorage = .{};
     const image = buildImage(&.{
         ir(.switch_, 0, 0, 0),
@@ -1451,7 +1451,7 @@ test "stage-2 structural: duplicate switch arm tags are rejected" {
     try expectRejected(&mutated, "duplicate arm tag");
 }
 
-test "stage-2: valid images of 1 and 10,000 instructions validate with 0 allocations" {
+test "valid images of 1 and 10,000 instructions validate with 0 allocations" {
     // A valid image never reaches the allocator: the failing allocator
     // (fail on the first allocation) must go untouched — any happy-path
     // allocation surfaces as `error.OutOfMemory` and fails the test
@@ -1474,7 +1474,7 @@ test "stage-2: valid images of 1 and 10,000 instructions validate with 0 allocat
     try testing.expect((try llir_validate.validate(&ten_k, failing_alloc)) == null);
 }
 
-test "stage-2: raw-word mutation corpus never panics (Debug and ReleaseSafe)" {
+test "raw-word mutation corpus never panics (Debug and ReleaseSafe)" {
     // Mutate every byte of every instruction word of a six-format image
     // to every byte value: `validate` must return a message (freed) or
     // null — it must never panic, index out of bounds, or assert. The
@@ -1530,8 +1530,8 @@ test "stage-2: raw-word mutation corpus never panics (Debug and ReleaseSafe)" {
 }
 
 // ---------------------------------------------------------------------------
-// Stage 3.2 — the structural-validator fixture slate (TODO.md §3.2).
-// Each item in the TODO's 3.2 checklist has at least one fixture here: every
+// The structural-validator fixture slate.
+// Each item has at least one fixture here: every
 // format's reserved code plus the top `10` class, opcode-specific register/
 // special schemas and the F/T frame bounds, the opcode-specific unused
 // operand-bit rejections, the 109/110 frame budget, the C-Type cast vs
@@ -1543,7 +1543,7 @@ test "stage-2: raw-word mutation corpus never panics (Debug and ReleaseSafe)" {
 // `checkCondLifetime` in llir_validate.zig.
 // ---------------------------------------------------------------------------
 
-test "3.2 validation: reserved codes in every format and the top-level 10 class" {
+test "validation: reserved codes in every format and the top-level 10 class" {
     var st: ImageStorage = .{};
     const image = buildImage(&.{
         ir(.movwz0, 0, 1, 0),
@@ -1568,7 +1568,7 @@ test "3.2 validation: reserved codes in every format and the top-level 10 class"
     @constCast(image.instructions)[1] = llir.instrE(.ret, 0, 0);
 }
 
-test "3.2 validation: opcode-specific register class and F/T frame bounds" {
+test "validation: opcode-specific register class and F/T frame bounds" {
     // A frame-only source field (`slot_move`'s `a` is `.src_f`) rejects a
     // T register just as it would an out-of-frame slot.
     var st: ImageStorage = .{};
@@ -1596,7 +1596,7 @@ test "3.2 validation: opcode-specific register class and F/T frame bounds" {
     try expectRejected(&image3, "register operand is neither a slot nor a special register");
 }
 
-test "3.2 validation: opcode-specific nonzero unused operand bits" {
+test "validation: opcode-specific nonzero unused operand bits" {
     // `tail` is `dst, src_real, none`: a nonzero third field is an unused
     // operand bit (an R-format counterpart of trap's reserved reason).
     var st: ImageStorage = .{};
@@ -1607,7 +1607,7 @@ test "3.2 validation: opcode-specific nonzero unused operand bits" {
     try expectRejected(&image, "nonzero unused field");
 }
 
-test "3.2 validation: frame budget -- 109 succeeds, 110 rejects" {
+test "validation: frame budget -- 109 succeeds, 110 rejects" {
     var st: ImageStorage = .{};
     // A 109-frame function validates: F0..F108 max out the F bank without
     // colliding with the specials (frame_count_max = 109).
@@ -1628,7 +1628,7 @@ test "3.2 validation: frame budget -- 109 succeeds, 110 rejects" {
     try expectRejected(&boundary, "frame too big");
 }
 
-test "3.2 validation: C-type cast vs comparison operand roles" {
+test "validation: C-type cast vs comparison operand roles" {
     var st: ImageStorage = .{};
     // A cast is `a = dst, b = src`; `cond` is not a legal cast destination.
     const image = buildImage(&.{
@@ -1657,7 +1657,7 @@ test "3.2 validation: C-type cast vs comparison operand roles" {
     try expectValid(&ok);
 }
 
-test "3.2 validation: cond read across a call and across a block boundary" {
+test "validation: cond read across a call and across a block boundary" {
     // A comparison defines cond, `jal ra` clobbers the whole cond
     // availability, and a `copy` reads it afterwards: the call makes cond
     // unavailable (Instruction Set §3.2). The caller is `() -> int32`, the
@@ -1683,7 +1683,7 @@ test "3.2 validation: cond read across a call and across a block boundary" {
     try expectRejected(&image2, "cond read before any in-block definition");
 }
 
-test "3.2 validation: cond lives across a non-cond instruction within a block" {
+test "validation: cond lives across a non-cond instruction within a block" {
     // A comparison defines cond, an unrelated R add does not touch it, and a
     // `cmov` still reads it: the block-local lifetime is requirement-based,
     // not physical-adjoining (Instruction Set §7).
@@ -1697,7 +1697,7 @@ test "3.2 validation: cond lives across a non-cond instruction within a block" {
     try expectValid(&image);
 }
 
-test "3.2 validation: B-type register/immediate/bit-test operand schemas" {
+test "validation: B-type register/immediate/bit-test operand schemas" {
     // The three B-type operand schemas: register branches (beq..bleu and the
     // f32/f64 variants), immediate branches (blti/bltiu/beqi/bnei), and the
     // bit-test branches (tbz/tbnz). Each branch targets the next block.
@@ -1726,7 +1726,7 @@ test "3.2 validation: B-type register/immediate/bit-test operand schemas" {
     try expectRejected(&bad, "register operand is neither a slot nor a special register");
 }
 
-test "3.2 validation: tbz/tbnz bit-index highest bit and the 64 bound" {
+test "validation: tbz/tbnz bit-index highest bit and the 64 bound" {
     // Both bit-test branches schema-bind the bit index to 0..63 (the imm7
     // field's high bit must be zero). bit 64 and bit 127 (high bit set) are
     // both rejected, with a small offset so the block still reads as a
@@ -1750,7 +1750,7 @@ test "3.2 validation: tbz/tbnz bit-index highest bit and the 64 bound" {
     try expectValid(&ok63);
 }
 
-test "3.2 validation: jalr implicit ra, base schema, and signed offs16" {
+test "validation: jalr implicit ra, base schema, and signed offs16" {
     // `jalr base, offs16`: the link destination is the fixed, un-encoded `ra`
     // token; the record's only register operand is the base (`.src`). A real
     // base with a negative offs16 accepts.

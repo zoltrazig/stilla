@@ -31,7 +31,7 @@ const funcBody = helpers.funcBody;
 const findFunc = helpers.findFunc;
 
 // ---------------------------------------------------------------------------
-// First-class function values: synthesized wrapper IrFuncs (phase 3)
+// First-class function values: synthesized wrapper IrFuncs
 // ---------------------------------------------------------------------------
 
 test "first-class intrinsic value lowers to a synthesized wrapper fn_ref" {
@@ -202,7 +202,7 @@ test "math constants materialize as typed literals with the specified bits" {
     }
 
     const program = &c.program.?;
-    // (member, expected f32 bit pattern) — the phase-0 contract table,
+    // (member, expected f32 bit pattern) — the contract table,
     // verified against Zig `std.math`.
     const cases = [_]struct { name: []const u8, bits: u32 }{
         .{ .name = "app.get_pi", .bits = 0x40490FDB },
@@ -383,7 +383,7 @@ test "first-class synthesis validates against the expansion table too" {
 }
 
 // ---------------------------------------------------------------------------
-// Canonical member tables and slots (phase 4)
+// Canonical member tables and slots
 // ---------------------------------------------------------------------------
 
 /// The `IrModule` of a compiled program by specifier.
@@ -397,8 +397,8 @@ fn moduleOf(program: *const cfg.IrProgram, name: []const u8) *const cfg.IrModule
 test "all-intrinsic modules have empty member tables and empty slots" {
     // builtin/math/array: every value member is an intrinsic (air.md
     // §5.6) — no member row, no constant slot, and `@init` stays but
-    // stores nothing (the empty init is preserved, intrinsic plan
-    // phase 4). string/hashmap carry exactly one ordinary row each:
+    // stores nothing (the empty init is preserved).
+    // string/hashmap carry exactly one ordinary row each:
     // their `const builtin = import("builtin")` module value (a module
     // member is never intrinsic — it is a static reference).
     const src = try helpers.probeSource("probes/cases", "intrinsic_all_intrinsic_modules");
@@ -509,7 +509,7 @@ test "load_member emits the compacted canonical index" {
     // intrinsic rows are gone from the member table, so the emitted
     // `load_member` carries the compacted canonical index 6; the
     // trailing `.print` member then resolves through the intrinsic path
-    // to a synthesized wrapper fn_ref (phase 3) — no second member row.
+    // to a synthesized wrapper fn_ref — no second member row.
     const src = try helpers.probeSource("probes/cases", "intrinsic_load_member_compacted_index");
     defer testing.allocator.free(src);
     var c = try compileText("app", &.{.{ "app", src }});
@@ -531,7 +531,7 @@ test "load_member emits the compacted canonical index" {
 }
 
 // ---------------------------------------------------------------------------
-// Failure diagnostics (stage 5): supported-type constraints and no-entry
+// Failure diagnostics: supported-type constraints and no-entry
 // members fail before canonical AIR (Intrinsics §3)
 // ---------------------------------------------------------------------------
 
@@ -785,7 +785,7 @@ fn lowerWithBundleModule(app_source: []const u8, fut_source: []const u8, needle:
         else => return err,
     };
 
-    // S6b: the frontend lowers exclusively through the HIR seam — build
+    // The frontend lowers exclusively through the HIR seam — build
     // the canonical HIR from the checker output, then lower it. The
     // diagnostic may surface from either stage (builder or lowerer).
     var bdiag: moduleinfo.Diag = undefined;

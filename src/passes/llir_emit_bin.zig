@@ -1,11 +1,11 @@
 //! Pass: LLIR binary — flat serialization of a frozen `llir.LlirProgram`
-//! image (TODO 6.1) plus the minimal reader that reconstructs an
-//! in-memory image from the bytes (TODO 6.2). In: the read-only
+//! image plus the minimal reader that reconstructs an
+//! in-memory image from the bytes. In: the read-only
 //! `LlirProgram` (or its bytes). Out: a deterministic little-endian byte
 //! stream, or the field-equal in-memory image.
 //!
 //! The binary is the image **directly** serialized — no assembly text
-//! round-trip (TODO 6, "明确不采用": binary 由 image 直接序列化). It is a
+//! round-trip. It is a
 //! versioned logical format, not a stable persistence ABI (spec §8); the
 //! layout is documented here and is mirrored by `read`.
 //!
@@ -91,7 +91,7 @@ pub const magic: u32 = 0x52494c4c;
 /// Version 12: the header gains the entry `FunctionId` (one `u32`
 /// between `version` and the counts), so a binary is self-contained —
 /// `stilla --run <file>` needs no side information (interpreter-vm.md
-/// §13 M5, D3). `write` without an entry records 0.
+/// §13, D3). `write` without an entry records 0.
 /// Version 13: the operand-register re-encoding (Instruction Set §3) —
 /// the zero/cond/T fast bank at `0x00–0x11` (indexed directly) and the
 /// frame registers at `0x13–0x7f`. Every instruction word and every
@@ -210,8 +210,7 @@ comptime {
 }
 
 /// The serialized size of an image: the header plus every table's rows.
-/// `write` emits exactly this many bytes (`bytes.len == size(image)`,
-/// TODO 6.1 acceptance).
+/// `write` emits exactly this many bytes (`bytes.len == size(image)`).
 pub fn size(image: llir.LlirProgram) usize {
     var total = header_size;
     inline for (tables) |t| {
@@ -276,8 +275,8 @@ pub const Error = error{ OutOfMemory, InvalidFormat };
 /// All returned slices are allocated with `allocator` (strings are
 /// copied), so the image never aliases the input bytes; free with the
 /// allocator or drop an arena. The stream is bounds-checked before any
-/// table is parsed (TODO 6.2: the reader is the round-trip companion of
-/// `write`; load-time `validateLLIR` is a VM concern, stage 7 A3).
+/// table is parsed (the reader is the round-trip companion of
+/// `write`; load-time `validateLLIR` is a VM concern).
 pub fn read(allocator: std.mem.Allocator, bytes: []const u8) Error!llir.LlirProgram {
     var r = Reader{ .bytes = bytes };
     if (try r.int(u32) != magic) return error.InvalidFormat;

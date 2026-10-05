@@ -1,4 +1,4 @@
-//! Pass: HIR call lowering (docs/hir.md §9, §5.5; PROGRESS S5). In:
+//! Pass: HIR call lowering (docs/hir.md §9, §5.5). In:
 //! Ctx + FuncState + a `call` node. Out: direct calls (member/instance
 //! record callees), value calls (λ refs, locals, arbitrary callees),
 //! and host syscalls (bodyless bindings / bundle intrinsics) — the

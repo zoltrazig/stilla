@@ -286,7 +286,7 @@ pub fn observableEffectFree(self: *Analysis, id: hir.ExprId) bool {
 }
 
 /// `total` + `observable_effect_free` + cleanup-safe (docs/effects.md
-/// §10.1, §11). The M2 selective-A-Normal-Form predicate
+/// §10.1, §11). The selective A-Normal-Form predicate
 /// (`can_float_as_tree`). Cleanup-safety is the modelled
 /// full-expression footprint (`cleanupDiscardable`), not the
 /// stronger literal `cleanupFree`.
@@ -337,7 +337,7 @@ pub fn isSegSafe(self: *Analysis, id: hir.ExprId) Error!bool {
 }
 
 /// Whether the op carries a SEG encoding (hir.md §3.5 `seg`, §8.1).
-/// The v1 M2a island set is registered in the OpRegistry; admission
+/// The v1 SEG island set is registered in the OpRegistry; admission
 /// also needs the semantic predicate (`isSegSafe`), so a `true` here
 /// is necessary but not sufficient (`isSegAdmissible`).
 pub fn hasSegEncoding(self: *Analysis, op: hir.OpId) bool {
@@ -354,7 +354,7 @@ pub fn isSegAdmissible(self: *Analysis, id: hir.ExprId) Error!bool {
 /// unary fact — total, no observable effect, no `Q`, plus the
 /// mandatory ownership gate and cleanup proof. Necessary but not
 /// sufficient; code motion must also consult `canMove`-style path
-/// context, which M1b does not expose because the FE/lifetime facts
+/// context, which the effect analysis does not expose because the FE/lifetime facts
 /// it would need are unmodelled. The ownership gate is what makes
 /// `move.effects == {}` insufficient on its own (§6.2 强约束).
 pub fn isIntrinsicallySpeculatable(self: *Analysis, id: hir.ExprId) Error!bool {

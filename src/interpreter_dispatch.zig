@@ -1568,7 +1568,7 @@ pub fn opConstruct(self: *VmCtx, d: VmInstr) HeapErr!void {
             // Each node records its suffix length (the number of
             // elements from this node to the end) so the head's
             // `len` is the list's element count — the O(1) read
-            // `list#len` and `read_index` rely on (M2).
+            // `list#len` and `read_index` rely on this.
             var nxt: Value = 0;
             var suffix_len: u32 = 0;
             var k = dd.args_len;

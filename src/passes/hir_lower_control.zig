@@ -1,4 +1,4 @@
-//! Pass: HIR control-flow lowering (docs/hir.md §9, §5.5; PROGRESS S5).
+//! Pass: HIR control-flow lowering (docs/hir.md §9, §5.5).
 //! In: Ctx + FuncState + an `if`/`and`/`or`/`match` node. Out: the CFG
 //! diamonds — `br`/`switch` terminators and join phis — replicating
 //! `cfg_lower_control`'s shapes block for block. `and`/`or` keep their

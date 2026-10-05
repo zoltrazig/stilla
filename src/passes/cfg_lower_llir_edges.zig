@@ -32,13 +32,13 @@ pub const EdgeCopy = struct {
     imm: u32 = 0,
 };
 
-/// Plan the stage-7 LLIR-only edge blocks: after lifecycle planning
+/// Plan the LLIR-only edge blocks: after lifecycle planning
 /// (so the per-edge `edgeKills` exist) and before budgeting, expand the
 /// global block order by appending one synthetic block per distinct
 /// effect-bearing outgoing edge of each CFG block — `j` and `br`/`switch`
 /// arms alike. Every edge with phi copies or lifecycle kills routes
-/// through its edge block, so only the selected edge's effects execute
-/// (TODO.md 7.1). Each synthetic block has empty `instrs`, a `.j`
+/// through its edge block, so only the selected edge's effects execute.
+/// Each synthetic block has empty `instrs`, a `.j`
 /// terminator to the real successor, and holds (in its record list) that
 /// edge's ordered phi copies then lifecycle kills. `block_ids` and
 /// `block_ranges` are rebuilt over the expanded order; the input CFG is
@@ -133,7 +133,7 @@ pub fn hasPhiCopies(bld: *const Builder, pred: *const cfg.BasicBlock, succ: *con
 }
 
 /// Emit every edge's effects as ordinary records in its LLIR-only edge
-/// block (stage 7): a synthetic edge block holds its edge's ordered phi
+/// block: a synthetic edge block holds its edge's ordered phi
 /// copies then lifecycle kills; ordinary CFG blocks emit NO inline edge
 /// effects — every outgoing edge with copies or kills routes through an
 /// edge block, so only the selected edge's effects execute. The tailcall

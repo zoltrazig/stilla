@@ -1,5 +1,5 @@
 //! Pure hash / equality / const-eval / algebra rules for the SEG e-graph
-//! driver (docs/hir.md §8, §11). Extracted from hir_egraph.zig: the M2b rule
+//! driver (docs/hir.md §8, §11). Extracted from hir_egraph.zig: the rule
 //! engine is acyclic — these helpers depend only on std, meta, and hir, never
 //! on the Island arena. The driver imports them through filescope aliases.
 
@@ -362,7 +362,7 @@ pub fn cmpResult(base: []const u8, rep: hir.ScalarRep, a: meta.ConstValue, b: me
             break :blk if (eq) std.mem.eql(u8, x, y) else !std.mem.eql(u8, x, y);
         },
         // `byte` comparisons lower through the u32 family (hir.md §7.2
-        // M1a note); the value occupies one host cell, compared unsigned.
+        // note); the value occupies one host cell, compared unsigned.
         .byte => blk: {
             const x = asInt(u8, a) orelse return null;
             const y = asInt(u8, b) orelse return null;

@@ -1,10 +1,9 @@
-//! Pass: annotated AST → canonical HIR — driver (hir.md §11 M1a,
-//! phase S4). Owns `Builder` (the per-program build state), the two
-//! entry points, the module/function inventory passes, and the cfg
-//! type-environment mapping. Expression, block, path, call, control,
-//! and pattern construction live in the sibling `hir_build_*.zig`
-//! files; the full encoding contract is in this file's original
-//! header (PROGRESS.md, S4 设计决定).
+//! Pass: annotated AST → canonical HIR — driver (hir.md §11). Owns
+//! `Builder` (the per-program build state), the two entry points, the
+//! module/function inventory passes, and the cfg type-environment
+//! mapping. Expression, block, path, call, control, and pattern
+//! construction live in the sibling `hir_build_*.zig` files; the full
+//! encoding contract is in hir.md §11.
 
 const std = @import("std");
 const ast = @import("stilla").ast;
@@ -46,7 +45,7 @@ pub const Builder = struct {
     wrapper_cache: std.AutoHashMapUnmanaged(WrapperKey, hir.FuncId) = .empty,
     /// Body AST per predeclared FuncId (parallel to `funcs`; the
     /// `bodies` entry at `fid` is that function's `ast.Block`, or null
-    /// for the module init). Transient build-time state — S5 consumes
+    /// for the module init). Transient build-time state — the lowering consumes
     /// the HIR trees, never the AST.
     bodies: std.ArrayListUnmanaged(?*const ast.Block) = .empty,
     /// Name → id lookup tables (keys are qualified: `{spec}.{name}`,
@@ -268,7 +267,7 @@ fn buildProgramInner(b: *Builder) BuildError!void {
 /// value-member declaration order), and its host/intrinsic function
 /// records (every bodyless function member: both ordinary host bindings
 /// and bundle intrinsics lower to (module, member) syscall targets; the
-/// use position decides wrapper-vs-syscall at S5).
+/// use position decides wrapper-vs-syscall during lowering).
 fn predeclareModule(b: *Builder, info: *moduleinfo.ModuleInfo) BuildError!void {
     const mi: u32 = @intCast(b.built.modules.items.len);
     try b.built.modules.append(b.built.arena, .{
@@ -492,8 +491,8 @@ pub fn buildFuncBody(b: *Builder, fid: hir.FuncId) BuildError!void {
     b.built.funcs.items[fid].root = node;
 }
 
-/// The module init body: not encoded in S4 (const initialization and
-/// store_member sequences are S5 decisions; PROGRESS "S4 设计决定").
+/// The module init body: not encoded here (const initialization and
+/// store_member sequences are lowering decisions).
 /// The init record's body is a void literal; the const initializer trees
 /// live on the const records.
 fn buildInitBody(b: *Builder) BuildError!hir.ExprId {

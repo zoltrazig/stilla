@@ -1,6 +1,6 @@
 //! Black-box interpreter host-boundary tests: the required `builtin` interface,
 //! `(specifier, member)` dispatch to `math`/`string`/`list`, the `any` dynamic
-//! type pack/test/recover, and the M3 `array`/`hashmap` opaque host objects.
+//! type pack/test/recover, and the `array`/`hashmap` opaque host objects.
 
 const std = @import("std");
 const llir = @import("llir.zig");
@@ -33,7 +33,7 @@ const runHandImage = support.runHandImage;
 const primType = support.primType;
 
 // ---------------------------------------------------------------------------
-// Phase 6 — host adapter, `any` dynamic types (TODO.md 阶段 6)
+// Host adapter, `any` dynamic types
 // ---------------------------------------------------------------------------
 
 test "host: builtin.print and str format every supported scalar" {
@@ -339,7 +339,7 @@ test "host: unknown member traps as not implemented" {
 }
 
 // ---------------------------------------------------------------------------
-// M2 — host dispatch by (specifier, member): `math`, `string`, `list`
+// Host dispatch by (specifier, member): `math`, `string`, `list`
 // (docs/interpreter-vm.md §9). One compile→run fixture per module, plus
 // the unknown-member trap and the dispatch-identity assertions.
 test "host: math module computes the 20 StdLib functions with IEEE edges" {
@@ -776,7 +776,7 @@ test "any: wrong-type recovery traps (dynamic TypeId mismatch)" {
 }
 
 // ---------------------------------------------------------------------------
-// M3 — opaque host objects: `array` / `hashmap` (StdLib §2, §3)
+// Opaque host objects: `array` / `hashmap` (StdLib §2, §3)
 // ---------------------------------------------------------------------------
 
 test "host: array module make/len/get/set/clone with copy element semantics" {

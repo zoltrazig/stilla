@@ -18,9 +18,9 @@
 //!               resolved `Type`, the nominal-declaration environment,
 //!               `ConstValue`, and `substParams` every pass agrees on
 //!               (compile-time)
-//! - `hir`     — the structural HIR (hir.md §3, M1a): arena + dense-handle
+//! - `hir`     — the structural HIR (hir.md §3): arena + dense-handle
 //!               data structures for the seam between the checker and CFG
-//!               lowering. S1: data only, no stage wired.
+//!               lowering. Data only, no stage wired.
 //! - `checker` — type checker and AST annotator (compile-time). Current
 //!               status: name/type inference, ownership analysis including
 //!               conditional release (checker.md, Ownership analysis; Core §10.10),

@@ -1,13 +1,13 @@
 //! Pass: LLIR assembly — symbolic text projection of a frozen
-//! `llir.LlirProgram` image (Stilla LLIR Specification §1;
-//! TODO 5.1). In: the image plus the `*const cfg.IrProgram` it was
+//! `llir.LlirProgram` image (Stilla LLIR Specification §1). In: the
+//! image plus the `*const cfg.IrProgram` it was
 //! lowered from — the image carries the module specifiers but no other
 //! names (spec §2), so module identity is symbolized through the image
 //! (`ModuleDesc.spec_*` into `strings`) and every other name symbol
 //! comes from the source program. Out: a deterministic
 //! symbolic assembly text.
 //!
-//! Conventions (TODO 5.1):
+//! Conventions:
 //!   - function header is the qualified name `func @mod.name`;
 //!   - basic blocks are symbolic labels, function-qualified for global
 //!     uniqueness (`$mod.fn.name`, falling back to a source-block name
@@ -40,7 +40,7 @@ const Builder = lower.Builder;
 
 /// Render the program image as symbolic assembly into an owned slice.
 /// `builder` is the lowered source program's Builder — the sole source of
-/// names AND of the expanded block order (stage 7 edge blocks are part of
+/// names AND of the expanded block order (edge blocks are part of
 /// the image layout, so the per-function block split and the CFG-block
 /// names come from `builder.ordered_blocks`/`block_ranges`, not from
 /// `program.funcs`). Deterministic for a fixed (builder, image)
@@ -102,7 +102,7 @@ const Printer = struct {
         // Functions in FunctionId order pair 1:1 with `program.funcs`;
         // their blocks tile the code range in image order == the per
         // function expanded `ordered_blocks` the Builder sorted into
-        // `block_ranges` (stage-7 edge blocks included).
+        // `block_ranges` (edge blocks included).
         var bi: usize = 0;
         for (self.image.functions, 0..) |fd, fi| {
             // image.functions pairs 1:1 with the Builder's scoped
@@ -126,10 +126,10 @@ const Printer = struct {
         try self.w(" {{  ; F{d} X{d} W{d}\n", .{ fd.f_count, fd.x_count, fd.window_count });
 
         // The image's per-function block order is exactly the Builder's
-        // expanded `ordered_blocks` range (stage 7 interleaves LLIR-only
-        // edge blocks after their predecessor), so each block's name is
-        // its source block's — empty for an edge block, which falls back
-        // to `b{k}`.
+        // expanded `ordered_blocks` range (the expansion interleaves
+        // LLIR-only edge blocks after their predecessor), so each block's
+        // name is its source block's — empty for an edge block, which
+        // falls back to `b{k}`.
         self.blk = blocks;
         self.labels = try self.allocator.alloc([]const u8, blocks.len);
         defer self.allocator.free(self.labels);
@@ -148,7 +148,7 @@ const Printer = struct {
             // table maps each label to exactly one PC, which a bare
             // `$entry` repeated per function would not. Prefer the cfg
             // block name when it is non-empty and unique in this
-            // function; otherwise fall back to `b{k}` (a stage-7 edge
+            // function; otherwise fall back to `b{k}` (an edge
             // block has no source name). If the qualification overflows
             // the 64-byte buffer, fall back to the always-fitting unique
             // `f{i}b{k}`. The stored label carries the leading `$`
@@ -532,7 +532,7 @@ const Printer = struct {
                 try self.w("{d}", .{v});
             },
             .float => {
-                // binary64 payloads (phase 5) carry a nonzero high word;
+                // binary64 payloads carry a nonzero high word;
                 // binary32 keeps b == 0 and prints from the low word.
                 if (rec.b != 0) {
                     const d: f64 = @bitCast((@as(u64, rec.b) << 32) | rec.a);

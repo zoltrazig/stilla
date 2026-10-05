@@ -1,7 +1,7 @@
 //! Pass: module-value emission helpers shared with the HIR seam. The
 //! direct AST module/init/drop-hook lowering (`lowerModule`,
-//! `lowerInit`, `lowerDropHook` and their helpers) was removed in
-//! PROGRESS S6b; the HIR seam builds the module's member table and
+//! `lowerInit`, `lowerDropHook` and their helpers) was removed; the
+//! HIR seam builds the module's member table and
 //! lowers every function from `hir.BuiltProgram` records (see
 //! hir_lower.zig). The two AST-free helpers both paths need survive
 //! here.

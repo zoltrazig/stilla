@@ -1,6 +1,6 @@
 // never_suffix — the `never_returns` must fact's suffix deletion
 // (docs/effects.md §10.1). `boom` is declared `void` but never returns
-// (`builtin.panic`), so the M2b consumer deletes the now-unreachable
+// (`builtin.panic`), so the effect-driven consumer deletes the now-unreachable
 // statements after it while keeping the statement before it, and its
 // `let`-initializer case deletes the rest of the block. The suffix after
 // the normal-returning `ok` must survive untouched.

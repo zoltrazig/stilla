@@ -1,5 +1,5 @@
 //! Host storage for the `hashmap` module (StdLib §3) — the open-
-//! addressing hash table behind a `HashMap[K, V]` opaque handle (M3).
+//! addressing hash table behind a `HashMap[K, V]` opaque handle.
 //! Plain data with no VM knowledge: the interpreter adapter
 //! (`hostHashMap` in interpreter.zig) does all heap mechanics — it
 //! retains entries on store, releases displaced cells, and frees

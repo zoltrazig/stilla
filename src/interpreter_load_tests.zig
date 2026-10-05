@@ -1,5 +1,5 @@
-//! Black-box loading-boundary interpreter tests: the stage-2 `setupRoot`
-//! instruction path, and the M6 whole-stdlib binary round-trips plus the M7
+//! Black-box loading-boundary interpreter tests: the `setupRoot`
+//! instruction path, and the whole-stdlib binary round-trips plus the
 //! module-loading (nonzero code_base, load-once, atomic publication, teardown).
 
 const std = @import("std");
@@ -35,7 +35,7 @@ const runHandImage = support.runHandImage;
 const primType = support.primType;
 
 // ---------------------------------------------------------------------------
-// Stage-2 — the load boundary (docs/interpreter-vm.md §11): the loader
+// The load boundary (docs/interpreter-vm.md §11): the loader
 // path allocates 0 for valid images. `validate` is covered in
 // frontend_llir_validate_tests.zig (1 and 10,000 instructions); here the
 // interpreter's *instruction path* is covered: after `setupRoot` (the
@@ -43,7 +43,7 @@ const primType = support.primType;
 // termination allocates nothing — no per-instruction workspace.
 // ---------------------------------------------------------------------------
 
-test "stage-2: the instruction path runs a scalar program with 0 allocations" {
+test "the instruction path runs a scalar program with 0 allocations" {
     var l = try load(
         \\fn main() -> int32 {
         \\    let a = 40;
@@ -74,7 +74,7 @@ test "stage-2: the instruction path runs a scalar program with 0 allocations" {
 }
 
 // ---------------------------------------------------------------------------
-// M6 — end-to-end acceptance (docs/interpreter-vm.md §12, final
+// End-to-end acceptance (docs/interpreter-vm.md §12, final
 // row): a representative program per stdlib module plus one combined
 // program is compiled, serialized to the LLIR binary (header carries the
 // resolved entry — the D3 path), read back, structurally validated, and
@@ -154,7 +154,7 @@ fn runBinRoundTrip(src: []const u8, expected: []const u8) !void {
     try testing.expectEqualStrings(expected, state.buffer[0..state.len]);
 }
 
-test "M6: builtin module runs through the binary load path" {
+test "load: builtin module runs through the binary load path" {
     try runBinRoundTrip(
         \\const builtin = import("builtin");
         \\fn main() -> void {
@@ -168,7 +168,7 @@ test "M6: builtin module runs through the binary load path" {
     );
 }
 
-test "M6: a later declared struct's fields construct, read, and destroy correctly" {
+test "load: a later declared struct's fields construct, read, and destroy correctly" {
     // Regression: a struct TypeDeclDesc's field range { c, d } into the
     // flat type_decl_fields table is { start, len }; the interpreter
     // consumers treated `d` as an absolute end, so the range silently
@@ -194,7 +194,7 @@ test "M6: a later declared struct's fields construct, read, and destroy correctl
     );
 }
 
-test "M6: math module runs through the binary load path" {
+test "load: math module runs through the binary load path" {
     try runBinRoundTrip(
         \\const math = import("math");
         \\const builtin = import("builtin");
@@ -211,7 +211,7 @@ test "M6: math module runs through the binary load path" {
     );
 }
 
-test "M6: string module runs through the binary load path" {
+test "load: string module runs through the binary load path" {
     try runBinRoundTrip(
         \\const string = import("string");
         \\const builtin = import("builtin");
@@ -229,7 +229,7 @@ test "M6: string module runs through the binary load path" {
     );
 }
 
-test "M6: list module runs through the binary load path" {
+test "load: list module runs through the binary load path" {
     try runBinRoundTrip(
         \\const lists = import("list");
         \\const builtin = import("builtin");
@@ -252,7 +252,7 @@ test "M6: list module runs through the binary load path" {
     );
 }
 
-test "M6: array module runs through the binary load path" {
+test "load: array module runs through the binary load path" {
     try runBinRoundTrip(
         \\const array = import("array");
         \\const builtin = import("builtin");
@@ -270,7 +270,7 @@ test "M6: array module runs through the binary load path" {
     );
 }
 
-test "M6: hashmap module runs through the binary load path" {
+test "load: hashmap module runs through the binary load path" {
     try runBinRoundTrip(
         \\const hashmap = import("hashmap");
         \\const builtin = import("builtin");
@@ -297,7 +297,7 @@ test "M6: hashmap module runs through the binary load path" {
     );
 }
 
-test "M6: one combined program across all stdlib modules runs end to end" {
+test "load: one combined program across all stdlib modules runs end to end" {
     try runBinRoundTrip(
         \\const builtin = import("builtin");
         \\const math = import("math");
@@ -329,7 +329,7 @@ test "M6: one combined program across all stdlib modules runs end to end" {
     );
 }
 
-test "M6: a drop-hook module that passes inline lambdas to the stdlib loads and runs" {
+test "load: a drop-hook module that passes inline lambdas to the stdlib loads and runs" {
     // Regression: the root artifact resolved a struct's drop hook to a
     // module-local `FunctionId`, and `seedShared` copied that type-decl row
     // verbatim into every dependency artifact — where the id is out of range
@@ -379,7 +379,7 @@ test "M6: a drop-hook module that passes inline lambdas to the stdlib loads and 
 // an in-range id naming one of its own functions. Both shapes are pinned
 // here: run the program, then inspect the same type-decl row in the root
 // and a dependency artifact.
-test "M6: the drop-hook type-decl reference is per-artifact (local id vs import)" {
+test "load: the drop-hook type-decl reference is per-artifact (local id vs import)" {
     var sources = moduleinfo.Sources{};
     var smap = std.StringHashMapUnmanaged([]const u8).empty;
     try smap.put(testing.allocator, "app",
@@ -470,7 +470,7 @@ fn expectMemberCoverage(spec: []const u8) !void {
                 if (f.body != null) continue; // ordinary Stilla source
                 const member = f.name.text;
                 if (!memberRecognized(info.specifier, member)) {
-                    std.log.err("M6: declared stdlib member {s}#{s} has no default-host handler", .{ info.specifier, member });
+                    std.log.err("declared stdlib member {s}#{s} has no default-host handler", .{ info.specifier, member });
                     return error.TestUnexpectedResult;
                 }
             },
@@ -485,12 +485,12 @@ fn memberRecognized(spec: []const u8, member: []const u8) bool {
     return interpreter_host.defaultHostRegistry.lookup(spec, member) != null;
 }
 
-test "M6: every declaration-only stdlib member has a default-host handler" {
+test "load: every declaration-only stdlib member has a default-host handler" {
     for (stdbundle.modules) |m| try expectMemberCoverage(m.specifier);
 }
 
 // ---------------------------------------------------------------------------
-// M7 — runtime module loading (docs/interpreter-vm.md §2–3): the loader
+// Runtime module loading (docs/interpreter-vm.md §2–3): the loader
 // resolves per-module artifacts at runtime. These tests
 // pin the load invariants — load-once caching, a deterministic trap
 // for a missing module, nonzero `code_base` relocation across the module
@@ -600,7 +600,7 @@ const ProbeLoader = struct {
     }
 };
 
-test "M7: a dependency at nonzero code_base resolves and calls across the module boundary" {
+test "module-load: a dependency at nonzero code_base resolves and calls across the module boundary" {
     const extras = [_]struct { []const u8, []const u8 }{
         .{ "dep", "fn add(a: int32, b: int32) -> int32 { a + b }" },
     };
@@ -620,7 +620,7 @@ test "M7: a dependency at nonzero code_base resolves and calls across the module
     }
 }
 
-test "M7: shared dependencies load exactly once (load-once caching)" {
+test "module-load: shared dependencies load exactly once (load-once caching)" {
     const extras = [_]struct { []const u8, []const u8 }{
         .{ "dep", "fn hit() -> int32 { 1 }" },
         .{ "other", "const dep = import(\"dep\"); fn go() -> int32 { dep.hit() }" },
@@ -649,7 +649,7 @@ test "M7: shared dependencies load exactly once (load-once caching)" {
     try testing.expectEqual(@as(u32, 1), probe.count("other"));
 }
 
-test "M7: a missing module traps deterministically before any target instruction" {
+test "module-load: a missing module traps deterministically before any target instruction" {
     const extras = [_]struct { []const u8, []const u8 }{
         .{ "dep", "fn hit() -> int32 { 7 }" },
     };
@@ -670,7 +670,7 @@ test "M7: a missing module traps deterministically before any target instruction
     );
 }
 
-test "M7: a malformed dependency load publishes no runtime state" {
+test "module-load: a malformed dependency load publishes no runtime state" {
     const extras = [_]struct { []const u8, []const u8 }{
         .{ "dep", "fn hit() -> int32 { 7 }" },
     };
@@ -707,7 +707,7 @@ test "M7: a malformed dependency load publishes no runtime state" {
     try testing.expectEqual(@as(usize, 1), vm.loaded.modules.items.len);
 }
 
-test "M7: publication is atomic — a reserved instruction publishes no code" {
+test "module-load: publication is atomic — a reserved instruction publishes no code" {
     const extras = [_]struct { []const u8, []const u8 }{
         .{ "dep", "fn hit() -> int32 { 7 }" },
     };
@@ -756,7 +756,7 @@ const BytesLoader = struct {
     }
 };
 
-test "M7: a parsed-but-rejected artifact leaks no tables" {
+test "module-load: a parsed-but-rejected artifact leaks no tables" {
     // The loader serves an artifact that parses (`read` succeeds — the
     // tables are allocated) but fails structural validation because one
     // instruction is a reserved word. A leak here means the parsed tables
@@ -788,7 +788,7 @@ test "M7: a parsed-but-rejected artifact leaks no tables" {
     // If the parsed tables leaked, `testing.allocator` fails this test.
 }
 
-test "M7: a published root aborts roll its code and functions back out" {
+test "module-load: a published root aborts roll its code and functions back out" {
     // The entry has a parameter: publication succeeds (the root's decoded
     // code and relocated functions enter the arenas and its state becomes
     // `.loaded`), but `installRootFrame` rejects a non-parameterless
@@ -811,7 +811,7 @@ test "M7: a published root aborts roll its code and functions back out" {
 }
 
 // ---------------------------------------------------------------------------
-// M8 — hot reload (docs/interpreter-vm.md §11): `reloadModule` re-fetches a
+// Hot reload (docs/interpreter-vm.md §11): `reloadModule` re-fetches a
 // loaded module's artifact through the provider and atomically repoints
 // `module_by_symbol` at the fresh version, with rollback on failure and the
 // superseded image kept resident for exactly-once teardown by `VmLoadedData.deinit`.
@@ -853,7 +853,7 @@ const ReloadLoader = struct {
     }
 };
 
-test "M8: reloadModule swaps a module's artifact and the new behavior runs" {
+test "reload: reloadModule swaps a module's artifact and the new behavior runs" {
     // The same `app` (imports `dep`, returns dep.hit()) is compiled
     // twice: dep returns 7 in the first bundle and 42 in the second.
     var v1 = try buildBundleRun(
@@ -916,7 +916,7 @@ test "M8: reloadModule swaps a module's artifact and the new behavior runs" {
     }
 }
 
-test "M8: a failed reload rolls back; the old image is intact and still runs" {
+test "reload: a failed reload rolls back; the old image is intact and still runs" {
     var pr = try buildBundleRun(
         testing.allocator,
         &[_]struct { []const u8, []const u8 }{.{ "dep", "fn hit() -> int32 { 7 }" }},
@@ -960,7 +960,7 @@ test "M8: a failed reload rolls back; the old image is intact and still runs" {
     }
 }
 
-test "M8: two consecutive reloads keep every superseded image resident" {
+test "reload: two consecutive reloads keep every superseded image resident" {
     // Three generations of `dep` (7, 42, 100). Each reload appends; the
     // map points at the latest; `VmLoadedData.deinit` frees each image exactly
     // once (the `testing.allocator` leak check fails otherwise).
@@ -1022,7 +1022,7 @@ test "M8: two consecutive reloads keep every superseded image resident" {
     try testing.expectEqual(expected_funcs, vm.loaded.funcs.items.len);
 }
 
-test "M8: reload is refused while the VM is executing (quiesce contract)" {
+test "reload: reload is refused while the VM is executing (quiesce contract)" {
     // Reload is only sound when no running frame references the old
     // image; a running VM (a root frame installed) refuses.
     var pr = try buildBundleRun(
@@ -1039,7 +1039,7 @@ test "M8: reload is refused while the VM is executing (quiesce contract)" {
     try testing.expectError(error.ContextRunning, vm.reloadModule("dep"));
 }
 
-test "M8: reloading the root module repoints the root identity" {
+test "reload: reloading the root module repoints the root identity" {
     // A root published without starting the VM (`publishRoot` only) can
     // be reloaded; the root identity follows the fresh slot.
     var g1 = try buildBundleRun(

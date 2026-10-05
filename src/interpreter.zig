@@ -35,7 +35,7 @@
 //! the stack limit, heap objects (str/list/box/struct/union/any/
 //! opaque), string constants, the counted lifecycle
 //! (release/copy_retain), destruction with drop-hook continuation, and
-//! the host adapter (phase 6 — the required `builtin` interface; M2 —
+//! the host adapter (the required `builtin` interface;
 //! `(specifier, member)` dispatch to the `math`/`string`/`list`
 //! stdlib modules).
 //!
@@ -159,7 +159,7 @@ pub const VmCtx = struct {
     /// Hard cell limit; exceeding it is a deterministic trap.
     stack_limit: u32 = 1 << 20,
 
-    /// Host-binding dispatch (phase 6): the default adapter implements
+    /// Host-binding dispatch: the default adapter implements
     /// the required `builtin` interface; an embedding replaces it to
     /// provide its own host modules.
     host: HostCall = .{},
@@ -209,8 +209,8 @@ pub const VmCtx = struct {
         return self.curImage();
     }
 
-    // --- host-resource registry (minimal phase-3 API; phase 6 wires
-    // --- the signature-driven adapter) ------------------------------
+    // --- host-resource registry (minimal API; the signature-driven
+    // --- adapter wires in) -----------------------------------------
 
     /// Register a host-owned payload entering VM ownership. A duplicate
     /// registration of the same un-released payload traps before commit.

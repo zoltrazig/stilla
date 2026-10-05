@@ -1,7 +1,7 @@
 //! Pass: module-value emission helpers shared with the HIR seam. The
 //! direct AST path lowering (`lowerPath`, `lowerPathValue`,
 //! `lowerMember`, `memberLoad`, `lowerMemberLoad`,
-//! `intrinsicMemberValue`, `joinPath`) was removed in PROGRESS S6b; the
+//! `intrinsicMemberValue`, `joinPath`) was removed; the
 //! HIR seam lowers value leaves and module access paths itself (see
 //! hir_lower_expr.zig — `memberValueRef`, `hopChain`, `memberLoadHir`).
 //! The two module-reference helpers both paths share survive here.

@@ -35,7 +35,7 @@ const primType = support.primType;
 const drainRootInit = support.drainRootInit;
 
 // ---------------------------------------------------------------------------
-// Phase 4 — image execution (TODO.md 阶段 4)
+// Image execution
 // ---------------------------------------------------------------------------
 
 test "move-wide: all twelve suffixes execute; the mixed sequence builds 0x0123456789abcdef" {
@@ -287,7 +287,7 @@ test "f64 arithmetic: IEEE division, remainder, NaN equality — no traps" {
 }
 
 // ---------------------------------------------------------------------------
-// Stage-3 (TODO.md 3.5) — interpreter & calling convention: zero/cond
+// Interpreter & calling convention: zero/cond
 // semantics, the C-Type comparison → cond matrix (integer + float, NaN),
 // `jal` link/target ordering and `j` discarding no link, nested-call
 // `ra` save/restore, `jalr` signed offset/overflow/non-entry handling,

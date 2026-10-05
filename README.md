@@ -115,7 +115,7 @@ and the trailing section lists what the code and docs still mark open.
 - [ ] HIR / effect-model follow-ups (match-into-SEG, host ABI metadata
   wiring, node-level full-expression boundary annotation, indirect-call
   narrowing, effectful β) are tracked with dependencies and acceptance
-  criteria in [docs/todo.md](docs/todo.md)
+  criteria in the design documents
 
 ## What is Stilla?
 
@@ -242,7 +242,7 @@ Diagnostics are
 `<file>:<line>:<col>: error: <message>`. The pipeline and the LLIR
 backend it lowers to are documented in [frontend.md](docs/frontend.md)
 and [interpreter-vm.md](docs/interpreter-vm.md). `--emit-hir` fails loudly
-rather than degrade: the printer's S2 boundary still rejects
+rather than degrade: the printer's serialization boundary still rejects
 `struct_make`/`field_get`/`variant_make` and module access chains, so a
 program using them reports the offending function and exits 1 with no
 output written.

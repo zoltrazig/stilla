@@ -35,7 +35,7 @@ const hashResourcePairs = hash.hashResourcePairs;
 
 /// Declared host-call semantics. A host binding with no entry is
 /// `Top` (docs/effects.md §9.3, §13) — the compiler never assumes a
-/// missing declaration is pure. M1b does not wire the embedding ABI;
+/// missing declaration is pure. The pass does not wire the embedding ABI;
 /// tests supply an analysis-local registry.
 pub const HostEffects = struct {
     entries: []const Entry = &.{},

@@ -325,7 +325,7 @@ Top  = ⊤ = (All,    true,  true,  true)    // 格顶，一切未知 = 全收 c
   `Pure` 同值，「推导下界 ≠ 已证明纯」的区分由 §8.2 的 `Pending` /
   `Ready(summary)` 状态机承担（不在格内）。后缀 DCE 的合法性由独立 must 事实
   `never_returns` 恢复——该 must 事实已落地（§10.1，hir_effects.zig 的
-   greatest fixpoint），后缀删除在 M2b 消费者（hir_simplify.zig，`hir` 门）；
+   greatest fixpoint），后缀删除在消费者（hir_simplify.zig，`hir` 门）；
   摘要代数不变，`;` 合并仍保守并入后缀位。
 
 **序论谓词：派生合法性查询是序理想（下集）。** 每个派生查询在 `≤` 上是**向下闭**的
@@ -844,7 +844,7 @@ ownership 可用性与 lifetime 栅栏，**缺一不可**。
   推导（`hir_effects.exprNever`：`never` 型节点、严格求值子项、全臂分支、可解析
   callee 集）。推导保守（取不到即 false）；递归 SCC 取 **greatest fixpoint**
   （coinductive：`fn f() -> void { f() }` 真的不返回，least fixpoint 会漏掉）。
-   调用点后同一直行区域的后缀不可达，M2b 消费者（`hir_simplify.zig`，
+   调用点后同一直行区域的后缀不可达，消费者（`hir_simplify.zig`，
    `hir` 门）整段删除（§12.4）并退役该区域的 FE 清理 token。被删节点不可达，
   故 `cleanupEffect` 的 `in_subtree` 本就不再计入，退役是 token 表卫生 +
   `cleanupOriginsReachable` 不变量。结果类型特化为 `never` 后由 `hir_lower_expr`
@@ -1117,8 +1117,8 @@ drop_effect(T) -> EffectSummary
 `drop` descriptor 的 `own_effect` 是 `pure`、`transfer = .drop_effect`；
 `Analysis.compute` 的 `.drop_effect` 分支调用**精确的** `dropEffectOf(operand
 类型)`，再 `; effects(operand)`。module-const teardown 检查（§7.2）也用它。
-这是唯一路径：M1b 遗留的极简 `effects.dropEffect`（Copy → `{}`，其余 / null →
-`Top`）已删除（docs/todo.md 第 20 项）。
+这是唯一路径：遗留的极简 `effects.dropEffect`（Copy → `{}`，其余 / null →
+`Top`）已删除。
 
 `drop_type` 节点的 transfer（`dropStructural`）沿用旧递归的形状：
 
@@ -1141,7 +1141,7 @@ drop_effect(T) -> EffectSummary
 EffectDependencyNode = Function(FuncId) | DropType(TypeKey)
 ```
 
-`TypeKey` 即 canonical `HIRTypeId`（hir.md §3.8，第 25 项），类型身份因此 O(1)
+`TypeKey` 即 canonical `HIRTypeId`（hir.md §3.8），类型身份因此 O(1)
 相等；两种节点携带同一 `Summary`、活在同一个有限乘积格（§5.4）上。四类边：
 
 1. `function → function`：可解析调用与回调契约目标，即既有 `collectCallees`
@@ -1481,7 +1481,7 @@ host 调用」列在当前范围之外只是范围，不是「永远不会发生
 （`drop(t) { builtin.print(...) }`）属于这一类。迁移方式是让 embedding（含测试
 的默认 host）显式声明 `builtin.*` 为 `Forbidden`，而不是把默认放宽。
 
-**待决**（[todo.md](todo.md)）：
+**待决**：
 
 - **回调参数化摘要（已落地）。** `.call` 处的 `MayExecute` host 调用若带
   **穷尽回调契约**（`HostDecl.callbacks`：同一次调用内、只经列出的实参位置执行
@@ -1626,14 +1626,12 @@ MayTrap（含 panic）+ MayDiverge + nondeterministic
   相等不单独放行任何程序级交换 / 删除」的负例，以及 `stable` 域读对在整体
   `Q = 1` 表达式中的边界用例（§5.5）。
 
-**里程碑映射**：M1a / M1b / M2a / M2b 见 [hir.md](hir.md) §11。三个消费者判定
-均由派生查询驱动、无 `switch(op)` 合法性特判；上述验收例由 effects.zig /
+三个消费者判定（见 [hir.md](hir.md) §11）均由派生查询驱动、无 `switch(op)` 合法性特判；上述验收例由 effects.zig /
 hir_effects.zig / hir_simplify_tests.zig / hir_seg_tests.zig 的正负例覆盖。
-未落地项、依赖与验收条件见 [todo.md](todo.md)。
 
 ## 15. 开放问题与现状核对
 
-**开放问题**（待决项与验收条件见 [todo.md](todo.md) 的「待决」节）：
+**开放问题**：
 
 - 域间 overlap / disjoint 声明的具体条目：形式见 §5.6，内容随真实 host 域出现
   后按需补全。`hierarchy` 实例（§5.7）已给出树 + 别名的形式；真实 host 域的树边
@@ -1644,8 +1642,8 @@ hir_effects.zig / hir_simplify_tests.zig / hir_seg_tests.zig 的正负例覆盖�
   回填本节与 checker 行为。
 - host 重入契约（§13）：**已定并落地**——缺失 = `Unknown` 取完整 `Top`；只有
   显式 `Forbidden` 才让声明逐字生效。回调参数化摘要与
-  `EffectEnvironmentFingerprint` 缓存指纹均已落地（见 §13 与 [todo.md](todo.md)
-  的「已完成」第 2 项）；运行时侧契约校验刻意不在范围内。
+  `EffectEnvironmentFingerprint` 缓存指纹均已落地（见 §13）；运行时侧契约校验刻意
+  不在范围内。
 
 **现状核对（哪些特设实现已被本文派生查询取代）：**
 
@@ -1656,7 +1654,7 @@ hir_effects.zig / hir_simplify_tests.zig / hir_seg_tests.zig 的正负例覆盖�
   规范化与 `relation` 处分化——包含序因此随实例而变。`hir_effects` 的组合与派生
   查询都由 `Analysis.eng` 统一转发（SCC 收敛比较走 `eng.eql`），
   `frontend.compile` / `frontend.Options.provider` 负责一次冻结并贯通效应分析、
-  M2b 消费者、SEG 与每次重校验；`interpreter_host.RunProgramOptions.provider` 是
+  消费者、SEG 与每次重校验；`interpreter_host.RunProgramOptions.provider` 是
   嵌入侧入口。
 
 - **module-const 依赖检查**：checker_validate.zig 的 `InitOrder` 曾是 AST 级

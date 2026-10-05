@@ -139,7 +139,7 @@ pub fn run(bld: *Builder) error{OutOfMemory}!void {
         const td = llir.decode(bld.instructions.items[branch_pc]) orelse continue;
         switch (td.op) {
             .j => {
-                // a `j` block terminator (the CFG jump, or a stage-7 edge
+                // a `j` block terminator (the CFG jump, or an edge
                 // block's hand-off): the target routes through an edge
                 // block when the edge has effects; for a synthetic edge
                 // block the mapping is absent, so it stays the real
@@ -274,7 +274,7 @@ fn isSkipJInstr(instr: llir.Instr) bool {
 /// The target the compare-and-branch record of block `bi` carries
 /// — recomputed from the emission form (never stored in the
 /// record), routed through an edge block when the arm's edge has
-/// effects (stage 7): the then-block in the two-record form and the
+/// effects: the then-block in the two-record form and the
 /// else-falls-through form, the else-block in the inverted form.
 /// `terminatorRecordCount` made the identical decision on the same
 /// conservative tables, so budget, emission, expansion, and

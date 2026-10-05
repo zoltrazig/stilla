@@ -483,7 +483,7 @@ test "stack limit: deep recursion terminates with a deterministic trap" {
 }
 
 // ---------------------------------------------------------------------------
-// Phase 4 — i64/u64 end-to-end (TODO.md 阶段 4)
+// i64/u64 end-to-end
 // ---------------------------------------------------------------------------
 
 test "i64/u64: literals type at target width and round-trip the pipeline" {
@@ -549,14 +549,14 @@ test "u64 shifts: counts are taken modulo 64" {
     }
 }
 
-test "binary format: readers reject pre-phase-4 versions" {
+test "binary format: readers reject pre-i64/u64 versions" {
     var l = try load(
         \\fn main() -> int32 { 7 }
     , false);
     defer l.deinit();
     var bytes = try lower.emitBin(l.image.*, testing.allocator);
     defer testing.allocator.free(bytes);
-    // The version field follows the magic: patch it to the pre-phase-4
+    // The version field follows the magic: patch it to the pre-i64/u64
     // value and expect rejection before any table decode.
     try testing.expect(bytes.len > 8);
     bytes[4] = 4;
@@ -569,7 +569,7 @@ test "binary format: readers reject pre-phase-4 versions" {
 }
 
 // ---------------------------------------------------------------------------
-// Phase 5 — f64 end-to-end (TODO.md 阶段 5)
+// f64 end-to-end
 // ---------------------------------------------------------------------------
 
 test "f64: literals type at target width and execute at binary64 precision" {

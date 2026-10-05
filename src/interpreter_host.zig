@@ -83,7 +83,7 @@ pub fn run(
     return runWithHost(allocator, image, .{});
 }
 
-/// `run` with an explicit host adapter (phase 6): the default adapter
+/// `run` with an explicit host adapter: the default adapter
 /// implements the required `builtin` interface; an embedding replaces it
 /// to provide its own host modules.
 pub fn runWithHost(
@@ -733,7 +733,7 @@ fn hostListLen(vm: *VmCtx, userdata: ?*anyopaque, sig: types.HostSignature, args
 const HostCtx = host_bind.HostCtx;
 
 // ---------------------------------------------------------------------------
-// The `array` and `hashmap` adapters (StdLib §2, §3) — M3. Each opaque
+// The `array` and `hashmap` adapters (StdLib §2, §3). Each opaque
 // value is a heap shell (`allocObject(.opaque_, ...)`) whose payload
 // cell 0 holds the host object pointer; the shell is registered in
 // `host_resources` (keyed by its address) so `drop` and panic teardown

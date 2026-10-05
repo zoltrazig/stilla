@@ -155,7 +155,7 @@ pub fn build(b: *std.Build) void {
     const run_exe_tests = b.addRunArtifact(exe_tests);
     test_step.dependOn(&run_exe_tests.step);
 
-    // 5.3 stdout probe: the fd-1 sink of the compiler can't run in the
+    // The --emit-asm stdout probe: the fd-1 sink of the compiler can't run in the
     // `zig build test` process (fd 1 is the test-runner's `--listen`
     // protocol pipe), so it is probed here as a real subprocess — run the
     // compiled `stilla` with `--emit-asm` on an example and assert that
@@ -171,7 +171,7 @@ pub fn build(b: *std.Build) void {
 
     // `--emit-hir` probes: the fd-1 sink of the canonical HIR dump (the
     // `--output` file sink is covered in `src/main.zig`). Aggregate member
-    // identity and destructuring lets now dump (hir.md §4.4, phase 16), and
+    // identity and destructuring lets now dump (hir.md §4.4), and
     // the exit-1 path covers what deliberately stays unserializable — a
     // value-position module access chain, which carries hop identities with
     // no canonical text form (`lists.builtin.print` in
@@ -193,7 +193,7 @@ pub fn build(b: *std.Build) void {
     hir_fail_probe.expectStdErrMatch("NotSerializable");
     test_step.dependOn(&hir_fail_probe.step);
 
-    // 13 M5 `--run` probes: the `--run` stdout sink is the fd-1 path that
+    // 13 `--run` probes: the `--run` stdout sink is the fd-1 path that
     // cannot run in the `zig build test` process (the test-runner's
     // `--listen` protocol pipe — see the note in `src/main.zig`), so the
     // full process is probed here as a real subprocess. The source and

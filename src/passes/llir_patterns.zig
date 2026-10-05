@@ -5,7 +5,7 @@ const std = @import("std");
 const cfg = @import("stilla").cfg;
 
 /// True when the value is defined by a `mul` instruction (a candidate
-/// product for the 2.15 multiply-accumulate fusion).
+/// product for the multiply-accumulate fusion).
 pub fn isMulResult(v: *const cfg.Value) bool {
     const d = v.def orelse return false;
     return std.meta.activeTag(d.op) == .mul;

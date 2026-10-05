@@ -18,7 +18,7 @@
 //! `listLen`/`listRange`) — the module structs in interpreter_host.zig
 //! bind them (docs/host-bindings.md §7). Handlers receive only verified
 //! plain data and never touch the VM; the binding layer does the heap
-//! mechanics. M3 adds the `array`/`hashmap` opaque host objects: their
+//! mechanics. The `array`/`hashmap` opaque host objects: their
 //! storage (`ArrayObject`, `HashMapObject`) lives here as plain data and
 //! the interpreter bindings own the retain/release and exactly-once
 //! disposal contract (docs/interpreter-vm.md §9).
@@ -325,7 +325,7 @@ pub fn stringFromCodepoints(cps: []const u32, out: *std.array_list.Managed(u8)) 
 // `len` is an O(1) read: the binding hands the head cons node's stored
 // suffix length to the handler. `range` generates the inclusive integer
 // range as plain values; the binding materializes the `list[int32]`
-// cons chain (M2).
+// cons chain.
 // ---------------------------------------------------------------------------
 
 /// §4.3: the element count of a borrowed list (the binding reads the
@@ -341,7 +341,7 @@ pub fn listRange(start: i32, end: i32, out: *std.array_list.Managed(i32)) anyerr
     while (v <= end) : (v += 1) try out.append(v);
 }
 
-// M3 opaque host-object storage, one module per file; the flattened
+// Opaque host-object storage, one module per file; the flattened
 // re-exports below keep the interpreter binding's single `host_module`
 // import working.
 pub const array_storage = @import("host_array.zig");

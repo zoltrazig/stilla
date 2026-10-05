@@ -43,7 +43,7 @@ pub const ParamRange = struct {
 
 /// A CFG edge `pred → succ`, the dedup key of the per-edge lifecycle
 /// kills and the LLIR-only edge blocks that carry them. Keyed by block
-/// pointers (stable across the stage-7 block-order expansion), so the
+/// pointers (stable across the edge-block order expansion), so the
 /// lifecycle pass never depends on a BlockId that later shifts.
 pub const EdgeKey = struct {
     pred: *const cfg.BasicBlock,
@@ -104,11 +104,11 @@ pub const Builder = struct {
     // --- per-block record lists — PCs deferred to linearization ------------
     /// Per-block non-phi instruction count, parallel to `ordered_blocks`:
     /// the number of instruction records at the head of each block's
-    /// list (the edge copies/kills follow, the terminator last; a stage-7
+    /// list (the edge copies/kills follow, the terminator last; an
     /// edge block has zero non-phi instructions).
     non_phi_counts: std.ArrayList(u32) = .empty,
     /// Per-block edge-effect record count (phi copies + lifecycle kills),
-    /// parallel to `ordered_blocks`: only a stage-7 LLIR-only edge block
+    /// parallel to `ordered_blocks`: only an LLIR-only edge block
     /// holds copies/kills (its single edge's); every ordinary block
     /// reserves none (its edges' effects live in the edge blocks), except
     /// a tailcall whose row covers the slot_* prep + leftover kills.
@@ -275,7 +275,7 @@ pub const Builder = struct {
     /// keyed by `pred_block_id << 32 | succ_block_id`; appended after the
     /// edge copies by `edgeCopyList`.
     release_edges: std.HashMapUnmanaged(EdgeKey, std.ArrayList(lifecycle.Rec), EdgeCtx, 80) = .empty,
-    /// Stage-7 edge blocks: `EdgeKey → LLIR-only synthetic block`, the
+    /// Edge blocks: `EdgeKey → LLIR-only synthetic block`, the
     /// routing target of every `br`/`switch` arm whose edge carries
     /// phi copies or lifecycle kills. `targetForEdge` reads it.
     edge_blocks: std.HashMapUnmanaged(EdgeKey, *cfg.BasicBlock, EdgeCtx, 80) = .empty,
@@ -693,15 +693,15 @@ pub const Builder = struct {
     }
 
     /// The control-transfer target of edge `pred → succ`: the LLIR-only
-    /// edge block when the edge carries phi copies or lifecycle kills
-    /// (stage 7), otherwise `succ` itself. Every `br`/`switch` arm target
+    /// edge block when the edge carries phi copies or lifecycle kills,
+    /// otherwise `succ` itself. Every `br`/`switch` arm target
     /// and the linearization fixups route through this, so only the
     /// selected edge's effects execute.
     pub fn targetForEdge(self: *const Builder, pred: *const cfg.BasicBlock, succ: *const cfg.BasicBlock) *const cfg.BasicBlock {
         return self.edge_blocks.get(.{ .pred = pred, .succ = succ }) orelse succ;
     }
 
-    /// Whether `blk` is a stage-7 LLIR-only edge block (not a source
+    /// Whether `blk` is an LLIR-only edge block (not a source
     /// CFG block). Its record list holds one edge's phi copies then
     /// lifecycle kills, and its terminator is a `j` to the real
     /// successor.

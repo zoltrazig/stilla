@@ -253,7 +253,7 @@ fn buildMove(b: *hir_build.Builder, info: *moduleinfo.ModuleInfo, m: *const ast.
     // matters even for Copy binders — `(move c) as T` on an `any`-typed
     // Copy unpacks with `any_unpack_move`, and a Copy-typed scrutinee
     // of `match (move c)` destructures atomically. Dropping the wrapper
-    // here would lose that distinction (S5 amendment).
+    // here would lose that distinction.
     const ops = try b.built.program.addOperands(&.{local});
     return b.built.program.addExpr(.{ .op = try b.op(m.span, "move"), .ty = try b.internTy(ty), .operands = ops, .origin = try b.origin(m.span) });
 }
@@ -306,7 +306,7 @@ fn resolveModuleChain(b: *hir_build.Builder, info: *moduleinfo.ModuleInfo, ex: *
 }
 
 /// One field/element read: index by declaration (struct) or position
-/// (tuple); S5 dispatches on the base type.
+/// (tuple); the lowering dispatches on the base type.
 pub fn fieldRead(b: *hir_build.Builder, info: *moduleinfo.ModuleInfo, e: ?*const ast.Expr, span: meta.Span, base: hir.ExprId, bt: meta.Type, name: []const u8) hir_build.BuildError!hir.ExprId {
     const ops = try b.built.program.addOperands(&.{base});
     switch (bt) {
@@ -323,7 +323,7 @@ pub fn fieldRead(b: *hir_build.Builder, info: *moduleinfo.ModuleInfo, e: ?*const
             // The path expression's annotation describes only the final
             // read of a chain (the whole path's type); an intermediate
             // read derives its type from the field declaration, exactly
-            // like the direct member chain (cfg_lower_path.memberLoad; the direct path was removed in S6b, this is the historical oracle).
+            // like the direct member chain (cfg_lower_path.memberLoad; the direct path was removed, this is the historical oracle).
             const ty = if (e) |ex| b.annotatedType(info, ex) orelse field_type else field_type;
             return b.built.program.addExpr(.{ .op = try b.op(span, "field_get"), .ty = try b.internTy(ty), .operands = ops, .payload = .{ .field = @intCast(idx) }, .origin = try b.origin(span) });
         },

@@ -19,7 +19,7 @@ const hir_build_expr = @import("hir_build_expr.zig");
 /// `value_pos` distinguishes *value-position* uses (a bare intrinsic
 /// function member synthesizes its first-class wrapper, mirroring
 /// `cfg_lower_intrinsic.intrinsicFnRef`) from *call-position* leaves
-/// (the call lowers to the inline expansion — syscall — at S5; the
+/// (the call lowers to the inline expansion — syscall — during lowering; the
 /// leaf stays a host fn_ref).
 pub fn memberLeaf(b: *hir_build.Builder, info: *moduleinfo.ModuleInfo, specifier: []const u8, name: []const u8, span: meta.Span, value_pos: bool) hir_build.BuildError!hir.ExprId {
     const owner = b.graph.module(specifier) orelse
@@ -51,7 +51,7 @@ pub fn memberLeaf(b: *hir_build.Builder, info: *moduleinfo.ModuleInfo, specifier
             // A *bare value use* of an intrinsic function member
             // synthesizes the first-class wrapper (the direct path's
             // `intrinsicFnRef`); call-position leaves keep the host
-            // fn_ref (S5 lowers the call to the inline expansion).
+            // fn_ref (the lowering expands the call inline).
             if (owner.isIntrinsic(vm) and value_pos) {
                 return intrinsicWrapperFnRef(b, info, span, owner, vm, null);
             }
@@ -249,7 +249,7 @@ pub fn buildSpecialize(b: *hir_build.Builder, info: *moduleinfo.ModuleInfo, s: *
 
 /// The callee leaf of a `::[…]`-specialized call whose callee is a
 /// bodyless (host/intrinsic) member: a host fn_ref (the concrete
-/// signature is derived at S5 from the arguments). Bodyful generic
+/// signature is derived from the arguments during lowering). Bodyful generic
 /// specializations are keyed in `call_of` and handled earlier.
 fn specializeCalleeLeaf(b: *hir_build.Builder, info: *moduleinfo.ModuleInfo, s: *const ast.Specialize, span: meta.Span) hir_build.BuildError!hir.ExprId {
     var operand = s.operand;
@@ -318,7 +318,7 @@ fn intrinsicWrapperFnRef(b: *hir_build.Builder, info: *moduleinfo.ModuleInfo, sp
 /// The forwarding body of a first-class intrinsic wrapper: parameters
 /// bound by mode, then a `call` of the intrinsic's (module, member)
 /// syscall target with each parameter as an argument (mirror
-/// `cfg_lower_intrinsic.synthIntrinsicFunc`; S5 emits the syscall).
+/// `cfg_lower_intrinsic.synthIntrinsicFunc`; the lowering emits the syscall).
 fn synthIntrinsicRoot(b: *hir_build.Builder, fid: hir.FuncId, hid: hir.HostBindingId) hir_build.BuildError!hir.ExprId {
     const rec = b.built.funcs.items[fid];
     const info = b.graph.modules[rec.module];

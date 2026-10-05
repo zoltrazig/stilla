@@ -12,7 +12,7 @@
 >   （hir_simplify.zig，`hir` 门，`--opt hir`，默认关）；SEG（hir_seg.zig 的
 >   island 驱动与 hir_egraph.zig 的 slotted e-graph arena，`seg` 门可执行文件
 >   默认开、库默认关）。
-> - **设计已定但未实现**（§11、[todo.md](todo.md)）：PRE（跨语句 / 分支的共享）。
+> - **设计已定但未实现**（§11）：PRE（跨语句 / 分支的共享）。
 > - **阅读约定**：数据结构以 hir.zig 的落地形态为准；标 **Target** 的段落是
 >   设计意图，不是现状。
 
@@ -126,8 +126,7 @@ HIR 落在 checker 与 CFG lowering 之间，是**兼容边界**，不是对两�
 - **范围边界** — 本文的 HIR 形态只做规范形，覆盖全部现有语言形态，**不含
   SEG**；SEG（§8）是可选的受限视图。
 - **远期边界（Target）** — 把 monomorphization 与 ownership 检查上移到
-  「先建 Typed HIR 再特化」，HIR 构建向上游扩展。本文描述其架构意图，未立项
-  （[todo.md](todo.md)）。
+  「先建 Typed HIR 再特化」，HIR 构建向上游扩展。本文描述其架构意图，未立项。
 
 ### 2.4 两份语义的归属
 
@@ -340,7 +339,7 @@ SemanticInfo {
   `Program` 的 ground truth。这是本迁移的主要正确性风险点。
 - **SEG**：e-node hash-consing 与 pattern 相等用 O(1) `HIRTypeId` 相等；节点散列
   折叠 id（或其结构哈希）而非每次深散列类型；按类型键的摘要 interning 以
-  `HIRTypeId` 为键（第 26 项 drop-type 依赖节点的前置条件）。
+  `HIRTypeId` 为键（drop-type 依赖节点的前置条件）。
 - 概念上的 canonical 类型词汇（用于阅读，不是落地 enum）：
   `Primitive | NominalStruct | NominalUnion | Opaque | List | Box | Tuple | Fn |
   Any | HostData | Never`。
@@ -579,7 +578,7 @@ fn (B0: i32) {
 - `--emit-hir` 与 `--emit-asm` / `--emit-bin` / `--run` 互斥；与 `--output` /
   `--no-entry-fn` 可同用。
 - 未覆盖的节点使转储失败：带 `access_hops` 的模块链叶子与带 region 的非命名 op
-  报 `NotSerializable`，CLI 输出函数名与错误并以退出码 1 结束。（第 16 项后，
+  报 `NotSerializable`，CLI 输出函数名与错误并以退出码 1 结束。（
   aggregate 成员身份与解构 let 已可序列化；这两类保留缺口是设计边界，不是
   待修项。）
 
@@ -806,7 +805,7 @@ EffectSummary {
 与资源偏序由 provider 声明、会话开始 intern 后冻结，`flat` 固定乘积格是默认实例，
 `hierarchy`（域树 + 别名）是第二实例。`hir_effects.Analysis` 持有该冻结实例
 （`eng`），组合与全部派生查询都经它转发；`frontend.compile` 一次冻结并贯通
-效应分析、M2b 消费者、SEG 与每次重校验。
+效应分析、消费者、SEG 与每次重校验。
 
 - **effect 层中 panic = trap**：都置 `may_trap = true`，运行时都跳过销毁。
 - **不跟踪 `may_return_normally`**：正常返回是默认假设；后缀 DCE 由独立 must
@@ -1034,7 +1033,7 @@ encode_hir(e, scope) -> SEGTerm?
 extract(eclass)      -> ExprId
 ```
 
-抽取的选点由 **per-opcode cost model** 给出（第 22 项，`hir_egraph.CostModel`）：
+抽取的选点由 **per-opcode cost model** 给出（`hir_egraph.CostModel`）：
 每个 e-class 取最小 cost 成员，cost 沿类 DAG 自底向上松弛，权重按 op 的 registry
 class 给、缺省回退到节点计数（§8.2 末的落地清单）。
 
@@ -1048,7 +1047,7 @@ class 给、缺省回退到节点计数（§8.2 末的落地清单）。
   自由 binder（`Local` 的 payload 换成 `.slot`）；同一 binder 的两处引用共享一个
   号，因此同形子树自然同余合并。slot → 原 `BinderId` 的表随 island 保存，
   extraction 在 island 外重新读到的 binder 原样写回原 id（free-binder 身份）。
-- **cost model（第 22 项）**：saturation 结束后对每个 e-class 求**最小 cost
+- **cost model**：saturation 结束后对每个 e-class 求**最小 cost
   成员**（`hir_egraph.CostModel`），自底向上在类 DAG 上松弛到不动点（每个类只付
   一次，所以共享类值得 materialize）。权重按 op 的 registry class 给（
   `.atom` / `.binding` / `.seq` / `.numeric` / `.conversion` = 1；构造与控制在
@@ -1168,9 +1167,9 @@ class 给、缺省回退到节点计数（§8.2 末的落地清单）。
   方式是安静轮，即真不动点，`converged` 恒为 `true`；不再有「撞界」路径）与
   `eclasses` / `enodes` / `merges` / `unions` /
   `folds` / `algebra` / `conds` / `projects` / `materialized` / `copied` /
-  `written`，外加 `extract_cost`（抽取选中形态的 DAG 总 cost，第 22 项）；驱动
+  `written`，外加 `extract_cost`（抽取选中形态的 DAG 总 cost）；驱动
   聚合成 `hir_seg.Stats.egraph_*` 与 `egraph_extract_cost`（§11 的基线逐项
-  打印）。第 23 项把四个 union 规则的计数拆成**匹配 / 应用**两半：`folds` /
+  打印）。四个 union 规则的计数拆成**匹配 / 应用**两半：`folds` /
   `algebra` / `conds` / `projects` 只数 `redirect` 真正改变类（合并或 preferred
   移动）的**应用**，新增的 `folds_matched` / `algebra_matched` / `conds_matched` /
   `projects_matched` 数识别出可用 redex（全 const 且折叠得出值 / `integerAlgebra`
@@ -1598,7 +1597,7 @@ lowering。可选变换每轮原位重写后重新跑结构 + 效果校验（§2
   复用 lower.zig / cfg_lower_* 发射机制；
 - 测试：hir_tests.zig / hir_simplify_tests.zig / hir_seg_tests.zig。
 
-**SEG 编译时间 / 轮数基线**（第 12 项验收；`hir_seg_tests.zig` 的 `SEG budget`
+**SEG 编译时间 / 轮数基线**（`hir_seg_tests.zig` 的 `SEG budget`
 测试在 CI 每次打印，基线取 2026-10-05、macOS/arm64 的一次运行）。
 
 > **稳定规范序契约下的重录。** 本轮删除了 SEG 的全部数值界（`max_iterations` /
@@ -1613,8 +1612,8 @@ lowering。可选变换每轮原位重写后重新跑结构 + 效果校验（§2
 新基线（2026-10-05、macOS/arm64；Stage A AC worklist）：`probes/` + `examples/` 全语料
 **63 个文件 / 5002 个可达节点**，SEG 接受 **2762 个 island 成员（≈55%）**，共
 **96 轮**、**122 次重写**，外层 arena 跑 **2121 轮 saturation**（**51 次 union /
-421 次同余 merges / 129 个写回拷贝**），抽取选中项的总 cost **5300**（第 22 项的
-`Stats.egraph_extract_cost`），第 23 项起基线行另打印规则引擎的**匹配 / 应用**两半
+421 次同余 merges / 129 个写回拷贝**），抽取选中项的总 cost **5300**（
+`Stats.egraph_extract_cost`），基线行另打印规则引擎的**匹配 / 应用**两半
 （**87 个匹配 redex / 43 次应用**）；`eq` / `ne` 原位交换 **1** 次、AC 重结合
 **8** 次（调度只访问极大 / 指纹相同的节点后大幅下降）。总编译时间 **≈90 ms**，最慢
 `probes/seg`（7 ms / 3 轮 / 130 islands）。每个程序与每个 island 都到达**真不动点**
@@ -1633,8 +1632,8 @@ lowering。可选变换每轮原位重写后重新跑结构 + 效果校验（§2
 **60 个程序 / 4732 个可达节点**，SEG 接受 **2558 个
 island 成员（≈54%）**，共 **91 轮**、**109 次重写**，外层 arena 跑 **2061 轮
 saturation**（**41 次 union / 322 次同余 merges / 82 个写回拷贝**），抽取选中项
-的总 cost **5089**（第 22 项的 `Stats.egraph_extract_cost`，单位是 `CostModel`
-的权重，不是时间）；第 23 项起基线行另打印规则引擎的**匹配 / 应用**两半——
+的总 cost **5089**（`Stats.egraph_extract_cost`，单位是 `CostModel`
+的权重，不是时间）；基线行另打印规则引擎的**匹配 / 应用**两半——
 四个 union 规则在语料上合计 **83 个匹配 redex / 41 次应用**（匹配 ≥ 应用，差即
 「已近优、重投无变化」的静态饱和信号，也证明规则真在空跑之上运转）。总编译时间
 **≈112 ms**（单文件最慢 ≈12 ms，`examples/fold` 与 `probes/seg` 之间随计时抖动）；
@@ -1642,27 +1641,27 @@ saturation**（**41 次 union / 322 次同余 merges / 82 个写回拷贝**）�
 界），每个 island 的 saturation 同样以安静轮到达不动点（`Stats.egraph_converged == true`）。
 测试断言两层收敛（CI 稳定），时间仅记录、不断言（CI 计时不是稳定 oracle）。
 §8.3 的跨 FE `let` 折叠把 70 轮 / 51 次重写推到 85 轮 / 94 次：它新增的
-重写是 let 三规则，新增的轮数是在 island 表快照之外的那一轮（§8.7）。第 19 项
-把 `tuple_make` / `list_make` 并入 island 集、新增一个探针后升到 89 轮 /
-99 次：新增重写主要来自两个字面量内的 CSE sharing（§8.3）。第 21 项把 union
+重写是 let 三规则，新增的轮数是在 island 表快照之外的那一轮（§8.7）。把
+`tuple_make` / `list_make` 并入 island 集、新增一个探针后升到 89 轮 /
+99 次：新增重写主要来自两个字面量内的 CSE sharing（§8.3）。把 union
 规则从原位树重写换成 arena（同上 `rounds` / `unions` / `merges` / `copies`
 四项新计数）、并新增 `probes/egraph.st`（60 个程序）：写回内容不变，只是
 “同一类的两个站点”现在先真并类再按 preferred e-node 抽取，计数里多出了
-同余合并与 saturation 轮数。第 22 项把选点从「优先级 + 最低索引」换成 per-opcode
+同余合并与 saturation 轮数。把选点从「优先级 + 最低索引」换成 per-opcode
 cost model（§8.2）：全语料 `rounds` / `unions` / `merges` / `copies` 四项与
 写回内容逐项不变（默认权重下最小 cost 与旧优先级选点一致），只多出
-`egraph_extract_cost` 一项聚合。第 23 项把 union 规则的应用计数补足为
+`egraph_extract_cost` 一项聚合。把 union 规则的应用计数补足为
 **匹配 / 应用**两半（新字段 `egraph_folds_matched` / `egraph_algebra_matched` /
 `egraph_conds_matched` / `egraph_projects_matched`，见 §8.2）：语料的应用计数与
 写回逐项不变，另多打印 rule matches / rule applies 两项聚合（83 / 41）。
-第 26 项新增跨层环 probe（`probes/cross_layer_drop_cycle.st`）：基线变为
+新增跨层环 probe（`probes/cross_layer_drop_cycle.st`）：基线变为
 **61 个程序 / 4812 个可达节点 / 2595 个 island 成员 / 92 轮 / 112 次重写 /
 2095 轮外层 saturation（43 union / 334 merges / 89 copies）/ 89 rule matches /
 43 rule applies / 8 ac swaps / 5156 extract cost**；相对新增前（60 / 4780 /
 2585 / 91 / 112 / 2086 / 43 / 334 / 89 / 89 / 43 / 8 / 5143）只随新文件增长
 （+1 程序 / +32 节点 / +10 island / +1 轮 / +9 arena 轮 / +13 cost），
 `rewrites` / `unions` / `merges` / `copies` / rule matches / applies / ac swaps 不变。
-第 28 项把整数交换律扩成**交换-结合全搜索**（`ruleAcRegroup`：展平 / 按最低 `NodeId`
+把整数交换律扩成**交换-结合全搜索**（`ruleAcRegroup`：展平 / 按最低 `NodeId`
 规范排序 / 左深重分组，仍由 `egraph_ac` 开关，见 §8.2），`Stats.ac` 此后只计 `eq` /
 `ne` 的就地交换、重结合另计 `Stats.assoc`（含纯二元交换的退化触发）；
 `probes/egraph.st` 增一个 `eq` / `ne` 反向用例以覆盖交换路径，新增
@@ -1708,23 +1707,13 @@ k=10 / 11 代价**在 SEG arena 自身**：`egraph_ac` 关（≈HEAD）仍要 0.
 与优化模式变化。runtime 输出
 在 `egraph_ac` 开/关与 `seg` 开/关四种组合下逐字相同（k=10 → `3072`，k=11 → `6144`）。
 
-
-落地档映射（历史里程碑编号）：
-
-| 档 | 内容 | 落点 |
-| --- | --- | --- |
-| M1a | 结构 HIR：AST→HIR 构建、结构校验、HIR→CFG lowering；直降路径删除后成为唯一前端路径 | hir_build.zig / hir_validate.zig / hir_lower.zig |
-| M1b | 效果基础设施：`SemanticInfo.effect`、可插拔格引擎（默认实例 = 固定乘积格，第二实例 `hierarchy`）、transfer、cleanup 门、派生查询、host 语义注册表 | effects_lattice.zig / effects_engine.zig / hir_effects*.zig |
-| M2a | SEG 规则子集（β / η / let / 常折叠 / 整数代数 / 聚合投影 / known-variant match / CSE sharing）；union 规则在 slotted e-graph arena 里走 encode → 稳定规范序 saturation → extraction，β / η / let / match 是驱动层的 boundary rewrite；`seg` 门可执行文件默认开 | hir_seg.zig / hir_egraph.zig / hir_egraph_rules.zig |
-| M2b | 摘要化消费者：函数摘要 SCC least fixpoint、精确 `drop_effect(T)`、module-const 检查、dead-let / selective ANF / `never_returns` 后缀删除 | hir_effects*.zig / hir_simplify.zig |
-
-**尚未实现**（完整清单见 [todo.md](todo.md)）：
+**尚未实现**：
 PRE（跨语句 / 分支的共享）。
 
 ## 12. 开放问题
 
 - §3.7 树形禁止 DAG、§8.2 的 per-opcode cost model（权重阶梯 + 确定性
-  tie-break，第 22 项落地）、§3.8 的 `HIRTypeId` 表复用 `meta.Type` 作跨
-  `Program` ground truth（第 25 项落地）——取舍已成正文规范。
+  tie-break）、§3.8 的 `HIRTypeId` 表复用 `meta.Type` 作跨
+  `Program` ground truth——取舍已成正文规范。
 - 效果模型的开放问题在 [effects.md](effects.md) 定稿。
 - 其余本文级开放点随实现推进（HIR→CFG 的等价门禁暴露表述缺口时）按需补充。

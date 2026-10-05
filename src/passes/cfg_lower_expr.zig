@@ -1,7 +1,7 @@
 //! Pass: expression emission helpers shared with the HIR seam. The
 //! direct AST expression lowering (literals, constructs, unary/binary
 //! operators, casts, moves — `lowerExpr` and its per-form functions)
-//! was removed in PROGRESS S6b; the HIR seam lowers every expression
+//! was removed; the HIR seam lowers every expression
 //! from `hir.ExprNode`s (see hir_lower_expr.zig) through the same
 //! `cfg_lower_emit` emission discipline. The three AST-free helpers
 //! both paths share survive here.

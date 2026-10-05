@@ -28,7 +28,7 @@ pub const Scalar = enum { bool_, byte_, int32_, uint32_, float32_ };
 /// `@min` on floats does not fix the ±0 tie or propagate NaN the way
 /// the StdLib `min`/`max` contract does (StdLib §4, Runtime §7.2).
 /// Shared by the AIR `.min_f32`/`.min_f64` opcodes and the `math`
-/// module host binding (M2).
+/// module host binding.
 pub fn fminIeee(comptime T: type, a: T, b: T) T {
     if (std.math.isNan(a) or std.math.isNan(b)) return std.math.nan(T);
     if (a == 0.0 and b == 0.0) return if (std.math.signbit(a)) a else b;

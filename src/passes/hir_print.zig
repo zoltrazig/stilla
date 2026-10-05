@@ -27,7 +27,7 @@
 //! - **No derived annotations.** Ownership views and full-expression
 //!   membership are deliberately absent from canonical text (hir.md §4.6).
 //!
-//! S2 serialization boundaries: aggregate identity is carried by the
+//! Serialization boundaries: aggregate identity is carried by the
 //! result type plus a member bracket (`struct_make(…) : P`,
 //! `field_get[x](e) : T`, `variant_make[Some](e) : Option[i32]`,
 //! hir.md §4.4). A value-position module access chain leaf still has no
@@ -1264,7 +1264,7 @@ fn aggFixture(allocator: std.mem.Allocator) !Fixture {
     return .{ .arena = arena, .ctx = .{ .types = decls } };
 }
 
-test "printer determinism over constructed programs (S1 structures)" {
+test "printer determinism over constructed programs (structural fixtures)" {
     var arena = std.heap.ArenaAllocator.init(t.allocator);
     defer arena.deinit();
     var p = try hir.Program.init(arena.allocator());

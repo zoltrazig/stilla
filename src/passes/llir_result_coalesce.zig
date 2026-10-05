@@ -1,5 +1,5 @@
 //! Pass: Step 8 result coalescing for direct calls (spec §4.1, §5.4).
-//! In: the `Builder` after the 2.3 allocation (`llir_alloc.zig`) — the
+//! In: the `Builder` after the allocation (`llir_alloc.zig`) — the
 //! frame-layout numbers (`f_count`/`x_count`/`window_count`), the
 //! value→slot map, and the liveness snapshots (`value_starts`/
 //! `value_ends`) are final. Out: eligible call results remapped onto

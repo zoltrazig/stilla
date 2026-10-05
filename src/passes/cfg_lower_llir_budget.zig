@@ -54,13 +54,13 @@ pub fn run(bld: *Builder) error{OutOfMemory}!void {
         for (bld.ordered_blocks.items) |blk| {
             var e: u32 = 0;
             if (bld.isEdgeBlock(blk)) {
-                // Stage-7 edge block: one edge's phi copies then kills.
+                // Edge block: one edge's phi copies then kills.
                 const edge = bld.edge_block_srcs.get(blk).?;
                 e += try edges.edgeCopyCount(bld, edge.pred, edge.succ);
                 e += @intCast(lifecycle.edgeKills(bld, edge.pred, edge.succ).len);
             } else switch (blk.terminator) {
                 // Ordinary blocks reserve no edge effects — every
-                // effect-bearing edge lives in an edge block (stage 7).
+                // effect-bearing edge lives in an edge block.
                 .tailcall => e += try edges.tailcallOverhead(bld, blk),
                 else => {}, // j / br / switch / ret / trap
             }

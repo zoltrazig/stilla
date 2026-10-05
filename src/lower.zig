@@ -110,8 +110,8 @@ pub const FuncState = struct {
     phi_lists: std.AutoHashMapUnmanaged(*cfg.Instr, *std.ArrayList(cfg.PhiIn)) = .empty,
 };
 
-/// Cache key of a first-class intrinsic wrapper (intrinsic plan,
-/// phase 3): the declaring module's identity (`@intFromPtr`), the
+/// Cache key of a first-class intrinsic wrapper: the declaring
+/// module's identity (`@intFromPtr`), the
 /// member's source slot, and the concrete specialization — the instance
 /// id for generic intrinsics, `maxInt(u32)` for non-generic members.
 /// Shared with the HIR builder's wrapper cache (`hir_build.WrapperKey`).
@@ -146,7 +146,7 @@ pub const Lowerer = struct {
     /// Deterministic per-program lambda counter (lambda names must be
     /// unique across the whole program's AIR text).
     next_lambda_id: u32 = 0,
-    /// First-class intrinsic wrappers (intrinsic plan, phase 3), keyed by
+    /// First-class intrinsic wrappers, keyed by
     /// (declaring module, member index, specialization): the cache is
     /// program-wide, so two modules using the same intrinsic value share
     /// one synthesized function. `intrinsic_funcs` holds only the
@@ -257,7 +257,7 @@ pub const Lowerer = struct {
 /// 8. edge blocks (`cfg_lower_llir_edges.planBlocks`) — expand the block
 ///    order with one LLIR-only edge block per effect-bearing outgoing
 ///    edge (phi copies or lifecycle kills), so only the selected edge's
-///    effects execute (TODO.md 7.1).
+///    effects execute.
 /// 9. edge emit (`cfg_lower_llir_edges.run`) — phi elimination as ordinary edge
 ///    records in each edge block: each incoming lowers to `copy`/`move`/`borrow`
 ///    then the lifecycle kills, reverse-topologically ordered,
@@ -289,7 +289,7 @@ pub const Lowerer = struct {
 /// and the whole backend is a read-only projection of the input CFG
 /// (Stilla LLIR Specification §1): nothing ever rewrites it.
 pub const LlirBuilder = cfg_lower_llir.Builder;
-/// 2.3 register allocation (`llir_alloc.zig`): the type-constrained
+/// Register allocation (`llir_alloc.zig`): the type-constrained
 /// linear-scan value→slot mapping and the per-function frame layout
 /// numbers (`value_slot_count`/`scratch_slot_count`/`cleanup_count`/
 /// `window_count`/`slot_types_len`). The Step 8 result coalescing runs
@@ -298,7 +298,7 @@ pub const LlirBuilder = cfg_lower_llir.Builder;
 /// (`llir_compact_noop_ownership.zig`).
 pub const allocateSlots = llir_alloc.allocateSlots;
 pub const compactNoopOwnership = llir_noop.compactNoopOwnership;
-/// 2.14/2.15 instruction fusion (`llir_fusion.zig`): the const+op
+/// Instruction fusion (`llir_fusion.zig`): the const+op
 /// immediate fusion, `read_indexi`, and the fused
 /// multiply-accumulate peepholes — folds fused sites into their
 /// immediate variants and compacts each block's record list

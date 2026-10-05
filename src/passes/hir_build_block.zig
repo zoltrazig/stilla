@@ -206,7 +206,7 @@ fn buildLet(
 ) hir_build.BuildError!hir.ExprId {
     const moving = isMoveExpr(ls.init);
     const init = try hir_build_expr.buildExpr(b, info, ls.init);
-    // `let _ = expr`: discard the value (drop at the FE, S5); the rest
+    // `let _ = expr`: discard the value (drop at the FE); the rest
     // of the block continues in the same scope.
     if (ls.pattern == .wildcard) {
         return seq2(b, ls.span, init, try buildStmts(b, info, stmts, i + 1, result));

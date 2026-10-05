@@ -1,5 +1,5 @@
-//! HIR SEG black-box suite — cross-module tests of the M2a SEG pass
-//! (docs/hir.md §8/§11 M2a). White-box rule/cost tests live in
+//! HIR SEG black-box suite — cross-module tests of the SEG pass
+//! (docs/hir.md §8/§11). White-box rule/cost tests live in
 //! `passes/hir_seg.zig`; this file builds real modules through the
 //! checker + HIR builder, runs the pass, re-validates structure and
 //! effects, and checks the observable rule set, the negative cases, the
@@ -1802,8 +1802,8 @@ fn runCompiled(c: *Compiled) !Term {
     };
 }
 
-/// The four `hir` × `seg` combinations (hir.md §11): the M2b
-/// consumers and SEG are independent passes, so every combination must
+/// The four `hir` × `seg` combinations (hir.md §11): the consumers
+/// and SEG are independent passes, so every combination must
 /// interpret a corpus program identically — output, termination, and
 /// panic message (hir.md §10.3). Combination 0 is the all-off baseline
 /// the other three are compared against.
@@ -2221,7 +2221,7 @@ test "SEG budget — every corpus program reaches a true fixpoint (no numeric ca
 // ---------------------------------------------------------------------------
 
 // The strongest guard for the incremental contract: for every corpus
-// program, the whole M2b (hir_simplify) + M2a (hir_seg) pipeline run
+// program, the whole consumers (hir_simplify) + SEG (hir_seg) pipeline run
 // against one caller-supplied session `SummaryCache` must print exactly
 // the same canonical HIR as the same pipeline run with the default
 // never-armed private cache, per function and per const. Any dirty-marking

@@ -1,4 +1,4 @@
-//! Test file: `frontend LLIR asm` — LLIR 5.1/5.2: the symbolic
+//! Test file: `frontend LLIR asm` — the symbolic
 //! assembly projection of a lowered image and `llir.print`
 //! re-exporting it. Split out of the former `src/frontend_tests.zig`.
 //!
@@ -42,7 +42,7 @@ fn patchImage(image: llir.LlirProgram, instructions: []const llir.Instr, st: *Pa
     out.functions = st.functions[0..1];
     return out;
 }
-test "5.1 LLIR assembly: symbolic projection — qualified funcs, block labels, consts, members, syscalls; deterministic and image-read-only" {
+test "LLIR assembly: symbolic projection — qualified funcs, block labels, consts, members, syscalls; deterministic and image-read-only" {
     const src = try helpers.probeSource("probes/cases", "llir_asm_symbolic_projection");
     defer testing.allocator.free(src);
     var c = try compileOpt("app", &.{.{ "app", src }});
@@ -88,7 +88,7 @@ test "5.1 LLIR assembly: symbolic projection — qualified funcs, block labels, 
     try testing.expect(std.mem.indexOf(u8, asm1, "; symbol table") != null);
     try testing.expect(std.mem.indexOf(u8, asm1, "$app.init.entry = 0x") != null);
 
-    // M1: the symbol table's symbols section projects every symbol from
+    // The symbol table's symbols section projects every symbol from
     // the image itself (the `symbols` SymbolId table into `strings`),
     // field-faithful and independent of the source program.
     try testing.expect(std.mem.indexOf(u8, asm1, "; symbols (SymbolId -> bytes)") != null);
@@ -106,8 +106,8 @@ test "5.1 LLIR assembly: symbolic projection — qualified funcs, block labels, 
     try testing.expectEqualStrings(asm1, asm2);
 }
 
-test "5.1 LLIR assembly: module symbols resolve from the image, not the source program" {
-    // Field-faithfulness (M1): the specifier is image data. Rewriting
+test "LLIR assembly: module symbols resolve from the image, not the source program" {
+    // Field-faithfulness: the specifier is image data. Rewriting
     // the specifier bytes inside the image's strings blob — the source
     // program untouched — must change every module symbol: the syscall
     // operand, the function-header qualifier, the symbol table's
@@ -179,7 +179,7 @@ test "5.1 LLIR assembly: module symbols resolve from the image, not the source p
     try testing.expect(std.mem.indexOf(u8, text, "module_ref r0, @app") == null);
 }
 
-test "5.1 LLIR assembly: every block label maps 1:1 to a distinct PC and every unresolvable id appears in the table" {
+test "LLIR assembly: every block label maps 1:1 to a distinct PC and every unresolvable id appears in the table" {
     const src = try helpers.probeSource("probes/cases", "llir_asm_block_label_pcs");
     defer testing.allocator.free(src);
     var c = try compileOpt("app", &.{.{ "app", src }});
@@ -214,8 +214,8 @@ test "5.1 LLIR assembly: every block label maps 1:1 to a distinct PC and every u
     try testing.expect(std.mem.indexOf(u8, asmText, "?target") == null);
 }
 
-test "5.2 llir.print re-exports the assembly printer from the LLIR module" {
-    // `src/llir.zig` now re-exports the printer (5.2), replacing the
+test "llir.print re-exports the assembly printer from the LLIR module" {
+    // `src/llir.zig` now re-exports the printer, replacing the
     // deleted `llir_print` binding. The functions are the same, so the
     // two spellings must return byte-identical assembly for one image.
     const src = try helpers.probeSource("probes/cases", "llir_print_reexport");
@@ -241,8 +241,8 @@ test "5.2 llir.print re-exports the assembly printer from the LLIR module" {
     try testing.expect(std.mem.indexOf(u8, asm1, ".block $") != null);
 }
 
-test "5.2 LLIR assembly: binary64 constants print at full precision" {
-    // Phase 5: the assembly projection renders a binary64 constant from
+test "LLIR assembly: binary64 constants print at full precision" {
+    // The assembly projection renders a binary64 constant from
     // its full {a, b} payload (the {d} shortest round-trip form), never
     // narrowed through binary32.
     const src = try helpers.probeSource("probes/cases", "llir_asm_binary64_precision");
@@ -266,8 +266,8 @@ test "5.2 LLIR assembly: binary64 constants print at full precision" {
     try testing.expect(std.mem.indexOf(u8, asm1, "3.1415927410125732") == null);
 }
 
-test "5.1 LLIR assembly: i64/u64/f64 ops and conversions print stable serialized names" {
-    // Phase 3 (TODO.md 阶段 3): the assembly projection is a projection of
+test "LLIR assembly: i64/u64/f64 ops and conversions print stable serialized names" {
+    // The assembly projection is a projection of
     // the *serialized* image, so the v9 typed opcode names print with
     // their rep suffixes (`mul`/`shru` — the width rides in the
     // opcode, never a load-time derivative), the C-Type comparisons
@@ -310,12 +310,12 @@ test "5.1 LLIR assembly: i64/u64/f64 ops and conversions print stable serialized
     try testing.expect(std.mem.indexOf(u8, asm1, "3.141592653589793") != null);
 }
 
-test "5.1 LLIR assembly: the twelve move-wide opcodes print unsigned imm16 lane values" {
-    // Phase 3 (TODO.md 阶段 3): `movwn0`…`movwk3` are I-format rows whose
+test "LLIR assembly: the twelve move-wide opcodes print unsigned imm16 lane values" {
+    // `movwn0`…`movwk3` are I-format rows whose
     // `imm16 = b | (c << 8)` is the unsigned lane value — printed as the
     // unsigned 16-bit immediate, never sign-extended (0x0000 → 0,
     // 0xffff → 65535), with no new assembly syntax. The frontend lowering
-    // does not emit them yet (TODO.md 阶段 5), so the image is a compiled
+    // does not emit them yet, so the image is a compiled
     // program whose code is patched in place with the twelve rows.
     const src = try helpers.probeSource("probes/cases", "llir_tiny_main");
     defer testing.allocator.free(src);
@@ -373,8 +373,8 @@ test "5.1 LLIR assembly: the twelve move-wide opcodes print unsigned imm16 lane 
     try testing.expect(std.mem.indexOf(u8, asm1, "movwk3 r19, 0") != null);
 }
 
-test "5.2 LLIR assembly: host syscalls and any payload TypeIds project symbolically" {
-    // Phase 6: the projection renders any instructions with their
+test "LLIR assembly: host syscalls and any payload TypeIds project symbolically" {
+    // The projection renders any instructions with their
     // payload TypeId (the packed source / recovery target) and
     // syscalls with their binding member name — the text form a host
     // reads to resolve bindings (Runtime §2.6).
@@ -402,10 +402,10 @@ test "5.2 LLIR assembly: host syscalls and any payload TypeIds project symbolica
 }
 
 // ---------------------------------------------------------------------------
-// 3.4 — operand printing contracts over patched images and natural lowering
+// Operand printing contracts over patched images and natural lowering
 // ---------------------------------------------------------------------------
 
-test "3.4 LLIR assembly: all seven formats print mnemonic, operands, and negative offsets" {
+test "LLIR assembly: all seven formats print mnemonic, operands, and negative offsets" {
     // One patched single-block image carries a representative row of every
     // format: R (`add`), E (`neg`), C (cast + immediate compare),
     // I (`jr`/`jalr`/`movwz1`), B (register, immediate, and bit-test
@@ -483,7 +483,7 @@ test "3.4 LLIR assembly: all seven formats print mnemonic, operands, and negativ
     try testing.expect(std.mem.indexOf(u8, text, "?? ") == null);
 }
 
-test "3.4 LLIR assembly: direct-call jal prints the callee name and take follows it" {
+test "LLIR assembly: direct-call jal prints the callee name and take follows it" {
     // Natural lowering of a self-recursive call (the optimizer keeps it)
     // plus an inlined fn-value call: `jal @callee` resolves the direct
     // frame call's function-entry target through `functionAtPc`, the
@@ -535,7 +535,7 @@ test "3.4 LLIR assembly: direct-call jal prints the callee name and take follows
     try testing.expect(std.mem.indexOf(u8, text, "#f") == null);
 }
 
-test "3.4 LLIR assembly: comparison swaps and the immediate-compare aliases print their fixed forms" {
+test "LLIR assembly: comparison swaps and the immediate-compare aliases print their fixed forms" {
     // Natural lowering of the non-canonical predicates: signed `>` swaps
     // to `slt rhs, lhs`, unsigned ">=" lowers to a negated `sltu`, float
     // equality stays ordered without any swap, and the fused immediate
@@ -578,7 +578,7 @@ test "3.4 LLIR assembly: comparison swaps and the immediate-compare aliases prin
     try testing.expect(std.mem.indexOf(u8, text, "?target") == null);
 }
 
-test "3.4 LLIR assembly: lui prints the shifted constant and auipc the pc delta with sign" {
+test "LLIR assembly: lui prints the shifted constant and auipc the pc delta with sign" {
     // U-type immediates are sign-extended 20-bit constants; `lui` renders
     // the raw decoded i20 while `auipc` renders its <<12 displacement as a
     // signed hexadecimal delta — positive, zero, and at both sign extremes.
@@ -626,7 +626,7 @@ test "3.4 LLIR assembly: lui prints the shifted constant and auipc the pc delta 
     try testing.expect(std.mem.indexOf(u8, text, "?? ") == null);
 }
 
-test "5.1 LLIR assembly: the variant tag prints as a number, not a register" {
+test "LLIR assembly: the variant tag prints as a number, not a register" {
     // `borrow_variant`/`unpack_variant`'s `c` is the variant *tag* — an
     // immediate value, never a register. Under the re-encoding the tag 1
     // numerically equals the `cond` encoding, so the printer must render
@@ -651,7 +651,7 @@ test "5.1 LLIR assembly: the variant tag prints as a number, not a register" {
     try testing.expect(std.mem.indexOf(u8, text, "borrow_variant #d0, r19, cond\n") == null);
 }
 
-test "5.1 LLIR assembly: a per-module artifact pairs functions with the scoped names" {
+test "LLIR assembly: a per-module artifact pairs functions with the scoped names" {
     // The root artifact carries only the entry module's functions, so its
     // FunctionIds index `ordered_funcs` — not the whole-program list, where
     // dependency functions precede the entry module. Pairing against the

@@ -1,5 +1,5 @@
-//! Pass: SEG (M2a rule subset): the island driver, plus the arena-based
-//! union rules (docs/hir.md §8, §11 M2a; docs/effects.md §12.3). In: a
+//! Pass: SEG (island rule subset): the island driver, plus the arena-based
+//! union rules (docs/hir.md §8, §11; docs/effects.md §12.3). In: a
 //! built HIR program whose every reachable node carries a *validated*
 //! `ready` effect summary (`hir_effects.Analysis`). Out: the same program
 //! with its admissible pure-Copy islands rewritten, iterated to a fixpoint,
@@ -17,7 +17,7 @@
 //! because they rewrite across an island boundary rather than to an
 //! equivalent term.
 //!
-//! Scope (hir.md §11 M2a):
+//! Scope (hir.md §11):
 //!
 //! - **Island set** — `const / local / let / lambda / call / if / match /
 //!   struct_make / variant_make / tuple_make / list_make / field_get` plus
@@ -285,7 +285,7 @@ pub const Stats = struct {
     /// instance over an empty registry).
     reorders: usize = 0,
 
-    // --- the SEG arena's own facts (docs/todo.md 21 / 23) ---
+    // --- the SEG arena's own facts ---
     /// Islands that actually went through the e-graph engine (encode
     /// succeeded): an island whose root failed admission keeps its shape.
     egraph_islands: usize = 0,
