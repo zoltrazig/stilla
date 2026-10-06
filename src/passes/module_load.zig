@@ -104,8 +104,8 @@ fn loadFromSearchDirs(self: *Builder, written: []const u8, span: meta.Span) !?*R
     return null;
 }
 
-/// Load one module from its source text through the frontend cache
-/// (PLAN item 3): hash the text and reuse the cached parse when the
+/// Load one module from its source text through the frontend cache:
+/// hash the text and reuse the cached parse when the
 /// specifier's content is unchanged; otherwise parse fresh (into the
 /// cache arena, when a cache is present) and store. The content hash is
 /// a fast validity filter — a hit is confirmed by byte-comparing the

@@ -4,7 +4,7 @@
 //! expression types, binding states, and concrete call signatures — and,
 //! on the first semantic error, a `moduleinfo.Diag`.
 //!
-//! Phase 2 is split into two passes over this driver's context:
+//! The checker is split into two passes over this driver's context:
 //! `checker_annotate` (block-level name resolution, expression/pattern
 //! inference, binding-state tracking — checker.md, Cross-module name resolution / Expression inference / Ownership analysis) and
 //! `checker_validate` (the consumer checks — Checks enabled by annotation: type mismatch, match

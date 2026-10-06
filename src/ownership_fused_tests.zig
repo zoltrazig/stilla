@@ -1,4 +1,4 @@
-//! Test file: the ownership fused oracle (PLAN item 5) — one corpus
+//! Test file: the ownership fused oracle — one corpus
 //! program per ownership behavior, each asserted at all four layers:
 //!
 //!   (a) the checker's final `BindingState`s (phase 2);
@@ -29,7 +29,7 @@
 //! released twice or never traps or leaks, which the heap-registry
 //! assertions catch).
 //!
-//! Run via `zig build test` (wired into `src/root.zig`'s test block).
+//! Run via `zig build -fincremental test` (wired into `src/root.zig`'s test block).
 
 const std = @import("std");
 const llir = @import("llir.zig");
@@ -287,7 +287,7 @@ const Fused = struct {
     /// is empty afterwards — a release/drop that runs twice or never
     /// leaks or double-frees and fails this check. The default host
     /// sends `builtin.print` to real stdout (host.zig), which under
-    /// `zig build test` is the build's live stdout, so a capturing host
+    /// `zig build -fincremental test` is the build's live stdout, so a capturing host
     /// adapter must be used whenever a corpus program prints.
     fn runExpectClean(self: *Fused) !Value {
         return self.runExpectCleanHost(.{});
@@ -512,7 +512,7 @@ test "fused oracle: edge kill — a counted value read on one branch releases on
     const pick_scan = try t.scanFunc(try t.fid("pick"));
     try testing.expectEqual(@as(usize, 1), pick_scan.releases);
     // (d) both paths: no leak, correct result, and the print is captured
-    // (never written to real stdout, which under `zig build test` is the
+    // (never written to real stdout, which under `zig build -fincremental test` is the
     // build's live stdout).
     {
         var rec = PrintRecorder{};

@@ -1,4 +1,4 @@
-//! The per-module frontend cache (PLAN item 3): avoids re-lexing and
+//! The per-module frontend cache: avoids re-lexing and
 //! re-parsing unchanged modules across `frontend.compile` calls.
 //!
 //! `FrontendCache` keeps one entry per resolved specifier: the source's

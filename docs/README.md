@@ -11,7 +11,8 @@ specifications (the spec suite index is [spec/README.md](../spec/README.md)).
 | --- | --- |
 | [architecture.md](architecture.md) | end-to-end map: artifacts, pipeline, boundaries, host embedding |
 | [passes.md](passes.md) | ordered inventory of every pass, with links to the detail documents |
-| [roadmap.md](roadmap.md) | open work: planned, spec-blocked, and intentionally-deferred items |
+| [roadmap.md](roadmap.md) | open work: the durable design-level backlog — planned, spec-blocked, design-blocked, and intentionally-deferred items |
+| [todo.md](todo.md) | prioritized overhaul plan: staged work items drawn from the design documents, complementing the durable backlog in [roadmap.md](roadmap.md) |
 
 ## Compiler pipeline
 
@@ -35,8 +36,12 @@ specifications (the spec suite index is [spec/README.md](../spec/README.md)).
 
 ## Open work
 
-The remaining work — planned, spec-blocked, and intentionally-deferred
-items — is catalogued in [roadmap.md](roadmap.md).
+The remaining work is catalogued in two documents.
+[roadmap.md](roadmap.md) is the durable design-level backlog — planned,
+spec-blocked, design-blocked, and intentionally-deferred items, each
+pointing at the design document that specifies it; items are removed when
+they land. [todo.md](todo.md) is the prioritized overhaul plan that
+sequences the work.
 
 ## Reading order
 

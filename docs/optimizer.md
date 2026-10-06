@@ -386,11 +386,11 @@ round-trip (air.md).
 The optimization harness compiles the corpus (`examples/` plus added
 benchmarks: `ownership.st` with `drop` hooks, `match.st` ADT `match`),
 runs the `cfg` gate, and reports instruction / block / text-byte counts
-before and after. The report prints only when the frontend test binary
-runs with stderr attached to a terminal — run the compiled
-`.zig-cache/o/*/test` binary directly; under `zig build test` stderr is
-a captured pipe, and the build runner replays any run-step stderr as an
-error, so the report is suppressed there to keep the log clean.
+before and after. The report is gated on stderr being a terminal
+(`isTty`). The test roots use `.mode = .simple`, whose run step inherits
+stdio, so running `zig build -fincremental test` from a terminal prints
+the report; redirecting stderr (as in CI or the log-capture invocation)
+suppresses it, keeping the log clean.
 
 ## Implementation files
 

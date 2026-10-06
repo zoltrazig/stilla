@@ -1,4 +1,4 @@
-//! Simple-mode test runner for `zig build test`.
+//! Simple-mode test runner for `zig build -fincremental test`.
 //!
 //! The build system's default runner drives a test binary through the
 //! `std.zig.Server` protocol so it can render a progress tree and aggregate

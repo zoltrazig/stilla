@@ -1,14 +1,14 @@
-//! Pass: mid-level CFG optimizer driver (optimizer.md, Pass 7–8). In: the
+//! Pass: mid-level CFG optimizer driver (optimizer.md). In: the
 //! lowered `cfg.IrProgram` (already optimized on-the-fly during
 //! construction — constant folding, arithmetic simplification, common
 //! subexpression elimination, and copy propagation happen at each emit
 //! site, braun13cc.pdf §3.1 / optimizer.md, On-the-fly optimizations). Out: the same program,
-//! rewritten in place by the optimization sub-passes in order — 7 tail
-//! call elimination, 8.0 function inlining, 8.4 module/member CSE, 8.4
-//! copy propagation, 8.3 partial redundancy elimination, 8.8 if-conversion
-//! (branchless select), 8.3 dead block
-//! elimination, 8.4 drop elision, 8.4 dead-instruction elimination, 8.6
-//! jump threading, 8.5 phi simplification. The sequence runs as a single
+//! rewritten in place by the optimization sub-passes in order — tail
+//! call elimination, function inlining, module/member CSE,
+//! copy propagation, partial redundancy elimination, if-conversion
+//! (branchless select), dead block
+//! elimination, drop elision, dead-instruction elimination,
+//! jump threading, phi simplification. The sequence runs as a single
 //! ordered pass only — no iteration to fixpoint (optimizer.md). Each
 //! sub-pass is individually toggled by `Config`; a disabled pass is
 //! simply skipped, and the air.md §13 validator still runs after every
@@ -77,7 +77,7 @@ pub fn optimize(program: *cfg.IrProgram, allocator: std.mem.Allocator, config: C
     try optimizeOnce(program, allocator, config);
 }
 
-/// One full pass of the Pass 7–8 sequence, skipping every pass disabled
+/// One full pass of the mid-level CFG rewrite sequence, skipping every pass disabled
 /// in `config`. The inliner is explicitly one-shot (cfg_inline.zig: "the
 /// spliced body's own call sites are not re-scanned this round, keeping
 /// the pass one shot"); re-running it on a spliced recursive callee

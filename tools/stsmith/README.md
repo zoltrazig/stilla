@@ -29,7 +29,7 @@ generator should surface — see "Stilla behaviors stsmith avoids".
 All options precede the seed/positional-free flags and are optional:
 
 - `--seed <u64>`      random seed; default 1. Same seed + same options ⇒
-                      byte-identical output (tested by `zig build test`).
+                      byte-identical output (tested by `zig build -fincremental test`).
 - `--statements <n>`  number of top-level statements in `main`; default 60.
 - `--funcs <n>`       number of generated helper functions; default 5.
 - `--max-depth <n>`   maximum recursion depth for recursive helpers; default 6.
@@ -134,7 +134,7 @@ bug or a mismatch worth reporting — never silent UB.
 
 Every random draw comes from a single deterministic PRNG (splitmix64) in a
 fixed order, and no output depends on allocation layout or hash iteration
-order. `zig build test` includes a unit test asserting that two generators
+order. `zig build -fincremental test` includes a unit test asserting that two generators
 with the same seed produce identical bytes.
 
 ## Layout
@@ -146,4 +146,4 @@ with the same seed produce identical bytes.
 - `main.zig` — CLI
 
 `build.zig` exposes the `stsmith` and `stsmith-check` steps and wires this
-module's tests into `zig build test`.
+module's tests into `zig build -fincremental test`.

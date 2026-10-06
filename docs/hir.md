@@ -1185,7 +1185,7 @@ class 给、缺省回退到节点计数（§8.2 末的落地清单）。
 - **终止契约：稳定规范序，无轮数上界。** SEG 的终止不再依赖任何数值界
   （`Config.max_iterations` / `Config.max_rounds` / `max_ac_leaves` / `max_eta_chain`
   与 `select` 的 `rounds <= n` 均已删除）。这里分两件事说清楚：**为什么不需要迭代
-  上界**，与 **AC 每轮的工作量为何近线性**（后者是 Stage A 的调度 / 展平设计，不是
+  上界**，与 **AC 每轮的工作量为何近线性**（后者是 AC worklist 的调度 / 展平设计，不是
   终止上界）。
   - **规则合成是幂等的。** 所有 union 规则的建节点路径都先 `lookupNode` 再 `addNode`
     （`buildCanonical` / `mkAcNode` / `buildRun` 逐段探测已 intern 的等价节点，命中即
@@ -1209,7 +1209,7 @@ class 给、缺省回退到节点计数（§8.2 末的落地清单）。
   - **安静轮即真不动点。** 某一轮报告 `changed == false` 时，对未变树重做分析结果逐位
     相同，这按定义就是不动点，故 `optimize` / `saturate` 用 `while (true)` 循环、以安静轮
     退出，**收敛与该轮之前的任何数值无关**。
-  与上述终止论证分开，**AC 搜索的每轮工作量**由 Stage A 的调度与展平设计约束为近似
+  与上述终止论证分开，**AC 搜索的每轮工作量**由 AC worklist 的调度与展平设计约束为近似
   线性：`planAcWork` 只调度「极大 AC 节点」加上「与另一节点指纹相同的节点」，
   `acChainCanonical` 对已是规范左深链的节点直接短路，`bagInto` / `bagOf` / `finalizeBag`
   对单次引用的类内联、对多次引用的类才 memo 物化并一次排序合并，故宽链不再走旧左折叠的
@@ -1233,7 +1233,7 @@ class 给、缺省回退到节点计数（§8.2 末的落地清单）。
 | aggregate projection | ✅ | `field_get(C(v0, …, vn), i) → vi`（`C` = `struct_make` / `tuple_make` / `list_make`；已知下标；越界 / 非构造基拒绝）。`struct_make` 的 operand 按声明序，`tuple_make` / `list_make` 按位置序，payload `field` 是字段 / 元素下标——即 `hir_build_expr.fieldRead` 的索引。乱序书写的 struct 构造被 builder 的临时 `let` 链隔开（§5.6），故不触发。list 的 `idx < operand len` 就是边界证明：只有 `list_make` 基的已知常量下标在界内时才归约，与 `hir_effects.fieldGetOwn` 的「界内不 trap」细化一致（`field_get` 的 list 基否则保守 `Top`）。**tuple / list 投影是 IR 级规则**：Stilla 没有元素读取后缀（Core Expression Binding Power Table），元素只经解构 pattern 读取，源码不产生 tuple / list 的 `field_get`；两者由白盒规则测试覆盖 |
 | α-equivalence | ✅* | island 内由 arena 的 hash-consing + `rebuild` 同余合并承担（α-相等子树自然同类）；β 克隆时的**捕获规避** fresh-binder 重映射仍由驱动做 |
 | CSE-style sharing | ✅ | 同一 island 内、同一 `strict_ltr` 无 region 节点的 operand 列表里，两个**同类**且 `isDuplicable` 的纯子树由 extraction materialize 成一个合成 `let`，非平凡原子才 materialize、trivial atom 直接复制（详见下） |
-| operand reorder | ✅* | 相邻 operand 对**仅在严格逆序**（`rowLess(b, a)`，行相等不交换）时交换、使 `rowLess` 逆序数单调下降（`canSwapOperands` / `reorder_rule`，§8.8）；仅当实例下该对 `orderCompatible`——默认 flat 空 registry 上从不触发，`hierarchy` 实例下兄弟域读对可交换（docs/effects.md §10.3–§10.5） |
+| operand reorder | ✅* | 相邻 operand 对**仅在严格逆序**（`rowLess(b, a)`，行相等不交换）时交换、使 `rowLess` 逆序数单调下降（`canSwapOperands` / `reorder_rule`，§8.8）；仅当实例下该对 `orderCompatible`——默认 flat 空 registry 上从不触发，`hierarchy` 实例下兄弟域读对可交换（effects.md §10.3–§10.5） |
 | integer commutativity | ✅ | `ruleNumeric` 对**交换但不结合**的二元 integer rep 节点（`eq` / `ne`）做原位规范化：`acRep(op0) > acRep(op1)` 时交换 operand（按稳定 key `acRep` 而非 `find()` 的 class id，见 §8.2），使同类节点 hash-cons 合并。结合交换算子（`add` / `mul` / `band` / `bor` / `bxor` / `min` / `max`）的交换由下一行的 AC 搜索统一处理（**含纯二元交换**：`b + a` 也走 `ruleAcRegroup`，`Stats.assoc` 计入这类退化触发），不再单独原地交换；排除浮点（NaN payload / ±0 可观察）与排序比较（`a < b` 是 `b > a`，另一条规则）；合法性由 island 的 `isSegSafe` 准入（total / 无 observable_effect / deterministic / Copy）保证，LTR 求值顺序不可观察 |
 | associativity + commutativity (AC) | ✅ | `egraph_ac` 下的 `ruleAcRegroup`：把 AC 链归纳成按 `acRep`（最低 `NodeId`）排序的 memoized `Bag`（`(叶子类, 计数)`），经 `buildRun`（共享倍增树）与 `buildCanonical`（确定性左折叠）物化规范 DAG（`E_k = E_{k-1} ⊕ E_{k-1}` 只需 O(k) 个节点，不再有展平预算）、链根 e-node 标记为 `ac_root` 供 extraction 在等 cost 时优先；仅 integer rep 的 `add` / `mul` / `band` / `bor` / `bxor` / `min` / `max`（`eq`/`ne` 交换不结合，`sub`/`div`/`rem`/`shl`/`shr` 非结合，均不重结合）；合法性同样由 island 的 `isSegSafe` 准入保证，详见 §8.2 |
 | Unique rewrite | ❌ | 需线性等式系统 |
@@ -1461,7 +1461,7 @@ init（这时已是 `%B0`）是 island 成员、与本轮分析一致，故下�
 ownership-gated、`eng.orderCompatible`）且当前序不是规范序时，交换两个 operand
 槽。规范序是确定性全序 `rowLess`：先比 wildcard 位、再按 (mode, resource)
 逐条比 canonical 访问行、再比行长，flag 位收尾。这是生产中消费
-`rewrite_contract.swap_operands` 的规则（docs/effects.md §10.3–§10.4）——也是
+`rewrite_contract.swap_operands` 的规则（effects.md §10.3–§10.4）——也是
 第二格实例能改 SEG 产出的落点：`hierarchy` 实例把兄弟域读对证成 disjoint 后，
 `reorder` 把它们摆回规范序，而默认 `flat` 实例（未声明异域冲突）绝不触发
 （SEG 空 registry 上 reorder 计数恒为 0）。
@@ -1525,8 +1525,8 @@ operands 是连续 Range，两个条目互换即整个树内改动，再 `markDi
   谓词，不在本层。
 - **清理 token 表**（program 级，`checkCleanupTokens`）：每个未退役 token 的
   `origin_expr` 是有效下标且其 `ty` 与节点一致、其节点的 `full_expr` 等于 token
-  的 `full_expr`，`full_expr` 是有效下标，同一 FE 内 `registration_index` 按
-  list 序为 `0..n-1`。退役 token（`no_expr`）跳过。
+  的 `full_expr`，`full_expr` 是有效下标，同一 FE 内 `registration_index` 严格
+  递增（允许有间隙，不要求 `0..n-1`）。退役 token（`no_expr`）跳过。
 - **不包含**：ownership 数据流与 SEG 检查（由 checker / effects 各自负责）。
 
 **效果分析校验**（`hir_effects.validate`，前端 pipeline 强制执行）：
@@ -1603,13 +1603,13 @@ lowering。可选变换每轮原位重写后重新跑结构 + 效果校验（§2
 > **稳定规范序契约下的重录。** 本轮删除了 SEG 的全部数值界（`max_iterations` /
 > `Config.max_rounds` / `max_ac_leaves` / `max_eta_chain` 与 `select` 的
 > `rounds <= n`，§8.2），并把 AC 从展平改成 DAG 安全的 memoized `Bag`
-> 规范化。下面的新基线在此之上又加入了 Stage A 的 AC worklist 调度与近线性展平
+> 规范化。下面的新基线在此之上又加入了 AC worklist 调度与近线性展平
 > （`planAcWork` / `acChainCanonical` / `bagInto` / `bagOf` / `finalizeBag`），
 > 是当前实测；紧随其后的「前一次重录」是加入该调度之前的稳定规范序基线，再往后的
 > 各段是**有界轮数 / `max_ac_leaves = 32` 时代**的历史数字，均保留供对照，不要
 > 据此断言新契约。
 
-新基线（2026-10-05、macOS/arm64；Stage A AC worklist）：`probes/` + `examples/` 全语料
+新基线（2026-10-05、macOS/arm64；AC worklist 调度）：`probes/` + `examples/` 全语料
 **63 个文件 / 5002 个可达节点**，SEG 接受 **2762 个 island 成员（≈55%）**，共
 **96 轮**、**122 次重写**，外层 arena 跑 **2121 轮 saturation**（**51 次 union /
 421 次同余 merges / 129 个写回拷贝**），抽取选中项的总 cost **5300**（

@@ -161,9 +161,13 @@ type `any` is the sole implicit widening (Core) —
 value (Core: module values may not leave module storage) — and an
 unique source must be `move`d into it; operator typing per
 Core (`int32 + int32 → int32`, `str + str → str`, comparisons →
-`bool`, `as` conversions only the Core set (`int32 ↔ float32`,
-`int32 ↔ byte`, `int32 ↔ uint32`, `byte → int32`, `uint32 → int32`)
-and `any as T` — the invalid-cast case traps at runtime, Runtime);
+`bool` — `==`/`!=` accept the nine equality scalar types (`byte`,
+`int32`, `uint32`, `int64`, `uint64`, `float32`, `float64`, `bool`,
+`str`) while `< <= > >=` accept the numeric ones — and `as` conversions
+are the uniform Core conversion family over the seven types
+`{byte, int32, uint32, int64, uint64, float32, float64}` (every
+non-identity pair is legal), plus `any as T` — the invalid-cast case
+traps at runtime, Runtime);
 a literal integer defaults to `int32` and a literal float to `float32`,
 but each is typed at its type's width in an explicit type context (a
 typed binding, argument, return, or the other operand of a numeric binary
@@ -237,18 +241,21 @@ the value is destroyed only on the paths where it is still alive
   carry a module value (tuple and list elements have no declared types
   of their own to check), so the module-value rule is not fully closed
   for those container positions; and `import(...)` written as a bare
-  function-body statement is rejected downstream in CFG lowering
-  (`cfg_lower_expr.zig`,
+  function-body statement is rejected at HIR build
+  (`hir_build_expr.zig`,
   "import(...) is only valid as a module constant initializer") as a
   backstop for positions the checker cannot see.
-- **module-constant initialization order** — an initializer must not
-  transitively call a function that reads a module constant declared later,
-  while function references themselves are order-independent
-  (Core);
 - **recursive types without indirection** (Core);
 - **drop-hook destruction-view restrictions** — the hook argument may not
   be moved, dropped, escaped, returned, or used to transfer field
   ownership (Core).
+
+Module-constant initialization order is no longer a checker check: an
+initializer (and every function it transitively calls) must not read a
+module constant declared later, and a Unique constant's teardown may not
+read one destroyed earlier, but both rules are enforced by the HIR effect
+analysis's module-const dependency seam ([effects.md](effects.md) §7),
+where the function summaries are available.
 
 ## Data structures
 
@@ -267,10 +274,16 @@ pub const Annotation = struct {
     /// The used generic specializations, deduplicated per (declaration,
     /// type args) across modules (Generic expansion). The lowerer consumes these and
     /// lowers one monomorphic `IrFunc` per instance.
-    instances: std.ArrayListUnmanaged(*FuncInstance) = .empty,
+    instances: std.ArrayList(*FuncInstance) = .empty,
 
     /// One `ModuleAnnotation` per module, keyed by resolved specifier.
     per_module: std.StringHashMapUnmanaged(*ModuleAnnotation) = .empty,
+
+    /// Integer literals typed at 64-bit width by their expected-type
+    /// context (Types & Ownership).
+    int_widths: std.AutoHashMapUnmanaged(*const ast.IntLiteral, meta.PrimitiveKind) = .empty,
+    /// Float literals typed `float64` by their expected-type context.
+    float_widths: std.AutoHashMapUnmanaged(*const ast.FloatLiteral, void) = .empty,
 
     pub fn deinit(self: *Annotation) void { self.arena.deinit(); }
 };
@@ -308,8 +321,9 @@ Every expression, binding, and type use is annotated; the program is fully
 monomorphic; no type, exhaustiveness, or ownership diagnostic remains.
 The remaining semantic checks the checker deliberately does not own —
 unknown names and missing members, and `import(...)` placement in body
-positions — are reported by CFG lowering, which consumes the annotated
-AST + module graph ([cfg-lowering.md](cfg-lowering.md)).
+positions — are reported at HIR build ([hir.md](hir.md)), and
+module-constant initialization order is checked later by the HIR effect
+analysis ([effects.md](effects.md) §7).
 
 ## Implementation files
 
@@ -342,7 +356,7 @@ single canonical case.
 Physically, the file is laid out in the same order as the matrix below:
 shared harness helpers up front (checkText, expectDiag, the
 multi-module builders, `OPAQUE_LIB`), a short driver-annotation preamble
-for the host-binding bookkeeping that CFG lowering consumes (no semantic
+for the host-binding bookkeeping the checker records (no semantic
 rule of its own), and then one section per dimension — 1 type system, 2
 name binding, 3 constraints, 4 control flow — holding that dimension's
 atomic cases in rule order. The four dimensions and the
@@ -358,7 +372,7 @@ rules they own:
 | 1. Type system | `any` is recovered only by `as` or a type-test `match` over it, never by a plain value position | **added:** `rejects recovering an any without as or match`; `accepts an any recovered by as` |
 | 1. Type system | construction values must match the declared field/payload types (Core); construction positions are explicit literal contexts | **added:** `rejects a construction field type mismatch`; `rejects a union payload type mismatch`; `types a literal at the declared field width` |
 | 1. Type system | branch joins unify `never` and `any` with the other branch's type | **added:** `unifies a never branch with a value branch` |
-| 1. Type system | `as` casts are restricted to the Core set | `rejects an invalid cast` |
+| 1. Type system | `as` casts are restricted to the Core conversion family | `rejects an invalid cast` |
 | 1. Type system | generic instantiation deduplicates per (declaration, type args) and checks the monomorphized body under the substitution | the generic-expansion section: `deduplicates generic specializations`, `specializes an explicitly annotated generic call`, `checks the monomorphized body of a generic call`, `rejects a generic call it cannot fully infer` |
 | 1. Type system | type arguments are inferred from the use site, or taken from `::[...]` | `specializes an explicitly annotated generic call`; `rejects a specialization with the wrong type argument count` |
 | 1. Type system | recursive types need indirection on every cycle | the recursive-types section, e.g. `rejects a directly recursive type without indirection`, `accepts recursion through box indirection` |
@@ -377,11 +391,14 @@ rules they own:
 | 3. Constraints | lifetime: a `borrow` call leaves the caller's owner alive and destructible afterwards | **added:** `accepts a borrow call and keeps the caller's owner alive` |
 | 3. Constraints | lifetime: conditional release merges to `maybe`/`released` (Types & Ownership) | the conditional-release section, e.g. `marks a binding released on only one if branch as maybe`, `accepts releasing a binding on every if branch and marks it released` |
 | 3. Constraints | drop-hook destruction view: may not move/drop/escape the view or its unique fields | the drop-hook section, e.g. `rejects moving the destruction view in a drop hook`, `accepts a drop hook that reads Copy fields` |
-| 3. Constraints | module-constant scope: an initializer or drop hook may not read a later constant (Core) | the module-constant-init-order section, e.g. `rejects reading a later module constant`, `rejects a drop hook reading a later module constant` |
 | 3. Constraints | `never` is the non-returning type: a `-> never` body must diverge, not yield a value | `rejects a never declaration whose body returns a value`; `accepts a never declaration whose body diverges`; `accepts an explicitly void declaration` |
 | 4. Control flow | a value-typed body must end in an expression of the declared type on every path | `rejects a non-void declaration whose body has no final expression`; **added:** `rejects a tail if without else in a value-returning function` |
 | 4. Control flow | `match` over a union must be exhaustive; over `any` it needs a wildcard arm | `rejects a non-exhaustive union match`; `accepts a type-test match over any` |
 | 4. Control flow | `let` accepts only irrefutable patterns; type-test patterns are refutable and belong to `match` over `any` | `rejects a refutable let pattern` |
+
+The module-constant initialization-order and teardown-read rules are not in
+this matrix: they are enforced by the HIR effect analysis's module-const
+dependency seam and tested in `hir_tests.zig` ([effects.md](effects.md) §7).
 
 Language features the general taxonomy would expect here, and how Stilla
 resolves them (so the matrix stays honest about what the checker owns):
@@ -414,8 +431,8 @@ resolves them (so the matrix stays honest about what the checker owns):
   for reachability (`leaves code after a never call unchecked for
   reachability`), and reachability of lowered blocks is validated
   downstream on the CFG (`cfg_validate.zig`).
-- **Unknown names and missing members** are reported by CFG lowering, not the
-  checker (`cfg_lower_path.zig`), so the name-binding cases above
+- **Unknown names and missing members** are reported at HIR build, not the
+  checker (`hir_build_path.zig`), so the name-binding cases above
   are acceptance cases plus checker-owned rejections (capture, use of
   released values), never unknown-name rejections.
 
@@ -436,19 +453,18 @@ in Stilla v1.3.
 | 1. Ownership & move: explicit `move`, at-most-once use, implicit tail transfer | 3 constraints; 1 type | `requires an explicit move before a move parameter`; `accepts a fresh unique value into a move parameter`; `rejects use of a moved unique value`; `rejects moving a binding twice`; **`accepts an owned unique local as an implicit tail return`** | destruction-exactly-once is a runtime property: `ownership_fused_tests.zig` (`move` oracle, `edge kill`, `tailcall leftover kills`, drop-elision/fusion passes) |
 | 2. Borrow: no ownership transfer, owner stays alive, no escape | 3 constraints | `rejects moving a borrowed binding`; **`rejects dropping a borrowed binding`**; `rejects returning a borrowed value as owned`; `rejects storing a borrowed value into an owning binding`; **`accepts a borrow call and keeps the caller's owner alive`**; non-consuming-match payload borrowing: `borrows an unique payload of a non-consuming match` | a borrow view is never destroyed by the callee: `ownership_fused_tests.zig` (`borrow` oracle) |
 | 3. Conditional release: maybe-unique, auto-drop on edges | 3 constraints (state merge, Types & Ownership) | the conditional-release section: `marks a binding released on only one if branch as maybe`; `accepts releasing a binding on every if branch and marks it released`; `rejects use of a maybe-unique binding`; `rejects use of a definitely-released binding` | join-time edge drops live in CFG lowering (`cfg_lower_*`); the fused oracle asserts drop-once-both-ways |
-| 4. Module scope & qualified paths | 2 name binding; 3 constraints (module-value flow) | `resolves module-qualified value members of an imported module`; **`rejects binding a module value by a local let`**; **`rejects widening a module value into an any`**; **`rejects storing a module value into an any field`** | `import(...)` placement splits by stage: binding positions die in the checker (Core), the bare statement form reaches the CFG-lowering backstop (`frontend_spec_tests.zig`, `frontend rejects import outside a module constant initializer`); a module type cannot be *named* as a parameter type, so "module value as argument" is only reachable through the `any` coercion. Struct-field and union-payload smuggling is closed by construction typing (Core); an inferred tuple/list element remains open |
+| 4. Module scope & qualified paths | 2 name binding; 3 constraints (module-value flow) | `resolves module-qualified value members of an imported module`; **`rejects binding a module value by a local let`**; **`rejects widening a module value into an any`**; **`rejects storing a module value into an any field`** | `import(...)` placement splits by stage: binding positions die in the checker (Core), the bare statement form reaches the HIR-build backstop (`frontend_spec_tests.zig`, `frontend rejects import outside a module constant initializer`); a module type cannot be *named* as a parameter type, so "module value as argument" is only reachable through the `any` coercion. Struct-field and union-payload smuggling is closed by construction typing (Core); an inferred tuple/list element remains open |
 | 5. No implicit capture | 2 name binding | `rejects a lambda capturing an enclosing local`; `accepts a lambda referencing only its own scope` (own params + a module constant) | nested named functions are not in the grammar — lambdas are the only function expressions |
 | 6. Match: exhaustiveness, consuming vs borrowing patterns, drop hooks | 4 control flow; 3 constraints | `rejects a non-exhaustive union match`; `accepts an exhaustive union match`; `accepts a type-test match over any`; `rejects a consuming destructure of a drop-hook struct`; `accepts moving the payload of a consuming match` | arm bindings are arm-scoped, so borrowed-payload movement is tested inside the arm where the binding lives |
 | 7. Type boundaries: `any`/`hostdata`/opaque | 1 type system | `widens a Copy argument implicitly to any`; `requires an explicit move before packing an unique value into any`; **`rejects recovering an any without as or match`**; **`accepts an any recovered by as`**; opaque-type section (`rejects raw construction of an opaque host type`, `accepts borrowing an opaque host value`, …) | `hostdata` is reachable in source only through host bindings: the boundary rows (no coercion to `any`, no casts, opaque payload) are covered at the integrated level in `frontend_lowering_tests.zig` (`frontend rejects every hostdata/any coercion and cast`), not duplicated in the checker suite |
-| Extra. Module-const init order & teardown reads | 3 constraints (module-constant scope) | the module-constant-init-order section: `rejects reading a later module constant`; `rejects a drop hook reading a later module constant`; `accepts a mutual call cycle that reads no constants` | teardown reads are illegal because teardown destroys in reverse declaration order (Runtime) — that ordering is exercised by the fused oracle and the interpreter lifecycle tests |
 
 ## Downstream consumers
 
 The checker's output is consumed by:
 
-- **[CFG lowering](cfg-lowering.md)** — reads `Annotation` for
+- **[HIR build](hir.md)** — reads `Annotation` for
   concrete signatures, instantiated types, and ownership decisions;
-  generic functions are lowered per used specialization (one monomorphic
-  `IrFunc` per instance);
+- **[CFG lowering](cfg-lowering.md)** — `hir_lower` lowers one
+  monomorphic `IrFunc` per generic instance from the built HIR;
 - **The AIR validator** ([optimizer.md](optimizer.md)) — validates
   the lowered CFG against the checker's invariants.

@@ -38,7 +38,7 @@ const primType = support.primType;
 
 test "host: builtin.print and str format every supported scalar" {
     // Capture through a host adapter instead of writing to real stdout: fd 1
-    // is the build's live stdout in `zig build test`, so stdout sinks are
+    // is the build's live stdout in `zig build -fincremental test`, so stdout sinks are
     // probed as subprocesses, never in-process (build.zig). The `str`
     // members still delegate to the default host call.
     const Capture = struct {

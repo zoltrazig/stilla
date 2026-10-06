@@ -9,7 +9,7 @@
 >
 > The pipeline is complete: every stage is **implemented**, the air.md
 > validator runs on every lowered program and around every optimizer
-> rewrite, and the full suite (`zig build test`) passes. The AIR op
+> rewrite, and the full suite (`zig build -fincremental test`) passes. The AIR op
 > inventory and data structures are authoritative in
 > [`spec/air.md`](../spec/air.md) and `src/cfg.zig`, not in this
 > document.
@@ -76,7 +76,7 @@ invariant the next one relies on:
 | --- | --- | --- |
 | module graph | `ModuleGraph` of `ModuleInfo` nodes | every module in the program has its module-level info computed; cross-module name/type lookup is decidable |
 | checker | annotated `ast.Program` per module | every expression, binding, and type use is annotated (name, type, ownership, expression); the program is fully monomorphic and statically correct |
-| HIR build | canonical monomorphic HIR per function | binder / region / pattern normalization; full-expression fences; cleanup-token registration (docs/effects.md §11.2); no capture; tree shape (no DAG) — the structural invariants the HIR validator checks (hir.md §10.1) |
+| HIR build | canonical monomorphic HIR per function | binder / region / pattern normalization; full-expression fences; cleanup-token registration (effects.md §11.2); no capture; tree shape (no DAG) — the structural invariants the HIR validator checks (hir.md §10.1) |
 | HIR effects | interned `EffectSummary` per reachable node (`ready`) | every node's summary is a sound over-approximation of its `effect_transfer` derivation (function summaries by the SCC least fixpoint); no node is left `pending` (hir.md §10.1 level two, effects.md §14); the module-const init/teardown rules hold over the summaries + `drop_effect` chain (effects.md §7) |
 | HIR→CFG lowering | CFG-based `IrModule` / `IrFunc` | control flow and value flow are explicit; every host binding call is a system call; every intrinsic use is ordinary AIR |
 
@@ -175,7 +175,7 @@ only — module-graph member tables and the checker/CFG-lowering side
 tables are re-derived each compile, keeping `TypeId`s consistent with
 the fresh per-compile interner and making stale-dependency reuse
 impossible. The cache also records the last compile's *effect environment*
-fingerprint (`effects.EffectEnvironmentFingerprint`, docs/effects.md §13)
+fingerprint (`effects.EffectEnvironmentFingerprint`, effects.md §13)
 — the host declarations, effect-domain registry, and host-semantics
 registry generation (`Options.host_decls` / `Options.resources` /
 `Options.effect_domains` / `Options.host_registry_generation`) folded
@@ -238,7 +238,7 @@ The pipeline is implemented in **passes** — one pass file per concern
 under `src/passes/` (drivers re-exported through the owning top-level
 module). The complete ordered inventory lives in
 [passes.md](passes.md); every pass of the **current** pipeline is
-implemented and covered by `zig build test`.
+implemented and covered by `zig build -fincremental test`.
 
 - [x] **Lexer, parser, AST** (`src/lex.zig`, `src/parser.zig`,
       `src/ast.zig`).
@@ -312,7 +312,7 @@ path; a module-internal call stays the direct `jal ra`.
 
 The driver is `Builder.lowerLlir` in
 [`src/passes/cfg_lower_llir.zig`](../src/passes/cfg_lower_llir.zig).
-It runs eleven named stages in this fixed order; each has one named
+It runs twelve named stages in this fixed order; each has one named
 input/output invariant:
 
 | Stage | Where | Invariant (in → out) |
@@ -372,7 +372,7 @@ against the module's own test block.
 | checker | `src/passes/checker.zig` (stage driver), `checker_annotate.zig` (name resolution, inference, binding states), `checker_validate.zig` (the checks), `checker_ownership.zig` (conditional-release state merging, Types & Ownership), `src/passes/monomorphize.zig` (generic expansion) — resolved types are `meta.Type` |
 | HIR seam | `src/hir.zig` (binder/region/pattern nodes, `OpDescriptor` semantics rows, `SemanticInfo` with `effect`), `src/effects.zig` (the effect lattice/interners/registries, re-exported by `root`), `src/passes/hir_build.zig` + `hir_build_block` / `_expr` / `_path` / `_call` / `_control` / `_pattern` / `_cleanup` (AST → HIR, incl. mono bodies / instances / drop hooks / λ lifting / intrinsic wrapper forwarding bodies; split by concern like `hir_lower`), `hir_validate.zig` (structural invariants, hir.md §10.1 first level), `hir_effects.zig` (`effect_transfer`, function-summary SCC fixpoint, cleanup footprint + gate, derived queries, annotation + validation), `hir_lower.zig` + `hir_lower_expr/control/call/pattern.zig` (HIR → CFG, split per the cfg convention), `src/passes/hir_parse.zig` + `hir_print.zig` (canonical text form, re-exported by `hir`) — the only frontend lowering path — `src/lower.zig` + `src/passes/cfg_lower_*.zig` supply the retained emission helpers |
 | CFG AIR | `src/cfg.zig` (op schema `opInfo`, `IrProgram`), `src/passes/cfg_lex.zig` + `cfg_parse.zig` + `cfg_print.zig` (AIR text form, re-exported by `cfg`), `src/lower.zig` + `src/passes/cfg_lower_*.zig` (shared HIR→CFG emission helpers; destruction placement, module init functions), `src/host.zig` (stdlib host implementations as plain functions; dispatch is the member-table registry in `src/interpreter_host.zig`, typed bindings in `src/host_bind.zig`) |
-| optimizer + validator | `src/passes/cfg_optimize.zig` (+ `cfg_tail_call`, `cfg_pre`, `cfg_select`, `cfg_dead_instr`, `cfg_dead_block`, `cfg_drop_elide`, `cfg_jump_thread`, `cfg_phi_simplify`) and `src/passes/cfg_validate.zig` (the air.md validator); on-the-fly constant folding, arithmetic simplification, CSE, and copy propagation in `cfg_lower_emit.zig` |
+| optimizer + validator | `src/passes/cfg_optimize.zig` (+ `cfg_tail_call`, `cfg_inline`, `cfg_cse`, `cfg_copy_prop`, `cfg_pre`, `cfg_select`, `cfg_dead_instr`, `cfg_dead_block`, `cfg_drop_elide`, `cfg_jump_thread`, `cfg_phi_simplify`) and `src/passes/cfg_validate.zig` (the air.md validator); on-the-fly constant folding, arithmetic simplification, CSE, and copy propagation in `cfg_lower_emit.zig` |
 | drop lowering | `src/passes/cfg_lower_drop.zig` — post-optimization expansion of statically-expandable `drop`s (struct/tuple/box/union) into explicit CFG operations; only opaque, `hostdata`, `list`, and `any` drops remain single instructions. Wired into `frontend.zig`'s optimize path after the optimizer, re-validated before the AIR text round-trip |
 
 ## 6. Non-goals and open questions

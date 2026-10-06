@@ -1127,7 +1127,7 @@ test "checker isolates a match pattern binding from an outer binding of the same
 test "checker resolves module-qualified value members of an imported module" {
     // External linking: `dep.bump` and `dep.base` resolve as value members
     // of the imported module (a monomorphic function and a const, Core
-    // §2.5) and type at their declared types. Phase 1 orders `dep` before
+    // §2.5) and type at their declared types. The module-graph topological order places `dep` before
     // `app`, so `dep` is annotated before `app` reads its members.
     var t = try checkAppAgainstDep(
         \\const base: int32 = 3;

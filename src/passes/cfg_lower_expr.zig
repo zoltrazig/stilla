@@ -24,7 +24,7 @@ pub fn emitConst(self: *Lowerer, fs: *FuncState, span: meta.Span, value: meta.Co
 }
 
 /// A `void`-typed expression result. `void` is a singleton type with no
-/// observable value (cfg-lowering.md, Lowering rules; Pass 4.1): a void
+/// observable value (cfg-lowering.md, Lowering rules): a void
 /// return is a bare `ret`, a void join produces no phi, and the checker
 /// rejects void in every typed operand position, so a void *value* is
 /// never an instruction operand. The result is therefore a phantom — a

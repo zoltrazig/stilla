@@ -1,4 +1,4 @@
-//! Pass: jump threading (optimizer.md, Pass 8.6). In: a lowered `cfg.IrProgram`
+//! Pass: jump threading (optimizer.md). In: a lowered `cfg.IrProgram`
 //! (after dead-block elimination and drop elision). Out: the same program,
 //! with empty forwarding blocks removed.
 //!

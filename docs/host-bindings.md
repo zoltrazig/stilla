@@ -177,7 +177,7 @@ const mydb_desc: host_bind.ModuleDesc = host_bind.register(mydb);
 
 Every fn in the module struct is a member — helpers live at file scope.
 A member may also declare its **effect semantics** next to the code
-(docs/effects.md §13) in a `pub const effects` table keyed by member
+(effects.md §13) in a `pub const effects` table keyed by member
 name. `register` serializes each entry under the compiler's stable
 `<symbol>.<member>` key, derived from the same `symbol` the runtime
 resolves against. Co-location keeps the contract next to the code, but
@@ -198,7 +198,7 @@ const mydb = struct {
     /// code; `callbacks`, only on a `may_execute` binding, lists the
     /// argument positions it invokes *synchronously, during the same
     /// call* — a binding that stores a callable for a later call cannot
-    /// use it (docs/effects.md §13).
+    /// use it (effects.md §13).
     pub const effects = .{
         .query = host_bind.MemberEffects{
             .summary = fx.host_top,        // declared own effects
@@ -237,14 +237,14 @@ pub const Binding = struct {
 pub const ModuleDesc = struct {
     symbol: []const u8,
     members: []const Binding, // sorted by name (binary search)
-    /// The members' explicit effect semantics (docs/effects.md §13),
+    /// The members' explicit effect semantics (effects.md §13),
     /// qualified as `<symbol>.<member>`. Built at comptime by `register`
     /// from the module struct's `effects` table; a member with no entry
     /// is absent — undeclared means unknown, never pure.
     decls: []const effects.HostDecl,
 };
 
-/// The host-side symbol serialization tool (docs/effects.md §13): every
+/// The host-side symbol serialization tool (effects.md §13): every
 /// declared member of `registry`, under the compiler's stable
 /// `<module>.<member>` symbol. The keys are built at comptime by
 /// `register`, so only strings a runtime can also resolve are exported —
@@ -456,7 +456,7 @@ One mechanism, several member kinds: generated typed thunks for members
 whose Stilla signature is expressible, raw-shaped fns for
 ownership-sensitive ones. The six stdlib modules (`builtin`, `math`,
 `string`, `list`, `array`, `hashmap`) are plain module structs
-registered through `host_bind.register` (interpreter_host.zig); 47 of the
+registered through `host_bind.register` (interpreter_host.zig); 42 of the
 60 members are typed bindings with signature checks:
 
 - plain typed — all 20 `math` functions (inlined `std.math`),
@@ -469,8 +469,8 @@ registered through `host_bind.register` (interpreter_host.zig); 47 of the
 - hidden `*HostCtx` + `HostResult` body (typed arguments, raw
   body) — `builtin.print`/`str`/`hash`, `string`
   `index_of`/`split`/`to_utf8`/`to_codepoints`, `list.range`;
-- the rest bind typed-args through `RawValue`/wildcard params
-  (`builtin.str`/`hash`).
+- the `builtin.str`/`hash` arguments bind through `RawValue`/wildcard
+  parameters.
 
 The member implementations are plain `pub` fns in host.zig
 (`hostStr`..`hostHash`, `stringLen`..`stringFromCodepoints`,
@@ -486,7 +486,7 @@ passes a hook that writes message + newline to its `Io`'s stdout; the
 embed path (`RunProgramOptions.print`) passes the hook through
 `buildProgram`.
 
-**Still raw** (13 members, by design, §9): `list.len` (borrow mode),
+**Still raw** (18 members, by design, §9): `list.len` (borrow mode),
 all of `array` (borrow/move + opaque) and `hashmap` (borrow/move +
 opaque), `builtin.box`/`unbox` (move), and the `string` members with
 list parameters (`join`, `from_utf8`, `from_codepoints`).
@@ -504,7 +504,7 @@ In host_bind_tests.zig and the existing suites:
    rejected at comptime;
 6. `raw()` handlers keep list/array/hashmap ownership semantics
    (existing interpreter_host_tests + lifecycle tests);
-7. full `zig build test --summary all` regression; test counts and timings come from the test runner itself (`test_runner.zig`), and `--summary all` no longer prints an `N/M tests passed` count.
+7. full `zig build -fincremental test` regression; test counts and timings come from the test runner itself (`test_runner.zig`), which bypasses the test-server protocol, so the build no longer prints an `N/M tests passed` count.
 
 ## 9. Out of scope / future
 

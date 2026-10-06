@@ -1,4 +1,4 @@
-//! Pass: local dead-instruction elimination (optimizer.md, Pass 8.2). In: a
+//! Pass: local dead-instruction elimination (optimizer.md). In: a
 //! lowered `cfg.IrProgram` (after drop elision, so the unobservable drops
 //! of Copy values are already gone). Out: the same program, with eligible
 //! instructions whose results are unused and Copy removed.

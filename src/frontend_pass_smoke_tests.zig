@@ -6,7 +6,7 @@
 //!
 //! - CFG lowering (HIR → AIR, with the on-the-fly emit optimizations) and
 //!   the canonical text round-trip;
-//! - every Pass 7–8 optimizer rewrite applied **individually** to a fresh
+//! - every mid-level optimizer rewrite applied **individually** to a fresh
 //!   compilation, validated and round-tripped after each — this catches a
 //!   pass that only misbehaves when it runs alone, which the ordered
 //!   full-sequence driver masks;
@@ -20,7 +20,7 @@
 //! declarations (`cfg_parse.zig` interns `.unknown` decls), so the air.md
 //! validator cannot run on a parsed program with aggregate constructs.
 //!
-//! Run via `zig build test` (wired into `src/root.zig`'s test block).
+//! Run via `zig build -fincremental test` (wired into `src/root.zig`'s test block).
 
 const std = @import("std");
 const cfg = @import("cfg.zig");
@@ -73,7 +73,7 @@ fn compileProbe(dir: []const u8, spec: []const u8, optimize: bool) !Compiled {
     return .{ .comp = comp, .source_arena = source_arena };
 }
 
-/// The Pass 7–8 optimizer sub-passes, each callable over a whole program.
+/// The mid-level optimizer sub-passes, each callable over a whole program.
 /// `cfg_inline.renumberPrintOrder` runs after every rewrite so the text
 /// round-trip is checked the way the driver's final normalization leaves
 /// it (a cross-block substitution may otherwise leave a forward reference).
@@ -120,7 +120,7 @@ test "probe pass smoke: lowering produces round-trippable AIR" {
     }
 }
 
-test "probe pass smoke: every Pass 7-8 rewrite individually" {
+test "probe pass smoke: every mid-level optimizer rewrite individually" {
     var corpus = try probe_corpus.list(testing.allocator, "probes");
     defer corpus.deinit();
     for (corpus.names) |spec| {
@@ -156,7 +156,7 @@ test "probe pass smoke: optimizer + drop lowering + LLIR backend" {
     var corpus = try probe_corpus.list(testing.allocator, "probes");
     defer corpus.deinit();
     for (corpus.names) |spec| {
-        // `optimize` runs the Pass 7–8 sequence, then the post-optimization
+        // `optimize` runs the mid-level optimizer sequence, then the post-optimization
         // drop lowering, then re-validates and re-parses the text form
         // (frontend.md): a returned compilation is already smoke-checked.
         var c = try compileProbe("probes", spec, true);

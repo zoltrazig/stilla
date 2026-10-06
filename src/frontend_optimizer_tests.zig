@@ -1,6 +1,6 @@
-//! Test file: `frontend optimizer` — Pass 7 tail call elimination and
+//! Test file: `frontend optimizer` — tail call elimination and
 //! the construction-time on-the-fly optimizations (constant folding,
-//! common subexpression elimination, copy elision) plus Pass 8.1/8.3
+//! common subexpression elimination, copy elision) plus
 //! partial redundancy elimination (optimizer.md), exercised over whole
 //! programs compiled through the frontend pipeline. Split out of the
 //! former `src/frontend_tests.zig`; `foldProgram` is local to this file.
@@ -9,7 +9,7 @@
 //! from `src/frontend_test_support.zig` below, so the test bodies are
 //! unchanged from the unsplit file.
 //!
-//! Run via `zig build test` (wired into `src/root.zig`'s test block).
+//! Run via `zig build -fincremental test` (wired into `src/root.zig`'s test block).
 
 const std = @import("std");
 const cfg = @import("cfg.zig");
@@ -26,7 +26,7 @@ const compileOpt = helpers.compileOpt;
 const irText = helpers.irText;
 const funcBody = helpers.funcBody;
 // ---------------------------------------------------------------------------
-// Pass 7 — tail call elimination (optimizer.md, Pass 7)
+// Tail call elimination (optimizer.md)
 // ---------------------------------------------------------------------------
 
 /// Test-only driver for the construction-time constant folding
@@ -46,7 +46,7 @@ fn foldProgram(program: *cfg.IrProgram) void {
     }
 }
 
-test "Pass 7 rewrites a self-recursive tail call into a loop" {
+test "tail-call optimization rewrites a self-recursive tail call into a loop" {
     // `countdown` calls itself in tail position: the else arm's call is the
     // last instruction before the join, and its result flows through the
     // join's single phi straight into the `ret` (§7.1). TCO turns the call
@@ -84,7 +84,7 @@ test "Pass 7 rewrites a self-recursive tail call into a loop" {
     try testing.expectEqualStrings(text, text2);
 }
 
-test "Pass 7 rewrites a void self-recursive tail call into a loop" {
+test "tail-call optimization rewrites a void self-recursive tail call into a loop" {
     // `count` returns void; the else arm's call is followed only by the
     // lowerer's `const void` noise before the bare `ret`, so it is in tail
     // position and becomes a loop (§7.1).
@@ -110,7 +110,7 @@ test "Pass 7 rewrites a void self-recursive tail call into a loop" {
     try testing.expectEqualStrings(text, text2);
 }
 
-test "Pass 7 skips a tail call whose chain merges another arm's value" {
+test "tail-call optimization skips a tail call whose chain merges another arm's value" {
     // The guarded recursion `if (n<=0) {0} else if (n==1) {1} else
     // {f(n-1)}` lowers the middle arm's value through a phi-only join
     // *before* the ret join. That join is an intermediate chain block
@@ -148,7 +148,7 @@ test "Pass 7 skips a tail call whose chain merges another arm's value" {
     try testing.expect(std.mem.indexOf(u8, fbody, "ret %") != null);
 }
 
-test "Pass 7 skips tail calls whose ret block would be orphaned" {
+test "tail-call optimization skips tail calls whose ret block would be orphaned" {
     // Both arms call `f` in tail position and both chains end at the
     // same ret block, whose every predecessor is one of the call blocks.
     // Rewriting both would leave the ret block with no predecessors and
@@ -169,7 +169,7 @@ test "Pass 7 skips tail calls whose ret block would be orphaned" {
     try testing.expect(std.mem.indexOf(u8, text, "j header") == null);
 }
 
-test "Pass 7 skips a void tail call whose chain merges another arm" {
+test "tail-call optimization skips a void tail call whose chain merges another arm" {
     // The void guarded recursion `if (n<=0) {} else if (n==1) {} else
     // { log(n-1) }` lowers the middle arm through a noise-only join
     // before the ret join. That intermediate chain block has two
@@ -191,7 +191,7 @@ test "Pass 7 skips a void tail call whose chain merges another arm" {
     try testing.expect(std.mem.indexOf(u8, text, "j header") == null);
 }
 
-test "Pass 7 leaves a non-tail self-recursive call alone" {
+test "tail-call optimization leaves a non-tail self-recursive call alone" {
     // The recursive call is an operand of `add`, not the last thing before
     // the join's ret, so it is not in tail position (§7.1).
     const src = try helpers.probeSource("probes/cases", "opt_tail_call_nontail");
@@ -208,7 +208,7 @@ test "Pass 7 leaves a non-tail self-recursive call alone" {
     try testing.expect(std.mem.indexOf(u8, text, "j header") == null);
 }
 
-test "Pass 7 leaves a tail call to another function alone" {
+test "tail-call optimization leaves a tail call to another function alone" {
     // The call is in tail position but targets `g`, not the enclosing
     // function, so only the enclosing function's own recursion is eligible
     // (§7.2, §7.3).
@@ -226,7 +226,7 @@ test "Pass 7 leaves a tail call to another function alone" {
     try testing.expect(std.mem.indexOf(u8, text, "j header") == null);
 }
 
-test "Pass 7 leaves a value call alone" {
+test "tail-call optimization leaves a value call alone" {
     // The callee is a function-typed parameter, so the target is not
     // statically known; only direct calls to a known IrFunc are candidates
     // (§7.3).
@@ -244,7 +244,7 @@ test "Pass 7 leaves a value call alone" {
     try testing.expect(std.mem.indexOf(u8, text, "j header") == null);
 }
 
-test "Pass 7 leaves a tail call with live unique state alone" {
+test "tail-call optimization leaves a tail call with live unique state alone" {
     // The hostdata local is unique: its scope-end `drop` sits in the join,
     // so the join is not phi-only and the call's result does not reach the
     // `ret` through nothing but phis (§7.1). The rewrite must not reorder
@@ -265,10 +265,11 @@ test "Pass 7 leaves a tail call with live unique state alone" {
     try testing.expect(std.mem.indexOf(u8, text, "j header") == null);
 }
 
-test "Pass 7 runs before the Pass 8 pipeline" {
-    // optimizer.md: the optimizer runs Pass 7 before Pass 8. `optimize`
-    // therefore rewrites the tail call into a loop first, and the later
-    // passes (which keep the loop reachable) leave the rewrite intact.
+test "tail-call optimization runs before the rest of the optimizer" {
+    // optimizer.md: the optimizer runs tail-call elimination first. `optimize`
+    // therefore rewrites the tail call into a loop before the later
+    // passes run, and those passes (which keep the loop reachable)
+    // leave the rewrite intact.
     const src = try helpers.probeSource("probes/cases", "opt_tail_call_before_pass8");
     defer testing.allocator.free(src);
     var c = try compileText("app", &.{.{ "app", src }});
@@ -294,7 +295,7 @@ test "Pass 7 runs before the Pass 8 pipeline" {
 // On-the-fly constant folding (optimizer.md, On-the-fly optimizations)
 // ---------------------------------------------------------------------------
 
-test "Pass 8.1 folds constant arithmetic, comparison, and logic" {
+test "constant folding folds constant arithmetic, comparison, and logic" {
     // 3 * 2 = 6, 6 + 5 = 11, 11 > 2 = true, !true = false — each rewritten
     // to a const instruction in place; ids and block structure are
     // unchanged (optimizer.md, On-the-fly optimizations).
@@ -329,7 +330,7 @@ test "Pass 8.1 folds constant arithmetic, comparison, and logic" {
     try testing.expectEqual(false, instrs[6].op.const_.bool);
 }
 
-test "Pass 8.1 folds constant bitwise ops" {
+test "constant folding folds constant bitwise ops" {
     // Bitwise ops are total and bit-identical on int32/uint32 (Runtime
     // §7.2): 5 & 3 = 1, 5 | 3 = 7, 5 ^ 3 = 6 — each folded to a const in
     // place.
@@ -358,7 +359,7 @@ test "Pass 8.1 folds constant bitwise ops" {
     try testing.expectEqual(@as(i64, 6), instrs[4].op.const_.int); // 5 ^ 3
 }
 
-test "Pass 8.1 simplifies bitwise identities at construction" {
+test "constant folding simplifies bitwise identities at construction" {
     // Integer identities (braun13cc.pdf §3.1's arithmetic simplification)
     // fire at each emit site: `x | 0 -> x` and `0 ^ x -> x` reuse the
     // operand (no instruction), `x & 0 -> 0` folds to the zero constant —
@@ -375,7 +376,7 @@ test "Pass 8.1 simplifies bitwise identities at construction" {
     try testing.expect(std.mem.indexOf(u8, text, "bitand") == null);
 }
 
-test "Pass 8.1 folds float arithmetic and comparisons" {
+test "constant folding folds float arithmetic and comparisons" {
     // Float arithmetic is IEEE binary32 (Runtime §7.2): division by zero
     // never traps — 4.0/0.0 = +inf, -4.0/0.0 = -inf, and 0.0/0.0 = NaN
     // (NaN compares unequal to itself, so NaN == NaN folds to false).
@@ -427,7 +428,7 @@ test "Pass 8.1 folds float arithmetic and comparisons" {
     try testing.expectEqual(true, instrs[11].op.const_.bool);
 }
 
-test "Pass 8.1 folds wrapping arithmetic, leaves division traps unfolded" {
+test "constant folding folds wrapping arithmetic, leaves division traps unfolded" {
     // WebAssembly semantics (Runtime §7.2): int32/uint32 arithmetic wraps
     // modulo 2³² — add/sub/mul overflow and neg of minInt fold to their
     // wrapped values, as does uint32 negation (two's-complement). Folding
@@ -483,7 +484,7 @@ test "Pass 8.1 folds wrapping arithmetic, leaves division traps unfolded" {
     try testing.expectEqual(@as(i64, 4294967291), instrs[17].op.const_.int); // uint32 neg = 0 - 5 wraps
 }
 
-test "Pass 8.1 folds int32 division, remainder, and ordering" {
+test "constant folding folds int32 division, remainder, and ordering" {
     // int32 div/rem truncate toward zero with the dividend's sign
     // (Runtime §7.2): 7 div 2 = 3, 7 rem 2 = 1, -7 div 2 = -3,
     // -7 rem 2 = -1. Every ordering op folds over int32.
@@ -534,7 +535,7 @@ test "Pass 8.1 folds int32 division, remainder, and ordering" {
     try testing.expectEqual(true, instrs[12].op.const_.bool);
 }
 
-test "Pass 8.1 folds uint32 arithmetic and ordering" {
+test "constant folding folds uint32 arithmetic and ordering" {
     // uint32 operands fold with unsigned wrap-avoidance: 3000000000 +
     // 1000000000 = 4000000000 stays in range; ordering compares unsigned.
     var t = try cfg_parse.parseText(
@@ -577,7 +578,7 @@ test "Pass 8.1 folds uint32 arithmetic and ordering" {
     try testing.expectEqual(false, instrs[11].op.const_.bool);
 }
 
-test "Pass 8.1 folds equality over byte, bool, and str" {
+test "constant folding folds equality over byte, bool, and str" {
     // Core §16.3: ==/!= span byte, bool, and str; the ordering ops are
     // numeric-only, so `lt` on byte and str stays unfolded.
     var t = try cfg_parse.parseText(
@@ -623,7 +624,7 @@ test "Pass 8.1 folds equality over byte, bool, and str" {
     try testing.expect(instrs[14].op == .lt);
 }
 
-test "Pass 8.1 folds unary negation" {
+test "constant folding folds unary negation" {
     // int32 and float32 neg fold; neg of minInt wraps to minInt and
     // uint32 neg computes 0 - x — both fold (see the wrapping-arithmetic
     // test).
@@ -653,7 +654,7 @@ test "Pass 8.1 folds unary negation" {
     try testing.expectEqual(@as(f32, 2.5), instrs[5].op.const_.float);
 }
 
-test "Pass 8.1 folds abs/min/max/clz/popcount" {
+test "constant folding folds abs/min/max/clz/popcount" {
     // The extended numeric families are all total (never trap), so they
     // always fold when constant: i32_abs wraps on int32_min (modulo
     // 2³²), f32_abs clears the sign bit; min/max compare as 32-bit
@@ -745,7 +746,7 @@ test "Pass 8.1 folds abs/min/max/clz/popcount" {
     try testing.expectEqual(@as(f32, 1.0), hi[6].op.const_.float); // fmin(1.0, 2.5)
 }
 
-test "Pass 8.1 abs/min/max/clz/popcount AIR round-trips through the standalone cfg parser" {
+test "constant folding abs/min/max/clz/popcount AIR round-trips through the standalone cfg parser" {
     // The extended ops print through the schema spelling and re-parse
     // identically (air.md §13) — unary forms and the min/max binary
     // forms included.
@@ -781,7 +782,7 @@ test "Pass 8.1 abs/min/max/clz/popcount AIR round-trips through the standalone c
     try testing.expectEqualStrings(text, text2);
 }
 
-test "Pass 8.1 folds saturating num_casts" {
+test "constant folding folds saturating num_casts" {
     // Only int32 as float32 and float32 as int32 are core conversions
     // (Core §16.3). Casts never trap (Runtime §7.2): casting the folded
     // +inf, NaN, and 2^31 constants saturates — +inf and 2^31 to the
@@ -822,7 +823,7 @@ test "Pass 8.1 folds saturating num_casts" {
     try testing.expectEqual(@as(i64, std.math.maxInt(i32)), instrs[8].op.const_.int);
 }
 
-test "Pass 8.1 folds the core num_casts" {
+test "constant folding folds the core num_casts" {
     // Core §16.3: int32 as float32 and float32 as int32 are core
     // conversions; both fold (asserted in memory — an integral float
     // prints without a decimal point, which the parser reads back as an
@@ -848,7 +849,7 @@ test "Pass 8.1 folds the core num_casts" {
     try testing.expectEqual(@as(i64, 3), instrs[2].op.const_.int);
 }
 
-test "Pass 8.1 folded AIR round-trips through the standalone cfg parser" {
+test "constant folding folded AIR round-trips through the standalone cfg parser" {
     // Folding rewrites ops in place (no new values, no id gaps), so the
     // printed text still re-parses and re-prints identically (air.md §13).
     const src = try helpers.probeSource("probes/cases", "opt_folded_roundtrip");
@@ -981,14 +982,13 @@ test "construction-time optimized AIR round-trips through the standalone cfg par
     try testing.expectEqualStrings(out, out2);
 }
 
-// Pass 8.1 — partial redundancy elimination (optimizer.md, Pass 8.1)
+// Partial redundancy elimination (optimizer.md)
 // ---------------------------------------------------------------------------
 
-test "Pass 8.3 hoists a partially redundant comparison into a join phi" {
+test "partial redundancy elimination hoists a partially redundant comparison into a join phi" {
     // `lt %0, %1` runs on the `neg` edge but not on `pos`, so the join's
     // copy is partially redundant: PRE inserts the computation at the end
-    // of `pos` and turns the join's computation into a phi (optimizer.md,
-    // Pass 8.1).
+    // of `pos` and turns the join's computation into a phi (optimizer.md).
     var t = try cfg_parse.parseText(
         \\module "app" {
         \\func @f(a: int32, b: int32, c: bool) -> bool {
@@ -1030,7 +1030,7 @@ test "Pass 8.3 hoists a partially redundant comparison into a join phi" {
     try testing.expect(phi.incoming[1].value == neg.instrs[0].results[0]);
 }
 
-test "Pass 8.3 joins a fully redundant computation without inserting" {
+test "partial redundancy elimination joins a fully redundant computation without inserting" {
     // Both edges already compute `lt %0, %1`, so the join's copy is fully
     // redundant: PRE replaces it with a phi and inserts nothing.
     var t = try cfg_parse.parseText(
@@ -1068,7 +1068,7 @@ test "Pass 8.3 joins a fully redundant computation without inserting" {
     try testing.expect(phi.incoming[1].value == blocks[2].instrs[0].results[0]);
 }
 
-test "Pass 8.3 leaves a fully unavailable computation alone" {
+test "partial redundancy elimination leaves a fully unavailable computation alone" {
     // Neither edge computes `lt %0, %1`: the join's copy is not redundant
     // on any path, so PRE must not insert anything and must leave the
     // computation in place.
@@ -1097,7 +1097,7 @@ test "Pass 8.3 leaves a fully unavailable computation alone" {
     try testing.expect(blocks[3].instrs[0].op == .lt);
 }
 
-test "Pass 8.3 skips a candidate with an operand from a predecessor" {
+test "partial redundancy elimination skips a candidate with an operand from a predecessor" {
     // `lt %3, %0`'s operand `%3` is defined in `b1`, which does not
     // dominate the join — hoisting it would reference a value that is not
     // available on the `b2` edge, so the candidate is left alone even
@@ -1128,7 +1128,7 @@ test "Pass 8.3 skips a candidate with an operand from a predecessor" {
     try testing.expect(blocks[3].instrs[0].op == .lt);
 }
 
-test "Pass 8.3 leaves trapping arithmetic alone" {
+test "partial redundancy elimination leaves trapping arithmetic alone" {
     // `div` traps on a zero divisor and on `int32_min / -1` (Runtime §7.2);
     // moving it onto a path that never ran it would change observable
     // behavior, so PRE never hoists it. (Add/sub/mul wrap modulo 2³² and
@@ -1158,7 +1158,7 @@ test "Pass 8.3 leaves trapping arithmetic alone" {
     try testing.expect(blocks[3].instrs[0].op == .div);
 }
 
-test "Pass 8.3 leaves side-effecting ops alone" {
+test "partial redundancy elimination leaves side-effecting ops alone" {
     // Two syntactically identical syscalls are not interchangeable: the
     // call may read mutable state or produce output.
     var t = try cfg_parse.parseText(
@@ -1186,7 +1186,7 @@ test "Pass 8.3 leaves side-effecting ops alone" {
     try testing.expect(blocks[3].instrs[0].op == .syscall);
 }
 
-test "Pass 8.3 hoists unary non-trapping ops" {
+test "partial redundancy elimination hoists unary non-trapping ops" {
     // `not_` (and the type test `type_is`) never trap, so both are valid
     // PRE candidates; the unary operand is available at the join head.
     var t = try cfg_parse.parseText(
@@ -1241,7 +1241,7 @@ test "Pass 8.3 hoists unary non-trapping ops" {
     try testing.expect(tphi.incoming[1].value == blocks[5].instrs[0].results[0]);
 }
 
-test "Pass 8.3 handles a self-loop back edge" {
+test "partial redundancy elimination handles a self-loop back edge" {
     // `body` reaches itself, so one incoming edge is the loop back edge.
     // The computation on the entry edge is reused; on the back edge a copy
     // is inserted at the end of `body` (which dominates nothing — the
@@ -1279,7 +1279,7 @@ test "Pass 8.3 handles a self-loop back edge" {
     try testing.expect(phi.incoming[1].value == body.instrs[1].results[0]);
 }
 
-test "Pass 8.3 hoists total arithmetic, shift, and bitwise ops" {
+test "partial redundancy elimination hoists total arithmetic, shift, and bitwise ops" {
     // Total integer ops — `add` (wraps modulo 2³²) and `shl` (count
     // masked to its low 5 bits) — never trap, so both are PRE candidates
     // like the comparisons; `sub`/`mul`/`min`/`max`, the bitwise ops, and
@@ -1337,7 +1337,7 @@ test "Pass 8.3 hoists total arithmetic, shift, and bitwise ops" {
     try testing.expect(sphi.incoming[1].value == blocks[5].instrs[0].results[0]);
 }
 
-test "Pass 8.3 hoists a float division (total) but never an integer one" {
+test "partial redundancy elimination hoists a float division (total) but never an integer one" {
     // The float forms of `div`/`rem` are total (IEEE: `x/0` is ±inf,
     // `x%0` is NaN — Runtime §7.2), so a partially redundant float `div`
     // is a PRE candidate; the integer form traps on a zero divisor and
@@ -1378,7 +1378,7 @@ test "Pass 8.3 hoists a float division (total) but never an integer one" {
     try testing.expect(phi.incoming[1].value == blocks[2].instrs[0].results[0]);
 }
 
-test "Pass 8.3 merges num_casts of the same result type" {
+test "partial redundancy elimination merges num_casts of the same result type" {
     // Both edges compute the float32→int32 cast of `%0`: `cfg.identical`
     // matches the operands and the result types agree, so the join's cast
     // becomes a phi and nothing is inserted.
@@ -1413,7 +1413,7 @@ test "Pass 8.3 merges num_casts of the same result type" {
     try testing.expect(phi.incoming[1].value == blocks[2].instrs[0].results[0]);
 }
 
-test "Pass 8.3 never merges num_casts with different result types" {
+test "partial redundancy elimination never merges num_casts with different result types" {
     // `cfg.identical` compares only the operand — a cast's target type
     // lives on its result — so the int32 casts and the float32 cast of
     // `%0` are different computations despite matching `identical`. PRE
@@ -1464,7 +1464,7 @@ test "Pass 8.3 never merges num_casts with different result types" {
     }
 }
 
-test "Pass 8.3 leaves a borrowed-view computation alone (ownership)" {
+test "partial redundancy elimination leaves a borrowed-view computation alone (ownership)" {
     // `tail` of an unique list is pure and non-trapping, but its result
     // is a borrowed view (air.md §6.4): hoisting it would share the view
     // across edges and change the destruction schedule, so it is not a
@@ -1496,7 +1496,7 @@ test "Pass 8.3 leaves a borrowed-view computation alone (ownership)" {
     try testing.expect(blocks[3].instrs[0].op == .tail);
 }
 
-test "Pass 8.3 optimized AIR round-trips through the standalone cfg parser" {
+test "partial redundancy elimination optimized AIR round-trips through the standalone cfg parser" {
     // PRE adds values and phis, so the pass renumbers the function's values
     // in text order; the printed text must still re-parse and re-print
     // identically (air.md §13).
@@ -1534,7 +1534,7 @@ test "Pass 8.3 optimized AIR round-trips through the standalone cfg parser" {
     try testing.expectEqualStrings(text, text2);
 }
 
-test "Pass 8.3 lower.optimize on a full program round-trips through the standalone cfg parser" {
+test "partial redundancy elimination lower.optimize on a full program round-trips through the standalone cfg parser" {
     // The if-statement's continuation recomputes `a < b`, which the then
     // arm already computed and the else arm did not: the compiled AIR is
     // genuinely partially redundant and the whole optimize pipeline
@@ -1588,10 +1588,10 @@ test "frontend emits no copies for Copy moves, keeps move_ for unique" {
     try testing.expectEqualStrings(out, out2);
 }
 
-// Pass 8.3 — dead-block elimination (optimizer.md, Pass 8.3)
+// Dead-block elimination (optimizer.md)
 // ---------------------------------------------------------------------------
 
-test "Pass 8.5 removes a block unreachable from the entry" {
+test "dead-block elimination removes a block unreachable from the entry" {
     var t = try cfg_parse.parseText(
         \\module "app" {
         \\func @f(a: int32) -> int32 {
@@ -1614,7 +1614,7 @@ test "Pass 8.5 removes a block unreachable from the entry" {
     try testing.expectEqual(@as(usize, 1), f.values.len);
 }
 
-test "Pass 8.5 prunes phi incoming lists and predecessor sets" {
+test "dead-block elimination prunes phi incoming lists and predecessor sets" {
     // `dead` feeds the join phi on one incoming edge but nothing branches
     // to it; removing it must drop that phi entry and the predecessor,
     // keeping incoming order aligned with the survivors (air.md §4.3).
@@ -1654,7 +1654,7 @@ test "Pass 8.5 prunes phi incoming lists and predecessor sets" {
     try testing.expect(join.terminator.ret.? == join.instrs[0].results[0]);
 }
 
-test "Pass 8.5 removes a whole unreachable chain" {
+test "dead-block elimination removes a whole unreachable chain" {
     // `dead` branches to `deeper`, which nothing else reaches; both are
     // removed even though `deeper` is not directly referenced by `entry`.
     var t = try cfg_parse.parseText(
@@ -1682,7 +1682,7 @@ test "Pass 8.5 removes a whole unreachable chain" {
     try testing.expectEqual(@as(usize, 1), f.values.len);
 }
 
-test "Pass 8.5 leaves a reachable diamond intact" {
+test "dead-block elimination leaves a reachable diamond intact" {
     // Both branches are reachable from the entry, so nothing is removed.
     var t = try cfg_parse.parseText(
         \\module "app" {
@@ -1711,7 +1711,7 @@ test "Pass 8.5 leaves a reachable diamond intact" {
     try testing.expectEqual(@as(usize, 6), f.values.len);
 }
 
-test "Pass 8.5 optimized AIR round-trips through the standalone cfg parser" {
+test "dead-block elimination optimized AIR round-trips through the standalone cfg parser" {
     // Removing blocks removes their values, so the pass renumbers the
     // survivors in text order; the printed text must still re-parse and
     // re-print identically (air.md §13), with the dead block gone.
@@ -1751,7 +1751,7 @@ test "Pass 8.5 optimized AIR round-trips through the standalone cfg parser" {
     try testing.expectEqualStrings(text, text2);
 }
 
-test "Pass 8.5 lower.optimize on a program with a dead block round-trips" {
+test "dead-block elimination lower.optimize on a program with a dead block round-trips" {
     // The whole pipeline (fold, cse, pre, copyProp, deadBlock) must keep
     // the printed AIR round-tripping through the standalone parser.
     const src = try helpers.probeSource("probes/cases", "opt_dead_block_roundtrip");
@@ -1773,7 +1773,7 @@ test "Pass 8.5 lower.optimize on a program with a dead block round-trips" {
     try testing.expectEqualStrings(text, text2);
 }
 
-test "Pass 8.8 if-conversion turns a pure select diamond branchless" {
+test "if-conversion turns a pure select diamond branchless" {
     // `sign`: `if (value >= 0) { 1 } else { -1 }` — pure const arms and
     // a join phi. The diamond collapses into one `select` (the LLIR
     // image: `copy cond_reg` + `cmov`), the phis and the dead arms are
@@ -1790,7 +1790,7 @@ test "Pass 8.8 if-conversion turns a pure select diamond branchless" {
     try testing.expect(std.mem.indexOf(u8, out, "br %") == null);
 }
 
-test "Pass 8.8 if-conversion leaves every hoisted instruction in one block" {
+test "if-conversion leaves every hoisted instruction in one block" {
     // A nested `or`/`and` over inlined calls: if-conversion hoists the
     // inner diamond's arm instructions into its cond block. Regression:
     // the arms' own instruction lists were never emptied, so each hoisted
@@ -1812,7 +1812,7 @@ test "Pass 8.8 if-conversion leaves every hoisted instruction in one block" {
     try testing.expect(std.mem.indexOf(u8, out, "select %") != null);
 }
 
-test "Pass 8.8 if-conversion absorbs short-circuit and/or second operands" {
+test "if-conversion absorbs short-circuit and/or second operands" {
     // `a > 0 and b > 0`: the short-circuit's else arm is `false`, the
     // then arm is the pure second comparison — the whole `and` becomes
     // one branchless select.
@@ -1828,7 +1828,7 @@ test "Pass 8.8 if-conversion absorbs short-circuit and/or second operands" {
     try testing.expect(std.mem.indexOf(u8, out, "br %") == null);
 }
 
-test "Pass 8.5 keeps diamonds with impure arms branchy" {
+test "if-conversion keeps diamonds with impure arms branchy" {
     // A side-effecting call in the then arm must stay on its path —
     // if-conversion must not hoist it. The diamond is not converted.
     const src = try helpers.probeSource("probes/cases", "opt_if_conversion_impure");
@@ -1864,7 +1864,7 @@ test "OptimizeConfig: disabling a cfg sub-pass changes the AIR (cfg_cse)" {
     // the `cfg` gate on and every sub-toggle default (on), the mid-level
     // module/member CSE collapses the two loads to one; with `cfg_cse` off
     // the duplicate loads survive, so the AIR differs for exactly that
-    // sub-pass (optimizer.md, Pass 8.4).
+    // sub-pass (optimizer.md).
     const app_src = try helpers.probeSource("probes/cases", "cfgpass_cse_module_member");
     defer testing.allocator.free(app_src);
     const lib_src = try helpers.probeSource("probes/cases", "cfgpass_cse_module_member_lib");

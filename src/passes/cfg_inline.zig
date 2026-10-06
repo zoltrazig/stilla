@@ -1,5 +1,5 @@
-//! Pass: function inlining (optimizer.md, Pass 8 — first sub-pass).
-//! In: a lowered `cfg.IrProgram` (after tail-call elimination, Pass 7).
+//! Pass: function inlining (optimizer.md — first sub-pass).
+//! In: a lowered `cfg.IrProgram` (after tail-call elimination).
 //! Out: the same program, with selected direct calls replaced by a spliced
 //! copy of the callee's body: parameters are bound at the splice point
 //! (renamed to the call's arguments), the callee's `ret` blocks are

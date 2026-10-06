@@ -1,8 +1,8 @@
-//! Pass: module-graph topological sort — cycle detection + reverse postorder (frontend Phase 1).
+//! Pass: module-graph topological sort — cycle detection + reverse postorder (module-graph construction).
 //! In: a static node set with sorted edge lists (supplied by `src/moduleinfo.zig`).
 //! Out: node indexes in reverse postorder, or the offending cycle edge.
 //!
-//! The import-ordering algorithm of frontend Phase 1 (module-graph.md, Import-cycle detection,
+//! The import-ordering algorithm of the module graph (module-graph.md, Import-cycle detection,
 //! Runtime §2.1, §2.3): cycle detection and topological sort over a static node set.
 //!
 //! A classic three-color DFS: **white** nodes are unvisited, **gray**

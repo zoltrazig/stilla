@@ -4,7 +4,7 @@
 //! this file compiles real modules through phase 1 (module graph) +
 //! phase 2 (checker) and builds + validates the HIR over the results.
 //!
-//! Wired into root.zig's test block; run via `zig build test`.
+//! Wired into root.zig's test block; run via `zig build -fincremental test`.
 
 const std = @import("std");
 const moduleinfo = @import("moduleinfo.zig");
@@ -230,7 +230,7 @@ test "build: source spans — built nodes carry their AST span, synthetics none"
 }
 
 /// The corpus harness: compile every `dir/*.st` module as its own entry
-/// (each file read from disk at the repo root — `zig build test` runs
+/// (each file read from disk at the repo root — `zig build -fincremental test` runs
 /// there, like `zig build examples`), build the HIR, and validate every
 /// function root. The directory is enumerated at test time, so a new
 /// probe joins automatically; a module that fails to build or validate

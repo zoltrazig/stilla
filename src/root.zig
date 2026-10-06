@@ -1,9 +1,9 @@
 //! Stilla runtime — a Zig implementation of the Stilla v1.3 execution
 //! model, as defined by the *Stilla Runtime Specification - v1.3 Draft*
-//! in `spec/`.
+//! in `spec/`, together with the Stilla-to-CFG-AIR compiler and the
+//! static-library embedding surface.
 //!
-//! Status: early skeleton. The module layout mirrors the Runtime
-//! specification's sections so that the long-term work has a home:
+//! The module layout follows the pipeline:
 //!
 //! - `host`    — host environment contract (Runtime §3)
 //! - `stdbundle` — the `std/` standard-library bundle: declaration-only
@@ -20,21 +20,24 @@
 //!               (compile-time)
 //! - `hir`     — the structural HIR (hir.md §3): arena + dense-handle
 //!               data structures for the seam between the checker and CFG
-//!               lowering. Data only, no stage wired.
-//! - `checker` — type checker and AST annotator (compile-time). Current
-//!               status: name/type inference, ownership analysis including
-//!               conditional release (checker.md, Ownership analysis; Core §10.10),
-//!               generic specialization with monomorphized instances
-//!               (checker.md, Generic expansion), and the phase-2 consumer checks; the
-//!               remaining phase-2 checks are future work (checker.md)
-//! - `moduleinfo` — module graph construction (frontend Phase 1): member
+//!               lowering, built with full-expression cleanup registration
+//!               (`hir_build`), structurally validated, effect-annotated
+//!               (`hir_effects`), optionally rewritten by SEG (`hir_seg`),
+//!               and lowered from there (`hir_lower`)
+//! - `checker` — type checker and AST annotator (compile-time): name/type
+//!               inference, ownership analysis including conditional release
+//!               (checker.md, Ownership analysis; Core §10.10), generic
+//!               specialization with monomorphized instances
+//!               (checker.md, Generic expansion), and the post-inference
+//!               consumer checks (checker.md)
+//! - `moduleinfo` — module graph construction (module-graph.md): member
 //!                tables, import resolution, cycle detection, topological
 //!                sort, type resolution
-//! - `lower`   — CFG lowering (frontend Phase 3): annotated AST + module
-//!               graph → `cfg.IrProgram`
+//! - `lower`   — CFG lowering (cfg-lowering.md): HIR + module graph →
+//!               `cfg.IrProgram`
 //! - `frontend` — the pipeline driver: entry module → AIR
 //! - `interpreter` — the raw-`u64`-cell LLIR interpreter VM
-//!               (docs/interpreter-vm.md): the structurally validated
+//!               (interpreter-vm.md): the structurally validated
 //!               image, interpreted in place → `Termination`. Split
 //!               into `interpreter_types` (shared records and the
 //!               runtime state `VmRuntimeState`),
@@ -44,10 +47,10 @@
 //!               (per-opcode handlers), and `interpreter_host` (run API
 //!               + host adapters).
 //! - `vm_types`    — raw VM cells and scalar/non-scalar value encoding
-//! - `llir`    — the phase-1 frozen LLIR model
+//! - `llir`    — the frozen LLIR model
 //!               (spec/Stilla LLIR Instruction Set.md, spec/Stilla
 //!               LLIR Specification.md): the
-//!               4-byte v9 `Instr` (`[4]u8`, six formats), the 234-strong logical `Opcode` table with
+//!               4-byte v9 `Instr` (`[4]u8`, six formats), the 273-strong logical `Opcode` table with
 //!               per-opcode schemas, reps, and the shared
 //!               `encode`/`decode`, the
 //!               special registers (`zero`/`ra`/`cond`), the frame/call contract, descriptors and
@@ -113,7 +116,7 @@
 //!               parser, and printer (`cfg_lex`, `cfg_parse`, `cfg_print` —
 //!               re-exported by `cfg`)
 //!
-//! See README.md for the roadmap.
+//! See roadmap.md for open work.
 
 const std = @import("std");
 

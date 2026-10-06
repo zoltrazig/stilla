@@ -1,8 +1,11 @@
-//! White-box tests for the Stilla interpreter VM (docs/interpreter-vm.md
+//! White-box tests for the Stilla interpreter VM (interpreter-vm.md
 //! §12 — "cell conversion, retain/release primitives, destruction
 //! ordering"). These exercise `Vm` and its `VmHeap` directly, so they sit
 //! beside the core (`interpreter.zig`) rather than in the black-box
-//! `interpreter_tests.zig`.
+//! interpreter suites (`interpreter_scalar_tests.zig`,
+//! `interpreter_lifecycle_tests.zig`, `interpreter_host_tests.zig`,
+//! `interpreter_image_tests.zig`, `interpreter_load_tests.zig`); this file
+//! (`interpreter_vm_tests.zig`) holds the white-box cases.
 
 const std = @import("std");
 const testing = std.testing;

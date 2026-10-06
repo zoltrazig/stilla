@@ -8,7 +8,7 @@
 //! from `src/frontend_test_support.zig` below, so the test bodies are
 //! unchanged from the unsplit file.
 //!
-//! Run via `zig build test` (wired into `src/root.zig`'s test block).
+//! Run via `zig build -fincremental test` (wired into `src/root.zig`'s test block).
 
 const std = @import("std");
 const llir = @import("llir.zig");
@@ -1405,8 +1405,9 @@ test "LLIR normalization harness: corpus normalize, validate, and measure" {
         total_side += side;
         total_desc += desc;
         // The report distinguishes the fixed records from the side
-        // tables (descriptors broken out); gated on a TTY —
-        // under `zig build test` stderr is a captured pipe.
+        // tables (descriptors broken out); gated on a TTY, because the
+        // simple-mode runner inherits stdio and a redirected stderr
+        // suppresses the report.
         if (tty) {
             std.log.info(
                 "{s}: {d} instr, {d} B fixed records, {d} B side tables ({d} B descriptors), max frame {d} slots, {d} B image",

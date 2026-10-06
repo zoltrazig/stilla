@@ -14,9 +14,10 @@ that connects both to a Zig or C host.
 
 ## Project status
 
-`zig build test` is green on HEAD. The checklist below is a code-level
-survey of what actually exists in `src/`; items are grouped by subsystem,
-and the trailing section lists what the code and docs still mark open.
+`zig build -fincremental test` is green on HEAD. The checklist below is a
+code-level survey of what actually exists in `src/`; items are grouped by
+subsystem, and the trailing section lists what the code and docs still mark
+open.
 
 **Language frontend: source → CFG AIR**
 
@@ -157,7 +158,7 @@ The implementation documents live in [`docs/`](docs/) (indexed by
 | [frontend.md](docs/frontend.md) | The compiler pipeline end to end: module graph → checker → CFG lowering → optimizer → LLIR backend |
 | [module-graph.md](docs/module-graph.md) | Module identity, resolution, loading, cycle detection, topo sort |
 | [checker.md](docs/checker.md) | Inference, generic expansion, ownership analysis, checks |
-| [cfg-lowering.md](docs/cfg-lowering.md) | Annotated AST → CFG AIR, destruction placement, module init functions |
+| [cfg-lowering.md](docs/cfg-lowering.md) | HIR → CFG AIR; destruction placement, module init functions |
 | [optimizer.md](docs/optimizer.md) | Tail-call elimination, inlining, CSE, copy propagation, and the mid-level rewrites |
 | [llir-typed.md](docs/llir-typed.md) | The typed LLIR lowering layer |
 | [host-bindings.md](docs/host-bindings.md) | The typed host-binding layer: comptime registry, signature checks, embedding |
@@ -168,13 +169,13 @@ The implementation documents live in [`docs/`](docs/) (indexed by
 Requires **Zig 0.16.0** (see `build.zig.zon`).
 
 ```sh
-zig build            # build + install both artifacts:
-                     #   zig-out/bin/stilla      — the compiler/interpreter CLI
-                     #   zig-out/lib/libstilla.a — the embeddable static library
-zig build examples   # compile every examples/*.st to AIR, LLIR asm, and LLIR bin under zig-out/examples/
-zig build embed      # run the host-embedding example (examples/embed/random_demo.zig)
-zig build test       # run unit tests
-zig build test -Dtest-filter=<name>   # rerun only matching unit tests (repeatable)
+zig build -fincremental           # build + install both artifacts:
+                                   #   zig-out/bin/stilla      — the compiler/interpreter CLI
+                                   #   zig-out/lib/libstilla.a — the embeddable static library
+zig build -fincremental examples   # compile every examples/*.st to AIR, LLIR asm, and LLIR bin under zig-out/examples/
+zig build -fincremental embed      # run the host-embedding example (examples/embed/random_demo.zig)
+zig build -fincremental test       # run unit tests
+zig build -fincremental test -Dtest-filter=<name>   # rerun only matching unit tests (repeatable)
 ```
 
 For consumers that link the static library (C, C++, …):
@@ -192,7 +193,7 @@ embedded-bundle intrinsics into ordinary AIR, and prints the program's
 **CFG AIR** text form:
 
 ```sh
-zig build run -- app.st              # compile app.st, print CFG AIR to stdout
+zig build -fincremental run -- app.st              # compile app.st, print CFG AIR to stdout
 zig-out/bin/stilla --output app.ir app.st
 ```
 
@@ -241,10 +242,12 @@ Diagnostics are
 `<file>:<line>:<col>: error: <message>`. The pipeline and the LLIR
 backend it lowers to are documented in [frontend.md](docs/frontend.md)
 and [interpreter-vm.md](docs/interpreter-vm.md). `--emit-hir` fails loudly
-rather than degrade: the printer's serialization boundary still rejects
-`struct_make`/`field_get`/`variant_make` and module access chains, so a
-program using them reports the offending function and exits 1 with no
-output written.
+rather than degrade: the printer's serialization boundary rejects only
+value-position module access chains (the node forms with no
+member-carrying text), so a program using one reports the offending
+function and exits 1 with no output written. `struct_make`, `field_get`,
+and `variant_make` serialize through their result type and member bracket
+([hir.md](docs/hir.md) §4.4).
 
 ## Using the library
 
@@ -289,7 +292,7 @@ defer term.deinit(allocator);
 
 ### Defining host functions
 
-The runnable example is `random_demo.zig` — `zig build
+The runnable example is `random_demo.zig` — `zig build -fincremental
 embed` builds it, runs it, and reports the round trip. The blocks below
 are quoted from that file (it is the example; this README only annotates
 it). The embedder gives Stilla a `random` host module: one `pub fn` per

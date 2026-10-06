@@ -1,5 +1,5 @@
-//! Test file: `frontend cfg passes` — the mid-level optimizer Pass 8.6
-//! drop elision, 8.7 phi simplification, 8.8 jump threading, and the 8.9
+//! Test file: `frontend cfg passes` — the mid-level optimizer's drop
+//! elision, phi simplification, and jump threading passes, plus the
 //! measurement harness; the post-optimization drop lowering
 //! (`cfg_lower_drop`); self-contained AIR (concrete TypeDecls,
 //! module member tables, syscall signatures); and the AIR validator
@@ -11,7 +11,7 @@
 //! from `src/frontend_test_support.zig` below, so the test bodies are
 //! unchanged from the unsplit file.
 //!
-//! Run via `zig build test` (wired into `src/root.zig`'s test block).
+//! Run via `zig build -fincremental test` (wired into `src/root.zig`'s test block).
 
 const std = @import("std");
 const cfg = @import("cfg.zig");
@@ -30,9 +30,8 @@ const irText = helpers.irText;
 const compileOpt = helpers.compileOpt;
 const funcBody = helpers.funcBody;
 // ---------------------------------------------------------------------------
-// Pass 8.6/8.7/8.8 — the new optimizer passes: drop elision, phi
-// simplification, jump threading — plus the Pass 8.9 measurement harness
-// over the example corpus.
+// Drop elision, phi simplification, and jump threading — the mid-level
+// optimizer passes — plus the measurement harness over the example corpus.
 // ---------------------------------------------------------------------------
 
 /// The number of non-overlapping occurrences of `needle` in `haystack`.
@@ -72,7 +71,7 @@ fn countBlocks(program: *const cfg.IrProgram) usize {
     return n;
 }
 
-test "Pass 8.8 jump threading removes an empty forwarding block" {
+test "jump threading removes an empty forwarding block" {
     // `then:` is a forwarding block (no instructions, `j join`); its
     // edge is redirected to `join` and the join phi's `then` entry is
     // re-keyed to `entry`.
@@ -110,7 +109,7 @@ test "Pass 8.8 jump threading removes an empty forwarding block" {
     try testing.expectEqualStrings(text, text2);
 }
 
-test "Pass 8.8 jump threading skips a candidate with a duplicate-edge risk" {
+test "jump threading skips a candidate with a duplicate-edge risk" {
     // `then:` forwards to `join`, but `entry` already branches to `join`
     // directly; threading would give `entry` two edges to `join`, which
     // the printer's phi ordering cannot distinguish. The skip rule keeps
@@ -148,7 +147,7 @@ test "Pass 8.8 jump threading skips a candidate with a duplicate-edge risk" {
     try testing.expectEqualStrings(text, text2);
 }
 
-test "Pass 8.7 phi simplification removes single-incoming phis" {
+test "phi simplification removes single-incoming phis" {
     // `join` has one predecessor, so `%2` is interchangeable with `%1`.
     var t = try cfg_parse.parseText(
         \\module "app" {
@@ -178,7 +177,7 @@ test "Pass 8.7 phi simplification removes single-incoming phis" {
     try testing.expectEqualStrings(text, text2);
 }
 
-test "Pass 8.7 phi simplification collapses identical-incoming phis" {
+test "phi simplification collapses identical-incoming phis" {
     // Both predecessors feed the same value, so `%2` is `%0` everywhere.
     var t = try cfg_parse.parseText(
         \\module "app" {
@@ -211,7 +210,7 @@ test "Pass 8.7 phi simplification collapses identical-incoming phis" {
     try testing.expectEqualStrings(text, text2);
 }
 
-test "Pass 8.7 phi simplification removes self-referential trivial phis" {
+test "phi simplification removes self-referential trivial phis" {
     // braun13cc.pdf Algorithm 3: a phi that references only itself and
     // one other value (a loop-carried value whose back edge passes the
     // header phi through unchanged) is interchangeable with that value.
@@ -247,7 +246,7 @@ test "Pass 8.7 phi simplification removes self-referential trivial phis" {
     try testing.expectEqualStrings(text, text2);
 }
 
-test "Pass 8.7 phi simplification resolves chains of trivial phis" {
+test "phi simplification resolves chains of trivial phis" {
     // The paper's recursive user walk in map form: `%2` is single-
     // incoming and forwards to `%3`; only once that lands does `%3`
     // become trivial (`φ(%1, %3)`), so the pass must iterate. Both phis
@@ -286,7 +285,7 @@ test "Pass 8.7 phi simplification resolves chains of trivial phis" {
     try testing.expectEqualStrings(text, text2);
 }
 
-test "Pass 8.7 phi simplification keeps all-self phis" {
+test "phi simplification keeps all-self phis" {
     // `φ(vφ, vφ)` is unreachable or in the start block; the AIR has no
     // undefined value to forward it to (braun13cc.pdf Algorithm 3's Undef
     // case), so it is kept — forwarding to nothing would change its type.
@@ -321,7 +320,7 @@ test "Pass 8.7 phi simplification keeps all-self phis" {
     try testing.expectEqualStrings(text, text2);
 }
 
-test "Pass 8.6 drop elision removes Copy drops, keeps unique drops" {
+test "drop elision removes Copy drops, keeps unique drops" {
     // A `drop` of a Copy value does nothing and can never run a
     // user hook (type_shape classifies hook-bearing structs unique), so
     // it is elided. A `drop` of an unique value (`hostdata`, `any`) may
@@ -537,7 +536,7 @@ test "drop lowering handles a drop before a match in one block" {
     try testing.expect(std.mem.indexOf(u8, body, "call @app.File.drop") != null);
 }
 
-test "Pass 8 drop lowering: a recursive named type stops expanding and leaves a residual drop" {
+test "drop lowering: a recursive named type stops expanding and leaves a residual drop" {
     // A named type whose payload boxes itself (`Tree` in the fixture) has
     // no finite structural expansion. The pass must stop at the cycle and
     // leave a residual runtime `drop` (Runtime §6.3 destroys the value
@@ -564,7 +563,7 @@ test "Pass 8 drop lowering: a recursive named type stops expanding and leaves a 
     try testing.expect(countOccurrences(text, "drop %") <= 8);
 }
 
-test "Pass 8.4 module/member CSE reuses identical loads in a block" {
+test "module/member CSE reuses identical loads in a block" {
     // `lib.ratio` lowers to `module_ref "lib"` + `load_member`, and the
     // on-the-fly CSE never shared them (module ops are not candidates at
     // emit time), so two reads of the same member in one block stay as
@@ -591,7 +590,7 @@ test "Pass 8.4 module/member CSE reuses identical loads in a block" {
     try testing.expect(countOccurrences(body, "load_member") == 1);
 }
 
-test "Pass 8.4 copy propagation collapses copies of Copy values" {
+test "copy propagation collapses copies of Copy values" {
     // The checker emits an explicit `copy` of the move parameter before
     // the ret; for a Copy type `move` is semantically an ordinary copy
     // (Core §10.2), so the copy is a no-op and the parameter is returned
@@ -612,7 +611,7 @@ test "Pass 8.4 copy propagation collapses copies of Copy values" {
     try testing.expect(std.mem.indexOf(u8, body, "ret %0") != null);
 }
 
-test "Pass 8.4 copy propagation collapses box round-trip copies" {
+test "copy propagation collapses box round-trip copies" {
     // `Token` is a plain Copy struct, so `box[Token]` is a Copy container
     // (Core §10.3) and `move` of it is an ordinary copy (Core §10.2). The
     // frontend's on-the-fly copy propagation folds that `copy` at the
@@ -637,7 +636,7 @@ test "Pass 8.4 copy propagation collapses box round-trip copies" {
     try testing.expect(std.mem.indexOf(u8, body, "builtin#unbox") != null);
 }
 
-test "Pass 8.4 dead-instruction elimination drops unused match payloads" {
+test "dead-instruction elimination drops unused match payloads" {
     // A `match` arm that binds the payload but returns a constant reads
     // the payload without using it: the `read_payload` is dead. It is a
     // guarded projection (the lowering emits it only after the tag
@@ -660,7 +659,7 @@ test "Pass 8.4 dead-instruction elimination drops unused match payloads" {
     try testing.expect(std.mem.indexOf(u8, body, "read_payload") == null);
 }
 
-test "Pass 8.7 dead-instruction elimination removes dead shifts and bitwise ops" {
+test "dead-instruction elimination removes dead shifts and bitwise ops" {
     // Shifts and bitwise ops never trap (Runtime §7.2: the shift count is
     // masked to its low 5 bits, the bitwise ops work on raw patterns) and
     // have no effects, so an unused Copy result is removable like any
@@ -684,7 +683,7 @@ test "Pass 8.7 dead-instruction elimination removes dead shifts and bitwise ops"
     try testing.expectEqual(@as(usize, 0), t.program.funcs[0].blocks[0].instrs.len);
 }
 
-test "Pass 8.7 dead-instruction elimination is trap-aware for div/rem" {
+test "dead-instruction elimination is trap-aware for div/rem" {
     // The integer forms of div/rem trap on a zero divisor (and the 64-bit
     // signed-division overflow), so a dead one stays — removing it would
     // delete an observable trap. The float forms are total (IEEE: `x/0`
@@ -710,7 +709,7 @@ test "Pass 8.7 dead-instruction elimination is trap-aware for div/rem" {
     try testing.expect(instrs[1].op == .rem);
 }
 
-test "Pass 8.7 dead-instruction elimination keeps unique results and views" {
+test "dead-instruction elimination keeps unique results and views" {
     // Ownership: a `copy` of an unique value (`any`) has an unique result
     // whose refcount bump is observable, and a `tail` view is outside the
     // candidate set (the trap audit: no impediment for Copy results, but
@@ -735,7 +734,7 @@ test "Pass 8.7 dead-instruction elimination keeps unique results and views" {
     try testing.expect(instrs[1].op == .tail);
 }
 
-test "Pass 8.0 inlining: nested splices keep block names unique and round-trip" {
+test "inlining: nested splices keep block names unique and round-trip" {
     // fib_tail_call.st's `print_terms` TCO loop has `fib` (whose own body
     // holds a TCO'd `go` loop) inlined into it: the splice clones the
     // already-rewritten callee, so clone names collide with clones created
@@ -769,7 +768,7 @@ test "Pass 8.0 inlining: nested splices keep block names unique and round-trip" 
     try testing.expectEqualStrings(text, text2);
 }
 
-test "Pass 8.0 print-order renumber honors terminator operands" {
+test "print-order renumber honors terminator operands" {
     // renumberPrintOrder assigns ids in a def-before-use block order so
     // the text form re-parses (air.md §13). The eligibility test used to
     // exempt terminator operands, so a block whose `br` condition is
@@ -824,10 +823,10 @@ test "Pass 8.0 print-order renumber honors terminator operands" {
     testing.allocator.free(f.values);
 }
 
-test "Pass 8.9 optimization harness: corpus compile, optimize, and measure" {
+test "optimization harness: corpus compile, optimize, and measure" {
     // Compiles each example in the optimizer corpus once without and once
     // with the optimizer, printing instruction / block / text-byte counts
-    // (optimizer.md, Pass 8.7). The optimizer must never grow the CFG, and the
+    // (optimizer.md). The optimizer must never grow the CFG, and the
     // optimized AIR must re-parse and re-print identically (air.md §13).
     // The corpus is enumerated at test time (probe_corpus.zig).
     var corpus = try probe_corpus.list(testing.allocator, "examples");
@@ -855,10 +854,10 @@ test "Pass 8.9 optimization harness: corpus compile, optimize, and measure" {
         const after_instrs = countInstrs(&opt.program.?);
         const after_nonphi = countNonPhi(&opt.program.?);
         const after_blocks = countBlocks(&opt.program.?);
-        // Report the measurement only when stderr reaches a human: under
-        // `zig build test` stderr is a captured pipe, and the build runner
-        // replays any run-step stderr as an error (a spurious "failed
-        // command:" line), so the report is gated on stderr being a TTY.
+        // Report the measurement only when stderr reaches a human: the
+        // simple-mode test runner's run step inherits stdio, so running
+        // `zig build -fincremental test` from a terminal prints the report,
+        // while a redirected stderr (CI, log capture) suppresses it.
         if (std.Io.File.stderr().isTty(std.testing.io) catch false) {
             std.log.info(
                 "harness {s}: {d} instr ({d} non-phi) {d} blocks {d} bytes -> {d} instr ({d} non-phi) {d} blocks {d} bytes",
@@ -866,7 +865,7 @@ test "Pass 8.9 optimization harness: corpus compile, optimize, and measure" {
             );
         }
 
-        // The inliner (Pass 8, first sub-pass) duplicates small callee
+        // The inliner (the first sub-pass) duplicates small callee
         // bodies, so the optimizer legitimately grows the CFG — bounded
         // by the inline budget (25/site) and the number of eligible call
         // sites, never by the caller. A generous sanity bound still

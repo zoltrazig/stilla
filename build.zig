@@ -133,7 +133,7 @@ pub fn build(b: *std.Build) void {
         "Run only tests whose name contains this substring (repeatable)",
     ) orelse &.{};
 
-    // Unit tests, run with `zig build test`. The test executable reuses the
+    // Unit tests, run with `zig build -fincremental test`. The test executable reuses the
     // `stilla` module (its `test` blocks are reachable through
     // `std.testing.refAllDecls` in root.zig).
     const mod_tests = b.addTest(.{
@@ -158,7 +158,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_exe_tests.step);
 
     // The --emit-asm stdout probe: the fd-1 sink of the compiler can't run
-    // in the `zig build test` process (the test step inherits stdio, so fd 1
+    // in the `zig build -fincremental test` process (the test step inherits stdio, so fd 1
     // is the build's live stdout and an in-process test must not write to
     // it), so it is probed here as a real subprocess — run the compiled
     // `stilla` with `--emit-asm` on an example and assert that stdout
@@ -197,7 +197,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&hir_fail_probe.step);
 
     // 13 `--run` probes: the `--run` stdout sink is the fd-1 path that
-    // cannot run in the `zig build test` process (the test step inherits
+    // cannot run in the `zig build -fincremental test` process (the test step inherits
     // stdio, so fd 1 is the build's live stdout — see the note in
     // `src/main.zig`), so the full process is probed here as a real
     // subprocess. The source and
@@ -249,7 +249,7 @@ pub fn build(b: *std.Build) void {
     // `zig build embed`: the host-embedding example (README, "Defining
     // host functions") — the embedder defines a `random` host module and
     // a Stilla program calls it. The example self-verifies (a round-trip
-    // mismatch returns nonzero), so it also runs under `zig build test`.
+    // mismatch returns nonzero), so it also runs under `zig build -fincremental test`.
     const embed_module = b.createModule(.{
         .root_source_file = b.path("examples/embed/random_demo.zig"),
         .target = target,
@@ -299,7 +299,7 @@ pub fn build(b: *std.Build) void {
     stsmith_check_step.dependOn(&run_check.step);
 
     // The generator's unit tests (determinism and self-consistency) run
-    // under `zig build test`.
+    // under `zig build -fincremental test`.
     const gen_test_module = b.createModule(.{
         .root_source_file = b.path("tools/stsmith/gen.zig"),
         .target = target,
@@ -328,7 +328,7 @@ pub fn build(b: *std.Build) void {
     // Discover the examples at configure time so new .st files join
     // automatically; a missing examples/ dir degrades to an empty build
     // with a warning rather than failing configure (which would break
-    // unrelated steps like `zig build test`).
+    // unrelated steps like `zig build -fincremental test`).
     var stems: std.ArrayList([]const u8) = .empty;
     if (std.Io.Dir.cwd().openDir(b.graph.io, "examples", .{ .iterate = true })) |*dir| {
         defer dir.close(b.graph.io);

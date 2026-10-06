@@ -6,7 +6,7 @@
 //! These black-box tests pin that boundary: the Layer A op view, the
 //! typed printer, and the one-record emission over the frontend's CFG.
 //!
-//! Run via `zig build test` (wired into `src/root.zig`'s test block).
+//! Run via `zig build -fincremental test` (wired into `src/root.zig`'s test block).
 
 const std = @import("std");
 const meta = @import("meta.zig");

@@ -15,7 +15,7 @@
 //! from `src/frontend_test_support.zig` below, so the test bodies are
 //! unchanged from the unsplit file.
 //!
-//! Run via `zig build test` (wired into `src/root.zig`'s test block).
+//! Run via `zig build -fincremental test` (wired into `src/root.zig`'s test block).
 
 const std = @import("std");
 const llir = @import("llir.zig");
@@ -1478,7 +1478,7 @@ test "raw-word mutation corpus never panics (Debug and ReleaseSafe)" {
     // Mutate every byte of every instruction word of a six-format image
     // to every byte value: `validate` must return a message (freed) or
     // null — it must never panic, index out of bounds, or assert. The
-    // same suite runs under Debug and ReleaseSafe (`zig build test
+    // same suite runs under Debug and ReleaseSafe (`zig build -fincremental test
     // -Doptimize=ReleaseSafe`), so this is the boundary-safety corpus
     // for both modes. Mutations that still decode to a valid word may
     // leave the image valid — that is expected; the invariant is "no

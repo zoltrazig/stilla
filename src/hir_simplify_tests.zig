@@ -7,7 +7,7 @@
 //! the whole-pipeline corpus with the `hir` gate, and consumers-on vs
 //! consumers-off interpreter equivalence.
 //!
-//! Wired into root.zig's test block; run via `zig build test`.
+//! Wired into root.zig's test block; run via `zig build -fincremental test`.
 
 const std = @import("std");
 const moduleinfo = @import("moduleinfo.zig");

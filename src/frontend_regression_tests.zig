@@ -9,7 +9,7 @@
 //! whole-program fixtures live in `probes/cases/*.st` and are read at test
 //! time rather than constructed inline.
 //!
-//! Run via `zig build test` (wired into `src/root.zig`'s test block).
+//! Run via `zig build -fincremental test` (wired into `src/root.zig`'s test block).
 
 const std = @import("std");
 const testing = std.testing;

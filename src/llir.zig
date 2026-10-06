@@ -32,7 +32,7 @@ pub const print = @import("passes/llir_asm.zig").print;
 // ---------------------------------------------------------------------------
 
 /// The logical opcode set: `Opcode = enum(u16)`, the complete
-/// alignment-constrained set of Instruction Set §4–§9 — 234 opcodes with
+/// alignment-constrained set of Instruction Set §4–§9 — 273 opcodes with
 /// explicit logical values (the alignment holes between typed families
 /// are not members and carry no `opInfo`).
 pub const Opcode = opcodes.Opcode;

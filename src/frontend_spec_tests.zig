@@ -11,7 +11,7 @@
 //! from `src/frontend_test_support.zig` below, so the test bodies are
 //! unchanged from the unsplit file.
 //!
-//! Run via `zig build test` (wired into `src/root.zig`'s test block).
+//! Run via `zig build -fincremental test` (wired into `src/root.zig`'s test block).
 
 const std = @import("std");
 const testing = std.testing;

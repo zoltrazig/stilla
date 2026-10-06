@@ -34,7 +34,7 @@ pub fn irText(program: *const cfg.IrProgram) ![]u8 {
     return cfg.print(program, testing.allocator);
 }
 
-/// Compile with the mid-level optimizer on (Passes 7–8 plus the
+/// Compile with the mid-level optimizer on (the rewrite sequence plus the
 /// post-optimization drop lowering), as the `stilla` executable does.
 pub fn compileOpt(entry: []const u8, texts: []const struct { []const u8, []const u8 }) !frontend.Compilation {
     var sources = moduleinfo.Sources{};

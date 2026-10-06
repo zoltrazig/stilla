@@ -10,7 +10,10 @@ The detailed probes cover the source-reachable operation/type matrix:
 - `integer_bits.st`: shifts and bitwise operations for all four integer types
 - `immediates.st`: integer immediate arithmetic, shifts, masks, and comparisons
 - `comparisons.st`: value and branch comparisons for numeric, byte, bool, and str
-- `casts.st`: all 20 non-identity casts among byte, int32, uint32, float32, and float64
+- `casts.st`: the 20 non-identity casts among byte, int32, uint32, float32, and
+  float64 (the five-type subset of the full 7-type / 42-cast family); the
+  64-bit integer casts (int64/uint64 sources and targets) are covered by the
+  `probes/cases/wide_*` fixtures and `lowering_integer_family_casts.st`
 - `fusion.st`: multiply-add fusion for every numeric representation and integer
   immediate forms that are reachable from source
 - `aggregates.st`, `union_match.st`, and `list_match.st`: construction and projection
@@ -135,8 +138,8 @@ The detailed probes cover the source-reachable operation/type matrix:
   leaf), so extraction's cost model changes the AIR. It runs through the
   normal SEG differential (its only SEG rewrite is AC): with `egraph_ac` off
   the AIR keeps the source chain and is byte-identical to `seg` off.
-  **Added for the stable-canonical-order change**; it is the
-  runnable SEG probe that exercises the DAG-safe canonicalization.
+  It is the runnable SEG probe that exercises the DAG-safe
+  canonicalization.
 - `never_suffix.st`: the `never_returns` must fact's suffix deletion
   ([effects.md](effects.md) §10.1) — a structurally-never callee
   (`builtin.panic` behind a `void` signature) deletes the statements after
@@ -172,7 +175,7 @@ consumers and `hir` × `seg` four-combination differentials
 transform/optimization pass family:
 
 - CFG lowering plus the canonical-AIR text round-trip;
-- each Pass 7-8 rewrite applied **individually** to a fresh compilation,
+- each mid-level optimizer rewrite applied **individually** to a fresh compilation,
 then validated and round-tripped (so a pass that only misbehaves alone
 is caught even though the ordered driver would mask it);
 - the full optimized pipeline (optimizer, then post-optimization drop
@@ -229,7 +232,7 @@ inlining a whole Stilla program in a test body.
   `converged == false`) is gone.
 
 Some LLIR instructions have no one-to-one source construct. `spill_take`,
-`spill_put`, `result_take`, argument-window instructions, `jal`/`jalr`/`jr`,
+`spill_put`, argument-window instructions, `jal`/`jalr`/`jr`,
 `auipc`, `lui`, long-branch inversions, and replacement/release variants are
 selected by register allocation, calling convention, relaxation, or ownership
 normalization. `msub` is currently present in the LLIR ISA but is not selected
@@ -241,7 +244,7 @@ source semantics.
 Compile one probe to CFG AIR:
 
 ```sh
-zig build run -- probes/branch.st
+zig build -fincremental run -- probes/branch.st
 ```
 
 Use `--emit-asm` or `--emit-bin <path>` to exercise the later IR stages. The

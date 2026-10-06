@@ -1,7 +1,7 @@
-//! Annotated AST → AIR lowering — frontend Phase 3 (cfg-lowering.md,
+//! Annotated AST → AIR lowering (cfg-lowering.md,
 //! air.md §12).
 //!
-//! Phase 3 consumes the phase-1 module graph (with its module-level
+//! The lowering pass consumes the phase-1 module graph (with its module-level
 //! annotation) and produces the CFG-based AIR of air.md: per module an
 //! `@init` function plus one `IrFunc` per Stilla function, all host
 //! binding calls lowered to `syscall` instructions, ownership operations
@@ -356,6 +356,6 @@ pub const cse = cfg_optimize.cse;
 pub const copyProp = cfg_optimize.copyProp;
 pub const deadInstr = cfg_optimize.deadInstr;
 pub const optimize = cfg_optimize.optimize;
-/// The air.md §13 AIR validator (frontend.md Pass 6.1), re-exported for
+/// The air.md §13 AIR validator (frontend.md), re-exported for
 /// the frontend and tests.
 pub const validate = cfg_optimize.validate;

@@ -32,6 +32,15 @@ the runtime, `canMove`, and other evidence-gated items stay deferred.
 The pipeline documents under this directory remain normative for the
 implemented behavior; this file only points at their open edges.
 
+**Relationship to the overhaul plan.** [todo.md](todo.md) is the
+prioritized, actionable overhaul plan: ordered work items with code
+evidence and a concrete verification for each, spanning the whole compiler
+and runtime. This file is the detailed design-level backlog: each item
+records the design document and section that specify it, its dependencies,
+and its acceptance criteria. Where a todo item overlaps an item here, the
+todo item names that item's section rather than restating its design
+rationale; the authoritative design detail stays in this file.
+
 ## Compiler and optimizer
 
 ### SEG linear-value cases
@@ -159,6 +168,27 @@ implemented behavior; this file only points at their open edges.
   annotations and an explicit full-expression wrapper, re-parses it, and
   passes the structural validator and `alphaEq`; the `--emit-hir` dump remains
   deterministic and byte-stable across invocations.
+
+### Typed HIR target (monomorphization and ownership checking on HIR)
+
+- **Status:** intentionally deferred (architecture direction; not yet scoped).
+- **What and why it is open:** monomorphization and the ownership check run
+  before HIR construction today. [hir.md](hir.md) §2.3 records a long-term
+  boundary in which the pipeline instead builds a *Typed HIR* first and
+  specializes it after, moving monomorphization and the ownership check up
+  onto HIR. The direction is architectural and unscoped: it would restructure
+  the checker / monomorphizer boundary and the HIR builder, and no consumer
+  requires it yet, so it stays a recorded direction rather than scheduled
+  work.
+- **Tracked in:** [hir.md](hir.md) §2.3 (`与现状管线的边界`, the
+  `远期边界（Target）` bullet).
+- **Dependencies:** none; gated on a concrete consumer or requirement that a
+  Typed HIR would serve.
+- **Acceptance:** the direction is either adopted with a scoping design that
+  names the affected passes and a migration test on the corpus (the full
+  corpus still compiles, and an existing test proves the ownership check runs
+  on HIR), or it is dropped and [hir.md](hir.md) §2.3 no longer lists it as
+  open. Until then this item stays a recorded direction.
 
 ## Effects model
 

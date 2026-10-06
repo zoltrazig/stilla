@@ -1,10 +1,10 @@
-//! Module graph construction — frontend Phase 1 (module-graph.md).
+//! Module graph construction (module-graph.md).
 //!
-//! Phase 1 loads the transitive closure of modules reachable from the
+//! The builder loads the transitive closure of modules reachable from the
 //! entry point, checks and annotates their **module-level** information
 //! (type/value members, import edges, module values, host bindings, using
 //! aliases), rejects import cycles, and produces the dependency-ordered
-//! `ModuleGraph` that phase 2 (checking) and phase 3 (lowering) consume.
+//! `ModuleGraph` that annotation and CFG lowering consume.
 //!
 //! The algorithms are split out into `src/passes/` and used from here:
 //!
@@ -185,7 +185,7 @@ pub const UsingAlias = struct {
 /// member of a host-provided module (Core §2.6) and every bodyless
 /// declaration of a user or caller-supplied stdlib module is one. The
 /// embedded bundle's bodyless members are intrinsics instead (Intrinsics
-/// §2). Phase 3 lowers calls to these as system calls, never as in-AIR
+/// §2). CFG lowering emits calls to these as system calls, never as in-AIR
 /// calls.
 pub const HostBinding = struct {
     span: meta.Span,
@@ -446,10 +446,10 @@ pub const Builder = struct {
     /// `sources.search_dirs`; null in embeddings that supply every module
     /// as in-memory text.
     io: ?std.Io = null,
-    /// Optional per-module frontend cache (PLAN item 3): when set, the
-    /// load pass reuses each unchanged module's parsed `ast.Program` /
-    /// `ast.Source` (from the cache's arena) instead of re-lexing and
-    /// re-parsing. See frontend_cache.zig.
+    /// Optional per-module frontend cache: when set, the load pass reuses
+    /// each unchanged module's parsed `ast.Program` / `ast.Source` (from
+    /// the cache's arena) instead of re-lexing and re-parsing. See
+    /// frontend_cache.zig.
     cache: ?*frontend_cache.FrontendCache = null,
     raws: std.ArrayList(*RawModule) = .empty,
     by_specifier: std.StringHashMapUnmanaged(*ModuleInfo) = .{},

@@ -6,7 +6,7 @@
 //! `never` intrinsics trap. Non-bundle bodyless declarations stay host
 //! bindings — origin decides, not spelling (source spoofing).
 //!
-//! Run via `zig build test` (wired into `src/root.zig`'s test block).
+//! Run via `zig build -fincremental test` (wired into `src/root.zig`'s test block).
 
 const std = @import("std");
 const ast = @import("ast.zig");

@@ -13,8 +13,8 @@
 //! of a Copy value is the value itself). The frontend therefore
 //! needs no separate passes for these (optimizer.md, On-the-fly optimizations); partial
 //! redundancy elimination, dead-block elimination, drop elision, jump
-//! threading, and phi simplification still run as the Pass 8 sequence
-//! over the finished program.
+//! threading, and phi simplification still run as the mid-level optimizer
+//! sequence over the finished program.
 
 const std = @import("std");
 const cfg = @import("stilla").cfg;

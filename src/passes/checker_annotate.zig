@@ -144,7 +144,7 @@ fn checkDropHook(frame: *Frame, s: *const ast.StructDef, d: *const ast.DropDecl)
 
 /// The name of the first `.param` (an unresolved type name) in `t` that
 /// is not one of the declared type parameters; null when every mention is
-/// in scope. Phase 1 degrades unknown names to `.param`, so this is how
+/// in scope. The module-graph builder degrades unknown names to `.param`, so this is how
 /// the checker turns a typo like `fn f(x: Piont)` into a diagnostic
 /// (Core §12.1).
 fn findStrayParam(t: meta.Type, declared: []const meta.Ident) ?[]const u8 {
@@ -171,7 +171,7 @@ fn checkFuncBody(frame: *Frame, f: *const ast.FuncDef, body: *const ast.Block) C
     _ = try pushScope(frame, true);
     defer popScope(frame);
 
-    // Phase 1 degrades an unresolvable type name to the generic-variable
+    // Module-graph construction degrades an unresolvable type name to the generic-variable
     // marker (`.param`), so the checker must verify every type in the
     // signature mentions only declared parameters (Core §12.1): a typo
     // like `fn f(x: Piont)` would otherwise compile as a phantom generic.

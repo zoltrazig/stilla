@@ -55,7 +55,7 @@ pub fn call(c: *Ctx, fs: *FuncState, id: hir.ExprId) LowerError!?*cfg.Value {
                     const arg = try cfg_lower_call.lowerCallArg(self, fs, v, p.mode, c.built.program.typeOf(p.ty));
                     // A void-typed argument carries no observable value:
                     // it emits no operand (the phantom must never reach
-                    // the text form, cfg-lowering.md Pass 4.1).
+                    // the text form, cfg-lowering.md).
                     if (arg.type_ == .primitive and arg.type_.primitive == .void) continue;
                     try args.append(self.arena, arg);
                 }

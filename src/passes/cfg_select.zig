@@ -1,4 +1,4 @@
-//! Pass: if-conversion — the branchless select (optimizer.md, Pass 8.8).
+//! Pass: if-conversion — the branchless select (optimizer.md).
 //! In: a lowered `cfg.IrProgram` (after PRE, which simplifies the arms
 //! by hoisting the redundant computations out of them). Out: the same
 //! program, with every pure *select diamond* replaced by one `select`

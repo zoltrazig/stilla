@@ -1,5 +1,5 @@
 //! Pass: AIR validity validator — the air.md §12 invariant set,
-//! enforced (frontend.md Pass 6.1). In: a `cfg.IrProgram` (freshly
+//! enforced (frontend.md). In: a `cfg.IrProgram` (freshly
 //! lowered, or after any optimization pass). Out: null when the program
 //! satisfies the invariants, or a human-readable first-violation message.
 //!

@@ -1,4 +1,4 @@
-//! Test file: `moduleinfo` — frontend Phase 1 module-graph construction.
+//! Test file: `moduleinfo` — module-graph construction.
 //!
 //! White-box tests of `src/moduleinfo.zig`'s own internals stay in that
 //! module's file; this file aggregates them (with the split passes in
@@ -7,7 +7,7 @@
 //! `type_infer`) so they are analyzed and run, and adds black-box tests of
 //! module graphs built from in-memory sources.
 //!
-//! Run this file via `zig build test` (it pulls in `moduleinfo.zig`, whose
+//! Run this file via `zig build -fincremental test` (it pulls in `moduleinfo.zig`, whose
 //! `stilla_std_sources` anonymous import is only wired up by the build
 //! system; `--dep` cannot attach to the main module from the CLI).
 
@@ -32,7 +32,7 @@ test {
 
 // ---------------------------------------------------------------------------
 // moduleinfo — black-box: module graphs built from in-memory sources
-// (Phase 1 of the frontend pipeline).
+// (module-graph construction).
 // ---------------------------------------------------------------------------
 
 /// One built module graph. The arena is heap-allocated so its address is
@@ -163,7 +163,7 @@ test "moduleinfo rejects an import cycle with a diagnostic" {
     try testing.expectError(error.Diagnostic, b.build("a"));
     try testing.expect(b.diag != null);
     try testing.expect(std.mem.indexOf(u8, b.diag.?.message, "import cycle") != null);
-    // Pass 6.2: the full cycle path is named, not just one module.
+    // The full cycle path is named, not just one module.
     try testing.expect(std.mem.indexOf(u8, b.diag.?.message, "a imports b imports a") != null);
 }
 

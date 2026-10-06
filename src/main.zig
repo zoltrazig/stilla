@@ -781,7 +781,7 @@ test "parseArgs rejects a second positional input" {
 }
 
 // NOTE: the CLI process exit-code mapping (`run` above) is not unit-tested
-// in-process: `std.testing.io` writes to fd 1, which under `zig build test`
+// in-process: `std.testing.io` writes to fd 1, which under `zig build -fincremental test`
 // is the build's live stdout (the test step inherits stdio), so any test
 // that prints usage text or compiles output would write into the build's
 // own output stream. The exit codes are verified end-to-end by CLI probes
@@ -808,7 +808,7 @@ test "parseArgs defaults --emit-asm off" {
 }
 
 // The fd-1 (stdout) sink of `run` is the CLI-probed path, not an
-// in-process unit: under `zig build test` fd 1 is the build's live stdout
+// in-process unit: under `zig build -fincremental test` fd 1 is the build's live stdout
 // (see the note above), so any test that prints the compile output to
 // stdout would write into the build's own output stream. The `--output`
 // sink writes only to a real file and is therefore fully exercised here
@@ -913,7 +913,7 @@ test "parseArgs --opt / --no-opt toggle OptimizeConfig fields; unknown name reje
 }
 
 test "parseArgs --opt-list lists the toggles" {
-    // `parseArgs` writes the listing to fd 1, which under `zig build test`
+    // `parseArgs` writes the listing to fd 1, which under `zig build -fincremental test`
     // is the build's live stdout (see the note above), so the terminal
     // `--opt-list` parse is CLI-probed; this asserts the pure listing that
     // arm hands to stdout. A representative gate and sub-toggle must both
@@ -1036,7 +1036,7 @@ test "parseArgs --emit-bin conflicts with --emit-asm and --output" {
 
 test "run --emit-bin writes the LLIR binary; CLI bytes equal a direct serialization" {
     // The binary sink writes only to the flag's own file (never stdout —
-    // under `zig build test` fd 1 is the build's live stdout), so it is
+    // under `zig build -fincremental test` fd 1 is the build's live stdout), so it is
     // fully exercised in-process: parse -> read the source -> compile ->
     // lower to LLIR -> serialize -> write the file. The acceptance is that
     // the CLI bytes equal a direct
@@ -1143,7 +1143,7 @@ test "run --run resolves the entry through the builder's func_ids" {
 
 test "run --run executes a source file and exits 0" {
     // In-process `--run` covers the paths that write no stdout: fd 1 is
-    // the build's live stdout under `zig build test`, so a printing program
+    // the build's live stdout under `zig build -fincremental test`, so a printing program
     // belongs to the build.zig CLI probe. A program that terminates without
     // printing still exercises compile -> lower -> resolve entry -> run.
     const src_name = "run_probe.st";

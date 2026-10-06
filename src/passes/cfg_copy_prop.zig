@@ -1,4 +1,4 @@
-//! Pass: copy propagation (optimizer.md, Pass 8 driver). In: a lowered
+//! Pass: copy propagation (optimizer.md). In: a lowered
 //! `cfg.IrProgram` (after drop elision, so the unobservable drops of
 //! Copy values are already gone). Out: the same program, with every
 //! `copy` of a Copy value replaced by the value itself, so

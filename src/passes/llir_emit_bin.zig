@@ -116,7 +116,7 @@ pub const magic: u32 = 0x52494c4c;
 /// Version 17: the C-type block grows the 64-bit integer cast matrix —
 /// the 22 `cvt.*` opcodes for `i64`/`u64` sources and targets (C
 /// selectors 42–63, previously reserved) — so every C-type selector is
-/// assigned and the logical opcode set is 234 (227 defined). No table or
+/// assigned and the logical opcode set is 273. No table or
 /// header row changes; only the instruction encoding space grows.
 pub const version: u32 = 17;
 

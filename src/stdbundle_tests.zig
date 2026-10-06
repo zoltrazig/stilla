@@ -5,7 +5,7 @@
 //! and adds black-box tests that every embedded `std/*.st` source parses
 //! and checks as an intrinsic surface.
 //!
-//! Run this file via `zig build test` (it pulls in `stdbundle.zig`, whose
+//! Run this file via `zig build -fincremental test` (it pulls in `stdbundle.zig`, whose
 //! `stilla_std_sources` anonymous import is only wired up by the build
 //! system; `--dep` cannot attach to the main module from the CLI).
 

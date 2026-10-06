@@ -5,7 +5,7 @@
 //! instead of being added to a hardcoded list in each file.
 //!
 //! Test-only helper (no test blocks of its own), like
-//! `frontend_test_support.zig`. `zig build test` runs at the repository
+//! `frontend_test_support.zig`. `zig build -fincremental test` runs at the repository
 //! root — the same cwd the existing corpus tests read `probes/*.st`
 //! from — so the paths here are relative and resolved with
 //! `std.testing.io`.

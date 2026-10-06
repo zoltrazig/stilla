@@ -7,7 +7,7 @@
 //! `hir` × `seg` combinations interpreting every corpus program
 //! identically, and the corpus-level compile-time / round budget.
 //!
-//! Wired into root.zig's test block; run via `zig build test`.
+//! Wired into root.zig's test block; run via `zig build -fincremental test`.
 
 const std = @import("std");
 const moduleinfo = @import("moduleinfo.zig");

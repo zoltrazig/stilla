@@ -35,7 +35,7 @@ itself and the immediate-fusion decision it feeds.
   differs), the SSA operands, and the result value. Binary ops carry
   `a` and `b`; unary ops (`neg`/`abs`/`clz`/`popcount`) and `cvt`
   carry `a` only.
-- `repOf(type)` — the rep suffix of an arithmetic primitive type, or
+- `repName(t)` — the rep suffix of an arithmetic primitive type, or
   null for a non-arithmetic type (the typed layer only carries
   arithmetic ops).
 - `typedKindOf(tag)` — the `typed` lowering kind of a CFG op tag, or
@@ -45,7 +45,7 @@ itself and the immediate-fusion decision it feeds.
 - `immOf(cv, kind, t)` — the 7-bit immediate a constant fuses into for
   a comparison kind, or null when it does not fit the window
   (`ge` normalizes to `gt` of the predecessor first).
-- `shiftImm(op, t, imm)` — the pre-masked shift count an immediate
+- `shiftImm(op, imm)` — the pre-masked shift count an immediate
   shift opcode carries (the opcode masks the count mod the width
   internally; the immediate form just stores the masked value).
 - `fusedImmR(kind, t, cv)` — the fused `(opcode, imm)` pair for an

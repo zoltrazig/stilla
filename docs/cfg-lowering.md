@@ -132,7 +132,7 @@ with a pattern lowers to destructuring ops.
 
 ### Member access (Core)
 
-`load_field` for structs; `load_member` for module members; chained paths
+`read_field` for structs; `load_member` for module members; chained paths
 lower left-to-right (`std.math.sqrt` → load `std` module, load `math`
 member, load `sqrt` member — Core).
 
@@ -449,9 +449,12 @@ Consumers of the CFG:
 | `src/passes/cfg_lower_call.zig` | Call and syscall lowering |
 | `src/passes/cfg_lower_pattern.zig` | Pattern destructuring |
 | `src/passes/cfg_lower_path.zig` | Path expression lowering |
+| `src/passes/cfg_lower_intrinsic.zig` | Intrinsic expansion: the per-member table for the embedded stdlib bundle's bodyless declarations (host-backed functions → `syscall`; `math` constants → materialized typed constants) |
 | `src/passes/cfg_lower_emit.zig` | On-the-fly optimizations at construction |
+| `src/passes/cfg_lower_typed.zig` | The typed lowering layer at the CFG → LLIR boundary: the atomic typed-op view and immediate-fusion helpers |
 | `src/passes/cfg_lower_validate.zig` | Post-lowering validation |
 | `src/passes/cfg_lower_drop.zig` | Post-optimization drop lowering: expand statically-expandable `drop`s (struct/tuple/box/union) into explicit CFG operations; only opaque, `hostdata`, `list`, and `any` drops remain single instructions |
+| `src/passes/cfg_lower_lifecycle.zig` | LLIR stage: counted-value `release` placement and tailcall leftover consumption (the `lifecycle plan` stage of `cfg_lower_llir.lowerLlir`) |
 | `src/passes/cfg_lex.zig` | AIR text lexing (re-exported by `cfg`) |
 | `src/passes/cfg_parse.zig` | AIR text parsing (re-exported by `cfg`) |
 | `src/passes/cfg_print.zig` | AIR text printing (re-exported by `cfg`) |

@@ -12,7 +12,7 @@
 //! from `src/frontend_test_support.zig` below, so the test bodies are
 //! unchanged from the unsplit file.
 //!
-//! Run via `zig build test` (wired into `src/root.zig`'s test block).
+//! Run via `zig build -fincremental test` (wired into `src/root.zig`'s test block).
 
 const std = @import("std");
 const cfg = @import("cfg.zig");
@@ -93,7 +93,7 @@ test "frontend rejects an import cycle" {
     try testing.expect(c.graph == null);
     try testing.expect(c.diag != null);
     try testing.expect(std.mem.indexOf(u8, c.diag.?.message, "import cycle") != null);
-    // Pass 6.2: the diagnostic names the full cycle, not just one module.
+    // The diagnostic names the full cycle, not just one module.
     try testing.expect(std.mem.indexOf(u8, c.diag.?.message, "a imports b imports a") != null);
     // The cycle diagnostic points at the re-entering import expression, not
     // the module start (regression: it used to be span 0, the entry 1:1).
@@ -592,16 +592,16 @@ test "frontend lowers a non-consuming multi-payload match to borrow_variant" {
     try testing.expectEqualStrings(text, text2);
 }
 
-test "Pass 7 emits tailcall for a move/unique self-recursive fold" {
+test "tail-call optimization emits tailcall for a move/unique self-recursive fold" {
     // air.md §14.7.1: a direct self-recursive tail call carrying move/unique
-    // loop-carried state (the iter.fold_with shape) is rewritten by Pass 7
-    // into the frame-reusing `tailcall` terminator instead of an ordinary
-    // `call`+`ret`, so recursion over a unique accumulator does not grow the
-    // stack. The optimizer (which validates after every pass, incl. tail
-    // call) must accept the emitted AIR, and the base-case `ret` survives via
-    // the join's other predecessor.
-    // Build with the optimizer on (Passes 7–8), as the `stilla` executable
-    // does — Pass 7's tailcall emission runs inside the optimizer.
+    // loop-carried state (the iter.fold_with shape) is rewritten by tail-call
+    // optimization into the frame-reusing `tailcall` terminator instead of an
+    // ordinary `call`+`ret`, so recursion over a unique accumulator does not
+    // grow the stack. The optimizer (which validates after every pass, incl.
+    // tail call) must accept the emitted AIR, and the base-case `ret` survives
+    // via the join's other predecessor.
+    // Build with the optimizer on (the mid-level optimizer), as the `stilla`
+    // executable does — tail-call emission runs inside the optimizer.
     var sources = moduleinfo.Sources{};
     var source_map = std.StringHashMapUnmanaged([]const u8).empty;
     defer source_map.deinit(testing.allocator);
@@ -627,8 +627,8 @@ test "Pass 7 emits tailcall for a move/unique self-recursive fold" {
 test "iter.fold with a unique accumulator compiles and fold_with tailcalls" {
     // The StdLib move gap (Core §18): fold/fold_with used to omit `move` when
     // re-passing a move-mode parameter, so a unique accumulator type could not
-    // instantiate them. Now a unique S instantiates, and (with the Pass 7
-    // emission) the embedded fold_with runs the unique accumulator across a
+    // instantiate them. Now a unique S instantiates, and (with tail-call
+    // optimization) the embedded fold_with runs the unique accumulator across a
     // frame-reusing `tailcall`, not a growing stack.
     var sources = moduleinfo.Sources{};
     var source_map = std.StringHashMapUnmanaged([]const u8).empty;

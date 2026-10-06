@@ -82,11 +82,11 @@ monotonic counter), so spans resolve correctly across changing module
 sets. The cache carries a counting hook (`Stats.hits` / `Stats.parses`)
 for embedders measuring the lex/parse share of repeated compiles. It also
 records the last compile's effect-environment fingerprint
-(`effects.EffectEnvironmentFingerprint`, docs/effects.md §13): parsing does
+(`effects.EffectEnvironmentFingerprint`, effects.md §13): parsing does
 not depend on the effect environment, so a change to the host declarations,
 the effect-domain registry, or the host-semantics registry generation keeps
 every parse reusable and only moves the semantic key
-(`Stats.effect_environment_changes`) a future phase-2/3 cache must include
+(`Stats.effect_environment_changes`) a future semantic cache must include
 in its key.
 
 ## Module-level information computed per module
@@ -103,8 +103,9 @@ statically knowable **without analyzing function bodies**:
 - **value members** — `const_def` names with their *declared* types (when
   annotated) and `func_def` names with their *signatures* (Core).
   Function signatures are resolved monomorphically (Core);
-  generic functions are recorded as templates, not value members
-  (Core). CFG lowering splits value members into the four AIR member
+  generic functions are templates (Core) but are still recorded among the
+  value members, so a generic builtin can be resolved by name. CFG
+  lowering splits value members into the four AIR member
   kinds (air.md): constants occupy storage slots, functions and
   module-valued constants are static references, and host bindings are
   syscall targets. Intrinsic members (below) expand during lowering and
@@ -138,17 +139,24 @@ statically knowable **without analyzing function bodies**:
 
 ### Module-level checks
 
-Implemented in `src/passes/module_check.zig` (`module_check.checkModule`):
+`module_check.checkModule` (`src/passes/module_check.zig`) enforces only
+that member names are unique — value members and type members alike
+(module members are struct members, Core); `using` aliases may shadow
+without becoming members (Core). The other module-level rules are
+enforced where they become decidable:
 
 - every `import(...)` appears only as a module-level `const` initializer,
-  and its argument is a string literal (Core);
+  and its argument is a string literal (Core): the parser guarantees the
+  literal, and a body-position form is rejected at HIR build
+  (`hir_build_expr.zig`);
 - module-valued const initializers are `import(...)` or a statically known
   module binding (Core) — a module value may not flow into local
-  bindings, parameters, returns, or aggregates;
-- member names of the generated module struct are unique (module members
-  are struct members, Core); `using` aliases may shadow without
-  becoming members (Core);
-- `import` cycles are rejected (see below).
+  bindings, parameters, returns, or aggregates: a local `let` of a module
+  value is rejected by the checker (`checker_annotate.zig`) and a bare
+  module value used as a runtime value is rejected at HIR build
+  (`hir_build_path.zig`);
+- `import` cycles are rejected by the topological sort
+  (`topo_sort.zig`, see below).
 
 ## Recursive expansion
 
@@ -206,7 +214,8 @@ a imports b imports c imports a" at the importing expression's span.
 > handled elsewhere: module-constant *initialization order* within a module
 > — an initializer may not transitively read a module constant declared
 > later, while function references are order-independent
-> (Core — checked by the checker, see [checker.md](checker.md))
+> (Core — checked by the HIR effect analysis's module-const dependency
+> seam, see [effects.md](effects.md))
 > — and recursive *types*, which are legal only through indirection
 > (Core — handled by type resolution).
 
@@ -219,34 +228,35 @@ const ModuleKind = enum { source, standard_library, host };
 /// One loaded module with its module-level annotation.
 pub const ModuleInfo = struct {
     /// Resolved specifier; the graph key (Runtime).
-    specifier: module.Specifier,
+    specifier: []const u8,
     kind: ModuleKind,
     /// True only for the implementation's embedded `std/` bundle
     /// (Intrinsics Specification): the origin mark that classifies
     /// bodyless declarations as intrinsics. Caller-supplied
     /// standard-library extensions and user modules never carry it.
-    bundle_origin: bool,
+    bundle_origin: bool = false,
     /// The parsed module, when source or standard library.
     source: ?*const ast.Source,
     program: ?*const ast.Program,
 
-    /// The compiler-generated nominal struct type (Core): its
-    /// members are the module's runtime value members. There is no
-    /// `typeinfo` module — resolved types are the AIR-native `meta.Type`
-    /// (see [checker.md](checker.md)).
-    struct_type: *meta.Type,
-
     /// Dependency edges in declaration order (Runtime).
     imports: []*ModuleInfo,
     /// Topological rank: dependencies have strictly lower rank.
-    order: u32,
+    order: u32 = 0,
 
     // Member tables (all arena-owned).
-    types: MemberTable,      // struct_def / union_def / type_def, with generic params
-    values: MemberTable,     // const_def and monomorphic func_def signatures —
-                             // the source of the AIR member table (air.md)
-    templates: MemberTable,  // generic func_def / struct_def / union_def / alias
-    using_aliases: MemberTable, // resolved path aliases (Core)
+    /// Value members: functions first (declaration order), then consts
+    /// (declaration order) — the generated module struct's member space
+    /// (Core) and the source of the AIR member table (air.md). Generic
+    /// functions are templates (Core) but are still recorded here so a
+    /// generic builtin can be resolved by name.
+    values: []ValueMember,
+    /// Type members: `struct_def` / `union_def` / `type_def` /
+    /// `opaque_def`, each carrying its generic-template flag.
+    types: []TypeMember,
+    /// Resolved `using` path aliases (Core) — compile-time bindings, not
+    /// members.
+    using_aliases: []UsingAlias,
 
     /// Bodyless declarations *outside* the embedded bundle — host-provided
     /// module members, caller-supplied standard-library extensions, and
@@ -255,19 +265,25 @@ pub const ModuleInfo = struct {
     /// (Intrinsics Specification). CFG lowering lowers calls to these as
     /// system calls (cfg-lowering.md).
     host_bindings: []HostBinding,
+
+    /// Name → resolved specifier for module-valued consts (imports and
+    /// aliases of them, Core / Runtime).
+    module_values: std.StringHashMapUnmanaged([]const u8),
+    /// Name indexes into `values` / `types` / `using_aliases`.
+    value_index: std.StringHashMapUnmanaged(u32),
+    type_index: std.StringHashMapUnmanaged(u32),
+    alias_index: std.StringHashMapUnmanaged(u32),
 };
 
 pub const HostBinding = struct {
     span: meta.Span,
     name: meta.Ident,
-    /// The declaration's resolved monomorphic signature.
-    signature: *meta.Type,
-    /// Index of the binding in its module's member table (a `MemberId`,
-    /// air.md); stable, so the runtime can dispatch syscalls by
-    /// (module, member).
+    /// Index of the binding in its module's value-member table (a
+    /// `MemberId`, air.md): the index orders the AIR row, while dispatch
+    /// is by (module, member name).
     member_index: u32,
-    /// The host implementation, when registered.
-    impl: ?*const anyopaque,
+    /// The declaration's resolved monomorphic signature.
+    signature: meta.Type,
 };
 
 /// The result: every module of the program, in dependency order, with
@@ -276,6 +292,7 @@ pub const ModuleGraph = struct {
     modules: []*ModuleInfo,        // topological order
     by_specifier: std.StringHashMapUnmanaged(*ModuleInfo),
     entry: *ModuleInfo,
+    type_interner: TypeInterner,   // shared nominal-type interner (air.md)
 };
 ```
 
@@ -308,8 +325,10 @@ The module graph is consumed by:
 
 - **[Checker](checker.md)** — iterates modules in topological
   order, resolving cross-module names against the module graph;
-- **[CFG lowering](cfg-lowering.md)** — reads `ModuleInfo` for member
-  tables, host bindings, and the generated struct type;
+- **[HIR build](hir.md)** — reads `ModuleInfo` member tables and host
+  bindings while building the canonical HIR;
+- **[CFG lowering](cfg-lowering.md)** — consumes the built HIR (the HIR
+  seam owns the module member table; only the shared const-slot helper
+  still reads `ModuleInfo`);
 - **The runtime** — instantiates modules in topological order, each at
-  most once (Runtime), using the init order recorded during CFG
-  lowering.
+  most once (Runtime), using the init order recorded during lowering.

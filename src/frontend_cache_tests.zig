@@ -1,4 +1,4 @@
-//! Test file: the per-module frontend cache (PLAN item 3) — black-box
+//! Test file: the per-module frontend cache — black-box
 //! `frontend.compile` tests over `Options.cache`: a second compile of an
 //! unchanged program performs zero lex/parse work (asserted via the
 //! cache's counting hook) and produces a byte-identical AIR; a changed
@@ -6,7 +6,7 @@
 //! cached; a failed parse is never cached; cached source ids stay unique
 //! so a fresh module's diagnostics resolve to the right module.
 //!
-//! Run via `zig build test` (wired into `src/root.zig`'s test block).
+//! Run via `zig build -fincremental test` (wired into `src/root.zig`'s test block).
 
 const std = @import("std");
 const frontend = @import("frontend.zig");

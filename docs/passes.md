@@ -68,10 +68,10 @@ structural validation and a fresh effect analysis before lowering
 
 | Pass | File | Job |
 | --- | --- | --- |
-| build | `hir_build.zig` + `hir_build_block` / `_expr` / `_path` / `_call` / `_control` / `_pattern` / `_cleanup` (data structures in `hir.zig`) | annotated AST + module graph → canonical monomorphic HIR: binder / region / pattern normalization, full-expression fences, ownership view carried over from the checker; `SemanticInfo.effect` starts `pending`; the `_cleanup` step registers full-expression `CleanupToken`s (docs/effects.md §11.2) |
+| build | `hir_build.zig` + `hir_build_block` / `_expr` / `_path` / `_call` / `_control` / `_pattern` / `_cleanup` (data structures in `hir.zig`) | annotated AST + module graph → canonical monomorphic HIR: binder / region / pattern normalization, full-expression fences, ownership view carried over from the checker; `SemanticInfo.effect` starts `pending`; the `_cleanup` step registers full-expression `CleanupToken`s (effects.md §11.2) |
 | validate | `hir_validate.zig` | structural HIR invariants only: scope, no capture, tree shape (no DAG), no duplicate BinderId, full-expression fence (hir.md §10.1 first level) |
 | effects | `hir_effects.zig` (model: `effects.zig`) | `effect_transfer` per descriptor (`own_effect` + `TransferKind`); function summaries by the SCC least fixpoint (recursive SCC seeded `Diverge`, `drop` hooks in the call graph; indirect/missing/unknown → `Top`); precise `drop_effect(T)` (struct hook + Unique fields reverse-order, union/tuple/list/box, opaque release); `OperandUse` resolution; full-expression cleanup footprint (`cleanupEffect`) plus the literal cleanup-free proof; derived legality queries; the summary-driven module-const init/teardown check (`checkModuleDependencies`); publishes interned `ready` summaries and validates them against a fresh derivation (`derived ≤ stored`) |
-| consumers | `hir_simplify.zig` | dead-let (`B ∉ FV(body)` ∧ `isDiscardable(init)`) and selective A-Normal Form (first `!canFloatAsTree` operand of a `StrictLTR` parent hoisted to a `let`, Copy only); legality is the derived query alone — no `switch(op)`; behind the `hir` gate (`--opt hir`, default off) |
+| consumers | `hir_simplify.zig` | dead-let (`B ∉ FV(body)` ∧ `isDiscardable(init)`), selective A-Normal Form (first `!canFloatAsTree` operand of a `StrictLTR` parent hoisted to a `let`, Copy only), and `never_returns` straight-line suffix deletion (`never_suffix`); legality is the derived query alone — no `switch(op)`; behind the `hir` gate (`--opt hir`, default off) |
 | seg | `hir_seg.zig` + `hir_egraph.zig` | β→let / η (value-position `fn_ref` redirect) / let simplification (dead / used-once / trivial-atom, boundary rewrites over the cross-full-expression `let`) / known-variant `match`→let in the driver; constant folding / integer algebra / integer AC search (memoized `Bag` / canonical `acRep` order / shared-DAG regroup) / constant `if` / aggregate projection / α-equivalence and CSE sharing as e-graph union rules in `hir_egraph.zig` (slotted e-graph: e-class table + union-find, `encode` → stable-order saturation → extraction, a shared operand class of one `strict_ltr` region-free island node materializes into a synthesized `let`) over recursively-admitted `isSegSafe` islands, with the boundary rewrites (β / η / `let`) admitted by their declared `rewrite_contract` contracts instead; the `seg` gate is on in the executable (`--no-opt seg` opts out) and off in the library (`OptimizeConfig.seg` unless set) |
 | lower | `hir_lower.zig` | HIR → CFG AIR, reusing the existing `lower.zig` / `cfg_lower_emit.zig` block, value, and drop mechanisms; replaced the direct AST → CFG expression lowering |
 
@@ -103,6 +103,7 @@ Sequence:
 | module | `cfg_lower_module.zig` | module constant slots |
 | function | `cfg_lower_func.zig` | per-`IrFunc` lowering state (`newFuncState`) and return coercion (`coerceRet`) |
 | expression | `cfg_lower_expr.zig` (with `cfg_lower_control.zig`, `cfg_lower_call.zig`, `cfg_lower_pattern.zig`, `cfg_lower_path.zig`) | the retained HIR→CFG emission helpers: const/void/discard (`cfg_lower_expr`), joins and phi unification (`cfg_lower_control`), call/syscall/host-call emission (`cfg_lower_call`), pattern type tests (`cfg_lower_pattern`), module references (`cfg_lower_path`) — along with on-the-fly constant folding, arithmetic simplification, block-local CSE, and copy folding at each emit site (`cfg_lower_emit.zig`) |
+| intrinsic expansion | `cfg_lower_intrinsic.zig` | the per-member expansion table for the embedded-bundle bodyless declarations: host-backed functions → `syscall`, `math` constants → materialized typed constants |
 | validate | `cfg_lower_validate.zig` / `cfg_validate.zig` | the air.md validator on every lowered program |
 
 Detail: [cfg-lowering.md](cfg-lowering.md).
@@ -147,8 +148,16 @@ Driver: `lower.LlirBuilder.lowerLlir`. The CFG → LLIR projection runs
 the named stages (prepare → allocate → result coalesce → lifecycle
 plan → edge blocks → budget → intern → body emit → edge emit → control
 emit → LLIR rewrites → linearize); the input CFG is never mutated. The
-stage table and invariants live in [frontend.md](frontend.md). After
-`lowerLlir` the frozen `LlirProgram` image is consumed by:
+stage table and invariants live in [frontend.md](frontend.md). The
+`LLIR rewrites` stage bundles four unconditional record-stream passes —
+`llir_fusion.zig` (`peephole`), `llir_compact_noop_ownership.zig`
+(`compactNoopOwnership`), `llir_fuse_lifecycle.zig` (`fuseLifecycle`),
+and `llir_expand_spills.zig` (`expandSpills`) — each block-local (no PC
+exists yet) and none behind `OptimizeConfig`. `llir_cfg_order.zig`
+(successor walk, post-order/RPO construction, block-index lookup) and
+`llir_patterns.zig` (allocation/fusion value predicates) are shared
+helpers for the LLIR lowering passes. After `lowerLlir` the frozen
+`LlirProgram` image is consumed by:
 
 | Pass | File | Job |
 | --- | --- | --- |
@@ -178,7 +187,7 @@ LLIR emission modes on top; the embeddable path goes through
 The `probes/*.st` directory is the dynamic smoke corpus. `probe_corpus.zig`
 enumerates it at test time (sorted), and `frontend_pass_smoke_tests.zig`
 drives every probe through CFG lowering plus the canonical-AIR round-trip,
-each Pass 7-8 rewrite individually (validated and round-tripped after each),
+each mid-level CFG rewrite individually (validated and round-tripped after each),
 the full optimized pipeline with post-optimization drop lowering, and the
 LLIR `lowerLlir` / validate / assemble / binary round-trip. The HIR build
 corpus (`hir_tests.zig`) and the consumers/SEG on-off differentials

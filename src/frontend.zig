@@ -102,12 +102,12 @@ pub const Options = struct {
     /// `EffectEnvironmentFingerprint` only — it changes no conclusion by
     /// itself.
     host_registry_generation: u64 = 0,
-    /// Optional per-module frontend cache (PLAN item 3): when set,
+    /// Optional per-module frontend cache: when set,
     /// repeated `compile` calls reuse each unchanged module's parsed
     /// `ast.Program`/`ast.Source` from the cache's arena, skipping
     /// lex/parse for them (validated by content hash + byte comparison).
-    /// Member tables and all phase-2/3 side tables are still re-derived
-    /// every compile. Null = today's fresh-compile behavior.
+    /// Member tables and all downstream side tables are still re-derived
+    /// every compile. Null = a fresh compile every time.
     cache: ?*frontend_cache.FrontendCache = null,
     /// Optimization toggles (`optimize_config.zig`, one bool per unit).
     /// Library default: every gate off. The `stilla` executable enables
@@ -200,8 +200,8 @@ fn revalidateHir(arena_alloc: std.mem.Allocator, graph: *moduleinfo.ModuleGraph,
     return null;
 }
 
-/// Run the optimizer (optimizer.md): the single ordered Pass 7–8
-/// sequence, with `opt`'s per-pass toggles threaded into `cfg_optimize`.
+/// Run the optimizer (optimizer.md): the single ordered mid-level
+/// CFG rewrite sequence, with `opt`'s per-pass toggles threaded into `cfg_optimize`.
 /// The validator inside `optimize` guards every rewrite; a violation
 /// surfaces as `error.ValidationFailed` here.
 fn runOptimizer(program: *cfg.IrProgram, allocator: std.mem.Allocator, opt: OptimizeConfig) !void {
@@ -259,7 +259,7 @@ pub fn compile(allocator: std.mem.Allocator, options: Options) CompileError!Comp
         _ = cache.noteEffectEnvironment(fp);
     }
 
-    // Phase 1: module graph (load, parse, annotate, sort).
+    // Module graph (load, parse, annotate, sort).
     var builder = moduleinfo.Builder.init(arena_alloc, options.sources);
     builder.io = options.io;
     builder.cache = options.cache;
@@ -273,7 +273,7 @@ pub fn compile(allocator: std.mem.Allocator, options: Options) CompileError!Comp
         error.OutOfMemory => return error.OutOfMemory,
     };
 
-    // Phase 2: annotation and checks (checker.md).
+    // Annotation and checks (checker.md).
     var ck = checker.Checker.init(arena_alloc);
     _ = ck.check(graph) catch |err| switch (err) {
         error.Diagnostic => {
@@ -282,7 +282,7 @@ pub fn compile(allocator: std.mem.Allocator, options: Options) CompileError!Comp
         else => return err,
     };
 
-    // Phase 3: CFG lowering through the HIR seam (docs/hir.md §11):
+    // CFG lowering through the HIR seam (hir.md §11):
     // the checker output is built into the canonical monomorphic HIR
     // (`hir_build.buildProgramDiag`) and lowered from there. This removed
     // the direct annotated-AST lowering and the `hir_stage` toggle.
@@ -401,7 +401,7 @@ pub fn compile(allocator: std.mem.Allocator, options: Options) CompileError!Comp
         };
     };
 
-    // The air.md §13 validator runs on every lowered program (Pass 6.1):
+    // The air.md §13 validator runs on every lowered program:
     // a lowering bug that violates structure, SSA, typing, or the
     // ownership dataflow surfaces as a diagnostic here rather than at the
     // runtime consumer. The optimizer re-runs it before and after every
@@ -415,7 +415,7 @@ pub fn compile(allocator: std.mem.Allocator, options: Options) CompileError!Comp
         }}, graph, builder.loaded_sources.items);
     }
 
-    // Mid-level optimizer (Passes 7–8, optimizer.md): a single ordered
+    // Mid-level optimizer (optimizer.md): a single ordered
     // pass over the lowered CFG, with `optimize`'s per-pass toggles. The
     // lowering validator already ran inside lowerProgram (before the
     // sequence); afterwards the optimized program is re-validated
