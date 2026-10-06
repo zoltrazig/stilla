@@ -308,10 +308,10 @@ test "frontend rejects list.get as a removed member" {
 }
 
 test "frontend lowers consuming list-pattern destructuring with split_list" {
-    // Core §18 (whole-owner rule): destructuring an owned list with
-    // `let [head, ..rest] = move xs` consumes the collection as a whole;
-    // one atomic `split_list` defines the item and the owned rest (air.md
-    // §5.3) — each unique element becomes an owner.
+    // Core §18 (whole-owner rule): destructuring an owned list in a
+    // `match (move xs) { [head, ..rest] => ... }` arm consumes the
+    // collection as a whole; one atomic `split_list` defines the item and
+    // the owned rest (air.md §5.3) — each unique element becomes an owner.
     const src = try helpers.probeSource("probes/cases", "spec_lower_split_list");
     defer testing.allocator.free(src);
     var c = try compileText("app", &.{.{ "app", src }});

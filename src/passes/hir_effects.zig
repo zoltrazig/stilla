@@ -379,9 +379,12 @@ pub const Analysis = struct {
     /// element access lowers to bounds-checked `read_index` (borrowed) or
     /// `split_list` (owned), both `may_trap` in `cfg.opInfo`. Every other
     /// pattern kind (wildcard/bind/literal/tuple/struct/variant/type
-    /// test) is total. The HIR carries no node for the pattern, so the
-    /// `let_`/`match` transfers must account for it here (docs/effects.md
-    /// §14 hidden-operation audit).
+    /// test) is total, though a tuple/struct/variant pattern may contain a
+    /// nested list subpattern. List-shape patterns are refutable (Core
+    /// Types §14), so a `let` rejects them and they occur only in `match`
+    /// arms; the HIR carries no node for the pattern, so the `match`
+    /// transfer must account for it here (docs/effects.md §14
+    /// hidden-operation audit).
     fn patternMayTrap(self: *Analysis, pid: hir.PatternId) bool {
         return switch (self.p().pattern(pid)) {
             .wildcard, .bind, .literal, .type_test => false,
@@ -448,9 +451,14 @@ pub const Analysis = struct {
                     acc = try self.eng.sequence(acc, try self.effectOf(op));
                 }
                 for (pr.regionsOf(id)) |r| {
-                    // The region's pattern is not an HIR node: a list
-                    // pattern's element reads (`read_index`/`split_list`,
-                    // cfg may_trap) must be sequenced here explicitly.
+                    // The region's pattern is not an HIR node, so a
+                    // trapping pattern would have to be sequenced here.
+                    // List-shape patterns are refutable (Core Types §14)
+                    // and a `let` rejects them, so this is defensive:
+                    // `patternMayTrap` is false for every pattern a `let`
+                    // can still bind. Kept so the transfer stays sound if
+                    // a future pass ever synthesizes a trapping let
+                    // pattern.
                     if (pr.region(r).pattern) |pt| {
                         if (self.patternMayTrap(pt)) acc = try self.eng.sequence(acc, effects.may_trap);
                     }
@@ -1417,49 +1425,58 @@ test "hir_effects: struct field reads stay total and pure" {
     try testing.expect((try an.validate(testing.allocator)) == null);
 }
 
-test "hir_effects: list patterns are MayTrap at the let node, tuple patterns are not" {
+test "hir_effects: list patterns are MayTrap at the match node, tuple patterns are not" {
     // A list pattern's element access lowers to a bounds-checked
     // `read_index`/`split_list` (cfg may_trap); it is not an HIR node, so
-    // the `let_` transfer must sequence it. Tuple destructuring lowers to
-    // a total `read_tuple` and must stay pure. Assert on the `let` node's
-    // *eval* summary (its operand and body are pure locals), which
-    // isolates the pattern transfer from the cleanup gate that would
-    // otherwise make any list-touching expression `Top`.
+    // the `match` transfer must sequence it. Tuple destructuring lowers to
+    // a total `read_tuple` and must stay pure. List patterns are refutable
+    // (Core Types §14) and so occur only in `match` arms. Assert on the
+    // `match` node's *eval* summary (its scrutinee and arm bodies are pure
+    // locals), which isolates the pattern transfer from the cleanup gate
+    // that would otherwise make any list-touching expression `Top`.
     var f = try build("app", &.{.{
         "app",
         \\fn head(borrow xs: list[int32]) -> int32 {
-        \\    let [h, ..rest] = xs;
-        \\    h
+        \\    match (xs) {
+        \\        [h, ..rest] => h,
+        \\        [] => -1,
+        \\    }
         \\}
         \\fn second(borrow t: tuple[int32, int32]) -> int32 {
-        \\    let (a, b) = t;
-        \\    b
+        \\    match (t) {
+        \\        (a, b) => b,
+        \\    }
         \\}
     }});
     defer f.deinit();
     var an = try Analysis.init(f.arena.allocator(), f.built, .{ .graph = f.graph });
     try an.analyze();
-    var list_let = false;
-    var tuple_let = false;
+    var list_match = false;
+    var tuple_match = false;
     for (f.built.program.exprs.items, 0..) |e, i| {
-        if (!std.mem.eql(u8, hir.registry.get(e.op).name, "let")) continue;
+        if (!std.mem.eql(u8, hir.registry.get(e.op).name, "match")) continue;
         const id: hir.ExprId = @intCast(i);
-        const rid = f.built.program.regionsOf(id)[0];
-        const pat = f.built.program.region(rid).pattern orelse continue;
         const s = an.readySummary(id) orelse continue;
-        switch (f.built.program.pattern(pat)) {
-            .list => {
-                try testing.expect(s.may_trap);
-                list_let = true;
-            },
-            .tuple => {
-                try testing.expect(!s.may_trap);
-                tuple_let = true;
-            },
-            else => {},
+        var has_list = false;
+        var has_tuple = false;
+        for (f.built.program.regionsOf(id)) |r| {
+            const pat = f.built.program.region(r).pattern orelse continue;
+            switch (f.built.program.pattern(pat)) {
+                .list => has_list = true,
+                .tuple => has_tuple = true,
+                else => {},
+            }
+        }
+        if (has_list) {
+            try testing.expect(s.may_trap);
+            list_match = true;
+        }
+        if (has_tuple) {
+            try testing.expect(!s.may_trap);
+            tuple_match = true;
         }
     }
-    try testing.expect(list_let and tuple_let);
+    try testing.expect(list_match and tuple_match);
     try testing.expect((try an.validate(testing.allocator)) == null);
 }
 

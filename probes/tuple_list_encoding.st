@@ -18,10 +18,12 @@ fn tuple_shared(x: int32, y: int32) -> int32 {
     a + b
 }
 
-// Same sharing through a `list_make` parent.
+// Same sharing through a `list_make` parent. A list pattern is refutable,
+// so it lives in a `match` arm rather than a `let` binding (Core Types §14).
 fn list_shared(x: int32, y: int32) -> int32 {
-    let [a, b] = [x * y, x * y];
-    a + b
+    match ([x * y, x * y]) {
+        [a, b] => a + b,
+    }
 }
 
 // Distinct operands are not α-equal: no sharing, both computations survive.

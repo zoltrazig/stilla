@@ -161,14 +161,26 @@ fn validateLet(frame: *Frame, l: *const ast.LetStmt) CheckError!void {
     }
 }
 
-/// `let` and `match` require irrefutable patterns (Core §18 *Patterns*);
-/// type-test and literal patterns are refutable and accepted only by
-/// `match`. List-with-rest, tuple, struct, path, and wildcard patterns are
-/// irrefutable.
+/// `let` accepts only irrefutable patterns (Core Types §14 *Patterns*):
+/// `_`, an identifier, a tuple of irrefutable patterns, and a struct
+/// pattern of irrefutable patterns. Literal, type-test, union-variant,
+/// and list-shape patterns are refutable and may appear only in `match`;
+/// a list pattern is refutable even when it is the zero-item `[..rest]`
+/// shape, because it matches only list values of that shape. The
+/// allow-list is recursive so a refutable pattern nested inside an
+/// otherwise irrefutable tuple or struct is rejected too.
 fn checkRefutable(frame: *Frame, p: *const ast.Pattern) CheckError!void {
     switch (p.*) {
-        .type_test, .literal => return frame.ck.fail(p.span(), "refutable pattern not allowed here", .{}),
-        else => {},
+        .wildcard => {},
+        .literal, .type_test, .list => return frame.ck.fail(p.span(), "refutable pattern not allowed here", .{}),
+        .tuple => |*tp| for (tp.elems) |*el| try checkRefutable(frame, el),
+        .path => |*pp| switch (pp.tail) {
+            .variant => return frame.ck.fail(p.span(), "refutable pattern not allowed here", .{}),
+            .none => {},
+            .struct_ => |*sp| for (sp.fields) |*f| {
+                if (f.pattern) |*fp| try checkRefutable(frame, fp);
+            },
+        },
     }
 }
 

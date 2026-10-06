@@ -51,27 +51,6 @@
 
 ## 前端与中端
 
-### F1 可反驳的 list 模式被 `let` 接受
-
-- **优先级**：P0
-- **问题**：`let` 只允许不可反驳模式（Core Types §14）。`checkRefutable` 只拒绝
-  `.type_test` / `.literal`；union variant 由 HIR 校验器的 `checkIrrefutable`
-  兜底拒绝，但 list 模式（含 list-with-rest）在两层都不被拒。HIR 校验器把
-  `.list` 归为不可反驳，而 effect 分析又把元素访问建模为可能 trap——一个被接受的
-  `let` 因此带隐式运行期失败路径。
-- **证据**：`checker_validate.zig:168-173`；`hir_validate.zig:494`、
-  `:498-501`；`hir_effects.zig:385-398`；规范
-  `Stilla Core Types & Ownership Specification.md:1046`、`:1055`；反例
-  `probes/cases/ownership_destructures.st:17-19`（`let [h, ..rest] = xs;`，作为黑盒
-  fixture 读入，不进入可运行语料）。
-- **建议工作**：在 checker 层让 `let` 拒绝 list（及一切可反驳）模式，或在规范中
-  明确「list 模式不可反驳」并同步 HIR 校验器与 `patternMayTrap`；若保留 `let`
-  list 解构，必须定义其失败语义。
-- **验证方式**：`checker_tests.zig` 新增反例（期望「refutable pattern not
-  allowed here」），`hir_validate.zig` 补 `checkIrrefutable` 对 `.list`
-  的白盒拒绝用例；`zig build -fincremental test -Dtest-filter=checker`。
-- **关联**：无
-
 ### F2 含 drop hook 的 struct 消费式 `let` 解构未被拒绝
 
 - **优先级**：P0
@@ -199,12 +178,11 @@
 ### F10 前端反例测试缺口
 
 - **优先级**：P2
-- **问题**：F1–F9 各自要求的定向反例尚未落地（可反驳 `let` 含 list、drop-hook
-  `let` 解构、块作用域无 `as` 的 `using`、未解析 `using`、解构 `let` 类型标注、
-  指数浮点、tuple-param 所有权），另缺泛型实例上限 `kMaxInstances` 的边界用例；
-  改动容易回归。
+- **问题**：F2–F9 各自要求的定向反例尚未落地（drop-hook `let` 解构、块作用域无
+  `as` 的 `using`、未解析 `using`、解构 `let` 类型标注、指数浮点、tuple-param
+  所有权），另缺泛型实例上限 `kMaxInstances` 的边界用例；改动容易回归。
 - **证据**：`kMaxInstances` 位于 `checker_annotate.zig:1343-1346`；其余缺口的
-  代码位置见 F1–F9。
+  代码位置见 F2–F9。
 - **建议工作**：为每项补一条定向正/负例，放入对应模块的 `test {}` 或
   `checker_tests.zig`。
 - **验证方式**：`zig build -fincremental test -Dtest-filter=checker` 覆盖 checker
@@ -641,17 +619,14 @@
   1. `Stilla LLIR Specification.md:921-930` 写「binary format version is 16」，而
      同文档 `:755` 写「273 logical opcodes」——273 含实现 17 才引入的 C-type
      64 位 cast（`llir_emit_bin.zig:121`）。版本与操作码计数互相矛盾。
-  2. `Stilla Core Types & Ownership Specification.md:1055` 把 list-shape 模式列为
-     可反驳，但 checker / HIR 接受 `let` list 解构（F1）。
-  3. `Stilla Core Static Semantics.md:60` 要求 `using` 路径可解析，但
+  2. `Stilla Core Static Semantics.md:60` 要求 `using` 路径可解析，但
      `module_materialize.zig:58-68` 与 `type_resolve.zig:97-120` 在解析失败时静默
      返回（F4）。
-- **建议工作**：逐条把规范改到与实现一致（S1 同步版本号与 16→17 变化；F1、F4 若以
+- **建议工作**：逐条把规范改到与实现一致（S1 同步版本号与 16→17 变化；F4 若以
   规范为准则改代码），并在改动处补往返或反例测试。
 - **验证方式**：`grep -nE 'version is|273 logical' "Stilla LLIR Specification.md"`
-  复核版本与计数自洽；`Stilla Core Types & Ownership Specification.md:1055` 与
-  `Stilla Core Static Semantics.md:60` 的断言与其反例测试一致——
-  `zig build -fincremental test -Dtest-filter=checker` 与
+  复核版本与计数自洽；`Stilla Core Static Semantics.md:60` 的断言与其反例测试
+  一致——`zig build -fincremental test -Dtest-filter=checker` 与
   `-Dtest-filter=truncated` 跑绿。
 - **关联**：无
 

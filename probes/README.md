@@ -230,6 +230,14 @@ inlining a whole Stilla program in a test body.
   the regression proof that the old `max_iterations = 8` cap (which
   truncated the chain at eight hoists and exited with
   `converged == false`) is gone.
+- `ownership_destructures.st`: ownership-transfer destructures
+  ([Core Types & Ownership Specification.md](../spec/Stilla%20Core%20Types%20&%20Ownership%20Specification.md)
+  §14.5–§14.6, [air.md](air.md) §5.4). A consuming destructure lowers to one
+  atomic multi-result op per kind — `unpack_variant` (tag-carrying),
+  `unpack_struct`, `unpack_tuple`, `split_list` — and a non-consuming list
+  pattern's rest binds a borrowed `tail` view.
+  `frontend_regression_tests.zig` pins the lowered `unpack_variant`,
+  `unpack_struct`, and `unpack_tuple` and the `tail` view.
 
 Some LLIR instructions have no one-to-one source construct. `spill_take`,
 `spill_put`, argument-window instructions, `jal`/`jalr`/`jr`,

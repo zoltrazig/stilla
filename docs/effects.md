@@ -1579,8 +1579,10 @@ MayTrap（含 panic）+ MayDiverge + nondeterministic
   边界、两 operand 的 cleanup / ownership 门，再经 `orderCompatible`。
 - 隐藏操作审计（未建模但可能有非 pure 行为者一律 `Top` / `MayTrap`）：值位置的
   模块链叶子（`access_hops` 非空）取 `Top`；`let` / `match` 的 pattern 在 HIR
-  无节点，transfer 显式序列化其效果：只有 list pattern 非 total（元素访问 lowering
-  为边界检查的 `read_index` / `split_list`），其余类别为 total。
+  无节点，transfer 显式序列化其效果：`let` 只接受不可反驳模式（wildcard / bind /
+  tuple / struct），transfer 为 total；list pattern 可反驳，只出现在 `match` arm，
+  其元素访问 lowering 为边界检查的 `read_index` / `split_list`（两者均 `may_trap`）；
+  因此 `let` transfer 不再携带隐藏的 list-pattern trap。
 - 查询组合按 §10.1 强约束；注解校验先清 per-node memo 再重算摘要，故校验是同
   逻辑的新推导。
 - module-const 检查在 `Analysis.checkModuleDependencies`；checker 的 AST 级

@@ -181,7 +181,8 @@ A `match` over a union must cover every variant unless an irrefutable arm
 exists (Core); a `match` over an `any` value must
 include a wildcard `_` arm, because the tag space is open
 (Core); `let` requires irrefutable patterns — refutable patterns
-are accepted only by `match`, and type-test patterns (`int32 n`,
+are accepted only by `match`; list-shape patterns (including `[..rest]`)
+are refutable and rejected by `let`; and type-test patterns (`int32 n`,
 Core) are refutable and accepted only by `match`, only for an `any`
 scrutinee (Core).
 
@@ -395,6 +396,7 @@ rules they own:
 | 4. Control flow | a value-typed body must end in an expression of the declared type on every path | `rejects a non-void declaration whose body has no final expression`; **added:** `rejects a tail if without else in a value-returning function` |
 | 4. Control flow | `match` over a union must be exhaustive; over `any` it needs a wildcard arm | `rejects a non-exhaustive union match`; `accepts a type-test match over any` |
 | 4. Control flow | `let` accepts only irrefutable patterns; type-test patterns are refutable and belong to `match` over `any` | `rejects a refutable let pattern` |
+| 4. Control flow | list-shape patterns (including `[..rest]`) are refutable and rejected by `let`; only `match` accepts them | **added:** `checker rejects a refutable list let pattern` |
 
 The module-constant initialization-order and teardown-read rules are not in
 this matrix: they are enforced by the HIR effect analysis's module-const

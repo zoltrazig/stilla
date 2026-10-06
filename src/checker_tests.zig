@@ -1750,6 +1750,39 @@ test "checker rejects a refutable let pattern" {
     , "refutable");
 }
 
+test "checker rejects a refutable list let pattern" {
+    // Core Types §14: a list-shape pattern matches only values of that
+    // shape, so it is refutable even across the `let` binding form.
+    try expectDiag(
+        \\fn f(xs: list[int32]) -> int32 { let [h, ..rest] = xs; h }
+    , "refutable");
+}
+
+test "checker rejects a refutable list nested in a tuple let pattern" {
+    // The allow-list is recursive: a refutable pattern inside an
+    // otherwise irrefutable tuple still makes the whole binding refutable.
+    try expectDiag(
+        \\fn f(xs: list[int32]) -> int32 { let (n, [h, ..rest]) = (0, xs); h }
+    , "refutable");
+}
+
+test "checker rejects a refutable variant let pattern" {
+    // A union-variant pattern is refutable, so the checker rejects it in
+    // `let` before the HIR validator would (Core Types §14).
+    try expectDiag(
+        \\union U { Some(int32), None }
+        \\fn f(u: U) -> int32 { let U::Some(v) = u; v }
+    , "refutable");
+}
+
+test "checker accepts an irrefutable tuple let pattern" {
+    var t = try checkText(
+        \\fn f(p: tuple[int32, int32]) -> int32 { let (a, b) = p; a }
+    );
+    defer t.deinit();
+    try testing.expectEqual(@as(usize, 0), t.ann.host_bindings.count());
+}
+
 test "checker accepts a type-test match over any" {
     // The only place type-test patterns are legal is a `match` over `any`,
     // and such a match must carry a wildcard arm (Core §11.6.2, §14.7).

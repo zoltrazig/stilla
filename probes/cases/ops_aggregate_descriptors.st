@@ -23,8 +23,9 @@ fn take_t(t: tuple[File, int32]) -> File {
     f
 }
 fn split(xs: list[File]) -> File {
-    let [f, ..rest] = move xs;
-    f
+    match (move xs) {
+        [f, ..rest] => f,
+    }
 }
 fn main() -> void {
     let a = Nothing{};

@@ -169,6 +169,7 @@ test {
     _ = @import("hir_tests.zig");
     _ = @import("hir_seg_tests.zig");
     _ = @import("hir_simplify_tests.zig");
+    _ = @import("passes/hir_effects.zig");
     _ = @import("passes/hir_seg.zig");
     _ = @import("passes/hir_simplify.zig");
     _ = @import("passes/optimize_config.zig");

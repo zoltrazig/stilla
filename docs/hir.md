@@ -621,7 +621,8 @@ HIR 没有 statement IR：block 就是一条 `let` 链（副作用节点用 `seq
 
 **解构 let**：`let (a, b) = e` 保持为 `let` region——region 的 params 是 pattern
 的绑定叶，`Region.pattern` 记录不可反驳的 pattern 形状（wildcard / bind /
-tuple / struct / list）；literal、variant、type-test 可反驳，只属于 match arm。
+tuple / struct）；literal、variant、type-test，以及 list 形状（含 `[..rest]`）
+可反驳，只属于 match arm（Core Types & Ownership Specification.md §14）。
 纯标识 `let x = e` 仍是单 binder、无 pattern 形式。
 
 ### 5.3 Region 的作用域规则

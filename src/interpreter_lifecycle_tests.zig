@@ -87,8 +87,9 @@ test "run initializes the entry module before its function" {
 test "list lifecycle: construct, consume, and clean up to zero objects" {
     var l = try load(
         \\fn sum3(move xs: list[int32]) -> int32 {
-        \\    let [a, b, c] = move xs;
-        \\    a + b + c
+        \\    match (move xs) {
+        \\        [a, b, c] => a + b + c,
+        \\    }
         \\}
         \\fn main() -> int32 { sum3([1, 2, 3]) }
     , true);
@@ -115,8 +116,9 @@ test "normal termination cleans every object and string constant" {
         \\}
         \\fn main() -> int32 {
         \\    let xs = [10, 20];
-        \\    let [a, ..rest] = move xs;
-        \\    a
+        \\    match (move xs) {
+        \\        [a, ..rest] => a,
+        \\    }
         \\}
     , true);
     defer l.deinit();
@@ -134,8 +136,9 @@ test "normal termination cleans every object and string constant" {
 test "trap path also cleans every object" {
     var l = try load(
         \\fn boom(move xs: list[int32]) -> int32 {
-        \\    let [h, ..t] = move xs;
-        \\    h / 0
+        \\    match (move xs) {
+        \\        [h, ..t] => h / 0,
+        \\    }
         \\}
         \\fn main() -> int32 { boom([1, 2]) }
     , true);
@@ -914,8 +917,9 @@ test "illegal null under a reference type traps before dereference" {
     // empty list only for reads that tolerate it; consuming it traps.
     var l = try load(
         \\fn first(move xs: list[int32]) -> int32 {
-        \\    let [h, ..t] = move xs;
-        \\    h
+        \\    match (move xs) {
+        \\        [h, ..t] => h,
+        \\    }
         \\}
         \\fn main() -> int32 { first([5, 6]) }
     , true);

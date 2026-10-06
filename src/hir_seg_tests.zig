@@ -928,7 +928,7 @@ test "SEG: the tuple_make / list_make encoding joins the CSE candidate set" {
     // The tuple and list literals each share their duplicate `mul`.
     try testing.expect(stats.shares >= 2);
     try expectFuncBody(&b, "app.tuple_shared", "fn (B0: i32, B1: i32) { let (B2, B3) = (let B4: i32 = mul.i32(%B0, %B1) { tuple_make(%B4, %B4) }) { add.i32(%B2, %B3) } }");
-    try expectFuncBody(&b, "app.list_shared", "fn (B0: i32, B1: i32) { let [B2, B3] = (let B4: i32 = mul.i32(%B0, %B1) { list_make(%B4, %B4) }) { add.i32(%B2, %B3) } }");
+    try expectFuncBody(&b, "app.list_shared", "fn (B0: i32, B1: i32) { match (let B2: i32 = mul.i32(%B0, %B1) { list_make(%B2, %B2) }) { [B3, B4] { add.i32(%B3, %B4) } } }");
     // Each shared literal keeps exactly one `mul`.
     try testing.expectEqual(@as(usize, 1), try countNodes(&b, "app.tuple_shared", "mul.i32"));
     try testing.expectEqual(@as(usize, 1), try countNodes(&b, "app.list_shared", "mul.i32"));

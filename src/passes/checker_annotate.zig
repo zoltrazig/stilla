@@ -263,8 +263,9 @@ fn checkLet(frame: *Frame, l: *const ast.LetStmt) CheckError!void {
     // existing unique local owner requires an explicit `move` (Core
     // §10.4, §14.6): the bindings take the value or its parts, and
     // otherwise two owners would exist. A wildcard discards (no new
-    // owner — no move needed) and refutable patterns are rejected by
-    // `inferPattern` below, so neither needs the ownership check first.
+    // owner — no move needed); refutable patterns are rejected by
+    // `checker_validate.checkRefutable`, not `inferPattern`, so the
+    // ownership check below does not guard them.
     if (try isBorrowedExpr(frame, l.init)) {
         return frame.ck.fail(l.init.span(), "cannot store a borrowed value into an owning binding (Core §10.7)", .{});
     }

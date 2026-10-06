@@ -394,7 +394,7 @@ const Validator = struct {
         // Region kind rules + pattern ⇄ params (hir.md §5.4). Match-arm
         // regions keep their patterns; let regions may carry an
         // *irrefutable* destructuring pattern whose binding leaves are
-        // the params (the §5.2 amendment: destructuring lets). A plain
+        // the params (hir.md §5.2 destructuring lets). A plain
         // identifier let is a pattern-less region with exactly one
         // param.
         if (fr.owner == match_op) {
@@ -421,8 +421,8 @@ const Validator = struct {
         } else if (fr.owner == let_op) {
             if (r.pattern) |pat| {
                 // Destructuring let: the pattern must be irrefutable
-                // (literal / variant / type-test arms are refutable and
-                // belong only to match arms).
+                // (literal / variant / type-test / list shapes are
+                // refutable and belong only to match arms).
                 if (try self.checkIrrefutable(pat, 0)) |m| return m;
                 var leaves: std.ArrayListUnmanaged(hir.BinderId) = .empty;
                 if (try self.checkPatternTree(pat, &leaves, 0)) |m| return m;
@@ -480,10 +480,11 @@ const Validator = struct {
     }
 
     /// True when the pattern subtree at `pid` is *irrefutable* (hir.md
-    /// §5.2 amendment): only wildcard / binding leaves / tuple / struct /
-    /// list shapes. Literal, variant, and type-test patterns are
-    /// refutable and belong only to match arms. Recursion is bounded by
-    /// the same cap as the pattern walk (a crafted cycle fails cleanly).
+    /// §5.2): only wildcard / binding leaves / tuple / struct shapes.
+    /// Literal, variant, type-test, and list shapes (including the
+    /// zero-item `[..rest]`) are refutable and belong only to match arms.
+    /// Recursion is bounded by the same cap as the pattern walk (a crafted
+    /// cycle fails cleanly).
     fn checkIrrefutable(self: *const Validator, pid: hir.PatternId, depth: u32) !?[]const u8 {
         if (depth > pattern_depth_cap) return self.fail("pattern nesting exceeds {d} levels", .{pattern_depth_cap});
         if (pid >= self.program.patterns.items.len) return self.fail("pattern {d} out of range", .{pid});
@@ -495,10 +496,7 @@ const Validator = struct {
             .tuple => |kids| {
                 for (kids) |k| if (try self.checkIrrefutable(k, depth + 1)) |m| return m;
             },
-            .list => |l| {
-                for (l.elems) |k| if (try self.checkIrrefutable(k, depth + 1)) |m| return m;
-                if (l.rest) |k| if (try self.checkIrrefutable(k, depth + 1)) |m| return m;
-            },
+            .list => return self.fail("a list pattern is refutable; only match arms may carry one", .{}),
             .struct_ => |st| {
                 for (st.fields) |f| if (try self.checkIrrefutable(f.pat, depth + 1)) |m| return m;
             },
@@ -918,6 +916,52 @@ test "let and if regions carry the documented param counts" {
     const m2 = try validate(&p, if_id, arena.allocator());
     const msg2 = m2 orelse return error.TestUnexpectedResult;
     try t.expect(std.mem.indexOf(u8, msg2, "must not carry binders") != null);
+}
+
+test "a refutable list pattern in a let region is rejected" {
+    var arena = std.heap.ArenaAllocator.init(t.allocator);
+    defer arena.deinit();
+    var p = (try fresh(arena.allocator())).prog;
+
+    // Even the empty `[]` shape is a list pattern and therefore
+    // refutable: `let` may carry only irrefutable patterns. (The rule
+    // rejects the whole `.list` variant, `[..rest]` included.)
+    const init_expr = try p.addExpr(.{ .op = op_const, .ty = try p.intern(ty_int), .payload = .{ .const_value = .{ .int = 0 } } });
+    const init_ops = try p.addOperands(&.{init_expr});
+    const body = try p.addExpr(.{ .op = op_const, .ty = try p.intern(ty_int), .payload = .{ .const_value = .{ .int = 0 } } });
+    const list_elems = try arena.allocator().alloc(hir.PatternId, 0);
+    const list_pat = try p.addPattern(.{ .list = .{ .elems = list_elems, .rest = null } });
+    const reg = try p.addRegion(&.{}, body, list_pat);
+    const let_id = try p.addExpr(.{ .op = op_let, .ty = try p.intern(ty_int), .operands = init_ops, .regions = try p.addRegions(&.{reg}) });
+    const m = try validate(&p, let_id, arena.allocator());
+    const msg = m orelse return error.TestUnexpectedResult;
+    try t.expect(std.mem.indexOf(u8, msg, "list pattern is refutable") != null);
+}
+
+test "an irrefutable tuple pattern in a let region validates" {
+    var arena = std.heap.ArenaAllocator.init(t.allocator);
+    defer arena.deinit();
+    var p = (try fresh(arena.allocator())).prog;
+
+    // Tuple / struct / wildcard / bind shapes remain irrefutable, so a
+    // destructuring `let` over them still validates.
+    const b_a = try p.addBinder(ty_int, .value);
+    const b_b = try p.addBinder(ty_int, .value);
+    const pat_a = try p.addPattern(.{ .bind = b_a });
+    const pat_b = try p.addPattern(.{ .bind = b_b });
+    const tuple_kids = try arena.allocator().alloc(hir.PatternId, 2);
+    tuple_kids[0] = pat_a;
+    tuple_kids[1] = pat_b;
+    const tuple_pat = try p.addPattern(.{ .tuple = tuple_kids });
+    const init_expr = try p.addExpr(.{ .op = op_const, .ty = try p.intern(ty_int), .payload = .{ .const_value = .{ .int = 0 } } });
+    const init_ops = try p.addOperands(&.{init_expr});
+    // The region root is the let body; here it reads one destructured
+    // binder, so the tuple's params are in scope inside the region.
+    const body = try p.addExpr(.{ .op = op_local, .ty = try p.intern(ty_int), .payload = .{ .binder = b_a } });
+    const reg = try p.addRegion(&.{ b_a, b_b }, body, tuple_pat);
+    const let_id = try p.addExpr(.{ .op = op_let, .ty = try p.intern(ty_int), .operands = init_ops, .regions = try p.addRegions(&.{reg}) });
+    const m = try validate(&p, let_id, arena.allocator());
+    try t.expect(m == null);
 }
 
 test "the returned violation message is caller-owned (allocated from the caller's allocator)" {

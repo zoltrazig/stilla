@@ -15,7 +15,8 @@ fn take_t(t: tuple[File, int32]) -> File {
     f
 }
 fn tail(xs: list[int32]) -> list[int32] {
-    let [h, ..rest] = xs;
-    rest
+    match (xs) {
+        [h, ..rest] => rest,
+    }
 }
 fn main() -> void { builtin.print("x"); }
