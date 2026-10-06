@@ -51,23 +51,6 @@
 
 ## 前端与中端
 
-### F2 含 drop hook 的 struct 消费式 `let` 解构未被拒绝
-
-- **优先级**：P0
-- **问题**：Core 规定「定义了自己的 drop hook 的 struct 只能通过借用模式解构，
-  消费式解构是编译期错误」。该检查只实现于 `match`；`let` 的消费式解构
-  （`let S { .. } = move s;`）没有对应检查，直接放行。
-- **证据**：`checkDropHookMatch` 仅被 `match` 调用——定义于
-  `checker_annotate.zig:475-484`，唯一调用点 `:763`；`checkLet`
-  （`:235-288`）无此检查。规范 `Stilla Core Types & Ownership
-  Specification.md:1160`、`Stilla Core Static Semantics.md:104`。现有测试只覆盖
-  `match`：`checker_tests.zig:1638-1647`。
-- **建议工作**：在 `checkLet` 的消费式解构路径复用同一判定（或抽出共享 helper），
-  拒绝 `let` 消费式解构带 hook 的 struct。
-- **验证方式**：`checker_tests.zig` 新增反例（`let File { fd } = move f;` 期望
-  与 match 相同的诊断）；`zig build -fincremental test -Dtest-filter=checker`。
-- **关联**：无
-
 ### F3 块作用域 `using path;` 缺 `as` 被静默忽略
 
 - **优先级**：P1

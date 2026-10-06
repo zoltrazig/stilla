@@ -1647,6 +1647,32 @@ test "checker rejects a consuming destructure of a drop-hook struct" {
     , "cannot consumingly destructure a struct that defines a drop hook");
 }
 
+test "checker rejects a consuming let destructure of a drop-hook struct" {
+    // Core §14.6 *Whole-owner*: a `let` pattern has no borrowing form, so a
+    // `let` struct destructure of a struct that defines its own drop hook is
+    // a compile-time error, just like the consuming `match` form.
+    try expectDiag(
+        \\struct File { fd: int32; drop(file) {} }
+        \\fn main() -> void {
+        \\    let s = File{ fd: 1 };
+        \\    let File { fd } = move s;
+        \\}
+    , "cannot consumingly destructure a struct that defines a drop hook");
+}
+
+test "checker accepts a consuming let destructure of a hookless struct" {
+    var t = try checkText(
+        \\struct Pair { first: int32; second: int32; }
+        \\fn f() -> int32 {
+        \\    let pair = Pair { first: 1, second: 2 };
+        \\    let Pair { first, second } = move pair;
+        \\    first + second
+        \\}
+    );
+    defer t.deinit();
+    try testing.expectEqual(@as(usize, 0), t.ann.host_bindings.count());
+}
+
 // ---------------------------------------------------------------------------
 // 3e — drop-hook destruction-view restrictions
 // ---------------------------------------------------------------------------

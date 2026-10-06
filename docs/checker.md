@@ -193,8 +193,10 @@ scrutinee (Core).
 - returning/storing a borrowed value as owned;
 - partial movement from fields or indexed elements (whole-owner rule,
   Core);
-- consuming destructuring of a struct that defines its own `drop` hook
-  (Core);
+- consuming destructuring of a struct that defines its own `drop` hook, in
+  `match` and `let` alike; `match` may instead borrow the payload, but a
+  `let` pattern has no borrowing form, so every `let` struct destructure of
+  such a struct is rejected (Core);
 - double `move` of the same owner.
 
 ### Conditional release
@@ -457,7 +459,7 @@ in Stilla v1.3.
 | 3. Conditional release: maybe-unique, auto-drop on edges | 3 constraints (state merge, Types & Ownership) | the conditional-release section: `marks a binding released on only one if branch as maybe`; `accepts releasing a binding on every if branch and marks it released`; `rejects use of a maybe-unique binding`; `rejects use of a definitely-released binding` | join-time edge drops live in CFG lowering (`cfg_lower_*`); the fused oracle asserts drop-once-both-ways |
 | 4. Module scope & qualified paths | 2 name binding; 3 constraints (module-value flow) | `resolves module-qualified value members of an imported module`; **`rejects binding a module value by a local let`**; **`rejects widening a module value into an any`**; **`rejects storing a module value into an any field`** | `import(...)` placement splits by stage: binding positions die in the checker (Core), the bare statement form reaches the HIR-build backstop (`frontend_spec_tests.zig`, `frontend rejects import outside a module constant initializer`); a module type cannot be *named* as a parameter type, so "module value as argument" is only reachable through the `any` coercion. Struct-field and union-payload smuggling is closed by construction typing (Core); an inferred tuple/list element remains open |
 | 5. No implicit capture | 2 name binding | `rejects a lambda capturing an enclosing local`; `accepts a lambda referencing only its own scope` (own params + a module constant) | nested named functions are not in the grammar — lambdas are the only function expressions |
-| 6. Match: exhaustiveness, consuming vs borrowing patterns, drop hooks | 4 control flow; 3 constraints | `rejects a non-exhaustive union match`; `accepts an exhaustive union match`; `accepts a type-test match over any`; `rejects a consuming destructure of a drop-hook struct`; `accepts moving the payload of a consuming match` | arm bindings are arm-scoped, so borrowed-payload movement is tested inside the arm where the binding lives |
+| 6. Match: exhaustiveness, consuming vs borrowing patterns, drop hooks | 4 control flow; 3 constraints | `rejects a non-exhaustive union match`; `accepts an exhaustive union match`; `accepts a type-test match over any`; `rejects a consuming destructure of a drop-hook struct`; `accepts moving the payload of a consuming match`; `rejects a consuming let destructure of a drop-hook struct`; `accepts a consuming let destructure of a hookless struct` | arm bindings are arm-scoped, so borrowed-payload movement is tested inside the arm where the binding lives |
 | 7. Type boundaries: `any`/`hostdata`/opaque | 1 type system | `widens a Copy argument implicitly to any`; `requires an explicit move before packing an unique value into any`; **`rejects recovering an any without as or match`**; **`accepts an any recovered by as`**; opaque-type section (`rejects raw construction of an opaque host type`, `accepts borrowing an opaque host value`, …) | `hostdata` is reachable in source only through host bindings: the boundary rows (no coercion to `any`, no casts, opaque payload) are covered at the integrated level in `frontend_lowering_tests.zig` (`frontend rejects every hostdata/any coercion and cast`), not duplicated in the checker suite |
 
 ## Downstream consumers

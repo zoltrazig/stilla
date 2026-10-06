@@ -274,6 +274,9 @@ fn checkLet(frame: *Frame, l: *const ast.LetStmt) CheckError!void {
         else => true,
     };
     if (binds) try requireMoveIfOwned(frame, l.init, "binding");
+    if (binds) {
+        if (t) |tt| try checkDropHookDestructure(frame, &l.pattern, tt);
+    }
     // A module value may exist only in a module-level `const` binding
     // (Core §2.3): binding one by a local `let` would store it outside
     // module storage, so a binding-producing let of a module type is
@@ -472,15 +475,22 @@ fn consumesScrutinee(frame: *Frame, e: *const ast.Expr, t: meta.Type) bool {
 
 /// Core §14.6 *Whole-owner*: consumingly destructuring a struct that
 /// defines its own `drop` hook is a compile-time error; borrowing
+/// destructuring is fine. `pattern` is the destructuring pattern and
+/// `destruct_t` the type being destructured.
+fn checkDropHookDestructure(frame: *Frame, pattern: *const ast.Pattern, destruct_t: meta.Type) CheckError!void {
+    if (destruct_t != .named) return;
+    if (pattern.* != .path or pattern.path.tail != .struct_) return;
+    const sd = moduleinfo.structDecl(frame.resolve, frame.info, frame.resolve.typeNameOf(destruct_t.named.id) orelse return) orelse return;
+    if (sd.drop == null) return;
+    return frame.ck.fail(pattern.span(), "cannot consumingly destructure a struct that defines a drop hook (Core §14.6)", .{});
+}
+
+/// Core §14.6 *Whole-owner*: consumingly destructuring a struct that
+/// defines its own `drop` hook is a compile-time error; borrowing
 /// destructuring is fine. Only reached for consuming scrutinees.
 fn checkDropHookMatch(frame: *Frame, m: *const ast.MatchExpr, scrut_t: meta.Type) CheckError!void {
-    if (scrut_t != .named) return;
-    const sd = moduleinfo.structDecl(frame.resolve, frame.info, frame.resolve.typeNameOf(scrut_t.named.id) orelse return) orelse return;
-    if (sd.drop == null) return;
     for (m.arms) |*arm| {
-        if (arm.pattern == .path and arm.pattern.path.tail == .struct_) {
-            return frame.ck.fail(arm.pattern.span(), "cannot consumingly destructure a struct that defines a drop hook (Core §14.6)", .{});
-        }
+        try checkDropHookDestructure(frame, &arm.pattern, scrut_t);
     }
 }
 
