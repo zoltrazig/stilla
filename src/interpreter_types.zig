@@ -228,8 +228,6 @@ pub const HostScratch = struct {
 pub const DestroyWork = union(enum) {
     /// Destroy `addr` as `type_id` (children first, then the shell).
     value: struct { type_id: u32, addr: Value },
-    /// Free one object whose children are already handled.
-    free_obj: *ObjectHeader,
     /// Resume a struct's destruction after its user drop hook returns.
     resume_struct: struct { type_id: u32, h: *ObjectHeader },
 };

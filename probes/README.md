@@ -38,6 +38,14 @@ The detailed probes cover the source-reachable operation/type matrix:
   tail call (inlining, the tail-call pass cycle guard)
 - `nested_aggregates.st`: nested struct / tuple / union values destroyed as a whole
   (recursive drop-lowering expansion)
+- `recursive_drop.st`: a self-recursive `union Tree` whose only cycle passes
+  through `box`, so the structural drop expansion stops at the cycle and leaves
+  a residual runtime `drop` for the boxed component; `root` nests three levels
+  (a `Node` over a boxed `Node` over boxed `Leaf`s), so the runtime walker must
+  release each owned counted child one level at a time — a printing `Leaf` drop
+  hook makes the destroyed leaves observable
+  ([cfg-lowering.md](cfg-lowering.md) `Destruction placement`,
+  [optimizer.md](optimizer.md) `Drop lowering (post-optimization)`)
 - `select.st`: scalar if-expressions of every if-convertible type plus a unique
   aggregate that must stay branchy (if-conversion's scalar-Copy-only rule)
 - `seg.st`: every source-reachable SEG rewrite family (known-variant `match`

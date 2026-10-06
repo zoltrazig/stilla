@@ -466,10 +466,28 @@ pub const VmCtx = struct {
     // and destruction machinery that also needs the image.
     // -----------------------------------------------------------------
 
+    /// Queue one *owned* child of an aggregate for destruction. An
+    /// aggregate holds exactly one reference to each counted child, so a
+    /// counted shell is **released** (decrement; destroy at zero) rather
+    /// than dropped whole: a Copy child may have other owners, and the
+    /// raw `.value` path would skip it entirely while its count stays
+    /// above zero (leaking the shell and its children). A unique shell is
+    /// queued directly, as before.
+    fn enqueueOwnedChild(self: *VmCtx, type_id: u32, addr: Value) !void {
+        if (addr == 0) return;
+        if (self.runtime.heap.registry.get(addr)) |h| {
+            if (h.isCounted()) return vm_dispatch.releaseCounted(self, addr);
+        }
+        try self.runtime.destroy_work.append(self.allocator, .{ .value = .{ .type_id = type_id, .addr = addr } });
+    }
+
     /// Expand one doomed object into destructor work items (children in
-    /// reverse destruction order, then the shell). A struct's user drop
-    /// hook runs first, while all fields remain valid: destruction of
-    /// that object pauses until the hook's frame returns.
+    /// declaration order, then the shell). The work list is LIFO, so
+    /// enqueuing in declaration order makes the drain destroy children
+    /// in the required reverse declaration order (Runtime §6.3). A
+    /// struct's user drop hook runs first, while all fields remain
+    /// valid: destruction of that object pauses until the hook's frame
+    /// returns.
     fn expandDestruction(self: *VmCtx, type_id: u32, h: *ObjectHeader) !void {
         const image = self.metaImage();
         switch (h.kind) {
@@ -479,33 +497,25 @@ pub const VmCtx = struct {
                 const elem_ty = row.a;
                 const head = h.cell(0);
                 const nxt = h.cell(1);
-                var items: [2]DestroyWork = undefined;
-                var n: usize = 0;
-                if (nxt != 0) {
-                    items[n] = .{ .value = .{ .type_id = type_id, .addr = nxt } };
-                    n += 1;
-                }
-                if (head != 0) {
-                    items[n] = .{ .value = .{ .type_id = elem_ty, .addr = head } };
-                    n += 1;
-                }
-                for (items[0..n]) |it| try self.runtime.destroy_work.append(self.allocator, it);
+                // Declaration order is index order; the LIFO drain then
+                // yields reverse index order (Runtime §6.3).
+                if (head != 0) try self.enqueueOwnedChild(elem_ty, head);
+                if (nxt != 0) try self.enqueueOwnedChild(type_id, nxt);
             },
             .box_ => {
                 const elem_ty = image.types[type_id].a;
                 const v = h.cell(0);
-                if (v != 0) try self.runtime.destroy_work.append(self.allocator, .{ .value = .{ .type_id = elem_ty, .addr = v } });
+                if (v != 0) try self.enqueueOwnedChild(elem_ty, v);
             },
             .tuple_ => {
                 const row = image.types[type_id];
                 // The tuple row's range is `{ a = start, b = len }`
                 // into `types` — the element count is `b`, not
                 // `b - a` (the range start is a table offset).
-                var k = row.b;
-                while (k > 0) {
-                    k -= 1;
+                var k: u32 = 0;
+                while (k < row.b) : (k += 1) {
                     const v = h.cell(k);
-                    if (v != 0) try self.runtime.destroy_work.append(self.allocator, .{ .value = .{ .type_id = row.a + k, .addr = v } });
+                    if (v != 0) try self.enqueueOwnedChild(row.a + k, v);
                 }
             },
             .struct_ => {
@@ -520,13 +530,12 @@ pub const VmCtx = struct {
                     try self.startHookCall(decl.b, @intFromPtr(h));
                     return;
                 }
-                var k = decl.d;
-                while (k > 0) {
-                    k -= 1;
+                var k: u32 = 0;
+                while (k < decl.d) : (k += 1) {
                     const ft = image.type_decl_fields[decl.c + k];
                     if (ft == llir.no_index) continue;
                     const v = h.cell(k);
-                    if (v != 0) try self.runtime.destroy_work.append(self.allocator, .{ .value = .{ .type_id = ft, .addr = v } });
+                    if (v != 0) try self.enqueueOwnedChild(ft, v);
                 }
             },
             .union_ => {
@@ -535,13 +544,12 @@ pub const VmCtx = struct {
                 const tag: u32 = @truncate(h.cell(0));
                 if (tag < decl.c) {
                     const v = image.union_variants[decl.b + tag];
-                    var k = v.payloads_len;
-                    while (k > 0) {
-                        k -= 1;
+                    var k: u32 = 0;
+                    while (k < v.payloads_len) : (k += 1) {
                         const pt = image.union_payloads[v.payloads_start + k];
                         const pv = h.cell(1 + k);
                         if (pv != 0 and pt != llir.no_index) {
-                            try self.runtime.destroy_work.append(self.allocator, .{ .value = .{ .type_id = pt, .addr = pv } });
+                            try self.enqueueOwnedChild(pt, pv);
                         }
                     }
                 }
@@ -550,7 +558,7 @@ pub const VmCtx = struct {
                 const pt: u32 = @truncate(h.cell(0));
                 const pv = h.cell(1);
                 if (pv != 0 and pt != llir.no_index) {
-                    try self.runtime.destroy_work.append(self.allocator, .{ .value = .{ .type_id = pt, .addr = pv } });
+                    try self.enqueueOwnedChild(pt, pv);
                 }
             },
             .opaque_ => {
@@ -633,7 +641,6 @@ pub const VmCtx = struct {
         while (!self.hookActive()) {
             const item = self.runtime.destroy_work.pop() orelse return;
             switch (item) {
-                .free_obj => |h| self.runtime.heap.freeShell(h),
                 .resume_struct => |w| {
                     // The hook finished: expand fields + shell now.
                     if (self.runtime.heap.registry.get(@intFromPtr(w.h)) == null) continue;
@@ -649,14 +656,17 @@ pub const VmCtx = struct {
                     // Counted shells only die at rc 0.
                     if (h.isCounted() and h.track.CopyValue > 0) continue;
                     try self.expandDestruction(w.type_id, h);
-                    if (self.hookActive()) {
-                        // Shell frees when the resumed expansion finishes.
-                        try self.runtime.destroy_work.append(self.allocator, .{ .free_obj = h });
-                    } else {
+                    if (!self.hookActive()) {
                         self.runtime.heap.freeShell(h);
                         try self.drainDestroyWork();
                         return;
                     }
+                    // A user drop hook is now running. `expandDestruction`
+                    // already enqueued the `.resume_struct` item, and that
+                    // arm re-expands the fields and frees the shell once
+                    // the hook returns. Freeing the shell here would sit
+                    // on top of it (LIFO) and free the shell first, so the
+                    // resume would find it gone and skip the fields.
                 },
             }
         }

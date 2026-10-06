@@ -7,6 +7,7 @@
 //! `interpreter`, which owns the `VmCtx` execution context.
 
 const std = @import("std");
+const meta = @import("meta.zig");
 const llir = @import("llir.zig");
 const vm_instr = @import("vm_instr.zig");
 const vm_types = @import("vm_types.zig");
@@ -1553,8 +1554,63 @@ pub fn retainCounted(self: *VmCtx, addr: Value) HeapErr!void {
     h.track.CopyValue += 1;
 }
 
+/// Whether `ty` is statically *Unique* (air.md §9.1): a Unique value is
+/// consumed, never copied, so building it into an aggregate transfers its
+/// existing reference instead of establishing a new one. Named
+/// structs/unions carry their resolved ownership in `TypeDeclDesc.a`
+/// (`OwnershipId.unique`); `list`/`box` inherit their element's and
+/// tuples join their elements. Unknown layouts (text form, an unresolved
+/// generic template) fall back to Copy, preserving the retain-based
+/// share.
+fn typeIsUnique(self: *VmCtx, ty: u32) bool {
+    const types = self.metaImage().types;
+    if (ty >= types.len) return false;
+    const td = types[ty];
+    return switch (td.kind) {
+        .primitive => td.a == @intFromEnum(llir.PrimitiveId.any) or td.a == @intFromEnum(llir.PrimitiveId.hostdata),
+        .list, .box => typeIsUnique(self, td.a),
+        .tuple => blk: {
+            var k: u32 = 0;
+            while (k < td.b) : (k += 1) {
+                if (typeIsUnique(self, td.a + k)) break :blk true;
+            }
+            break :blk false;
+        },
+        .named => blk: {
+            const decls = self.metaImage().type_decls;
+            if (td.a >= decls.len) break :blk false;
+            const decl = decls[td.a];
+            break :blk switch (decl.kind) {
+                // A real host-backed opaque is unique by declaration
+                // (Core §11.8). The `.unknown` placeholder (text form, or
+                // an unresolved layout) serializes as an opaque with no
+                // host type (`a == no_index`); it has no destruction
+                // contract, so it falls back to Copy like any unknown
+                // layout.
+                .opaque_ => decl.a != llir.no_index,
+                .struct_, .union_ => decl.a == @intFromEnum(meta.Ownership.unique),
+            };
+        },
+        // function / module / cleanup values are Copy.
+        else => false,
+    };
+}
+
+/// The aggregate owns exactly one reference to each counted child it
+/// holds. A *Copy* counted child is shared: constructing the aggregate
+/// establishes a new owner, so retain it. A *Unique* counted child is
+/// consumed by the construction — its existing reference transfers to the
+/// aggregate — so no retain is added (the aggregate walker releases it
+/// exactly once at destruction). Non-counted children are unaffected
+/// either way (`retainCell` ignores them).
+fn retainConstructedChild(self: *VmCtx, ty: u32, v: Value) HeapErr!void {
+    if (typeIsUnique(self, ty)) return;
+    try retainCell(self, v);
+}
+
 /// `construct`: allocate the aggregate described by the descriptor
-/// and retain each counted component written into it.
+/// and retain each *Copy* counted component written into it; a Unique
+/// counted component's reference is transferred, not retained.
 pub fn opConstruct(self: *VmCtx, d: VmInstr) HeapErr!void {
     const image = self.curImage();
     const dd = image.construct_descs[@truncate(d.operand)];
@@ -1577,7 +1633,7 @@ pub fn opConstruct(self: *VmCtx, d: VmInstr) HeapErr!void {
                 const h = try self.runtime.heap.allocObjectIn(.list_cons, self.curModIdx(), ty, 2, 0);
                 const ev = read(self, image.call_args[dd.args_start + k]);
                 h.setCell(0, ev);
-                try retainCell(self, ev);
+                try retainConstructedChild(self, row.a, ev); // element type
                 h.setCell(1, nxt);
                 h.len = suffix_len + 1;
                 suffix_len += 1;
@@ -1589,7 +1645,7 @@ pub fn opConstruct(self: *VmCtx, d: VmInstr) HeapErr!void {
             const h = try self.runtime.heap.allocObjectIn(.box_, self.curModIdx(), ty, 0, 1);
             const v = read(self, image.call_args[dd.args_start]);
             h.setCell(0, v);
-            try retainCell(self, v); // boxed element type
+            try retainConstructedChild(self, row.a, v); // boxed element type
             out = @intFromPtr(h);
         },
         .tuple => {
@@ -1601,7 +1657,7 @@ pub fn opConstruct(self: *VmCtx, d: VmInstr) HeapErr!void {
             for (0..n) |k| {
                 const v = read(self, image.call_args[dd.args_start + @as(u32, @intCast(k))]);
                 h.setCell(k, v);
-                try retainCell(self, v); // tuple element type
+                try retainConstructedChild(self, row.a + @as(u32, @intCast(k)), v); // tuple element type
             }
             out = @intFromPtr(h);
         },
@@ -1614,7 +1670,7 @@ pub fn opConstruct(self: *VmCtx, d: VmInstr) HeapErr!void {
                         const v = read(self, image.call_args[dd.args_start + @as(u32, @intCast(k))]);
                         h.setCell(k, v);
                         const ft = image.type_decl_fields[decl.c + k];
-                        if (ft != llir.no_index) try retainCell(self, v); // field type
+                        if (ft != llir.no_index) try retainConstructedChild(self, ft, v); // field type
                     }
                     out = @intFromPtr(h);
                 },
@@ -1626,7 +1682,7 @@ pub fn opConstruct(self: *VmCtx, d: VmInstr) HeapErr!void {
                         const v = read(self, image.call_args[dd.args_start + @as(u32, @intCast(k))]);
                         h.setCell(1 + k, v);
                         const pt = image.union_payloads[variant.payloads_start + k];
-                        if (pt != llir.no_index) try retainCell(self, v); // payload type
+                        if (pt != llir.no_index) try retainConstructedChild(self, pt, v); // payload type
                     }
                     out = @intFromPtr(h);
                 },

@@ -365,11 +365,16 @@ phis).
 `src/passes/cfg_lower_drop.zig` — after the optimizer sequence, expand every
 `drop` the CFG can express into explicit operations at the drop's
 program point: a struct drop becomes its hook call (when declared) +
-`unpack_struct` + reverse-declaration-order field drops (recursively); a
+`unpack_struct` + reverse-declaration-order field drops; a
 tuple drop becomes `unpack_tuple` + reverse element drops; a `box[T]`
 drop becomes `builtin#unbox` + a drop of the contained value; a union
 drop becomes `read_tag` + a `switch` destroying the active variant's
-payload (payload-less variants destroy nothing). Only the drops that
+payload (payload-less variants destroy nothing). The expansion is
+recursive through box, tuple, and named struct/union payloads, but it
+stops at a type cycle — a named type already being expanded — where it
+emits a residual `drop` instead of recursing; the runtime expands that
+residual `drop` iteratively (Runtime), destroying recursive values
+without unbounded native recursion. Only the drops that
 must dispatch dynamically stay single instructions: opaque host types
 (`host_drop`), `hostdata`, `list[T]`, and `any`. The expansion needs the
 module graph (the AIR type environment is name-only) and runs in

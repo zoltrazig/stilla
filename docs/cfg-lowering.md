@@ -204,9 +204,15 @@ reverse-declaration-order field destruction (Core, Runtime).
 The lowering emits the destruction as one `drop` instruction; the
 post-optimization **drop-lowering pass** (`src/passes/cfg_lower_drop.zig`)
 expands it in the CFG — a direct `call` of the hidden hook function,
-then `unpack_struct` and per-field drops in reverse declaration order
-(recursively). The hook runs while all fields remain valid: the call is
+then `unpack_struct` and per-field drops in reverse declaration order.
+The hook runs while all fields remain valid: the call is
 emitted before the unpack (air.md).
+
+The expansion is recursive through `.box`, tuple, and named struct/union
+payloads, but it stops at a type cycle — a named type already being
+expanded — where it emits a residual `drop` instead of recursing. The
+runtime expands that residual `drop` iteratively (Runtime), destroying
+recursive values without unbounded native recursion.
 
 ### hostdata payloads
 

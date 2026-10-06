@@ -300,6 +300,235 @@ test "mid-frame drop hook runs once through the hook continuation" {
     }
 }
 
+test "recursive aggregate drop releases every counted child exactly once" {
+    // A `Node` whose boxed child is itself a `Node`: the structural drop
+    // of the recursive `Tree` is a residual runtime `drop`, so the
+    // destruction walker must release each *owned* counted `box[Tree]`
+    // child (decrementing to zero and expanding it) rather than enqueuing
+    // a raw destroy that skips a child whose count is still above zero.
+    // The printing `Leaf` hook counts each destruction, so a skipped child
+    // shows up as a missing leaf and a registered object as a leak before
+    // context disposal. Run optimized (static union expansion) and
+    // unoptimized (the walker sees the whole tree).
+    const Count = struct {
+        one: usize = 0,
+        two: usize = 0,
+        three: usize = 0,
+        unexpected: usize = 0,
+    };
+    const Adapter = struct {
+        fn invoke(vm: *interpreter.VmCtx, userdata: ?*const anyopaque, module_symbol: []const u8, member: []const u8, sig: interpreter.HostSignature, args: []const vm_types.Value) interpreter.HostResult {
+            if (std.mem.eql(u8, member, "print")) {
+                const c: *Count = @ptrCast(@alignCast(@constCast(userdata.?)));
+                const bytes = vm.runtime.heap.strSliceOf(args[0]) orelse return .{ .panic = "print: not a str" };
+                if (std.mem.eql(u8, bytes, "1")) {
+                    c.one += 1;
+                } else if (std.mem.eql(u8, bytes, "2")) {
+                    c.two += 1;
+                } else if (std.mem.eql(u8, bytes, "3")) {
+                    c.three += 1;
+                } else c.unexpected += 1;
+                return .{ .value = 0 };
+            }
+            return interpreter.defaultHostCall(vm, userdata, module_symbol, member, sig, args);
+        }
+    };
+    for ([_]bool{ false, true }) |opt| {
+        var state = Count{};
+        var l = try load(
+            \\const builtin = import("builtin");
+            \\struct Leaf { value: int32; drop(leaf) { builtin.print(builtin.str(leaf.value)); } }
+            \\union Tree { Leaf(Leaf), Node(box[Tree], box[Tree]) }
+            \\fn leaf(v: int32) -> Tree { Tree::Leaf(Leaf { value: v }) }
+            \\fn main() -> void {
+            \\    let l1 = leaf(1);
+            \\    let l2 = leaf(2);
+            \\    let inner = Tree::Node(builtin.box::[Tree](move l1), builtin.box::[Tree](move l2));
+            \\    let l3 = leaf(3);
+            \\    let root = Tree::Node(builtin.box::[Tree](move inner), builtin.box::[Tree](move l3));
+            \\    drop root;
+            \\}
+        , opt);
+        defer l.deinit();
+        var vm = interpreter.VmCtx.init(testing.allocator);
+        defer vm.deinit();
+        vm.host = .{ .userdata = &state, .invoke = Adapter.invoke };
+        try vm.setupRootArtifact(l.image, try l.fid("main"));
+        while (!vm.runtime.terminated) {
+            if (try vm_dispatch.step(&vm)) |t| {
+                switch (t) {
+                    .normal => {},
+                    .panic => |m| {
+                        std.log.err("recursive drop panic: {s}", .{m});
+                        testing.allocator.free(m);
+                        return error.TestUnexpectedResult;
+                    },
+                }
+                break;
+            }
+            try vm.drainDestroyWork();
+        }
+        try vm.drainDestroyWork();
+        // Every owned child was released exactly once before context
+        // disposal: the trees are gone rather than raw-freed.
+        try testing.expectEqual(@as(usize, 0), vm.runtime.heap.registry.count());
+        try testing.expectEqual(@as(usize, 1), state.one);
+        try testing.expectEqual(@as(usize, 1), state.two);
+        try testing.expectEqual(@as(usize, 1), state.three);
+        try testing.expectEqual(@as(usize, 0), state.unexpected);
+    }
+}
+
+/// A printing drop hook records its bytes in source order through this
+/// adapter; the destruction tests assert the exact order and that no
+/// object survives the run.
+const PrintRecorder = struct {
+    buf: [32]u8 = undefined,
+    len: usize = 0,
+
+    fn push(self: *PrintRecorder, s: []const u8) void {
+        @memcpy(self.buf[self.len..][0..s.len], s);
+        self.len += s.len;
+    }
+
+    fn slice(self: *const PrintRecorder) []const u8 {
+        return self.buf[0..self.len];
+    }
+
+    fn invoke(vm: *interpreter.VmCtx, userdata: ?*const anyopaque, module_symbol: []const u8, member: []const u8, sig: interpreter.HostSignature, args: []const vm_types.Value) interpreter.HostResult {
+        if (std.mem.eql(u8, member, "print")) {
+            const c: *PrintRecorder = @ptrCast(@alignCast(@constCast(userdata.?)));
+            const bytes = vm.runtime.heap.strSliceOf(args[0]) orelse return .{ .panic = "print: not a str" };
+            if (c.len + bytes.len > c.buf.len) return .{ .panic = "print: recorder overflow" };
+            c.push(bytes);
+            return .{ .value = 0 };
+        }
+        return interpreter.defaultHostCall(vm, userdata, module_symbol, member, sig, args);
+    }
+};
+
+/// Run `src` in `opt` mode, recording every drop-hook print into `rec`,
+/// and return the live-object registry count captured after the run
+/// drains but before `VmCtx.deinit`. Mirrors `runLoop`'s normal-return
+/// path: complete module teardown and drive any destruction work a
+/// post-return drop hook armed (a root `release_ret` fuses a counted
+/// drop into the return, so its hooks run after the root frame ends).
+fn runHookSrc(src: []const u8, opt: bool, rec: *PrintRecorder) !usize {
+    var l = try load(src, opt);
+    defer l.deinit();
+    var vm = interpreter.VmCtx.init(testing.allocator);
+    defer vm.deinit();
+    vm.host = .{ .userdata = rec, .invoke = PrintRecorder.invoke };
+    try vm.setupRootArtifact(l.image, try l.fid("main"));
+    while (!vm.runtime.terminated) {
+        if (try vm_dispatch.step(&vm)) |t| {
+            switch (t) {
+                .normal => {},
+                .panic => |m| {
+                    std.log.err("hook-run panic: {s}", .{m});
+                    testing.allocator.free(m);
+                    return error.TestUnexpectedResult;
+                },
+            }
+            vm.runtime.terminated = false;
+            try vm.teardownModules();
+            while (vm.hookActive()) {
+                if (try vm_dispatch.step(&vm)) |_| break;
+                try vm.drainDestroyWork();
+            }
+            vm.runtime.terminated = true;
+            break;
+        }
+        try vm.drainDestroyWork();
+    }
+    try vm.drainDestroyWork();
+    return vm.runtime.heap.registry.count();
+}
+
+test "walker destroys a hook-bearing struct's fields after its hook, exactly once" {
+    // `Outer` owns a hook-bearing `Inner` field. Destruction runs the
+    // `Outer` hook first (fields still valid), then the walker must
+    // expand and destroy the field so the `Inner` hook runs too. The
+    // work list is LIFO: a shell-free item enqueued on top of the
+    // `resume_struct` item would free the shell first, so the resume
+    // would find it gone and skip the fields (leaking them and their
+    // hooks). Run optimized (static expansion) and unoptimized (the
+    // walker expands the fields) and require the same order and no live
+    // objects before context disposal.
+    const src =
+        \\const builtin = import("builtin");
+        \\struct Inner { v: int32; drop(i) { builtin.print(builtin.str(i.v)); } }
+        \\struct Outer { inner: Inner; v: int32; drop(o) { builtin.print(builtin.str(o.v)); } }
+        \\fn main() -> void { let o = Outer { inner: Inner { v: 1 }, v: 9 }; drop o; }
+    ;
+    for ([_]bool{ false, true }) |opt| {
+        var rec = PrintRecorder{};
+        const live = try runHookSrc(src, opt, &rec);
+        try testing.expectEqualStrings("91", rec.slice());
+        try testing.expectEqual(@as(usize, 0), live);
+    }
+}
+
+test "structural drop destroys fields in reverse declaration order in both modes" {
+    // Two hook-bearing fields named `a1` then `a2`: the Runtime
+    // specification requires reverse declaration order, so the second
+    // field's hook runs first. The compiler's expansion emits the
+    // per-field drops in reverse order; the walker's LIFO work list must
+    // yield the same order (enqueue declaration-first).
+    const src =
+        \\const builtin = import("builtin");
+        \\struct A { v: int32; drop(a) { builtin.print(builtin.str(a.v)); } }
+        \\struct B { a1: A; a2: A; drop(b) { } }
+        \\fn main() -> void { let b = B { a1: A { v: 1 }, a2: A { v: 2 } }; drop b; }
+    ;
+    for ([_]bool{ false, true }) |opt| {
+        var rec = PrintRecorder{};
+        const live = try runHookSrc(src, opt, &rec);
+        try testing.expectEqualStrings("21", rec.slice());
+        try testing.expectEqual(@as(usize, 0), live);
+    }
+}
+
+test "boxed hook values in a list, tuple, and struct destroy exactly once with no leak" {
+    // A `box[Leaf]` is a counted runtime container; whether the box is a
+    // list element, a tuple element, or a struct field, the walker must
+    // release the box exactly once and run the boxed `Leaf` hook exactly
+    // once. The count check catches a double release or a leaked shell.
+    const list_src =
+        \\const builtin = import("builtin");
+        \\struct Leaf { value: int32; drop(l) { builtin.print(builtin.str(l.value)); } }
+        \\fn main() -> void {
+        \\    let xs: list[box[Leaf]] = [builtin.box::[Leaf](Leaf { value: 1 }), builtin.box::[Leaf](Leaf { value: 2 })];
+        \\    drop xs;
+        \\}
+    ;
+    const holder_src =
+        \\const builtin = import("builtin");
+        \\struct Leaf { value: int32; drop(l) { builtin.print(builtin.str(l.value)); } }
+        \\struct Holder { b: box[Leaf]; }
+        \\fn main() -> void { let h = Holder { b: builtin.box::[Leaf](Leaf { value: 7 }) }; drop h; }
+    ;
+    const tuple_src =
+        \\const builtin = import("builtin");
+        \\struct Leaf { value: int32; drop(l) { builtin.print(builtin.str(l.value)); } }
+        \\fn main() -> void { let t = (builtin.box::[Leaf](Leaf { value: 8 }), builtin.box::[Leaf](Leaf { value: 9 })); drop t; }
+    ;
+    const Case = struct { src: []const u8, expected: []const u8 };
+    const cases = [_]Case{
+        .{ .src = list_src, .expected = "21" },
+        .{ .src = holder_src, .expected = "7" },
+        .{ .src = tuple_src, .expected = "98" },
+    };
+    for (cases) |case| {
+        for ([_]bool{ false, true }) |opt| {
+            var rec = PrintRecorder{};
+            const live = try runHookSrc(case.src, opt, &rec);
+            try testing.expectEqualStrings(case.expected, rec.slice());
+            try testing.expectEqual(@as(usize, 0), live);
+        }
+    }
+}
+
 test "release_ret fuses release+ret: the cleanup source dies with the frame" {
     // `release x; ret result` fuses to `release_ret result, x` (the
     // block-final pair, llir_fuse_lifecycle, Instruction Set §8:

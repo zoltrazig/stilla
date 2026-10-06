@@ -22,8 +22,8 @@
 //!   hidden drop-hook function (when the declaration has a hook — the
 //!   hook runs while all fields are valid, Runtime §6.2), an
 //!   `unpack_struct` consuming the value, and the per-field drops in
-//!   reverse declaration order — recursively expanded; *Copy* fields
-//!   destroy nothing and get no drop;
+//!   reverse declaration order — expanded component by component
+//!   (cycle-stop below); *Copy* fields destroy nothing and get no drop;
 //! - a tuple drop becomes `unpack_tuple` plus reverse-element drops;
 //! - a `box[T]` drop becomes `builtin#unbox` plus a drop of the contained
 //!   value (Runtime §6.3 "destroy the contained value");
@@ -32,6 +32,17 @@
 //!   order (Runtime §6.3 "only the active union variant is destroyed").
 //!   A payload-less variant destroys nothing and is a bare `j` to the
 //!   join — matching the existing consuming-match lowering.
+//!
+//! A recursive named type has no finite structural expansion (a `Tree`
+//! whose payload boxes another `Tree`, for example), so the expansion
+//! tracks the named types currently being expanded. Re-entering one emits
+//! a residual `drop` for that component instead of recursing — the same
+//! fallback the opaque and unresolved cases use. That is correct because
+//! the runtime already destroys a residual value iteratively through its
+//! type metadata (Runtime §6.3); only the cycle edge stays dynamic, and
+//! the frontend's re-validation still accepts the residual `drop`. The
+//! in-progress marker is removed once an expansion returns, so non-cyclic
+//! sibling occurrences of the same type still expand.
 //!
 //! The pass still resolves through the phase-1 module graph (the AIR's
 //! `TypeDecl` environment carries the declared field/variant types, but
@@ -93,6 +104,25 @@ const Ctx = struct {
     work: std.ArrayList(*cfg.BasicBlock),
     /// Block-name counter for minting unique `drop_*` labels.
     name_n: u32 = 0,
+    /// Named types currently being expanded, keyed by concrete
+    /// instantiation (declaration id + resolved type arguments, per
+    /// `meta.Type.eql`). Re-entering a member emits a residual `drop`
+    /// instead of recursing (see the pass header).
+    expanding: std.HashMapUnmanaged(meta.Type, void, TypeCtx, std.hash_map.default_max_load_percentage) = .empty,
+};
+
+/// Structural hash/equality for `meta.Type` (hir.md §3.8): equal types
+/// hash equal, so the in-progress expansion set keys on concrete named
+/// instantiations rather than the declaration alone.
+const TypeCtx = struct {
+    pub fn hash(_: TypeCtx, k: meta.Type) u64 {
+        var h = std.hash.Wyhash.init(0);
+        meta.hashType(&h, k);
+        return h.final();
+    }
+    pub fn eql(_: TypeCtx, a: meta.Type, b: meta.Type) bool {
+        return meta.Type.eql(a, b);
+    }
 };
 
 /// One block under construction: the block, its instruction list, and
@@ -228,6 +258,7 @@ fn lowerFunc(resolve: moduleinfo.Resolve, program: *cfg.IrProgram, graph: *modul
     defer c.names.deinit(allocator);
     defer c.blocks.deinit(allocator);
     defer c.work.deinit(allocator);
+    defer c.expanding.deinit(allocator);
     for (f.blocks) |b| {
         try c.blocks.append(allocator, b);
         try c.work.append(allocator, b);
@@ -390,8 +421,27 @@ fn emitDestroy(seq: *Seq, v: *cfg.Value) error{OutOfMemory}!void {
                 // Host-backed opaque — the host destructor dispatches
                 // (`host_drop(host_id, value)`); never expandable.
                 .opaque_ => _ = try seq.appendOp(span, .{ .drop_ = v }, &.{}),
-                .struct_ => |s| try emitStructDrop(seq, v, ref, n.args, s, span),
-                .union_ => |u| try emitUnionDrop(seq, v, ref, n.args, u, span),
+                .struct_ => |s| {
+                    if (seq.c.expanding.contains(v.type_)) {
+                        // A type already being expanded is a cycle: keep
+                        // the component as a residual runtime drop (the
+                        // runtime destroys it iteratively; pass header).
+                        _ = try seq.appendOp(span, .{ .drop_ = v }, &.{});
+                        return;
+                    }
+                    try seq.c.expanding.put(seq.c.allocator, v.type_, {});
+                    defer _ = seq.c.expanding.remove(v.type_);
+                    try emitStructDrop(seq, v, ref, n.args, s, span);
+                },
+                .union_ => |u| {
+                    if (seq.c.expanding.contains(v.type_)) {
+                        _ = try seq.appendOp(span, .{ .drop_ = v }, &.{});
+                        return;
+                    }
+                    try seq.c.expanding.put(seq.c.allocator, v.type_, {});
+                    defer _ = seq.c.expanding.remove(v.type_);
+                    try emitUnionDrop(seq, v, ref, n.args, u, span);
+                },
                 .alias => unreachable, // aliases expand at resolution
             }
         },

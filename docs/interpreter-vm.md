@@ -405,9 +405,12 @@ replacement, and fused return records. The interpreter executes their exact
 ordering and never infers liveness from frame contents.
 
 Some data opcodes also create owners and therefore retain as specified, for
-example a counted field read, a counted element read, construction from a
-counted component, or copy-packing a counted value into `any`. Transfer
-operations do not alter the count.
+example a counted field read, a counted element read, or copy-packing a
+counted value into `any`. Transfer operations do not alter the count.
+`construct` distinguishes the two ownership classes: a *Copy* counted
+component is shared, so the aggregate establishes a new owner with a retain;
+a *Unique* counted component (`box[Tree]`, `list[Tree]`) is consumed, so its
+existing reference transfers to the aggregate and no retain is added.
 
 Use two internal primitives (implemented as `retainCell(addr)` and
 `destroyValue(type_id, addr)`):
@@ -422,9 +425,17 @@ type's runtime mode:
 
 - plain: no action;
 - counted: decrement and, at zero, enqueue the object's children and free it;
-- structural unique: enqueue children in required reverse order;
+- structural unique: enqueue children in declaration order; the LIFO
+  destruction work list then destroys them in the required reverse order;
 - `any`: destroy its payload using the runtime payload type;
 - opaque or `hostdata`: invoke host disposal and unregister the pointer.
+
+An aggregate owns exactly one reference to each counted child it holds, so its
+destruction walker *releases* every counted child it meets — decrementing and,
+at zero, enqueuing the child's children and freeing it — instead of enqueuing
+it as a raw destroy. A Copy child may have other owners, and a raw destroy
+would be skipped while its count stays above zero, leaking the child and
+everything under it.
 
 The lifecycle opcodes first check the descriptor/header-resolved type of
 their source: `release` and `copy_retain` accept only `str`, `list`, or
@@ -457,7 +468,6 @@ Each work item contains only the information needed to resume one step:
 
 ```text
 DestroyWork = value { type_id, addr }        // destroy addr as type_id
-            | free_obj: *ObjectHeader        // children already handled
             | resume_struct { type_id, h }   // resume after a struct drop hook
 ```
 

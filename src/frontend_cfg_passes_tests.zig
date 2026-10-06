@@ -537,6 +537,33 @@ test "drop lowering handles a drop before a match in one block" {
     try testing.expect(std.mem.indexOf(u8, body, "call @app.File.drop") != null);
 }
 
+test "Pass 8 drop lowering: a recursive named type stops expanding and leaves a residual drop" {
+    // A named type whose payload boxes itself (`Tree` in the fixture) has
+    // no finite structural expansion. The pass must stop at the cycle and
+    // leave a residual runtime `drop` (Runtime §6.3 destroys the value
+    // iteratively through its type metadata) instead of recursing until
+    // the stack overflows. A non-null program also proves the frontend
+    // re-validated the expanded form (air.md §13).
+    const src = try helpers.probeSource("probes/cases", "lowering_multi_payload_borrow_variant");
+    defer testing.allocator.free(src);
+    var c = try compileOpt("app", &.{.{ "app", src }});
+    defer c.deinit();
+    try testing.expect(c.diag == null);
+    try testing.expect(c.program != null);
+    const text = try irText(&c.program.?);
+    defer testing.allocator.free(text);
+    // The recursive `box[Tree[T]]` payload is unboxed; the unboxed value is
+    // the cycle edge, so its drop is left residual rather than expanded.
+    const unbox = std.mem.indexOf(u8, text, "Tree[int32] = syscall builtin#unbox") orelse {
+        return error.TestUnexpectedResult;
+    };
+    try testing.expect(std.mem.indexOf(u8, text[unbox..], "drop %") != null);
+    // The guard keeps the expansion finite: the cycle edge is emitted a
+    // bounded number of times, not repeated without end.
+    try testing.expect(countOccurrences(text, "syscall builtin#unbox") <= 4);
+    try testing.expect(countOccurrences(text, "drop %") <= 8);
+}
+
 test "Pass 8.4 module/member CSE reuses identical loads in a block" {
     // `lib.ratio` lowers to `module_ref "lib"` + `load_member`, and the
     // on-the-fly CSE never shared them (module ops are not candidates at
