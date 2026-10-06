@@ -62,14 +62,14 @@ fn seq2(b: *hir_build.Builder, span: meta.Span, e: hir.ExprId, rest: hir.ExprId)
 /// let leaf (mirroring cfg `lowerUsing`'s bind-once) so the rest of the
 /// block resolves through the single load. Type aliases bind nothing.
 fn buildUsing(b: *hir_build.Builder, info: *moduleinfo.ModuleInfo, u: *const ast.UsingDecl, stmts: []const ast.Stmt, i: usize, result: ?*const ast.Expr) hir_build.BuildError!hir.ExprId {
-    const alias = u.alias orelse return buildStmts(b, info, stmts, i + 1, result);
+    const alias = if (u.alias) |a| a.text else u.path[u.path.len - 1].text;
     // Resolve the alias target like the module graph's alias pass: the
     // written path's final segment names the member; resolve the path's
     // first segment as a module value / member.
     const target = try resolveAlias(b, info, u);
     switch (target) {
         .module => |spec| {
-            try b.pushModuleAlias(alias.text, spec);
+            try b.pushModuleAlias(alias, spec);
             const out = try buildStmts(b, info, stmts, i + 1, result);
             _ = b.module_aliases.pop();
             return out;
@@ -77,7 +77,7 @@ fn buildUsing(b: *hir_build.Builder, info: *moduleinfo.ModuleInfo, u: *const ast
         .value => |*mr| {
             // Bind once: a let leaf whose value is the member.
             const leaf = try hir_build_call.memberLeaf(b, info, mr.module, mr.name, u.span, true);
-            return letChain(b, info, u.span, &.{.{ .name = alias.text }}, leaf, stmts, i + 1, result);
+            return letChain(b, info, u.span, &.{.{ .name = alias }}, leaf, stmts, i + 1, result);
         },
         .type => return buildStmts(b, info, stmts, i + 1, result),
     }

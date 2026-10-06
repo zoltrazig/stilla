@@ -117,6 +117,23 @@ test "build: build fib-class module and validate every function root" {
     try expectEffectsAll(b.built, b.graph);
 }
 
+test "build: block-scope using without as binds the last path segment" {
+    // Grammar `using-decl`: without `as`, the alias is the final path
+    // segment. The HIR builder must bind it so a call through the derived
+    // name resolves (before F3 this failed with `unknown name 'print'`).
+    var b = try buildText("app", &.{.{
+        "app",
+        \\const builtin = import("builtin");
+        \\fn main() -> void {
+        \\    using builtin.print;
+        \\    print("x");
+        \\}
+    }});
+    defer b.deinit();
+    try expectValidAll(b.built);
+    try expectEffectsAll(b.built, b.graph);
+}
+
 // ---------------------------------------------------------------------------
 // Source spans (hir.md §3.2): the builder records every source-built
 // node's AST span in the interned `origins` side table; synthetic nodes

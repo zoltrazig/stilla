@@ -22,7 +22,8 @@ consumer checks). Its pass structure is preserved per module:
 
 1. collect named declarations (module scope);
 2. resolve `using` aliases — at module scope and inside blocks; both are
-   scoped compile-time bindings, not runtime members (Core);
+   scoped compile-time bindings, not runtime members, and each binds the
+   written `as` name or, absent `as`, the final path segment (Core);
 3. check items in order — const types, function declarations, struct and
    union instantiation, drop-hook bodies (Core).
 

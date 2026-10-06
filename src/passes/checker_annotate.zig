@@ -292,19 +292,20 @@ fn checkLet(frame: *Frame, l: *const ast.LetStmt) CheckError!void {
 }
 
 /// A block-level `using` alias is a scoped compile-time binding (Core
-/// §13.1); unresolvable aliases are silently skipped, matching phase 1.
+/// §13.1); without `as` the alias is the final path segment (Grammar
+/// `using-decl`).
 fn bindUsing(frame: *Frame, u: *const ast.UsingDecl) CheckError!void {
-    const alias = u.alias orelse return;
+    const alias = if (u.alias) |a| a.text else u.path[u.path.len - 1].text;
     const target = type_resolve.resolveAliasTarget(frame.resolve, frame.info, u) orelse return;
     switch (target) {
         .module => {
-            const local = try bindLocal(frame, alias.text, meta.Type{ .module = {} }, false);
+            const local = try bindLocal(frame, alias, meta.Type{ .module = {} }, false);
             local.is_using = true;
         },
         .value => |mr| {
             const m = frame.resolve.module(mr.module) orelse return;
             const vm = m.valueMember(mr.name) orelse return;
-            const local = try bindLocal(frame, alias.text, vm.type_, false);
+            const local = try bindLocal(frame, alias, vm.type_, false);
             local.is_using = true;
         },
         .type => {},

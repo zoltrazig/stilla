@@ -280,6 +280,26 @@ test "checker ignores non-function module items" {
     try testing.expectEqual(@as(usize, 0), t.ann.host_bindings.count());
 }
 
+test "checker binds a block-scope using alias without as to the last segment" {
+    // Grammar `using-decl`: without `as`, the alias is the final path
+    // segment. Block scope must bind it (one additional owned local), not
+    // silently drop it. Compare against the same body without the `using`
+    // line so the assertion isolates the alias from any baseline locals.
+    var with = try checkText(
+        \\const builtin = import("builtin");
+        \\fn f() -> void { using builtin.print; }
+    );
+    defer with.deinit();
+    var without = try checkText(
+        \\const builtin = import("builtin");
+        \\fn f() -> void { }
+    );
+    defer without.deinit();
+    const with_owned = try countBindingsWithState(with, .owned);
+    const without_owned = try countBindingsWithState(without, .owned);
+    try testing.expectEqual(without_owned + 1, with_owned);
+}
+
 test "checker annotates an empty program" {
     // A module with no function members yields an empty annotation, not
     // an error.

@@ -51,22 +51,6 @@
 
 ## 前端与中端
 
-### F3 块作用域 `using path;` 缺 `as` 被静默忽略
-
-- **优先级**：P1
-- **问题**：语法规定 `using` 的 `as` 可省略，省略时取路径末段。模块作用域实现了
-  「取末段」，但块作用域的 `bindUsing` 在无 `as` 时直接返回，别名不绑定且无诊断，
-  同一语法在块内被静默丢弃。
-- **证据**：`checker_annotate.zig:290-294`（`const alias = u.alias orelse
-  return;`）；`hir_build_block.zig:64-65`（`const alias = u.alias orelse
-  return buildStmts(...)`）；模块作用域 `module_materialize.zig:58-68`
-  用 `u.path[len - 1]`。语法 `Stilla Core Grammar Draft.abnf:172-183`。
-- **建议工作**：块作用域与模块作用域统一——无 `as` 时用路径末段作为别名；checker 的
-  `bindUsing` 与 HIR builder 的 `buildUsing` 同步。
-- **验证方式**：`checker_tests.zig` 新增无 `as` 的块内 `using` 黑盒用例，并在
-  HIR 构建层补白盒；`zig build -fincremental test -Dtest-filter=checker`。
-- **关联**：无
-
 ### F4 未解析的 `using` 别名被静默接受
 
 - **优先级**：P1
