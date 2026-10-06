@@ -71,6 +71,7 @@ pub fn validateModule(ck: *checker.Checker, info: *ModuleInfo) CheckError!void {
 fn validateItem(frame: *Frame, item: *ast.ModuleItem) CheckError!void {
     switch (item.*) {
         .const_def => |*c| try validateConst(frame, c),
+        .using_decl => |*u| try validateUsing(frame, u),
         .func_def => |*f| if (f.body) |body| {
             // Generic templates are never checked unspecialized (Core
             // §12.4); each used specialization is validated under the
@@ -108,6 +109,14 @@ fn validateConst(frame: *Frame, c: *const ast.ConstDef) CheckError!void {
         try fmtType(frame.ck.alloc(), frame.resolve, dt),
         try fmtType(frame.ck.alloc(), frame.resolve, it),
     });
+}
+
+/// The spec requires a `using` path to resolve (Core §2.8 / "Path
+/// aliases"); a module-scope alias whose target does not resolve is a
+/// compile-time error.
+fn validateUsing(frame: *Frame, u: *const ast.UsingDecl) CheckError!void {
+    _ = type_resolve.resolveAliasTarget(frame.resolve, frame.info, u) orelse
+        return frame.ck.fail(u.span, "cannot resolve using alias '{s}' (Core §2.8)", .{u.path[u.path.len - 1].text});
 }
 
 /// Check a function or lambda body's result against its declared return

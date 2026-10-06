@@ -273,7 +273,7 @@ test "checker ignores non-function module items" {
         \\const version: int32;
         \\struct File { fd: int32; }
         \\union Opt { Some(int32), None }
-        \\using builtin.Option;
+        \\using File as F;
     );
     defer t.deinit();
 
@@ -298,6 +298,22 @@ test "checker binds a block-scope using alias without as to the last segment" {
     const with_owned = try countBindingsWithState(with, .owned);
     const without_owned = try countBindingsWithState(without, .owned);
     try testing.expectEqual(without_owned + 1, with_owned);
+}
+
+test "checker rejects an unresolved module-level using alias" {
+    // A module-level `using` whose path does not resolve is an error
+    // (Core §2.8 / "Path aliases"); it must not be silently dropped.
+    try expectDiag(
+        \\using missing.Option;
+    , "cannot resolve using alias");
+}
+
+test "checker rejects an unresolved block-scope using alias" {
+    // The same requirement holds inside a block: an unresolvable target
+    // is an error, not a silent skip.
+    try expectDiag(
+        \\fn f() -> void { using missing.Option; }
+    , "cannot resolve using alias");
 }
 
 test "checker annotates an empty program" {

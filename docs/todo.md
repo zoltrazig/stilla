@@ -51,23 +51,6 @@
 
 ## 前端与中端
 
-### F4 未解析的 `using` 别名被静默接受
-
-- **优先级**：P1
-- **问题**：规范要求 `using` 的路径必须可解析，否则是错误。实现里
-  `resolveAliasTarget` 解析失败返回 `null`，`module_materialize` 无 `else` 分支，
-  checker 又不校验 module 级 `using_decl`，坏别名因此被静默忽略。
-- **证据**：`type_resolve.zig:97-120`；`module_materialize.zig:58-68`
-  （无 `else`）；`checker_validate.zig:71-82`（`validateItem` 只处理
-  `const_def` / `func_def`，`else => {}`）。规范
-  `Stilla Core Static Semantics.md:55-60`。测试甚至使用未导入的
-  `builtin.Option`：`checker_tests.zig:269-281`。
-- **建议工作**：把 `using_decl` 纳入 `validateItem`，解析失败即报诊断；修正上述
-  测试为真正未定义/未导入的目标。
-- **验证方式**：`checker_tests.zig` 新增未解析 `using` 的反例并修正
-  `:269-281`；`zig build -fincremental test -Dtest-filter=checker`。
-- **关联**：无
-
 ### F5 解构 `let` 上的类型标注被拒绝
 
 - **优先级**：P2
@@ -581,20 +564,15 @@
 ### S2 规范内部与实现之间其余已知不一致
 
 - **优先级**：P2
-- **问题**：除 S1 的版本号外，规范文本还留有若干与实现不一致的断言，需要逐项收敛。
-- **证据**：
-  1. `Stilla LLIR Specification.md:921-930` 写「binary format version is 16」，而
-     同文档 `:755` 写「273 logical opcodes」——273 含实现 17 才引入的 C-type
-     64 位 cast（`llir_emit_bin.zig:121`）。版本与操作码计数互相矛盾。
-  2. `Stilla Core Static Semantics.md:60` 要求 `using` 路径可解析，但
-     `module_materialize.zig:58-68` 与 `type_resolve.zig:97-120` 在解析失败时静默
-     返回（F4）。
-- **建议工作**：逐条把规范改到与实现一致（S1 同步版本号与 16→17 变化；F4 若以
-  规范为准则改代码），并在改动处补往返或反例测试。
+- **问题**：规范 LLIR 文档自身对版本与操作码计数的描述互相矛盾：同一文档既写
+  version 16，又写「273 logical opcodes」，而 273 含实现 17 才引入的编码。
+- **证据**：`Stilla LLIR Specification.md:921-930` 写「binary format version is 16」，
+  而同文档 `:755` 写「273 logical opcodes」——273 含实现 17 才引入的 C-type
+  64 位 cast（`llir_emit_bin.zig:121`）。版本与操作码计数互相矛盾。
+- **建议工作**：把规范改到与实现一致（S1 同步版本号与 16→17 变化），并在改动处
+  补往返测试。
 - **验证方式**：`grep -nE 'version is|273 logical' "Stilla LLIR Specification.md"`
-  复核版本与计数自洽；`Stilla Core Static Semantics.md:60` 的断言与其反例测试
-  一致——`zig build -fincremental test -Dtest-filter=checker` 与
-  `-Dtest-filter=truncated` 跑绿。
+  复核版本与计数自洽；`zig build -fincremental test -Dtest-filter=truncated` 跑绿。
 - **关联**：无
 
 ### S3 spec 文档残留 Phase / Pass 编号
