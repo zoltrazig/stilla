@@ -24,27 +24,36 @@ and the trailing section lists what the code and docs still mark open.
   expression parsing, per-module diagnostic collection with recovery
 - [x] **Module graph** — multi-file import resolution (embedded `std/` bundle
   and `-I` search dirs), cycle detection, topological ordering, host-binding
-  classification (`moduleinfo` + `passes/module_*`)
+  classification (`moduleinfo` and the `module_*` passes)
 - [x] **Type checker** — inference, ownership analysis with conditional
   release and state merging, generic monomorphization, `any`/union/tuple/list
 - [x] **HIR seam** — checker output built into the canonical monomorphic HIR
-  (`hir_build`), structurally validated, annotated with effect summaries
-  (`hir_effects` / `effects`), and lowered from there (`hir_lower`);
-  canonical text printer/parser for round-trip checks
+  (`hir_build`, with full-expression cleanup registration split into
+  `hir_build_cleanup`), structurally validated, annotated with effect
+  summaries (`hir_effects` / `effects`), and lowered from there
+  (`hir_lower`); canonical text printer/parser for round-trip checks
   ([hir.md](docs/hir.md), [effects.md](docs/effects.md))
-- [x] **Effect model** — resource/control `EffectSummary` lattice,
-  `effect_transfer`, function-summary SCC least fixpoint, `OperandUse`,
-  the cleanup-aware legality queries (`discardable` / `duplicable` /
-  `isSegSafe` …), per-node annotation validation, precise `drop_effect(T)`,
-  and the summary-driven module-const init/teardown check
+- [x] **Effect model** — resource/control `EffectSummary` lattice
+  (`effects_lattice`) over a pluggable provider engine (`effects_engine`),
+  resource registry (`effects_registry`), host metadata and environment
+  fingerprint (`effects_host`), conflict queries (`effects_conflict`), and
+  canonical hashing (`effects_hash`); `effect_transfer`, function-summary
+  SCC least fixpoint with incremental caching (`hir_effects_cache`),
+  `OperandUse`, the cleanup-aware legality queries (`discardable` /
+  `duplicable` / `isSegSafe` …), per-node annotation validation, precise
+  `drop_effect(T)`, and the summary-driven module-const init/teardown check
   ([effects.md](docs/effects.md))
-- [x] **SEG v1** — registry `seg` encoding facet, recursive island
-  admission over `isSegSafe`, and four rule groups (β→let boundary
-  rewrite, let simplification, typed constant folding, integer algebra)
-  with minimal-node-cost extraction and post-rewrite effect
+- [x] **SEG v1** — registry `seg` encoding facet and recursive island
+  admission over `isSegSafe`, rewriting through a slotted e-graph arena
+  (`hir_egraph`): an e-class table with union-find, island-wide slot
+  numbering, and `encode` → stable-order saturation → extraction, carrying
+  α-equivalence/CSE sharing, integer AC search, constant folding, constant
+  `if`, and aggregate projection as union rules; the boundary rewrites
+  (β→let, η, let simplification, known-variant `match`→let) are admitted
+  by typed contracts (`rewrite_contract`) with post-rewrite effect
   re-validation (`hir_seg`; the `seg` gate is on by default in the
   executable and off in the library, so `--no-opt seg` opts out and
-  library `OptimizeConfig.seg` opts in, [hir.md](docs/hir.md) §11)
+  library `OptimizeConfig.seg` opts in, [hir.md](docs/hir.md) §8, §11)
 - [x] **CFG lowering** — control flow, `match`/patterns, field paths, calls,
   intrinsic (`builtin`) expansion, destruction placement, module init
   functions, syscalls
@@ -54,7 +63,9 @@ and the trailing section lists what the code and docs still mark open.
   sub-toggles: tail-call, inline, CSE, copy-prop, PRE, if-convert,
   dead-block, drop-elide, dead-instr, jump-threading, phi-simplify;
   constant folding during emit; drop expansion
-- [x] **Frontend cache** — per-module, dependency-tracked
+- [x] **Frontend cache** — per-module, dependency-tracked, keyed on a
+  `SemanticKey` (specifier + content hash + effect-environment
+  fingerprint) and recording the last compile's fingerprint
 
 **LLIR backend: CFG → frozen image → bytes**
 
@@ -79,7 +90,7 @@ and the trailing section lists what the code and docs still mark open.
 - [x] **Loader & artifacts** — dependency-order instantiation, host modules,
   `VmLoadedData`/`VmRuntimeState` split, `artifact_bundle` build-once/run-many
 - [x] **Embedding** — `frontend.compile` + `runWithHostAndLoader`,
-  `examples/embed/random_demo.zig`, `libstilla.a` static library
+  `random_demo.zig`, `libstilla.a` static library
 - [x] **CLI** — compile to canonical HIR / CFG AIR / LLIR assembly / LLIR
   binary; `--run` (source or self-contained binary);
   `--module`/`--entry-fn`/`--no-entry-fn`/`-I`; `--opt <name>` /
@@ -102,20 +113,7 @@ and the trailing section lists what the code and docs still mark open.
   seed-sweep harness
 - [x] CLI end-to-end probes (exit-code contract, `--emit-bin` round-trip)
 
-**Still open** (from code and docs)
-
-- [ ] Hot-reload is designed for but the reload entry point is not wired
-  (interpreter_loader.zig)
-- [ ] The `movwz*`/`movwn*`/`movwk*` I-format rows exist but the frontend
-  lowering does not emit them yet (longer forms are compiled instead)
-- [ ] `select` does not yet participate in CSE (optimizer.md §8.4 follow-up)
-- [ ] Inferred tuple/list elements can still carry a module value; §2.3 not
-  closed for container positions (checker.md)
-- [ ] Only the Zig API is public for embedding — no C header yet
-- [ ] HIR / effect-model follow-ups (match-into-SEG, host ABI metadata
-  wiring, node-level full-expression boundary annotation, indirect-call
-  narrowing, effectful β) are tracked with dependencies and acceptance
-  criteria in the design documents
+**Still open** — the remaining work is catalogued in [docs/roadmap.md](docs/roadmap.md).
 
 ## What is Stilla?
 
@@ -155,6 +153,7 @@ The implementation documents live in [`docs/`](docs/) (indexed by
 | --- | --- |
 | [architecture.md](docs/architecture.md) | End-to-end map: artifacts, pipeline, boundaries, host embedding |
 | [passes.md](docs/passes.md) | Ordered inventory of every pass, with links to the detail documents |
+| [roadmap.md](docs/roadmap.md) | Open work: planned, spec-blocked, and intentionally-deferred items |
 | [frontend.md](docs/frontend.md) | The compiler pipeline end to end: module graph → checker → CFG lowering → optimizer → LLIR backend |
 | [module-graph.md](docs/module-graph.md) | Module identity, resolution, loading, cycle detection, topo sort |
 | [checker.md](docs/checker.md) | Inference, generic expansion, ownership analysis, checks |
@@ -186,7 +185,7 @@ zig build -fincremental --release=safe -p <prefix>   # install libstilla.a under
 
 ## The `stilla` executable
 
-A single executable (`src/main.zig`) that is both the **frontend
+A single executable (`main.zig`) that is both the **frontend
 compiler** and the **interpreter**: it parses a Stilla source file (plus
 its imports, resolved against the embedded `std/` bundle), expands the
 embedded-bundle intrinsics into ordinary AIR, and prints the program's
@@ -290,7 +289,7 @@ defer term.deinit(allocator);
 
 ### Defining host functions
 
-The runnable example is `examples/embed/random_demo.zig` — `zig build
+The runnable example is `random_demo.zig` — `zig build
 embed` builds it, runs it, and reports the round trip. The blocks below
 are quoted from that file (it is the example; this README only annotates
 it). The embedder gives Stilla a `random` host module: one `pub fn` per
@@ -374,7 +373,7 @@ const term = try stilla.interpreter.runProgram(arena, &built);
 output hook (`appPrint` above writes message + newline to stdout). The
 program's `main` returns `a + b`, which the example then verifies
 against the draws the host observed. See [host-bindings.md](docs/host-bindings.md) for the full walkthrough;
-`examples/embed/random_demo.zig` is the verbatim source.
+`random_demo.zig` is the verbatim source.
 
 ### As a C embedder
 

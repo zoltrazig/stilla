@@ -11,6 +11,7 @@ specifications (the spec suite index is [spec/README.md](../spec/README.md)).
 | --- | --- |
 | [architecture.md](architecture.md) | end-to-end map: artifacts, pipeline, boundaries, host embedding |
 | [passes.md](passes.md) | ordered inventory of every pass, with links to the detail documents |
+| [roadmap.md](roadmap.md) | open work: planned, spec-blocked, and intentionally-deferred items |
 
 ## Compiler pipeline
 
@@ -20,7 +21,7 @@ specifications (the spec suite index is [spec/README.md](../spec/README.md)).
 | [module-graph.md](module-graph.md) | module identity, resolution, loading, cycle detection, topo sort |
 | [checker.md](checker.md) | inference, generic expansion, ownership analysis, checks |
 | [hir.md](hir.md) | the canonical monomorphic HIR seam between the checker and CFG lowering: data structures, text form, structural invariants, HIR→CFG contract, effect annotations and consumers |
-| [effects.md](effects.md) | the effect-semantics model: resource/control summary lattice, `effect_transfer`, function-summary SCC fixpoint, cleanup-aware legality queries, the module-const check (host ABI metadata wiring remains a proposal) |
+| [effects.md](effects.md) | the effect-semantics model: resource/control summary lattice, `effect_transfer`, function-summary SCC fixpoint, cleanup-aware legality queries, the module-const check |
 | [cfg-lowering.md](cfg-lowering.md) | the CFG AIR model and the HIR→CFG emission rules: destruction placement, module init functions, syscalls |
 | [optimizer.md](optimizer.md) | tail-call elimination, inlining, CSE, copy propagation, and the mid-level rewrites |
 | [llir-typed.md](llir-typed.md) | the typed LLIR lowering layer (typed opcodes, typed-assembly surface) |
@@ -32,17 +33,10 @@ specifications (the spec suite index is [spec/README.md](../spec/README.md)).
 | [interpreter-vm.md](interpreter-vm.md) | the LLIR interpreter VM: image, execution loop, ownership, loading, public API |
 | [host-bindings.md](host-bindings.md) | the typed host-binding layer: comptime registry, signature checks, embedding |
 
-## Unimplemented proposals
+## Open work
 
-The remaining unimplemented parts of the model are described inside the
-documents above rather than in a standalone proposal: the host ABI
-metadata wiring (effects.md §13), node-level full-expression boundary
-annotation (hir.md §5.6), and indirect-call target narrowing
-(effects.md §9.2). The effect infrastructure —
-lattice, transfer, SCC-fixpoint function summaries, precise
-`drop_effect`, cleanup gate, derived queries — is implemented, as are
-the three consumers (dead-let / selective ANF / SEG-safe) and the
-module-const init/teardown check.
+The remaining work — planned, spec-blocked, and intentionally-deferred
+items — is catalogued in [roadmap.md](roadmap.md).
 
 ## Reading order
 
