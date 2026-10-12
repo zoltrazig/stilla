@@ -24,6 +24,7 @@ const interpreter = @import("interpreter.zig");
 const support = @import("interpreter_test_support.zig");
 const artifact_bundle = @import("artifact_bundle.zig");
 const probe_corpus = @import("probe_corpus.zig");
+const helpers = @import("frontend_test_support.zig");
 const testing = std.testing;
 
 const CaptureAdapter = support.CaptureAdapter;
@@ -2087,6 +2088,288 @@ test "SEG arena — associativity on a shared DAG (egraph_ac) changes the AIR" {
     const run_on = try capture(text, true);
     defer testing.allocator.free(run_on);
     try testing.expectEqualStrings(run_off, run_on);
+}
+
+// ---------------------------------------------------------------------------
+// Whole-pipeline AIR differential: one test per SEG sub-switch
+// ---------------------------------------------------------------------------
+//
+// `OptimizeConfig` maps every `seg_*` field into `hir_seg.Config` by its
+// stripped prefix and every `egraph_*` field by identical name
+// (frontend.zig's `compile`). Each test below proves one sub-switch is
+// actually threaded through that mapping by compiling one fixture twice —
+// all SEG defaults on vs. that one switch off — and asserting the emitted
+// canonical AIR differs, with a directional check on the function the
+// rewrite owns. Both texts round-trip through the standalone
+// `cfg.Parser` (air.md §13). The pass runs with the `cfg` gate off, so the
+// AIR is the direct lowering of the rewritten HIR.
+//
+// `egraph_ac` has no `SEG sub-switch`-named test here because the
+// whole-pipeline test `SEG arena — integer associativity (egraph_ac)
+// canonicalizes the AC chain in the AIR` already compares `.seg = true`
+// against `.egraph_ac = false` on `probes/egraph_ac.st` and pins the
+// canonical-chain result; a second test would be exactly redundant.
+
+/// Compile `text` under an explicit `OptimizeConfig` and an explicit effect
+/// environment (host declarations + lattice provider). The `reorder`
+/// rewrite only fires under a provider that proves the two host reads
+/// disjoint, so its sub-switch needs the same environment the HIR-level
+/// reorder test builds.
+fn compileAirEnv(
+    spec: []const u8,
+    texts: []const struct { []const u8, []const u8 },
+    optimize: frontend.OptimizeConfig,
+    host_decls: []const effects.HostDecl,
+    provider: ?*const effects.Provider,
+) ![]u8 {
+    var sources = moduleinfo.Sources{};
+    var source_map = std.StringHashMapUnmanaged([]const u8).empty;
+    defer source_map.deinit(testing.allocator);
+    for (texts) |pair| try source_map.put(testing.allocator, pair[0], pair[1]);
+    sources.source = source_map;
+    var comp = try frontend.compile(testing.allocator, .{
+        .entry = spec,
+        .sources = sources,
+        .entry_fn = "main",
+        .host_decls = host_decls,
+        .provider = provider,
+        .optimize = optimize,
+    });
+    defer comp.deinit();
+    if (comp.program) |*p| return cfg.print(p, testing.allocator);
+    if (comp.diag) |d| std.debug.print("SEG pipeline diag: {s}\n", .{d.message});
+    return error.TestUnexpectedResult;
+}
+
+/// Compile `text` twice — all SEG defaults on and `off`'s sub-switch
+/// disabled — and assert the whole-pipeline AIR differs and both forms
+/// round-trip through the standalone parser. Returns `[on, off]`; the
+/// caller owns both.
+fn compileSubSwitch(spec: []const u8, text: []const u8, off: frontend.OptimizeConfig) ![2][]u8 {
+    const on_air = try compileAirOpt(spec, text, .{ .seg = true });
+    errdefer testing.allocator.free(on_air);
+    const off_air = try compileAirOpt(spec, text, off);
+    errdefer testing.allocator.free(off_air);
+    try testing.expect(!std.mem.eql(u8, on_air, off_air));
+    for ([_][]const u8{ on_air, off_air }) |air| {
+        var p = cfg.Parser.init(testing.allocator);
+        defer p.deinit();
+        const reparsed = try p.parse(air);
+        try testing.expect(reparsed.funcs.len > 0);
+    }
+    return .{ on_air, off_air };
+}
+
+fn airPos(text: []const u8, needle: []const u8) !usize {
+    return std.mem.indexOf(u8, text, needle) orelse error.TestUnexpectedResult;
+}
+
+test "SEG sub-switch seg_beta changes the AIR" {
+    const src = try probe_corpus.read(testing.allocator, "probes/cases", "seg_beta_let_no_duplication");
+    defer testing.allocator.free(src);
+    const air = try compileSubSwitch("app", src, .{ .seg = true, .seg_beta = false });
+    defer testing.allocator.free(air[0]);
+    defer testing.allocator.free(air[1]);
+    const on = helpers.funcBody(air[0], "func @app.dup");
+    const off = helpers.funcBody(air[1], "func @app.dup");
+    try testing.expect(on.len > 0 and off.len > 0);
+    // β inlines the λ body; without it the call site still materializes the
+    // λ record and calls it indirectly.
+    try testing.expect(std.mem.indexOf(u8, on, "fn_ref") == null);
+    try testing.expect(std.mem.indexOf(u8, off, "fn_ref") != null);
+}
+
+test "SEG sub-switch seg_eta changes the AIR" {
+    const src = try probe_corpus.read(testing.allocator, "probes", "eta");
+    defer testing.allocator.free(src);
+    const air = try compileSubSwitch("app", src, .{ .seg = true, .seg_eta = false });
+    defer testing.allocator.free(air[0]);
+    defer testing.allocator.free(air[1]);
+    const on = helpers.funcBody(air[0], "func @app.via_lambda");
+    const off = helpers.funcBody(air[1], "func @app.via_lambda");
+    try testing.expect(on.len > 0 and off.len > 0);
+    // η redirects the wrapper value to the callee `fn_ref`; the untouched
+    // wrapper stays an indirect call through its own λ record.
+    try testing.expect(std.mem.indexOf(u8, on, "fn_ref") == null);
+    try testing.expect(std.mem.indexOf(u8, off, "fn_ref") != null);
+}
+
+test "SEG sub-switch seg_let_dead changes the AIR" {
+    const src = try probe_corpus.read(testing.allocator, "probes", "seg");
+    defer testing.allocator.free(src);
+    const air = try compileSubSwitch("app", src, .{ .seg = true, .seg_let_dead = false });
+    defer testing.allocator.free(air[0]);
+    defer testing.allocator.free(air[1]);
+    const on = helpers.funcBody(air[0], "func @app.unused_let");
+    const off = helpers.funcBody(air[1], "func @app.unused_let");
+    try testing.expect(on.len > 0 and off.len > 0);
+    // dead-let drops the unused initializer's evaluation entirely.
+    try testing.expect(std.mem.indexOf(u8, on, "call @app.identity") == null);
+    try testing.expect(std.mem.indexOf(u8, off, "call @app.identity") != null);
+}
+
+test "SEG sub-switch seg_let_forward changes the AIR" {
+    const src = try probe_corpus.read(testing.allocator, "probes/cases", "seg_let_forward_across_effect");
+    defer testing.allocator.free(src);
+    const air = try compileSubSwitch("app", src, .{ .seg = true, .seg_let_forward = false });
+    defer testing.allocator.free(air[0]);
+    defer testing.allocator.free(air[1]);
+    const on = helpers.funcBody(air[0], "func @app.f");
+    const off = helpers.funcBody(air[1], "func @app.f");
+    try testing.expect(on.len > 0 and off.len > 0);
+    // Forwarding relocates the pure `add` to its single use, after the
+    // print; without it the `let` keeps the `add` before the effect.
+    try testing.expect(try airPos(on, "syscall") < try airPos(on, "add "));
+    try testing.expect(try airPos(off, "add ") < try airPos(off, "syscall"));
+}
+
+test "SEG sub-switch seg_let_atom changes the AIR" {
+    const src = try probe_corpus.read(testing.allocator, "probes/cases", "seg_let_atom_branches");
+    defer testing.allocator.free(src);
+    const air = try compileSubSwitch("app", src, .{ .seg = true, .seg_let_atom = false });
+    defer testing.allocator.free(air[0]);
+    defer testing.allocator.free(air[1]);
+    const on = helpers.funcBody(air[0], "func @app.f");
+    const off = helpers.funcBody(air[1], "func @app.f");
+    try testing.expect(on.len > 0 and off.len > 0);
+    // The atom is copied into both branch uses, so each arm emits its own
+    // `const 5`; with the rule off one `const 5` stays bound in the entry.
+    try testing.expectEqual(@as(usize, 2), std.mem.count(u8, on, "const 5"));
+    try testing.expectEqual(@as(usize, 1), std.mem.count(u8, off, "const 5"));
+}
+
+test "SEG sub-switch seg_match changes the AIR" {
+    const src = try probe_corpus.read(testing.allocator, "probes/cases", "seg_known_variant_match");
+    defer testing.allocator.free(src);
+    const air = try compileSubSwitch("app", src, .{ .seg = true, .seg_match = false });
+    defer testing.allocator.free(air[0]);
+    defer testing.allocator.free(air[1]);
+    const on = helpers.funcBody(air[0], "func @app.single");
+    const off = helpers.funcBody(air[1], "func @app.single");
+    try testing.expect(on.len > 0 and off.len > 0);
+    // A known-variant match reduces to its arm body; without the rule the
+    // tag dispatch (`switch`) survives.
+    try testing.expect(std.mem.indexOf(u8, on, "switch") == null);
+    try testing.expect(std.mem.indexOf(u8, off, "switch") != null);
+}
+
+test "SEG sub-switch seg_reorder changes the AIR" {
+    const sensor = try probe_corpus.read(testing.allocator, "probes/cases", "lattice_reorder_host_sensor");
+    defer testing.allocator.free(sensor);
+    const app = try probe_corpus.read(testing.allocator, "probes/cases", "lattice_reorder_host_app");
+    defer testing.allocator.free(app);
+    const texts = [_]struct { []const u8, []const u8 }{
+        .{ "sensor", sensor },
+        .{ "app", app },
+    };
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const s_peek = try effects.summaryOf(a, &.{.{ .resource = .{ .host = 3 }, .mode = .read }});
+    const s_read = try effects.summaryOf(a, &.{.{ .resource = .{ .host = 2 }, .mode = .read }});
+    const decls = [_]effects.HostDecl{
+        .{ .key = "sensor.read", .summary = s_read, .stilla_execution = .forbidden },
+        .{ .key = "sensor.peek", .summary = s_peek, .stilla_execution = .forbidden },
+    };
+    // `example_hierarchy` proves host(2) and host(3) disjoint sibling
+    // subtrees, so the reorder canonicalizes the operands; the switch off
+    // preserves the caller's `peek + read` order.
+    const on = try compileAirEnv("app", &texts, .{ .seg = true }, &decls, &effects.example_hierarchy);
+    defer testing.allocator.free(on);
+    const off = try compileAirEnv("app", &texts, .{ .seg = true, .seg_reorder = false }, &decls, &effects.example_hierarchy);
+    defer testing.allocator.free(off);
+    try testing.expect(!std.mem.eql(u8, on, off));
+    for ([_][]const u8{ on, off }) |air| {
+        var p = cfg.Parser.init(testing.allocator);
+        defer p.deinit();
+        const reparsed = try p.parse(air);
+        try testing.expect(reparsed.funcs.len > 0);
+    }
+    const on_body = helpers.funcBody(on, "func @app.f");
+    const off_body = helpers.funcBody(off, "func @app.f");
+    try testing.expect(on_body.len > 0 and off_body.len > 0);
+    // Canonical order emits the host(2) read before the host(3) peek; the
+    // source wrote peek first. Host calls print as `syscall sensor#read`.
+    try testing.expect(try airPos(on_body, "sensor#read") < try airPos(on_body, "sensor#peek"));
+    try testing.expect(try airPos(off_body, "sensor#peek") < try airPos(off_body, "sensor#read"));
+}
+
+test "SEG sub-switch egraph_fold changes the AIR" {
+    const src = try probe_corpus.read(testing.allocator, "probes/cases", "seg_constant_folding");
+    defer testing.allocator.free(src);
+    const air = try compileSubSwitch("app", src, .{ .seg = true, .egraph_fold = false });
+    defer testing.allocator.free(air[0]);
+    defer testing.allocator.free(air[1]);
+    const on = helpers.funcBody(air[0], "func @app.g");
+    const off = helpers.funcBody(air[1], "func @app.g");
+    try testing.expect(on.len > 0 and off.len > 0);
+    // `(2 + 3)` folds to `5` only with the fold rule; without it both
+    // operands and the outer `add` survive.
+    try testing.expect(std.mem.indexOf(u8, on, "const 5") != null);
+    try testing.expect(std.mem.indexOf(u8, off, "const 5") == null);
+    try testing.expectEqual(@as(usize, 1), std.mem.count(u8, on, "add "));
+    try testing.expectEqual(@as(usize, 2), std.mem.count(u8, off, "add "));
+}
+
+test "SEG sub-switch egraph_algebra changes the AIR" {
+    const src = try probe_corpus.read(testing.allocator, "probes", "egraph");
+    defer testing.allocator.free(src);
+    const air = try compileSubSwitch("app", src, .{ .seg = true, .egraph_algebra = false });
+    defer testing.allocator.free(air[0]);
+    defer testing.allocator.free(air[1]);
+    const on = helpers.funcBody(air[0], "func @app.merged_after_rule");
+    const off = helpers.funcBody(air[1], "func @app.merged_after_rule");
+    try testing.expect(on.len > 0 and off.len > 0);
+    // `(a * b) + ((a * b) * 1)`: only with the algebra rule does the `* 1`
+    // identity drop its `const 1` operand and merge the two classes.
+    try testing.expect(std.mem.indexOf(u8, on, "const 1") == null);
+    try testing.expect(std.mem.indexOf(u8, off, "const 1") != null);
+}
+
+test "SEG sub-switch egraph_cond changes the AIR" {
+    const src = try probe_corpus.read(testing.allocator, "probes/cases", "seg_constant_if_and_or");
+    defer testing.allocator.free(src);
+    const air = try compileSubSwitch("app", src, .{ .seg = true, .egraph_cond = false });
+    defer testing.allocator.free(air[0]);
+    defer testing.allocator.free(air[1]);
+    const on = helpers.funcBody(air[0], "func @app.pick");
+    const off = helpers.funcBody(air[1], "func @app.pick");
+    try testing.expect(on.len > 0 and off.len > 0);
+    // A constant condition selects its branch; without the rule the
+    // `br`/phi scaffold survives.
+    try testing.expect(std.mem.indexOf(u8, on, "br ") == null);
+    try testing.expect(std.mem.indexOf(u8, off, "br ") != null);
+}
+
+test "SEG sub-switch egraph_project changes the AIR" {
+    const src = try probe_corpus.read(testing.allocator, "probes", "struct_projection");
+    defer testing.allocator.free(src);
+    const air = try compileSubSwitch("app", src, .{ .seg = true, .egraph_project = false });
+    defer testing.allocator.free(air[0]);
+    defer testing.allocator.free(air[1]);
+    const on = helpers.funcBody(air[0], "func @app.project_first");
+    const off = helpers.funcBody(air[1], "func @app.project_first");
+    try testing.expect(on.len > 0 and off.len > 0);
+    // `field_get(struct_make(...), 0)` projects to the constructor operand;
+    // without the rule the construct + `read_field` survive.
+    try testing.expect(std.mem.indexOf(u8, on, "read_field") == null);
+    try testing.expect(std.mem.indexOf(u8, off, "read_field") != null);
+}
+
+test "SEG sub-switch egraph_cse changes the AIR" {
+    const src = try probe_corpus.read(testing.allocator, "probes/cases", "seg_cse_tuple_shared");
+    defer testing.allocator.free(src);
+    const air = try compileSubSwitch("app", src, .{ .seg = true, .egraph_cse = false });
+    defer testing.allocator.free(air[0]);
+    defer testing.allocator.free(air[1]);
+    const on = helpers.funcBody(air[0], "func @app.f");
+    const off = helpers.funcBody(air[1], "func @app.f");
+    try testing.expect(on.len > 0 and off.len > 0);
+    // The two α-equal inner tuples are one class; with sharing on the outer
+    // tuple's operands are the same value, so one inner `construct` feeds
+    // both. With it off each operand materializes its own inner `construct`.
+    try testing.expectEqual(@as(usize, 2), std.mem.count(u8, on, "construct"));
+    try testing.expectEqual(@as(usize, 3), std.mem.count(u8, off, "construct"));
 }
 
 // ---------------------------------------------------------------------------

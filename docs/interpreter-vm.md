@@ -963,7 +963,7 @@ CLI integration: `stilla --run <input>` executes. An input
 starting with the LLIR magic loads through `readBin` → `validateLlir` →
 `run`, executing from the header's symbolic entry member — the binary
 header carries the module symbol and entry member (binary format version
-17), so a serialized artifact is self-contained and needs no side
+16), so a serialized artifact is self-contained and needs no side
 information. Anything else compiles the whole dependency closure
 (entry plus `-I` imports and the embedded standard library) into one
 per-module artifact bundle and runs the root artifact through
@@ -989,7 +989,7 @@ The acceptance matrix is:
 
 | Area | Required evidence |
 | --- | --- |
-| Load boundary | malformed binary and invalid LLIR are rejected before host callbacks or runtime allocations; a non-v17 input is rejected on magic/version alone; loading decodes exactly one `VmInstr` per record (1:1, order-preserving), and the executed path allocates nothing per instruction |
+| Load boundary | malformed binary and invalid LLIR are rejected before host callbacks or runtime allocations; a non-v16 input is rejected on magic/version alone; loading decodes exactly one `VmInstr` per record (1:1, order-preserving), and the executed path allocates nothing per instruction |
 | Value encoding | canonical scalar bit patterns (bool 0/1, byte high bits zero, 32-bit integers sign-extended to a cell, `float32` high bits zero, full-width `i64`/`u64`/`f64`, NaN payload round-trip), rep-resolved typed `zero`, empty-list all-zero encoding, full-cell transfers, pointer cells validated by registry membership before dereference, null-only-for-empty-list traps, and no 48-bit pointer rejection path |
 | Scalars | arithmetic, comparison, the casts, zero/discard (zero read/write), `ret zero`, `copy cond, zero`, and every trap edge — dispatched per rep |
 | Comparisons | C-Type comparisons overwrite `cond`; integer opcodes distinguish only signed from unsigned because 32-bit integers are already cell-extended; float width remains explicit; NaN boundaries (`seq` false, `sne` true, `slt`/`sle` false); `copy dst, cond` materialization |

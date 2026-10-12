@@ -18,6 +18,7 @@ const meta = @import("meta.zig");
 const cfg = @import("cfg.zig");
 const frontend_cache = @import("frontend_cache.zig");
 const lower = @import("lower.zig");
+const cfg_optimize = @import("passes/cfg_optimize.zig");
 const moduleinfo = @import("moduleinfo.zig");
 const checker = @import("passes/checker.zig");
 const hir = @import("hir.zig");
@@ -32,6 +33,8 @@ const cfg_parse = @import("passes/cfg_parse.zig");
 pub const OptimizeConfig = @import("passes/optimize_config.zig").OptimizeConfig;
 pub const setOptimizeByName = @import("passes/optimize_config.zig").setByName;
 pub const optimizeToggleNames = @import("passes/optimize_config.zig").names;
+pub const optimizeGates = @import("passes/optimize_config.zig").gates;
+pub const optimizeGateChildren = @import("passes/optimize_config.zig").gate_children;
 
 pub const CompileError = error{ OutOfMemory, Diagnostic, InvalidProvider, UnsupportedCleanupType };
 
@@ -205,19 +208,19 @@ fn revalidateHir(arena_alloc: std.mem.Allocator, graph: *moduleinfo.ModuleGraph,
 /// The validator inside `optimize` guards every rewrite; a violation
 /// surfaces as `error.ValidationFailed` here.
 fn runOptimizer(program: *cfg.IrProgram, allocator: std.mem.Allocator, opt: OptimizeConfig) !void {
-    try lower.optimize(program, allocator, .{
-        .tail_call = opt.cfg_tail_call,
-        .inline_calls = opt.cfg_inline,
-        .cse = opt.cfg_cse,
-        .copy_prop = opt.cfg_copy_prop,
-        .pre = opt.cfg_pre,
-        .if_convert = opt.cfg_if_convert,
-        .dead_block = opt.cfg_dead_block,
-        .drop_elide = opt.cfg_drop_elide,
-        .dead_instr = opt.cfg_dead_instr,
-        .jump_thread = opt.cfg_jump_thread,
-        .phi_simplify = opt.cfg_phi_simplify,
-    });
+    // Thread every `cfg_*` sub-switch into `cfg_optimize.Config` by
+    // reflection: the destination field is the name with the `cfg_` prefix
+    // stripped (`cfg_inline` -> `inline_calls`). Assigning through `@field`
+    // makes this mapping total by construction — a sub-switch with no
+    // matching destination field fails to compile instead of being dropped.
+    var config = cfg_optimize.Config{};
+    inline for (std.meta.fields(OptimizeConfig)) |f| {
+        if (comptime std.mem.startsWith(u8, f.name, "cfg_")) {
+            const dest = comptime if (std.mem.eql(u8, f.name, "cfg_inline")) "inline_calls" else f.name[4..];
+            @field(config, dest) = @field(opt, f.name);
+        }
+    }
+    try lower.optimize(program, allocator, config);
 }
 
 /// Compile a program: entry module → AIR (frontend.md §1, §2).
@@ -346,17 +349,31 @@ pub fn compile(allocator: std.mem.Allocator, options: Options) CompileError!Comp
         if (options.optimize.hir) {
             // Effect-driven consumers (hir.md §11): dead-let +
             // selective A-Normal Form, then re-validate structure and
-            // effects on the rewritten program (hir.md §2.4).
-            _ = hir_simplify.optimize(arena_alloc, built, .{
+            // effects on the rewritten program (hir.md §2.4). The
+            // environment fields stay explicit; the three unprefixed
+            // sub-switches (`dead_let`, `anf`, `never_suffix`) are derived
+            // by reflection, so a new unprefixed sub-switch with no matching
+            // `hir_simplify.Config` field fails to compile via `@field`
+            // rather than being silently dropped.
+            var simplify_config = hir_simplify.Config{
                 .graph = graph,
                 .host_decls = options.host_decls,
                 .resources = options.resources,
                 .engine = &engine,
                 .cache = summary_cache,
-                .dead_let = options.optimize.dead_let,
-                .anf = options.optimize.anf,
-                .never_suffix = options.optimize.never_suffix,
-            }) catch return error.OutOfMemory;
+            };
+            inline for (std.meta.fields(OptimizeConfig)) |f| {
+                if (comptime !std.mem.startsWith(u8, f.name, "cfg_") and
+                    !std.mem.startsWith(u8, f.name, "seg_") and
+                    !std.mem.startsWith(u8, f.name, "egraph_") and
+                    !std.mem.eql(u8, f.name, "hir") and
+                    !std.mem.eql(u8, f.name, "seg") and
+                    !std.mem.eql(u8, f.name, "cfg"))
+                {
+                    @field(simplify_config, f.name) = @field(options.optimize, f.name);
+                }
+            }
+            _ = hir_simplify.optimize(arena_alloc, built, simplify_config) catch return error.OutOfMemory;
             if (revalidateHir(arena_alloc, graph, built, options.host_decls, options.resources, &engine, summary_cache) catch return error.OutOfMemory) |diag| {
                 return failed(arena, &.{diag}, graph, builder.loaded_sources.items);
             }
@@ -365,27 +382,28 @@ pub fn compile(allocator: std.mem.Allocator, options: Options) CompileError!Comp
             // SEG (hir.md §11): rewrite islands after the validated
             // effect analysis, then re-validate structure and effects on
             // the rewritten program (hir.md §2.4 — a transform may not
-            // assume the pre-rewrite static conclusions still hold).
-            _ = hir_seg.optimize(arena_alloc, built, .{
+            // assume the pre-rewrite static conclusions still hold). The
+            // environment fields stay explicit; every `seg_*` sub-switch is
+            // derived by reflection from its stripped prefix (`seg_beta` ->
+            // `beta`) and every `egraph_*` by identical name. `@field`
+            // makes a missing destination field fail to compile, so this
+            // mapping is total by construction.
+            var seg_config = hir_seg.Config{
                 .graph = graph,
                 .host_decls = options.host_decls,
                 .resources = options.resources,
                 .engine = &engine,
                 .cache = summary_cache,
-                .beta = options.optimize.seg_beta,
-                .eta = options.optimize.seg_eta,
-                .let_dead = options.optimize.seg_let_dead,
-                .let_forward = options.optimize.seg_let_forward,
-                .let_atom = options.optimize.seg_let_atom,
-                .match = options.optimize.seg_match,
-                .reorder = options.optimize.seg_reorder,
-                .egraph_fold = options.optimize.egraph_fold,
-                .egraph_algebra = options.optimize.egraph_algebra,
-                .egraph_cond = options.optimize.egraph_cond,
-                .egraph_project = options.optimize.egraph_project,
-                .egraph_cse = options.optimize.egraph_cse,
-                .egraph_ac = options.optimize.egraph_ac,
-            }) catch return error.OutOfMemory;
+            };
+            inline for (std.meta.fields(OptimizeConfig)) |f| {
+                if (comptime std.mem.startsWith(u8, f.name, "seg_")) {
+                    @field(seg_config, f.name[4..]) = @field(options.optimize, f.name);
+                }
+                if (comptime std.mem.startsWith(u8, f.name, "egraph_")) {
+                    @field(seg_config, f.name) = @field(options.optimize, f.name);
+                }
+            }
+            _ = hir_seg.optimize(arena_alloc, built, seg_config) catch return error.OutOfMemory;
             if (revalidateHir(arena_alloc, graph, built, options.host_decls, options.resources, &engine, summary_cache) catch return error.OutOfMemory) |diag| {
                 return failed(arena, &.{diag}, graph, builder.loaded_sources.items);
             }

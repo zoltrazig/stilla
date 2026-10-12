@@ -159,38 +159,6 @@
 
 ## 优化管线
 
-### O1 `--opt-list` 列出的是库默认而非可执行默认
-
-- **优先级**：P1
-- **问题**：`--opt-list` 读 `OptimizeConfig{}`（所有 gate 全 false 的库默认），而
-  `stilla` 可执行默认 `seg` / `cfg` 开。用户看到的默认与可执行行为不符；现有测试也
-  只断言 `hir off` / `cfg_cse on`。
-- **证据**：`main.zig:589-605`（`:593-594` 读 `OptimizeConfig{}`）；可执行默认
-  `main.zig:97-101`；测试 `main.zig:915-927`。
-- **建议工作**：`optListText` 接受默认值参数（CLI 传可执行默认、库测试传库默认），
-  或在 CLI 路径以 `Options.optimize` 初值渲染。
-- **验证方式**：扩展 `main.zig:915-927`，断言 CLI profile 下
-  `seg on (gate)` / `cfg on (gate)`、库 profile 下二者 off；
-  `zig build -fincremental test -Dtest-filter=parseArgs`。
-- **关联**：无
-
-### O2 子开关→驱动映射无定向测试
-
-- **优先级**：P1
-- **问题**：`runOptimizer` 手写把 `OptimizeConfig` 字段映射到 `cfg_optimize.Config`；
-  现有「每个 toggle 独立可配置」测试只验证编译与 AIR 往返，映射写错或漏写仍然会通过。
-  HIR simplify / SEG 的子开关同样弱覆盖。
-- **证据**：映射 `frontend.zig:207-221`；弱测试
-  `frontend_optimizer_tests.zig:1901-1923`；各子开关定义在
-  `optimize_config.zig`。
-- **建议工作**：为每个子开关建一条「翻转该开关会改变本 pass 负责的 AIR 形状」的
-  小用例（仿现有 CSE 子开关测试 `frontend_optimizer_tests.zig:1874-1898`），或把
-  `runOptimizer` 的映射改为结构化枚举以消除漏写。
-- **验证方式**：`frontend_optimizer_tests.zig` 新增逐子开关 AIR 差异断言；
-  `zig build -fincremental test -Dtest-filter=OptimizeConfig` 与
-  `-Dtest-filter=optimizer`。
-- **关联**：无
-
 ### O3 CFG 优化无不动点
 
 - **优先级**：P2
@@ -372,23 +340,27 @@
 - **验证方式**：与 `optimizer.md`、源码交叉核对；`zig fmt --check src`。
 - **关联**：无
 
+### O15 `cfg_copy_prop` 与构造期 copy 折叠冗余，端到端不可观测
+
+- **优先级**：P2
+- **问题**：`cfg_copy_prop` 子开关端到端不可观测：`cfg_lower_emit` 在构造期就把 Copy 值的 `copy` 折叠为其 operand，而 `cfg_copy_prop` 只在 `ownership != .unique` 时删除 `copy`，因此 lowering 产出的 AIR 中不存在该 pass 能删除的 `copy`；pass 实际不生效，翻转子开关不改变任何 AIR。
+- **证据**：`cfg_lower_emit.zig:84-89`（构造期 copy 折叠）；`cfg_copy_prop.zig:37`（仅非 unique 时删除）；`frontend_cfg_passes_tests.zig:614-637`（合成用例在调用前已无 `copy %`）。全语料在 `--no-opt cfg_copy_prop` 与默认下 AIR 逐字节相同。
+- **建议工作**：确定该 pass 的定位——删除（连同 `cfg_copy_prop` 子开关），或找到一个端到端能触发它的输入形状并在注释中说明为何端到端不可达；若保留，评估构造期折叠与 pass 的分工是否应合并以免冗余。
+- **验证方式**：若删除，`grep -rn "cfg_copy_prop" src` 为空且 `zig build -fincremental test -Dtest-filter=OptimizeConfig` 通过；若保留，新增一个端到端触发该 pass 的 `probes/*.st`，或明确记录其不可达。
+- **关联**：无
+
+### O16 子开关到驱动的映射只单向完备
+
+- **优先级**：P3
+- **问题**：`frontend.zig` 的三处映射改为对 `OptimizeConfig` 反射后，只保证「`OptimizeConfig` 的子开关都有对应的目标字段」（缺目标字段即编译错误）；反向不成立——向 `cfg_optimize.Config` / `hir_seg.Config` / `hir_simplify.Config` 增加一个 bool 字段而不同步 `OptimizeConfig` 时，该字段静默保持默认值、没有子开关暴露。HIR 处的负向谓词（排除 `cfg_` / `seg_` / `egraph_` 前缀与门）对未来新增的同名无前缀字段也会静默误配。
+- **证据**：`frontend.zig` 的 `runOptimizer` 与 `compile` 中的反射块；`cfg_optimize.zig:53-67`、`hir_seg.zig:336-376`、`hir_simplify.zig:157-187`。
+- **建议工作**：加一处 comptime 断言，要求每个目标 Config 的子开关 bool 都有对应的 `OptimizeConfig` 字段；并把 HIR 处的负向谓词改为正向字段列表（`dead_let`、`anf`、`never_suffix`），使漏加或误配同样编译失败。
+- **验证方式**：在 `optimize_config.zig` 或 `frontend.zig` 增加 comptime 检查；`zig build -fincremental test -Dtest-filter=OptimizeConfig`；`zig fmt --check src`。
+- **关联**：无
+
 ---
 
 ## 后端与运行时
-
-### B1 LLIR 二进制版本号：实现 17 vs 规范 16
-
-- **优先级**：P0
-- **问题**：实现写入并只接受 version 17，而规范写 16。已决定以实现 17 为准，但规范
-  未同步，形成「实现与规范冲突」。
-- **证据**：`llir_emit_bin.zig:15`、`:121`（version 17）、`:280-283`
-  （reader 拒绝非 17）；`Stilla LLIR Specification.md:921-930`（version 16）。
-- **建议工作**：更新规范为 17（见 S1），并在 `interpreter-vm.md` 与二进制头注释中
-  保持 17 的一致描述。
-- **验证方式**：`llir_emit_bin.zig:512` 的版本拒绝测试
-  （`zig build -fincremental test -Dtest-filter=truncated`）确认非 17 被拒、17
-  被接受；全量 `zig build -fincremental test` 全绿。
-- **关联**：无（规范修改见 S1）
 
 ### B2 `auipc`/`lui` 通过校验却在运行期 trap
 
@@ -538,8 +510,7 @@
   「校验通过但 trap」的图像无测试；`--opt-list` 的可执行 / 库两种默认 profile
   无测试。
 - **证据**：`main.zig:915-927`（opt-list 单 profile）；B2 的 `lui` 图像；T1。
-- **建议工作**：随 T1 一起加 cfg differential；为 `auipc` / `lui` 加 B2 的正 / 负例；
-  扩 O1 的双 profile 测试。
+- **建议工作**：随 T1 一起加 cfg differential；为 `auipc` / `lui` 加 B2 的正 / 负例。
 - **验证方式**：`zig build -fincremental test -Dtest-filter=parseArgs` 与
   `-Dtest-filter=frontend_pass_smoke`。
 - **关联**：无
@@ -547,33 +518,6 @@
 ---
 
 ## 规范漂移
-
-### S1 规范 LLIR 二进制版本 16 → 17
-
-- **优先级**：P1
-- **问题**：规范写版本 16，实现为 17（见 B1）。需要把规范更新为 17，并说明 17 相对
-  16 的变化。
-- **证据**：`Stilla LLIR Specification.md:921-930`；实现
-  `llir_emit_bin.zig:15`、`:121`、`:280-283`。
-- **建议工作**：更新规范版本号与「reader 拒绝任何非 17 版本」的措辞，补记 16→17 的
-  指令编码变化（C-type 的 64 位 cast 矩阵，273 opcode）。
-- **验证方式**：`grep -n "version" "Stilla LLIR Specification.md"` 复核；
-  `zig build -fincremental test -Dtest-filter=truncated` 确认实现与规范一致。
-- **关联**：无（实现侧见 B1）
-
-### S2 规范内部与实现之间其余已知不一致
-
-- **优先级**：P2
-- **问题**：规范 LLIR 文档自身对版本与操作码计数的描述互相矛盾：同一文档既写
-  version 16，又写「273 logical opcodes」，而 273 含实现 17 才引入的编码。
-- **证据**：`Stilla LLIR Specification.md:921-930` 写「binary format version is 16」，
-  而同文档 `:755` 写「273 logical opcodes」——273 含实现 17 才引入的 C-type
-  64 位 cast（`llir_emit_bin.zig:121`）。版本与操作码计数互相矛盾。
-- **建议工作**：把规范改到与实现一致（S1 同步版本号与 16→17 变化），并在改动处
-  补往返测试。
-- **验证方式**：`grep -nE 'version is|273 logical' "Stilla LLIR Specification.md"`
-  复核版本与计数自洽；`zig build -fincremental test -Dtest-filter=truncated` 跑绿。
-- **关联**：无
 
 ### S3 spec 文档残留 Phase / Pass 编号
 

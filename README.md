@@ -235,7 +235,8 @@ Options: `--output <file>`, `--module <spec>`, `--entry-fn <name>` /
 (per-field toggles for `OptimizeConfig`; the executable defaults to
 `seg` and `cfg` on, `hir` off, all sub-toggles on,
 [hir.md](docs/hir.md) §11), `--opt-list` (print every toggle and its
-default), and the emission modes
+default, with each gate's sub-toggles nested beneath it), and the
+emission modes
 `--emit-hir` (the canonical HIR text form, [hir.md](docs/hir.md) §4),
 `--emit-asm`, `--emit-bin <file>`, and `--run` (compile and execute).
 Diagnostics are

@@ -68,6 +68,59 @@ pub const names = blk: {
     break :blk out;
 };
 
+/// The top-level optimization gates, in listing order. A disabled gate
+/// makes its sub-toggles inert; `--opt-list` nests each gate's children
+/// beneath it.
+pub const gates = [_][]const u8{ "hir", "seg", "cfg" };
+
+/// Sub-toggles owned by each gate, parallel to `gates` (same index) and in
+/// listing order.
+pub const gate_children = [_][]const []const u8{
+    &.{ "dead_let", "anf", "never_suffix" },
+    &.{
+        "seg_beta",       "seg_eta",     "seg_let_dead",   "seg_let_forward",
+        "seg_let_atom",   "seg_match",   "seg_reorder",    "egraph_fold",
+        "egraph_algebra", "egraph_cond", "egraph_project", "egraph_cse",
+        "egraph_ac",
+    },
+    &.{
+        "cfg_tail_call",  "cfg_inline",      "cfg_cse",          "cfg_copy_prop",
+        "cfg_pre",        "cfg_if_convert",  "cfg_dead_block",   "cfg_drop_elide",
+        "cfg_dead_instr", "cfg_jump_thread", "cfg_phi_simplify",
+    },
+};
+
+fn nameIndex(name: []const u8) ?usize {
+    for (names, 0..) |candidate, i| {
+        if (std.mem.eql(u8, candidate, name)) return i;
+    }
+    return null;
+}
+
+test "gate grouping partitions every toggle" {
+    try std.testing.expectEqual(gates.len, gate_children.len);
+
+    var seen = [_]bool{false} ** names.len;
+
+    for (gates) |gate| {
+        const index = nameIndex(gate);
+        try std.testing.expect(index != null);
+        try std.testing.expect(!seen[index.?]);
+        seen[index.?] = true;
+    }
+
+    for (gate_children) |children| {
+        for (children) |child| {
+            const index = nameIndex(child);
+            try std.testing.expect(index != null);
+            try std.testing.expect(!seen[index.?]);
+            seen[index.?] = true;
+        }
+    }
+
+    for (seen) |covered| try std.testing.expect(covered);
+}
+
 fn defaultOf(comptime field_name: []const u8) bool {
     const defaults = OptimizeConfig{};
     return @field(defaults, field_name);

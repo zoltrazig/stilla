@@ -71,6 +71,12 @@ const usage =
     \\
 ;
 
+/// The `stilla` executable's optimization defaults: the SEG and CFG gates
+/// on, `hir` off, and every sub-toggle on. The single source of truth for
+/// `Options.optimize` and the `--opt-list` listing, which would otherwise
+/// report the all-off library `OptimizeConfig{}`.
+const default_optimize: OptimizeConfig = .{ .seg = true, .cfg = true };
+
 const Options = struct {
     input: []const u8 = &.{},
     output: ?[]const u8 = null,
@@ -98,7 +104,7 @@ const Options = struct {
     /// the SEG and CFG gates on, `hir` off, and every sub-toggle on; the
     /// library default is every gate off. `--opt`/`--no-opt <name>` set
     /// fields (last occurrence wins).
-    optimize: OptimizeConfig = .{ .seg = true, .cfg = true },
+    optimize: OptimizeConfig = default_optimize,
     search_dirs: std.ArrayList([]const u8) = .empty,
 };
 
@@ -582,31 +588,27 @@ fn errWrite(io: std.Io, bytes: []const u8) !void {
     try std.Io.File.writeStreamingAll(std.Io.File.stderr(), io, bytes);
 }
 
-/// Build the `--opt-list` text: one line per `OptimizeConfig` field, with
-/// its default state read from the struct (never hard-coded) and the three
-/// top-level gates marked. Pure, so a unit test can assert on the listing
-/// without touching the fd-1 stdout sink.
-fn optListText(gpa: std.mem.Allocator) ![]u8 {
+/// Build the `--opt-list` text as a two-level tree: each top-level gate (the
+/// three `OptimizeConfig` gates) with its ` (gate)` marker, and that gate's
+/// sub-toggles nested underneath it. Every default state is read from the
+/// passed config (never hard-coded). Pure, so a unit test can assert on the
+/// listing without touching the fd-1 stdout sink.
+fn optListText(gpa: std.mem.Allocator, defaults: OptimizeConfig) ![]u8 {
     var out = std.ArrayList(u8).empty;
     errdefer out.deinit(gpa);
     try out.appendSlice(gpa, "optimization toggles (OptimizeConfig fields; use --opt <name> / --no-opt <name>):\n");
-    inline for (stilla.frontend.optimizeToggleNames) |name| {
-        const on = @field(stilla.frontend.OptimizeConfig{}, name);
-        const is_gate = std.mem.eql(u8, name, "hir") or
-            std.mem.eql(u8, name, "seg") or
-            std.mem.eql(u8, name, "cfg");
-        try out.print(gpa, "  {s: <15} {s}{s}\n", .{
-            name,
-            if (on) "on" else "off",
-            if (is_gate) " (gate)" else "",
-        });
+    inline for (stilla.frontend.optimizeGates, stilla.frontend.optimizeGateChildren) |gate, children| {
+        try out.print(gpa, "  {s: <15} {s} (gate)\n", .{ gate, if (@field(defaults, gate)) "on" else "off" });
+        inline for (children) |child| {
+            try out.print(gpa, "    {s: <15} {s}\n", .{ child, if (@field(defaults, child)) "on" else "off" });
+        }
     }
     return out.toOwnedSlice(gpa);
 }
 
 /// Write the `--opt-list` listing to stdout.
 fn writeOptList(io: std.Io, gpa: std.mem.Allocator) !void {
-    const text = try optListText(gpa);
+    const text = try optListText(gpa, default_optimize);
     defer gpa.free(text);
     try std.Io.File.writeStreamingAll(std.Io.File.stdout(), io, text);
 }
@@ -918,12 +920,29 @@ test "parseArgs --opt-list lists the toggles" {
     // `--opt-list` parse is CLI-probed; this asserts the pure listing that
     // arm hands to stdout. A representative gate and sub-toggle must both
     // appear.
-    const text = try optListText(testing.allocator);
+    const text = try optListText(testing.allocator, default_optimize);
     defer testing.allocator.free(text);
     try testing.expect(std.mem.indexOf(u8, text, "hir") != null);
     try testing.expect(std.mem.indexOf(u8, text, "hir             off (gate)") != null);
     try testing.expect(std.mem.indexOf(u8, text, "cfg_cse") != null);
     try testing.expect(std.mem.indexOf(u8, text, "cfg_cse         on") != null);
+    try testing.expect(std.mem.indexOf(u8, text, "seg             on (gate)") != null);
+    try testing.expect(std.mem.indexOf(u8, text, "cfg             on (gate)") != null);
+
+    // The listing is a two-level tree: gates at a two-space indent, their
+    // children at four spaces with no ` (gate)` marker. Pin the exact
+    // rendered lines so the indentation cannot regress.
+    try testing.expect(std.mem.indexOf(u8, text, "\n  hir             off (gate)\n") != null);
+    try testing.expect(std.mem.indexOf(u8, text, "\n  cfg             on (gate)\n") != null);
+    try testing.expect(std.mem.indexOf(u8, text, "\n    cfg_cse         on\n") != null);
+    try testing.expect(std.mem.indexOf(u8, text, "\n    seg_beta        on\n") != null);
+
+    // The library `OptimizeConfig{}` default ships every gate off; the
+    // listing reads the passed defaults, never the struct's own.
+    const lib_text = try optListText(testing.allocator, OptimizeConfig{});
+    defer testing.allocator.free(lib_text);
+    try testing.expect(std.mem.indexOf(u8, lib_text, "seg             off (gate)") != null);
+    try testing.expect(std.mem.indexOf(u8, lib_text, "cfg             off (gate)") != null);
 }
 
 test "parseArgs --emit-hir conflicts with the other emission modes" {

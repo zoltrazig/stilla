@@ -1898,6 +1898,215 @@ test "OptimizeConfig: disabling a cfg sub-pass changes the AIR (cfg_cse)" {
     }
 }
 
+// Each test below proves that one source-observable `cfg_*` sub-switch is
+// actually threaded into `cfg_optimize.Config` by `runOptimizer`
+// (frontend.zig): compiling the same fixture with the sub-switch on and off
+// must produce different AIR, and the difference must be the rewrite that
+// sub-pass performs. `cfg_dead_block`, `cfg_drop_elide`, and `cfg_jump_thread`
+// have no such test because no source program reaches them (drop elision only
+// ever sees unique drops; nothing produces the empty forwarding or unreachable
+// blocks the other two target); they are covered by the structural mapping in
+// `optimize_config.zig` instead. `cfg_copy_prop` is likewise not observable
+// through the whole pipeline: the on-the-fly copy propagation at each emit
+// site (cfg_lower_emit.zig) already folds every `copy` of a Copy value, and a
+// monomorphized program has no deferred-ownership `copy` left for the pass to
+// remove, so flipping it changes no source program's AIR.
+
+test "OptimizeConfig: cfg sub-switch cfg_tail_call changes the AIR" {
+    // `countdown` calls itself in tail position. With `cfg_tail_call` on the
+    // self call becomes a branch back to a loop header; with it off the
+    // recursive call survives and flows through the join phi.
+    const src = try helpers.probeSource("probes/cases", "opt_tail_call_self_recursive");
+    defer testing.allocator.free(src);
+    const texts = &.{.{ "app", src }};
+
+    var on = try compileWithOpt("app", texts, .{ .cfg = true });
+    defer on.deinit();
+    var off = try compileWithOpt("app", texts, .{ .cfg = true, .cfg_tail_call = false });
+    defer off.deinit();
+
+    const on_text = try irText(&on.program.?);
+    defer testing.allocator.free(on_text);
+    const off_text = try irText(&off.program.?);
+    defer testing.allocator.free(off_text);
+
+    try testing.expect(!std.mem.eql(u8, on_text, off_text));
+    try testing.expect(std.mem.count(u8, funcBody(on_text, "func @app.countdown"), "call @app.countdown") == 0);
+    try testing.expect(std.mem.count(u8, funcBody(off_text, "func @app.countdown"), "call @app.countdown") == 1);
+
+    for ([_][]const u8{ on_text, off_text }) |air| {
+        var p = cfg.Parser.init(testing.allocator);
+        defer p.deinit();
+        const reparsed = try p.parse(air);
+        const again = try irText(&reparsed);
+        defer testing.allocator.free(again);
+        try testing.expectEqualStrings(air, again);
+    }
+}
+
+test "OptimizeConfig: cfg sub-switch cfg_inline changes the AIR" {
+    // `fib` calls the non-recursive helper `go`. With `cfg_inline` on, `go`'s
+    // body (already a loop after tail-call elimination) is spliced into
+    // `fib`; with it off the call survives.
+    const src = try helpers.probeSource("examples", "fib_tail_call");
+    defer testing.allocator.free(src);
+    const texts = &.{.{ "app", src }};
+
+    var on = try compileWithOpt("app", texts, .{ .cfg = true });
+    defer on.deinit();
+    var off = try compileWithOpt("app", texts, .{ .cfg = true, .cfg_inline = false });
+    defer off.deinit();
+
+    const on_text = try irText(&on.program.?);
+    defer testing.allocator.free(on_text);
+    const off_text = try irText(&off.program.?);
+    defer testing.allocator.free(off_text);
+
+    try testing.expect(!std.mem.eql(u8, on_text, off_text));
+    try testing.expect(std.mem.count(u8, funcBody(on_text, "func @app.fib"), "call @app.go") == 0);
+    try testing.expect(std.mem.count(u8, funcBody(off_text, "func @app.fib"), "call @app.go") == 1);
+
+    for ([_][]const u8{ on_text, off_text }) |air| {
+        var p = cfg.Parser.init(testing.allocator);
+        defer p.deinit();
+        const reparsed = try p.parse(air);
+        const again = try irText(&reparsed);
+        defer testing.allocator.free(again);
+        try testing.expectEqualStrings(air, again);
+    }
+}
+
+test "OptimizeConfig: cfg sub-switch cfg_pre changes the AIR" {
+    // `joined` computes `x * y` in both arms of the conditional and again
+    // after the join, so the post-join copy is fully redundant. With `cfg_pre`
+    // on the post-join multiplication is merged away (two arm `mul`s remain);
+    // with it off the third `mul` survives in the join block.
+    const src = try helpers.probeSource("probes", "redundancy");
+    defer testing.allocator.free(src);
+    const texts = &.{.{ "app", src }};
+
+    var on = try compileWithOpt("app", texts, .{ .cfg = true });
+    defer on.deinit();
+    var off = try compileWithOpt("app", texts, .{ .cfg = true, .cfg_pre = false });
+    defer off.deinit();
+
+    const on_text = try irText(&on.program.?);
+    defer testing.allocator.free(on_text);
+    const off_text = try irText(&off.program.?);
+    defer testing.allocator.free(off_text);
+
+    try testing.expect(!std.mem.eql(u8, on_text, off_text));
+    try testing.expect(std.mem.count(u8, funcBody(on_text, "func @app.joined"), "mul %1, %2") == 2);
+    try testing.expect(std.mem.count(u8, funcBody(off_text, "func @app.joined"), "mul %1, %2") == 3);
+
+    for ([_][]const u8{ on_text, off_text }) |air| {
+        var p = cfg.Parser.init(testing.allocator);
+        defer p.deinit();
+        const reparsed = try p.parse(air);
+        const again = try irText(&reparsed);
+        defer testing.allocator.free(again);
+        try testing.expectEqualStrings(air, again);
+    }
+}
+
+test "OptimizeConfig: cfg sub-switch cfg_if_convert changes the AIR" {
+    // `sign`'s two arms produce constants. With `cfg_if_convert` on the
+    // branch/join diamond becomes a single `select`; with it off the branch
+    // and the join phi survive.
+    const src = try helpers.probeSource("probes/cases", "opt_if_conversion_select");
+    defer testing.allocator.free(src);
+    const texts = &.{.{ "app", src }};
+
+    var on = try compileWithOpt("app", texts, .{ .cfg = true });
+    defer on.deinit();
+    var off = try compileWithOpt("app", texts, .{ .cfg = true, .cfg_if_convert = false });
+    defer off.deinit();
+
+    const on_text = try irText(&on.program.?);
+    defer testing.allocator.free(on_text);
+    const off_text = try irText(&off.program.?);
+    defer testing.allocator.free(off_text);
+
+    try testing.expect(!std.mem.eql(u8, on_text, off_text));
+    try testing.expect(std.mem.count(u8, funcBody(on_text, "func @app.sign"), "select ") == 1);
+    try testing.expect(std.mem.count(u8, funcBody(on_text, "func @app.sign"), "phi ") == 0);
+    try testing.expect(std.mem.count(u8, funcBody(off_text, "func @app.sign"), "select ") == 0);
+    try testing.expect(std.mem.count(u8, funcBody(off_text, "func @app.sign"), "phi ") == 1);
+
+    for ([_][]const u8{ on_text, off_text }) |air| {
+        var p = cfg.Parser.init(testing.allocator);
+        defer p.deinit();
+        const reparsed = try p.parse(air);
+        const again = try irText(&reparsed);
+        defer testing.allocator.free(again);
+        try testing.expectEqualStrings(air, again);
+    }
+}
+
+test "OptimizeConfig: cfg sub-switch cfg_dead_instr changes the AIR" {
+    // `is_some` binds the match payload but returns a constant, so the
+    // `read_payload` is dead. With dead-instruction elimination on it is
+    // removed; with it off it survives.
+    const src = try helpers.probeSource("probes/cases", "cfgpass_dead_instr_match_payload");
+    defer testing.allocator.free(src);
+    const texts = &.{.{ "app", src }};
+
+    var on = try compileWithOpt("app", texts, .{ .cfg = true });
+    defer on.deinit();
+    var off = try compileWithOpt("app", texts, .{ .cfg = true, .cfg_dead_instr = false });
+    defer off.deinit();
+
+    const on_text = try irText(&on.program.?);
+    defer testing.allocator.free(on_text);
+    const off_text = try irText(&off.program.?);
+    defer testing.allocator.free(off_text);
+
+    try testing.expect(!std.mem.eql(u8, on_text, off_text));
+    try testing.expect(std.mem.count(u8, funcBody(on_text, "func @app.is_some"), "read_payload") == 0);
+    try testing.expect(std.mem.count(u8, funcBody(off_text, "func @app.is_some"), "read_payload") == 1);
+
+    for ([_][]const u8{ on_text, off_text }) |air| {
+        var p = cfg.Parser.init(testing.allocator);
+        defer p.deinit();
+        const reparsed = try p.parse(air);
+        const again = try irText(&reparsed);
+        defer testing.allocator.free(again);
+        try testing.expectEqualStrings(air, again);
+    }
+}
+
+test "OptimizeConfig: cfg sub-switch cfg_phi_simplify changes the AIR" {
+    // Inlining `choose` into `main` leaves a join phi with a single incoming
+    // edge. With `cfg_phi_simplify` on the phi folds away; with it off the
+    // single-incoming phi survives.
+    const src = try helpers.probeSource("probes", "branch");
+    defer testing.allocator.free(src);
+    const texts = &.{.{ "app", src }};
+
+    var on = try compileWithOpt("app", texts, .{ .cfg = true });
+    defer on.deinit();
+    var off = try compileWithOpt("app", texts, .{ .cfg = true, .cfg_phi_simplify = false });
+    defer off.deinit();
+
+    const on_text = try irText(&on.program.?);
+    defer testing.allocator.free(on_text);
+    const off_text = try irText(&off.program.?);
+    defer testing.allocator.free(off_text);
+
+    try testing.expect(!std.mem.eql(u8, on_text, off_text));
+    try testing.expect(std.mem.count(u8, funcBody(on_text, "func @app.main"), "phi ") == 0);
+    try testing.expect(std.mem.count(u8, funcBody(off_text, "func @app.main"), "phi ") == 1);
+
+    for ([_][]const u8{ on_text, off_text }) |air| {
+        var p = cfg.Parser.init(testing.allocator);
+        defer p.deinit();
+        const reparsed = try p.parse(air);
+        const again = try irText(&reparsed);
+        defer testing.allocator.free(again);
+        try testing.expectEqualStrings(air, again);
+    }
+}
+
 test "OptimizeConfig: every toggle is independently configurable" {
     // For every field of `OptimizeConfig`, start from all gates on and flip
     // that one field away from its library default; the pipeline must still

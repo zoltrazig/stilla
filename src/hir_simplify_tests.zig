@@ -25,6 +25,7 @@ const effects = @import("effects.zig");
 const support = @import("interpreter_test_support.zig");
 const artifact_bundle = @import("artifact_bundle.zig");
 const probe_corpus = @import("probe_corpus.zig");
+const frontend_support = @import("frontend_test_support.zig");
 const testing = std.testing;
 
 const CaptureAdapter = support.CaptureAdapter;
@@ -342,7 +343,11 @@ test "consumers: a many-operand ANF hoist reaches a true fixpoint (no round cap)
 // interpreter differential.
 // ---------------------------------------------------------------------------
 
-fn compileAir(spec: []const u8, text: []const u8, simplify: bool) ![]u8 {
+/// Compile through the whole pipeline with an explicit `OptimizeConfig` and
+/// return the pre-CFG-optimizer AIR. The library defaults leave `seg`/`cfg`
+/// off, so `.hir = true` in isolation runs exactly the effect-driven HIR
+/// consumers (with their sub-switches at their defaults).
+fn compileAirCfg(spec: []const u8, text: []const u8, optimize: frontend.OptimizeConfig) ![]u8 {
     var sources = moduleinfo.Sources{};
     var source_map = std.StringHashMapUnmanaged([]const u8).empty;
     defer source_map.deinit(testing.allocator);
@@ -352,12 +357,25 @@ fn compileAir(spec: []const u8, text: []const u8, simplify: bool) ![]u8 {
         .entry = spec,
         .sources = sources,
         .entry_fn = "main",
-        .optimize = .{ .hir = simplify },
+        .optimize = optimize,
     });
     defer comp.deinit();
     if (comp.program) |*p| return cfg.print(p, testing.allocator);
     if (comp.diag) |d| std.debug.print("simplify pipeline diag: {s}\n", .{d.message});
     return error.TestUnexpectedResult;
+}
+
+fn compileAir(spec: []const u8, text: []const u8, simplify: bool) ![]u8 {
+    return compileAirCfg(spec, text, .{ .hir = simplify });
+}
+
+/// Both AIR texts of a sub-switch differential must round-trip through the
+/// standalone parser, exactly as the whole-gate tests above require.
+fn expectAirRoundTrips(air: []const u8) !void {
+    var p = cfg.Parser.init(testing.allocator);
+    defer p.deinit();
+    const prog = try p.parse(air);
+    try testing.expect(prog.funcs.len > 0);
 }
 
 test "consumers: off by default; enabling rewrites the AIR; both round-trip" {
@@ -393,6 +411,91 @@ test "consumers: the never-suffix rule rewrites the AIR of probes/never_suffix.s
         const prog = try p.parse(air);
         try testing.expect(prog.funcs.len > 0);
     }
+}
+
+// ---------------------------------------------------------------------------
+// Per-sub-switch AIR differentials
+//
+// The full-gate test above proves the `hir` gate changes the AIR; these
+// prove each independently configurable sub-switch threaded through
+// `frontend.compile`'s reflective mapping reaches the emitted AIR on its
+// own. Each compiles the same fixture twice — all consumers on
+// (`.hir = true`) versus that one sub-switch off — and checks the change
+// is directional in a named function, not merely a byte difference.
+// ---------------------------------------------------------------------------
+
+test "hir simplify sub-switch dead_let changes the AIR" {
+    const src = try probe_corpus.read(testing.allocator, "probes", "consumers");
+    defer testing.allocator.free(src);
+    const on = try compileAirCfg("app", src, .{ .hir = true });
+    defer testing.allocator.free(on);
+    const off = try compileAirCfg("app", src, .{ .hir = true, .dead_let = false });
+    defer testing.allocator.free(off);
+    try testing.expect(!std.mem.eql(u8, on, off));
+
+    // On: `dead_scalar` folds to `x + 1` (the discardable `pure` call is
+    // gone) and `dead_unique` folds to `7`. Off: both discardable bindings
+    // survive, so the call and the `Quiet` construct/drop are emitted.
+    const on_scalar = frontend_support.funcBody(on, "func @app.dead_scalar");
+    const off_scalar = frontend_support.funcBody(off, "func @app.dead_scalar");
+    try testing.expect(std.mem.indexOf(u8, on_scalar, "call") == null);
+    try testing.expect(std.mem.indexOf(u8, off_scalar, "call @app.pure") != null);
+
+    const off_unique = frontend_support.funcBody(off, "func @app.dead_unique");
+    try testing.expect(std.mem.indexOf(u8, off_unique, "construct") != null);
+
+    try expectAirRoundTrips(on);
+    try expectAirRoundTrips(off);
+}
+
+test "hir simplify sub-switch anf changes the AIR" {
+    const src = try probe_corpus.read(testing.allocator, "probes", "consumers");
+    defer testing.allocator.free(src);
+    const on = try compileAirCfg("app", src, .{ .hir = true });
+    defer testing.allocator.free(on);
+    const off = try compileAirCfg("app", src, .{ .hir = true, .anf = false });
+    defer testing.allocator.free(off);
+    try testing.expect(!std.mem.eql(u8, on, off));
+
+    // `anf_ltr` is `pure(1) + builtin.hash(x)`. With ANF on, the
+    // non-floatable `builtin#hash` is materialized ahead of the pure call;
+    // with ANF off, the operands stay in source order (pure first).
+    const on_ltr = frontend_support.funcBody(on, "func @app.anf_ltr");
+    const off_ltr = frontend_support.funcBody(off, "func @app.anf_ltr");
+    const on_hash = std.mem.indexOf(u8, on_ltr, "builtin#hash") orelse return error.TestUnexpectedResult;
+    const on_pure = std.mem.indexOf(u8, on_ltr, "call @app.pure") orelse return error.TestUnexpectedResult;
+    try testing.expect(on_hash < on_pure);
+    const off_hash = std.mem.indexOf(u8, off_ltr, "builtin#hash") orelse return error.TestUnexpectedResult;
+    const off_pure = std.mem.indexOf(u8, off_ltr, "call @app.pure") orelse return error.TestUnexpectedResult;
+    try testing.expect(off_pure < off_hash);
+
+    try expectAirRoundTrips(on);
+    try expectAirRoundTrips(off);
+}
+
+test "hir simplify sub-switch never_suffix changes the AIR" {
+    // `never_suffix`'s `main` intentionally traps; this test only compiles
+    // and compares AIR, it never executes the program.
+    const src = try probe_corpus.read(testing.allocator, "probes", "never_suffix");
+    defer testing.allocator.free(src);
+    const on = try compileAirCfg("app", src, .{ .hir = true });
+    defer testing.allocator.free(on);
+    const off = try compileAirCfg("app", src, .{ .hir = true, .never_suffix = false });
+    defer testing.allocator.free(off);
+    try testing.expect(!std.mem.eql(u8, on, off));
+
+    // `after_statement` prints "a", calls the never-returning `boom`, then
+    // prints "dead-statement" and returns 1. With the rule on, the
+    // unreachable suffix after `boom` is deleted (the body ends in `trap`);
+    // with it off, the dead print and return survive.
+    const on_after = frontend_support.funcBody(on, "func @app.after_statement");
+    const off_after = frontend_support.funcBody(off, "func @app.after_statement");
+    try testing.expect(std.mem.indexOf(u8, on_after, "trap") != null);
+    try testing.expect(std.mem.indexOf(u8, on_after, "dead-statement") == null);
+    try testing.expect(std.mem.indexOf(u8, off_after, "dead-statement") != null);
+
+    try expectAirRoundTrips(on);
+    try expectAirRoundTrips(off);
 }
 
 fn capture(text: []const u8, simplify: bool) ![]u8 {

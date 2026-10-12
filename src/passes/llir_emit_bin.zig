@@ -12,7 +12,7 @@
 //! Format (all little-endian, fixed-width, no padding, no pointers):
 //! ```text
 //! u32 magic   = 0x52494c4c ("LLIR" as little-endian bytes)
-//! u32 version = 17
+//! u32 version = 16
 //! module symbol {start, len}: u32, u32  (self_symbol's byte range)
 //! entry member {start, len}: u32, u32   (entry_member's byte range)
 //! {tables.len} × u32 count, one per table, in the LlirProgram field order below
@@ -112,13 +112,13 @@ pub const magic: u32 = 0x52494c4c;
 /// imported-hook field; `HostTypeDesc.host_module` becomes a symbol
 /// string.
 /// Version 16: the call header grows to three cells (`saved_fn`) so
-/// `window_count` semantics become `3 + A`.
-/// Version 17: the C-type block grows the 64-bit integer cast matrix —
-/// the 22 `cvt.*` opcodes for `i64`/`u64` sources and targets (C
-/// selectors 42–63, previously reserved) — so every C-type selector is
-/// assigned and the logical opcode set is 273. No table or
-/// header row changes; only the instruction encoding space grows.
-pub const version: u32 = 17;
+/// `window_count` semantics become `3 + A`; the C-type block grows the
+/// 64-bit integer cast matrix — the 22 `cvt.*` opcodes for `i64`/`u64`
+/// sources and targets (C selectors 42–63, previously reserved) — so
+/// every C-type selector is assigned and the logical opcode set is 273.
+/// No table or header row changes; only the instruction encoding space
+/// grows.
+pub const version: u32 = 16;
 
 /// The scalar header fields serialized inside the table block (count 1
 /// + one value word each) — listed by name because `TypeId == u32`.
