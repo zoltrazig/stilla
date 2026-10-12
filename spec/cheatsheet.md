@@ -6,9 +6,9 @@
 ## Pipeline at a glance
 
 ```text
-Stilla .st → Phase 1 module graph → Phase 2 type check & ownership
-   → Phase 3 CFG lowering → AIR (validated SSA CFG)
-   → mid-level optimizer (Pass 8) → drop lowering
+Stilla .st → module graph → checker (type check & ownership)
+   → CFG lowering → AIR (validated SSA CFG)
+   → mid-level optimizer (cfg_optimize) → drop lowering
    → LLIR builder + allocator + fusion + validation → 4-byte LLIR image
    → runtime / VM
 ```

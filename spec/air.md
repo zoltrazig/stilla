@@ -38,7 +38,7 @@ The AIR must carry, without reference to source text:
 - the **destruction schedule** — when and in what order values are destroyed (per the Stilla Runtime Specification);
 - **module storage** — module members as a statically known member table: runtime constants occupy laid-out storage slots, while function, module-valued, and host-binding members are static references.
 
-The AIR is produced by the frontend (Phase 3 of the pipeline described in [frontend.md](../docs/frontend.md)) and consumed by the runtime and every downstream analysis or backend. It is the **runtime boundary**: consumers receive the AIR alone, so its data model — the type environment (§9.1), the module member tables (§9.6), the syscall signatures (§9.3) — must be interpretable without reference to source text or the source module graph. The AIR is **not** an optimizer IR, a register-based IR, or target code: it fixes no registers, frame layouts, encodings, or ABI, so a consumer may interpret it directly, lower it further, or compile it. The frontend emits a direct, semantically faithful CFG; all optimization is performed by a later consumer.
+The AIR is produced by the frontend (the CFG-lowering stage of the pipeline described in [frontend.md](../docs/frontend.md)) and consumed by the runtime and every downstream analysis or backend. It is the **runtime boundary**: consumers receive the AIR alone, so its data model — the type environment (§9.1), the module member tables (§9.6), the syscall signatures (§9.3) — must be interpretable without reference to source text or the source module graph. The AIR is **not** an optimizer IR, a register-based IR, or target code: it fixes no registers, frame layouts, encodings, or ABI, so a consumer may interpret it directly, lower it further, or compile it. The frontend emits a direct, semantically faithful CFG; all optimization is performed by a later consumer.
 
 ## 1.2 Conventions
 
@@ -446,7 +446,7 @@ syscallTarget ::= module "#" member_name   -- text form
 
 The target carries the host declaration's `(module, member)` identity.
 Argument evaluation is identical to `call` (left to right, once);
-`move`/`borrow` modes apply; generic calls were specialized in phase 2, so the
+`move`/`borrow` modes apply; generic calls were specialized by the checker, so the
 syscall carries a concrete signature. Intrinsic recognition occurred earlier,
 while lowering the annotated source declaration: an intrinsic use whose
 expansion is host-backed becomes an ordinary, genuine host-binding
@@ -560,7 +560,7 @@ PhiIn        ::= { value: Value, pred: BasicBlock }
 Select       ::= { cond: Value, a: Value, b: Value } -- the fixed ternary: %a when %c, else %b (§5.2)
 ```
 
-`SysCall.sig` is the host binding's specialized concrete signature (parameter modes and types, result type): generic host bindings were specialized in phase 2, so the call site carries the resolved signature; `sig.ret` is `never` for panicking declarations. It mirrors `call`'s callee signature (direct callee: the function's params/ret; value callee: the function type). The signature is null only for text-form-parsed AIR — the text form carries no parameter modes (§10) — and the validator skips signature checks for null (the frontend always writes it).
+`SysCall.sig` is the host binding's specialized concrete signature (parameter modes and types, result type): generic host bindings were specialized by the checker, so the call site carries the resolved signature; `sig.ret` is `never` for panicking declarations. It mirrors `call`'s callee signature (direct callee: the function's params/ret; value callee: the function type). The signature is null only for text-form-parsed AIR — the text form carries no parameter modes (§10) — and the validator skips signature checks for null (the frontend always writes it).
 
 ## 9.4 The op schema
 
@@ -687,7 +687,7 @@ This section maps **source → AIR** constructs. The frontend walks the annotate
 | module member reference | `load_member` (member lookup: constant members read their slot, function members yield a `fn_ref`, module-valued members yield the module value — chained for library paths) |
 | nominal struct / union / opaque types | one `TypeDecl` in the type environment per type in use (including monomorphic generic specializations), translated from the module's type members into AIR-native types; an opaque type becomes `opaque(OpaqueDecl)` with the declared ownership and the host identity of its monomorphic instantiation |
 | binary arithmetic / comparison / bitwise | one `add`…`ge`, `bitand`/`bitor`/`bitxor` |
-| branchless select | `select %c, %a, %b` — the condition, then, and else values; produced only by the optimizer's if-conversion (frontend.md Pass 8) — source lowering never emits it (a conditional expression lowers to a `br` diamond with a join phi) |
+| branchless select | `select %c, %a, %b` — the condition, then, and else values; produced only by the optimizer's if-conversion (frontend.md) — source lowering never emits it (a conditional expression lowers to a `br` diamond with a join phi) |
 | `!` | `not` |
 | `and` / `or` | `br` diamond, join phi |
 | `a as T` | `num_cast` (the [Core Types & Ownership Specification](Stilla%20Core%20Types%20%26%20Ownership%20Specification.md) cast set) or `any_unpack_copy` / `any_unpack_move` |

@@ -18,9 +18,9 @@
 ```mermaid
 flowchart TD
     subgraph Compile["Frontend · compile time"]
-        A["Stilla source .st"] --> B["Phase 1 · Module graph"]
-        B --> C["Phase 2 · Type check & ownership"]
-        C --> D["Phase 3 · CFG lowering + intrinsic expansion"]
+        A["Stilla source .st"] --> B["Module graph"]
+        B --> C["Type check & ownership"]
+        C --> D["CFG lowering + intrinsic expansion"]
     end
 
     subgraph Air["AIR · canonical SSA CFG"]
@@ -29,7 +29,7 @@ flowchart TD
     end
 
     subgraph Opt["Mid-level optimizer"]
-        F --> G["Pass 8 · cfg_optimize"]
+        F --> G["cfg_optimize"]
         G --> H["cfg_lower_drop"]
         H --> I["cfg_validate"]
     end
@@ -47,13 +47,13 @@ flowchart TD
 
 | Document | Defines | Pipeline position |
 | --- | --- | --- |
-| [Stilla Core Language Specification](Stilla%20Core%20Language%20Specification.md) | Language structure: files & modules, the `builtin` module, bindings, module constants, functions, control flow | Phases 1–2 (checks) and the source contract |
-| [Stilla Core Types & Ownership Specification](Stilla%20Core%20Types%20%26%20Ownership%20Specification.md) | Values and ownership: structs, construction, destruction, ownership, algebraic data types, generics, patterns, member access, operators | Phase 2 (type & ownership checks) |
-| [Stilla Core Static Semantics](Stilla%20Core%20Static%20Semantics.md) | The normative formal static semantics | Phase 2 (static validation) |
+| [Stilla Core Language Specification](Stilla%20Core%20Language%20Specification.md) | Language structure: files & modules, the `builtin` module, bindings, module constants, functions, control flow | Module graph and checker (checks) and the source contract |
+| [Stilla Core Types & Ownership Specification](Stilla%20Core%20Types%20%26%20Ownership%20Specification.md) | Values and ownership: structs, construction, destruction, ownership, algebraic data types, generics, patterns, member access, operators | Checker (type & ownership checks) |
+| [Stilla Core Static Semantics](Stilla%20Core%20Static%20Semantics.md) | The normative formal static semantics | Checker (static validation) |
 | [Stilla Core Grammar Draft.abnf](Stilla%20Core%20Grammar%20Draft.abnf) | Normative lexical and syntactic grammar (ABNF), defined down to the statement level; expressions are specified in the companion Expression Binding Power Table | lexer / parser |
 | [Stilla Expression Binding Power Table](Stilla%20Expression%20Binding%20Power%20Table.md) | Expression grammar in Pratt-parser form: binding powers, associativity, prefix/postfix/primary forms, and the expression-level parser decisions | lexer / parser (expressions) |
 | [Stilla Runtime Specification](Stilla%20Runtime%20Specification.md) | Execution model, module instantiation, evaluation order, cleanup, panic, host contract | Runtime / VM |
-| [Stilla AIR Specification](air.md) | The canonical SSA control-flow-graph IR: values, instructions, ownership, module storage, text form | Phase 3 output |
+| [Stilla AIR Specification](air.md) | The canonical SSA control-flow-graph IR: values, instructions, ownership, module storage, text form | CFG lowering output |
 | [Stilla LLIR Specification](Stilla%20LLIR%20Specification.md) | The fixed-width LLIR projection: program image, registers, frames, call/return contract | AIR → LLIR |
 | [Stilla LLIR Instruction Set](Stilla%20LLIR%20Instruction%20Set.md) | The canonical instruction set: 4-byte R/B/I/C/E/U encoding, typed opcode tables, operand and special-register rules, descriptor records | LLIR encoding |
 | [Stilla Standard Library](Stilla%20Standard%20Library.md) | The importable standard-library modules and the opaque-collection contract | Runtime modules |

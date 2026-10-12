@@ -1,12 +1,12 @@
 //! Frontend pipeline driver — frontend.md §1–§3, cfg-lowering.md.
 //!
 //! `compile` runs the whole frontend in one call: load and parse the
-//! transitive closure of modules reachable from the entry point (phase 1,
-//! `moduleinfo`), build the module graph with module-level annotation,
-//! annotate and check every module (phase 2, `checker`), and lower every
-//! module to the AIR (phase 3, `lower`). The output is a
-//! `Compilation`: an arena owning everything, the phase-1 `ModuleGraph`,
-//! and the phase-3 `cfg.IrProgram`.
+//! transitive closure of modules reachable from the entry point
+//! (`moduleinfo`), build the module graph with module-level annotation,
+//! annotate and check every module (`checker`), and lower every
+//! module to the AIR (`lower`). The output is a
+//! `Compilation`: an arena owning everything, the `ModuleGraph`,
+//! and the `cfg.IrProgram`.
 //!
 //! Diagnostics follow the first-error-wins convention: on failure the
 //! error is `error.Diagnostic` and `Compilation.diag` holds the span and
@@ -118,10 +118,10 @@ pub const Options = struct {
     optimize: OptimizeConfig = .{},
 };
 
-/// The frontend's output: the arena, the phase-1 graph, and the phase-3
+/// The frontend's output: the arena, the module graph, and the
 /// AIR. On failure (`error.Diagnostic`) `graph`/`program` are null (or
-/// `graph` is set when the failure is phase 2/3) and `diags` holds every
-/// diagnostic the failing phase collected, in order; `diag` names the
+/// `graph` is set when the failure is in the checker or lowering) and `diags` holds every
+/// diagnostic the failing stage collected, in order; `diag` names the
 /// first for callers that only want one.
 pub const Compilation = struct {
     /// The compile arena, owned by this compilation. The struct lives
@@ -137,13 +137,13 @@ pub const Compilation = struct {
     /// this compilation; null on a failed compile. The CLI's `--emit-hir`
     /// dump reads it through `hir.BuiltProgram.serCtx` + `hir.print`.
     hir: ?*hir.BuiltProgram = null,
-    /// Every diagnostic the failing phase collected, in source order
+    /// Every diagnostic the failing stage collected, in source order
     /// (arena-owned; present even when `graph` is null).
     diags: []const moduleinfo.Diag = &.{},
     /// The first diagnostic (a view of `diags[0]`), for callers that
     /// only want one.
     diag: ?moduleinfo.Diag = null,
-    /// Every source loaded during phase 1, in creation order. Present
+    /// Every source loaded during module-graph loading, in creation order. Present
     /// even when `graph` is null (a parse failure): diagnostics can
     /// resolve their span against it for a file:line:col report.
     sources: []const *const ast.Source = &.{},
@@ -160,8 +160,8 @@ pub const Compilation = struct {
 };
 
 /// Build a failed `Compilation`: the diagnostic list (arena-owned — the
-/// phases allocated into this compile's arena, so their slices stay
-/// valid), the graph (when the failure is phase 2/3), and the loaded
+/// stages allocate into this compile's arena, so their slices stay
+/// valid), the graph (when the failure is in the checker or lowering), and the loaded
 /// sources for span resolution. `diag` names the first diagnostic.
 fn failed(
     arena: *std.heap.ArenaAllocator,
@@ -241,13 +241,13 @@ pub fn compile(allocator: std.mem.Allocator, options: Options) CompileError!Comp
     // and validated once, here, then read-only for the rest of the
     // compile. Every consumer below (effect analysis, the effect consumers,
     // SEG, each re-validation) is handed this same instance, so no two
-    // phases can disagree about the mode set or the resource order.
+    // stages can disagree about the mode set or the resource order.
     const engine = effects.Engine.init(arena_alloc, options.provider, options.resources) catch |err| return engineError(err);
 
     // The effect-environment fingerprint (docs/effects.md §13): the
     // semantic half of a module cache key, the program text being the
     // other half. The parse cache is independent of it, so cached parses
-    // stay valid across a change; stamping it is what lets a phase-2/3
+    // stay valid across a change; stamping it is what lets a checker/lowering
     // cache invalidate on an environment change instead of reusing a
     // conclusion derived under a different contract. The lattice
     // descriptor is part of that environment (docs/effects.md §5.7).
@@ -457,7 +457,7 @@ pub fn compile(allocator: std.mem.Allocator, options: Options) CompileError!Comp
         // reverse-declaration-order field drops), tuples, boxes, and
         // unions — so the only drops reaching the runtime are the ones it
         // must dispatch dynamically (opaque host types, `hostdata`,
-        // `list[T]`, `any`). It needs the phase-1 graph for field/variant
+        // `list[T]`, `any`). It needs the module graph for field/variant
         // types and ownership; the result is re-validated like any other
         // rewrite.
         lower.lowerDrop(&program, graph, arena_alloc) catch |err| switch (err) {
