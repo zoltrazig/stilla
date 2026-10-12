@@ -4,20 +4,45 @@ on:
   push:
   pull_request:
 
+# Supersede in-flight runs for the same ref, so a new push cancels a stale one.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+# The workflow only reads the repository.
+permissions:
+  contents: read
+
 jobs:
   build-and-test:
     runs-on: ubuntu-latest
+    # Bound the whole job so a compiler or generator hang cannot stall a run.
+    timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        # Pinned to the v4.2.2 tag commit.
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
       - name: Setup Zig Compiler
-        # You may pin to the exact commit or the version.
-        # uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29
-        uses: mlugg/setup-zig@v2.2.1
+        # Pinned to the v2.2.1 tag commit.
+        uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
         with:
-          # Version of the Zig compiler, e.g. "0.13.0" or "0.13.0-dev.351+64ef45eb0". "master" uses the latest nightly build. "latest" uses the latest tagged release. Leave empty to use minimum_zig_version from build.zig.zon, with a fallback to "latest".
+          # Must match `minimum_zig_version` in build.zig.zon.
           version: "0.16.0"
-      - run: zig build -fincremental test -Doptimize=ReleaseSafe
+      - name: Cache Zig artifacts
+        # The global cache is content-addressed by compiler version and
+        # flags, so a key over the OS and build.zig.zon (which carries
+        # minimum_zig_version) is stable across runs of the same toolchain.
+        uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
+        with:
+          path: ~/.cache/zig
+          key: zig-${{ runner.os }}-${{ hashFiles('build.zig.zon') }}
+          restore-keys: |
+            zig-${{ runner.os }}-
+      - name: Check formatting
+        run: zig fmt --check src/
+      - name: Test (ReleaseSafe)
+        run: zig build -fincremental test -Doptimize=ReleaseSafe
+      - name: Build toolchain
+        run: zig build -fincremental -Doptimize=ReleaseSafe
       - name: stsmith sweep
-        run: |
-          zig build -fincremental -Doptimize=ReleaseSafe
-          python3 tools/stsmith/sweep.py
+        run: python3 tools/stsmith/sweep.py
