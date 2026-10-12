@@ -11,6 +11,36 @@ pub fn isMulResult(v: *const cfg.Value) bool {
     return std.meta.activeTag(d.op) == .mul;
 }
 
+/// True when `bin` is a multiply-accumulate shape: one operand is a
+/// `mul` result and the other is the accumulator. The integer `add`
+/// commutes, so the product may be either operand; the f32 forms never
+/// reorder. The caller stamps the exact operand roles and the
+/// single-use / adjacency preconditions.
+pub fn isMaddAccumulator(bin: cfg.Bin) bool {
+    return isMulResult(bin.b) or isMulResult(bin.a);
+}
+
+/// True when `bin` is a multiply-subtract shape: the second operand is
+/// a `mul` result (`dst = dst - b*c`) and the first is the accumulator.
+/// Subtraction does not commute, so a `sub` whose first operand is the
+/// product (`b*c - a`) is not an msub shape.
+pub fn isMsubAccumulator(bin: cfg.Bin) bool {
+    return isMulResult(bin.b);
+}
+
+/// The coarse shape test shared by allocation and fusion: true when
+/// `op` defines the accumulator of a fused multiply-accumulate or
+/// multiply-subtract. Both passes must agree on which result cells may
+/// be coalesced with the accumulator, so this delegates to the
+/// per-operator shape tests above.
+pub fn isFmaAccumulator(op: cfg.Op) bool {
+    return switch (op) {
+        .add => |bin| isMaddAccumulator(bin),
+        .sub => |bin| isMsubAccumulator(bin),
+        else => false,
+    };
+}
+
 /// Whether the value's defining op reads all inputs before
 /// writing its single destination — permitted for in-place slot
 /// assignment (the def instruction is the occupant's last use, so it

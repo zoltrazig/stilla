@@ -752,7 +752,7 @@ Set](Stilla%20LLIR%20Instruction%20Set.md). This specification references
 it for the instruction-level definitions: the encoding, the operand and
 special-register rules, the format classes (R/B/I/C/E/U), the opcode
 tables, the descriptor records, and the side-table records. The complete
-set is **273 logical opcodes**: R-type 116, B-type 20, I-type 31, C-type
+set is **269 logical opcodes**: R-type 112, B-type 20, I-type 31, C-type
 64, E-type 38, U-type 4 (the generic `take` sits at the end of the E-type,
 the I-type keeps selector 10 reserved so the `slot_*` encodings are
 unchanged, and the C-type carries the full 64-bit integer cast matrix, §7).
@@ -919,13 +919,16 @@ canonical bytes; little-endian word assembly happens only inside
 representation of Zig `extern struct`s or any Zig ABI layout directly.
 
 **The version number is the format boundary: the binary format version is
-16**, and every earlier image is rejected on the version alone. The
-instruction stream is the Instruction Set's v10 encoding: the bit layouts,
+17**, and every earlier image is rejected on the version alone. Version 17
+retired four R-type opcodes and remapped the following sixteen down by
+four (R-type wire codes 100–115 become 96–111; the logical table is now
+269 opcodes). The instruction stream is the Instruction Set's v10 encoding:
+the bit layouts,
 the typed opcode assignment, the register model (`frame_count_max` = 109,
 the fast bank, the specials), the immediate ranges, and the call
 convention of §4–§5; any change to the opcode assignment, the ranges, or
 any table's row layout is a new version. The built-in reader rejects any
-version other than 16 on its magic/version alone, **before the header
+version other than 17 on its magic/version alone, **before the header
 symbols or a single table count is decoded** — and no two readers
 disagree about a version's table set.
 

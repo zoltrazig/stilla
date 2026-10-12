@@ -14,8 +14,10 @@ The detailed probes cover the source-reachable operation/type matrix:
   float64 (the five-type subset of the full 7-type / 42-cast family); the
   64-bit integer casts (int64/uint64 sources and targets) are covered by the
   `probes/cases/wide_*` fixtures and `lowering_integer_family_casts.st`
-- `fusion.st`: multiply-add fusion for every numeric representation and integer
-  immediate forms that are reachable from source
+- `fusion.st`: multiply-add fusion for every numeric representation
+  (register `madd` for `a + b*c`, including the literal-multiplier form
+  read from the constant's slot)
+- `fusion_sub.st`: `msub` fusion: `a - b*c` for every numeric representation
 - `aggregates.st`, `union_match.st`, and `list_match.st`: construction and projection
 - `patterns.st`: literal, exact-list, rest-list, shorthand struct, and multi-payload
   union patterns
@@ -240,14 +242,15 @@ inlining a whole Stilla program in a test body.
   `unpack_struct`, and `unpack_tuple` and the `tail` view.
 
 Some LLIR instructions have no one-to-one source construct. `spill_take`,
-`spill_put`, argument-window instructions, `jal`/`jalr`/`jr`,
-`auipc`, `lui`, long-branch inversions, and replacement/release variants are
-selected by register allocation, calling convention, relaxation, or ownership
-normalization. `msub` is currently present in the LLIR ISA but is not selected
-by the source-to-LLIR fusion pass. The control-flow and call probes exercise
-some backend selectors, but exact opcode coverage belongs in the synthetic LLIR
-tests because allocator and optimizer choices may change without changing
-source semantics.
+`spill_put`, argument-window instructions, `jal`/`jalr`, long-branch
+inversions, and replacement/release variants are selected by register
+allocation, calling convention, relaxation, or ownership normalization.
+`auipc` and `lui` have no source-level producer at all and are exercised
+only by synthetic LLIR tests. `jr` has no source-level lowering — the
+language has no computed jump — and exists for runtime/backend dispatch
+only. The control-flow and call probes exercise some backend selectors, but
+exact opcode coverage belongs in the synthetic LLIR tests because allocator
+and optimizer choices may change without changing source semantics.
 
 Compile one probe to CFG AIR:
 

@@ -31,7 +31,7 @@ const blockIdx = helpers.blockIdx;
 const findFunc = helpers.findFunc;
 
 /// The v9 immediate families: the integer-4
-/// `addi`/`subi`/`muli`/`divi`/`remi`/`maddi`, `shli`/`shri`,
+/// `addi`/`subi`/`muli`/`divi`/`remi`, `shli`/`shri`,
 /// `andi`/`ori`/`xori` (mask semantics), and C-Type comparisons
 /// `slti`/`sgti`/`seqi`/`snei`. The rep-suffixed names make
 /// the families non-contiguous, so the check is on the name prefix.
@@ -39,7 +39,7 @@ fn isImmediateFamily(op: llir.Opcode) bool {
     const name = llir.opInfo(op).name;
     const dot = std.mem.indexOfScalar(u8, name, '.');
     const base = if (dot) |d| name[0..d] else name;
-    const fams = [_][]const u8{ "addi", "subi", "muli", "divi", "remi", "maddi", "shli", "shri", "andi", "ori", "xori", "slti", "sltiu", "sgti", "sgtiu", "seqi", "snei" };
+    const fams = [_][]const u8{ "addi", "subi", "muli", "divi", "remi", "shli", "shri", "andi", "ori", "xori", "slti", "sltiu", "sgti", "sgtiu", "seqi", "snei" };
     for (fams) |fam| {
         if (std.mem.eql(u8, base, fam)) return true;
     }
@@ -850,7 +850,7 @@ test "LLIR lowering: corpus fusion metric" {
     try testing.expect(fused_any);
 }
 
-test "LLIR lowering: compiled mul+add folds to madd/maddi, literal list read to read_indexi" {
+test "LLIR lowering: compiled mul+add folds to register madd, literal list read to read_indexi" {
     const src = try helpers.probeSource("probes/cases", "imm_madd_and_list_read");
     defer testing.allocator.free(src);
     var c = try compileText("app", &.{.{ "app", src }});
@@ -862,11 +862,11 @@ test "LLIR lowering: compiled mul+add folds to madd/maddi, literal list read to 
     var b = cfg_lower_llir.Builder.init(arena.allocator(), program);
     const image = try b.lowerLlir();
 
-    // The four fused sites, each 8 bytes vs its expansion; the
-    // constants and muls are gone, so the image shrank.
+    // The fused sites stand in for their mul+add expansions; the muls
+    // are gone, so the image shrank. The `scale` constant survives
+    // (the fused record reads its slot).
     try testing.expect(b.last_fusion.after_instrs < b.last_fusion.before_instrs);
     var n_madd: usize = 0;
-    var n_maddi: usize = 0;
     var n_f32_madd: usize = 0;
     var n_read_indexi: usize = 0;
     var n_mul: usize = 0;
@@ -881,18 +881,28 @@ test "LLIR lowering: compiled mul+add folds to madd/maddi, literal list read to 
             switch (d.op) {
                 .madd_i32 => {
                     n_madd += 1;
-                    // `x * y + c`: accumulator = c's slot (r2), product
-                    // operands x/y in their original order (r0, r1).
-                    try testing.expectEqual(llir.frameReg(2), d.a);
-                    try testing.expectEqual(llir.frameReg(0), d.b);
-                    try testing.expectEqual(llir.frameReg(1), d.c);
-                },
-                .maddi_i32 => {
-                    n_maddi += 1;
-                    // `x * 2 + c`: accumulator = c's slot (r1), imm = 2.
-                    try testing.expectEqual(llir.frameReg(1), d.a);
-                    try testing.expectEqual(llir.frameReg(0), d.b);
-                    try testing.expectEqual(@as(u32, 2), d.c);
+                    if (std.mem.eql(u8, f.name.text, "app.scale")) {
+                        // `x * 2 + c` fuses to a register `madd` reading
+                        // the constant's slot (order preserved: x, const),
+                        // so the const record survives instead of folding
+                        // to an immediate.
+                        try testing.expectEqual(b.slotOf(f.values[1]), d.a);
+                        try testing.expectEqual(b.slotOf(f.values[0]), d.b);
+                        try testing.expectEqual(b.slotOf(f.values[2]), d.c);
+                        try testing.expect(d.c >= llir.frame_base);
+                        var const_ins: ?*const cfg.Instr = null;
+                        for (f.blocks) |blk| for (blk.instrs) |ins| {
+                            if (std.meta.activeTag(ins.op) == .const_ and ins.results[0] == f.values[2]) const_ins = ins;
+                        };
+                        const ci = const_ins orelse return error.TestUnexpectedResult;
+                        try testing.expect(!b.isFusedConst(ci));
+                    } else {
+                        // `x * y + c`: accumulator = c's slot (r2), product
+                        // operands x/y in their original order (r0, r1).
+                        try testing.expectEqual(llir.frameReg(2), d.a);
+                        try testing.expectEqual(llir.frameReg(0), d.b);
+                        try testing.expectEqual(llir.frameReg(1), d.c);
+                    }
                 },
                 .madd_f32 => {
                     n_f32_madd += 1;
@@ -912,8 +922,7 @@ test "LLIR lowering: compiled mul+add folds to madd/maddi, literal list read to 
             }
         }
     }
-    try testing.expectEqual(@as(usize, 2), n_madd);
-    try testing.expectEqual(@as(usize, 1), n_maddi);
+    try testing.expectEqual(@as(usize, 3), n_madd);
     try testing.expectEqual(@as(usize, 1), n_f32_madd);
     try testing.expectEqual(@as(usize, 1), n_read_indexi);
     try testing.expectEqual(@as(usize, 0), n_mul);
@@ -953,6 +962,85 @@ test "LLIR lowering: compiled mul+add folds to madd/maddi, literal list read to 
         }
     }
     try testing.expect(checked_call_arg);
+}
+
+test "LLIR lowering: compiled mul+sub folds to register msub, shape and negative cases" {
+    const src = try helpers.probeSource("probes/cases", "imm_msub");
+    defer testing.allocator.free(src);
+    var c = try compileText("app", &.{.{ "app", src }});
+    defer c.deinit();
+    const program = &c.program.?;
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var b = cfg_lower_llir.Builder.init(arena.allocator(), program);
+    const image = try b.lowerLlir();
+
+    // Every fused `a - b*c` pair loses its `mul` record, so the image
+    // shrank; the negative sites keep their `mul` + `sub`.
+    try testing.expect(b.last_fusion.after_instrs < b.last_fusion.before_instrs);
+
+    var n_msub_i32: usize = 0;
+    var n_msub_u32: usize = 0;
+    var n_msub_i64: usize = 0;
+    var n_msub_u64: usize = 0;
+    var n_msub_f32: usize = 0;
+    var n_msub_f64: usize = 0;
+    var n_mul_i32: usize = 0;
+    var n_sub_i32: usize = 0;
+    var n_mul_f32: usize = 0;
+    var n_sub_f32: usize = 0;
+    for (program.funcs) |f| {
+        const fid = b.func_ids.get(f) orelse continue;
+        const fd = image.functions[fid];
+        const slots = fd.f_count + fd.x_count + fd.window_count;
+        for (image.instructions[fd.code_start..fd.code_end]) |rec| {
+            try testing.expectEqual(@as(?llir.Issue, null), llir.checkInstr(rec, slots));
+            const d = llir.decode(rec).?;
+            switch (d.op) {
+                .msub_i32, .msub_u32, .msub_i64, .msub_u64, .msub_f32, .msub_f64 => {
+                    switch (d.op) {
+                        .msub_i32 => n_msub_i32 += 1,
+                        .msub_u32 => n_msub_u32 += 1,
+                        .msub_i64 => n_msub_i64 += 1,
+                        .msub_u64 => n_msub_u64 += 1,
+                        .msub_f32 => n_msub_f32 += 1,
+                        .msub_f64 => n_msub_f64 += 1,
+                        else => unreachable,
+                    }
+                    // The fused `dst - b*c` reads the accumulator's slot
+                    // (its `a` operand, read-modify-write) and the mul
+                    // operands from their original slots, in order — the
+                    // allocator coalesced the sub result into the
+                    // accumulator cell.
+                    try testing.expectEqual(b.slotOf(f.values[0]), d.a); // accumulator
+                    try testing.expectEqual(b.slotOf(f.values[1]), d.b); // mul's a
+                    try testing.expectEqual(b.slotOf(f.values[2]), d.c); // mul's b
+                },
+                .mul_i32 => n_mul_i32 += 1,
+                .sub_i32 => n_sub_i32 += 1,
+                .mul_f32 => n_mul_f32 += 1,
+                .sub_f32 => n_sub_f32 += 1,
+                else => {},
+            }
+        }
+    }
+    // One fused site per rep: `a - b*c`.
+    try testing.expectEqual(@as(usize, 1), n_msub_i32);
+    try testing.expectEqual(@as(usize, 1), n_msub_u32);
+    try testing.expectEqual(@as(usize, 1), n_msub_i64);
+    try testing.expectEqual(@as(usize, 1), n_msub_u64);
+    try testing.expectEqual(@as(usize, 1), n_msub_f32);
+    try testing.expectEqual(@as(usize, 1), n_msub_f64);
+    // The negatives stay a `mul` + `sub`: `rev_i32` puts the product on
+    // the left (subtraction does not commute) and `multi_use` reads its
+    // product twice (single-use precondition fails). Two i32 muls and
+    // two i32 subs survive, none fused.
+    try testing.expectEqual(@as(usize, 2), n_mul_i32);
+    try testing.expectEqual(@as(usize, 2), n_sub_i32);
+    // The fused float site leaves no `mul.f32`/`sub.f32` behind.
+    try testing.expectEqual(@as(usize, 0), n_mul_f32);
+    try testing.expectEqual(@as(usize, 0), n_sub_f32);
 }
 
 test "LLIR lowering: madd semantics — preconditions, f32 rules, slot rewrite, read_indexi" {
@@ -1024,7 +1112,6 @@ test "LLIR lowering: madd semantics — preconditions, f32 rules, slot rewrite, 
     const image = try b.lowerLlir();
 
     var n_i32_madd: usize = 0;
-    var n_i32_maddi: usize = 0;
     var n_f32_madd: usize = 0;
     var n_f32_mul: usize = 0;
     var n_f32_add: usize = 0;
@@ -1041,18 +1128,21 @@ test "LLIR lowering: madd semantics — preconditions, f32 rules, slot rewrite, 
             switch (d.op) {
                 .madd_i32 => {
                     n_i32_madd += 1;
-                    // @f: `add %2, %3` → dst = the accumulator (r2),
-                    // product operands in order (r0, r1).
-                    try testing.expectEqual(b.slotOf(f.values[2]), d.a);
-                    try testing.expectEqual(b.slotOf(f.values[0]), d.b);
-                    try testing.expectEqual(b.slotOf(f.values[1]), d.c);
-                },
-                .maddi_i32 => {
-                    n_i32_maddi += 1;
-                    // @g: `mul %0, 3` + `add %1, %m`.
-                    try testing.expectEqual(b.slotOf(f.values[1]), d.a);
-                    try testing.expectEqual(b.slotOf(f.values[0]), d.b);
-                    try testing.expectEqual(@as(u32, 3), d.c);
+                    if (std.mem.eql(u8, f.name.text, "g")) {
+                        // @g: `mul %0, 3` + `add %1, %m` — accumulator
+                        // %1, product x %0; the constant is read from its
+                        // (surviving) slot %2 rather than folded.
+                        try testing.expectEqual(b.slotOf(f.values[1]), d.a);
+                        try testing.expectEqual(b.slotOf(f.values[0]), d.b);
+                        try testing.expectEqual(b.slotOf(f.values[2]), d.c);
+                        try testing.expect(d.c >= llir.frame_base);
+                    } else {
+                        // @f: `add %2, %3` → dst = the accumulator (r2),
+                        // product operands in order (r0, r1).
+                        try testing.expectEqual(b.slotOf(f.values[2]), d.a);
+                        try testing.expectEqual(b.slotOf(f.values[0]), d.b);
+                        try testing.expectEqual(b.slotOf(f.values[1]), d.c);
+                    }
                 },
                 .madd_f32 => {
                     n_f32_madd += 1;
@@ -1082,8 +1172,7 @@ test "LLIR lowering: madd semantics — preconditions, f32 rules, slot rewrite, 
             }
         }
     }
-    try testing.expectEqual(@as(usize, 1), n_i32_madd);
-    try testing.expectEqual(@as(usize, 1), n_i32_maddi);
+    try testing.expectEqual(@as(usize, 2), n_i32_madd);
     try testing.expectEqual(@as(usize, 1), n_f32_madd);
     try testing.expectEqual(@as(usize, 1), n_f32_mul);
     try testing.expectEqual(@as(usize, 1), n_f32_add);
@@ -1110,8 +1199,9 @@ test "LLIR lowering: madd semantics — preconditions, f32 rules, slot rewrite, 
     }
     try testing.expect(found_rewritten);
 
-    // @g's const 3 was inlined into the maddi and deleted; the madd's
-    // mul record was deleted too — compaction shrank the image.
+    // @g's register madd reads the const 3 from its slot, so the const
+    // record survives; the madd's mul record was deleted — compaction
+    // shrank the image.
     try testing.expect(b.last_fusion.after_instrs < b.last_fusion.before_instrs);
 }
 
@@ -1134,7 +1224,6 @@ test "LLIR lowering: corpus fused multiply-accumulate and immediate-index metric
     };
     const io = std.testing.io;
     var n_madd: usize = 0;
-    var n_maddi: usize = 0;
     var n_read_indexi: usize = 0;
     for (corpus) |path| {
         const src = try std.Io.Dir.cwd().readFileAlloc(io, path, testing.allocator, .limited(1 << 20));
@@ -1158,7 +1247,6 @@ test "LLIR lowering: corpus fused multiply-accumulate and immediate-index metric
                 const op = llir.decode(rec).?.op;
                 switch (op) {
                     .madd_f32, .madd_f64 => n_madd += 1,
-                    .maddi_i32, .maddi_u32 => n_maddi += 1,
                     .read_indexi => n_read_indexi += 1,
                     else => {},
                 }
@@ -1174,7 +1262,6 @@ test "LLIR lowering: corpus fused multiply-accumulate and immediate-index metric
     // Each fused family appears at least once across the corpus:
     // madd.st contributes all three.
     try testing.expect(n_madd >= 1);
-    try testing.expect(n_maddi >= 1);
     try testing.expect(n_read_indexi >= 1);
 }
 

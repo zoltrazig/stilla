@@ -310,6 +310,29 @@ test "LLIR assembly: i64/u64/f64 ops and conversions print stable serialized nam
     try testing.expect(std.mem.indexOf(u8, asm1, "3.141592653589793") != null);
 }
 
+test "LLIR assembly: compiled int32 mul+sub prints a register msub.i32" {
+    // `a - b*c` fuses to the register-form `msub.i32` (subtraction is
+    // not commutative, so the product stays the second operand); the
+    // assembly projection prints the typed rep suffix like every other
+    // typed family member.
+    const src =
+        \\fn f(a: int32, b: int32, c: int32) -> int32 { a - b * c }
+        \\fn main() -> void { let _ = f(9, 4, 2); }
+    ;
+    var c = try compileOpt("app", &.{.{ "app", src }});
+    defer c.deinit();
+    const program = &c.program.?;
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var b = cfg_lower_llir.Builder.init(arena.allocator(), program);
+    const image = try b.lowerLlir();
+
+    const text = try lower.llirAsm(&b, image, testing.allocator);
+    defer testing.allocator.free(text);
+    try testing.expect(std.mem.indexOf(u8, text, "\n    msub.i32 ") != null);
+}
+
 test "LLIR assembly: the twelve move-wide opcodes print unsigned imm16 lane values" {
     // `movwn0`…`movwk3` are I-format rows whose
     // `imm16 = b | (c << 8)` is the unsigned lane value — printed as the

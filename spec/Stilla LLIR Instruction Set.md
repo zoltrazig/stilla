@@ -145,7 +145,7 @@ code/reserved-field combinations of §14.
 ## 2.2 The six formats
 
 ```text
-R-type: 00 | code(9) | a(7) | b(7) | c(7)        512 codes, 116 assigned
+R-type: 00 | code(9) | a(7) | b(7) | c(7)        512 codes, 112 assigned
 B-type: 01 | code(6) | lhs(7) | rhs_or_imm7(7) | offs10   64 codes, 20 assigned
 I-type: 110 | code(6) | a(7) | imm16              64 codes, 31 assigned
 C-type: 111000 | code(6) | reserved(6) = 0 | a(7) | b(7)  64 codes, 64 assigned
@@ -376,9 +376,9 @@ or (for the branches and `jal`/`jr`/`auipc`/`lui`) a target or constant —
 never a register. The field width and interpretation are fixed per opcode
 (§10); the opcode determines sign/zero extension for the integer
 immediate families: the `.i32`/`.i64` members of the immediate families
-(`addi`, `subi`, `muli`, `divi`, `remi`, `maddi`, `shri`) sign-extend the
+(`addi`, `subi`, `muli`, `divi`, `remi`, `shri`) sign-extend the
 7-bit field (exact range `[-64, 63]`), the `.u32`/`.u64` members
-(`addi.u32`…`maddi.u64`, `shri.u32`/`shri.u64`) zero-extend it (exact
+(`addi.u32`…`remi.u64`, `shri.u32`/`shri.u64`) zero-extend it (exact
 range `[0, 127]`); the mask/count forms (`andi`/`ori`/`xori`/`shli`)
 always zero-extend.
 
@@ -387,8 +387,8 @@ always zero-extend.
 Every opcode with top bits `00` shares the layout
 `code(9) | a(7) | b(7) | c(7)`. `a` is the destination (`zero` discards a
 Copy/void result), `b` a source (`zero` reads the type's zero), and `c` a
-second source or a 7-bit immediate, per the family. The 116 assigned
-opcodes occupy codes `0–115`; codes `116–511` are reserved and rejected by
+second source or a 7-bit immediate, per the family. The 112 assigned
+opcodes occupy codes `0–111`; codes `112–511` are reserved and rejected by
 validation.
 
 **Typed families.** Every family is a **contiguous run**: its members
@@ -403,12 +403,12 @@ bitwise ops (`and`, `or`, `xor`, `andi`, `ori`, `xori`) — while an
 operation whose result canonicalization differs by signedness carries
 the full rep even when the arithmetic itself is sign-agnostic
 (`shl.i32`/`shl.u32`), because the result cell's top half is fixed by
-the rep. The logical values span `1–273` with no holes — by format: R
-`1–116`, B `117–136`, C `137–200`, E `201–238`, I `239–269`, U `270–273`
+the rep. The logical values span `1–269` with no holes — by format: R
+`1–112`, B `113–132`, C `133–196`, E `197–234`, I `235–265`, U `266–269`
 (sections below follow format class, so the numeric ranges interleave:
 C-type §7 and E-type §8 precede I-type §6 in numeric order) — and every
 format's encoded selectors are contiguous except the **reserved holes**:
-R `0–115`, B `0–19`, C `0–63`, E `0–43` **with `6–7` and `13/15/17/19`
+R `0–111`, B `0–19`, C `0–63`, E `0–43` **with `6–7` and `13/15/17/19`
 reserved**, and I `0–31` **with selector 10 reserved**; U keeps
 `jal`/`j` sharing selector 0, `auipc` 1, `lui` 2. The reserved E-type codes
 `6–7`, `13`, `15`, `17`, `19` and the reserved I-type selector 10 are the
@@ -455,7 +455,7 @@ never trap: an out-of-range integer cast truncates to the target width
 (low-order bits), a float→int cast truncates toward zero, saturating on
 NaN or out-of-range values (NaN becomes zero).
 
-#### R-type — typed binary/immediate and inline-ID families — 116 opcodes
+#### R-type — typed binary/immediate and inline-ID families — 112 opcodes
 
 **add** — reps `i32, u32, i64, u64, f32, f64`
 
@@ -743,17 +743,6 @@ per rep.
 | `msub.f32` | 32-bit float |
 | `msub.f64` | 64-bit double float |
 
-**maddi** — reps `i32, u32, i64, u64`
-
-`a = a + b × imm7` — same immediate rule as `addi`.
-
-| Opcode | Comment |
-| --- | --- |
-| `maddi.i32` | signed imm7 |
-| `maddi.u32` | unsigned imm7 |
-| `maddi.i64` | signed imm7 |
-| `maddi.u64` | unsigned imm7 |
-
 **untyped**
 
 | Opcode | Behavior | trap | term |
@@ -776,8 +765,8 @@ per rep.
 | `cmov` | `a = cond ? b : c` | — | — |
 
 **The immediate families** read their 7-bit `c` field per opcode (§10):
-the `.i32`/`.i64` members (`addi.i32`…`maddi.i64`, `shri.i32`/`shri.i64`)
-sign-extend; the `.u32`/`.u64` members (`addi.u32`…`maddi.u64`,
+the `.i32`/`.i64` members (`addi.i32`…`remi.i64`, `shri.i32`/`shri.i64`)
+sign-extend; the `.u32`/`.u64` members (`addi.u32`…`remi.u64`,
 `shri.u32`/`shri.u64`) zero-extend; the shift counts (`shli`) and the
 bitwise masks (`andi`/`ori`/`xori`) always zero-extend (`[0, 127]`, mask
 semantics — `andi F0, F1, 0x7f` masks with `0x0000007f`, never
@@ -1508,8 +1497,8 @@ immediate shifted left 12 as a pc-relative displacement.
 ## 9.1 j — the link-less jump
 
 Conceptually `j` and `jal` differ — a frame call versus an
-intra-function jump — and they remain separate logical opcodes (270
-vs. 271). At the encoding level, however, `j` extends the U-type `jal`
+intra-function jump — and they remain separate logical opcodes (266
+vs. 267). At the encoding level, however, `j` extends the U-type `jal`
 slot: it is the same word with the register field carrying the `zero`
 special register (`0x00`):
 
@@ -1537,7 +1526,7 @@ magnitude, not the bound):
 
 | Item | range |
 | --- | --- |
-| signed fused immediate (the `.i32`/`.i64` members of `addi`/`subi`/`muli`/`divi`/`remi`/`maddi`/`shri`; C-type `slti`/`sgti`/`seqi`/`snei`; B-type `blti`/`beqi`/`bnei`) | `[-64, 63]`, sign-extended from the 7-bit pattern |
+| signed fused immediate (the `.i32`/`.i64` members of `addi`/`subi`/`muli`/`divi`/`remi`/`shri`; C-type `slti`/`sgti`/`seqi`/`snei`; B-type `blti`/`beqi`/`bnei`) | `[-64, 63]`, sign-extended from the 7-bit pattern |
 | mask/unsigned fused immediate (the `.u32`/`.u64` members of the same families; `andi`/`ori`/`xori`; `shli` counts) | `[0, 127]`, zero-extended |
 | conditional branch `offs10` (all B-type) | `[-512, 511]` |
 | `jal`/`j` offset | `[-524288, 524287]` (signed 20-bit, instruction granularity) |
@@ -1829,7 +1818,7 @@ trust-boundary list ([LLIR Specification](Stilla%20LLIR%20Specification.md) §8)
 
 - a word whose top two bits are `10` (the reserved class), a word whose
   top bits are `11` but match no format prefix, an unassigned code in any
-  format (R codes 116–511; B codes 20–63; E codes 44–63;
+  format (R codes 112–511; B codes 20–63; E codes 44–63;
   I codes 32–63 **and the reserved I-type selector 10**), or a `11101`
   word whose register field is neither `ra`
   nor `zero`;
@@ -1909,7 +1898,7 @@ representation, the frame/call transfer contract, module-instantiation
 lifecycle, host vtables, GC, concurrency, JIT compilation, source maps,
 debug information, and a stable file format — are listed in [Stilla LLIR
 Specification](Stilla%20LLIR%20Specification.md). This document
-additionally fixes the opcode set: §4–§9 are the complete set — 273
+additionally fixes the opcode set: §4–§9 are the complete set — 269
 logical opcodes — and adding an opcode is a specification change. The
 set is **semantically trusted, structurally validated**: it is not a
 security boundary for arbitrary external LLIR ([LLIR

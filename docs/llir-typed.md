@@ -95,7 +95,8 @@ Immediate fusion folds into the same single record: a constant right
 operand inside the rep's immediate window lowers as the immediate form
 (`addi.i32`, `divi.u64`, …) instead of a `const` slot read. The
 multiply-accumulate peephole stays a record-level peephole
-(llir_fusion.zig).
+(llir_fusion.zig): it emits the register-form `madd` for `a + b*c` and
+`msub` for `a - b*c`.
 
 ## 5. Status
 

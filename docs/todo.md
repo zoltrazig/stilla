@@ -362,35 +362,6 @@
 
 ## 后端与运行时
 
-### B2 `auipc`/`lui` 通过校验却在运行期 trap
-
-- **优先级**：P1
-- **问题**：校验器接受含 `lui`（以及 `auipc`）的图像，但 VM 把这两个 opcode 映射到
-  通用 trap 处理器，即「已通过校验的图像不可执行」。无测试覆盖。
-- **证据**：校验接受 `frontend_llir_validate_tests.zig:1502`（`.lui`）；VM
-  `interpreter_dispatch.zig:1096-1099`、`:1016-1023`（`hTrapGeneric`）。
-- **建议工作**：让校验器拒绝 VM 不支持的 opcode（校验即「可执行」），或为
-  `auipc` / `lui` 实现语义并经 lowering 可达；明确两个 opcode 的定位（保留/废弃）。
-- **验证方式**：`frontend_llir_validate_tests.zig` 新增负例（含 `lui` 的图像被拒）
-  或 VM 正例（`lui` 可执行），二选一；
-  `zig build -fincremental test -Dtest-filter=frontend_llir_validate`。
-- **关联**：无
-
-### B3 `msub` 系列与 `jr` 从不被 lowering 选择
-
-- **优先级**：P1
-- **问题**：VM 实现了 6 个 `msub` opcode 与 `jr`，也有合成测试，但 peephole fusion
-  只发 `madd` / `maddi`，`jr` 从不下发。`a - b*c` 保持 `mul` + `sub`，是错过的优化
-  （非误编译）。
-- **证据**：fusion `llir_fusion.zig:540-625`；VM handler
-  `interpreter_dispatch.zig:1046`、`:1831`、`:1986-1993`；`jr` `:1071`；语料说明
-  `probes/README.md`。
-- **建议工作**：在 fusion 中补 `mul` + `sub` → `msub` / `msubi` 的匹配；确认 `jr` 是否
-  有意保留（若有意，注释说明并加 VM 白盒），否则补一条 lowering 路径或删除。
-- **验证方式**：新增 `probes/*.st` 触发 `a - b*c`，断言反汇编 / 二进制出现 `msub` 且
-  运行输出不变；`zig build -fincremental test -Dtest-filter=msub`。
-- **关联**：无
-
 ### B4 泛型实例化所有权分类不可靠
 
 - **优先级**：P1
@@ -470,6 +441,26 @@
   `zig build -fincremental test -Dtest-filter=frontend_cfg_passes`。
 - **关联**：无
 
+### B9 后端不发射 `auipc` / `lui`
+
+- **优先级**：P3
+- **问题**：`auipc` / `lui` 是 LLIR ISA 的规范 opcode，VM 已实现其语义
+  （`interpreter_dispatch.zig` 的 `hAuipc` / `hLui`），但没有任何 lowering /
+  fusion / peephole 发射它们：唯一的 U 型发射点是 `jal`。LLIR 没有计算地址的
+  load/store，`auipc` 的 pc 相对寻址也无消费者，因此当前没有源构造需要二者，
+  它们只出现在手工构造的测试图像中。
+- **证据**：`cfg_lower_llir_emit.zig:514`（`setU` 的唯一调用只发 `.jal`）；
+  `llir.zig:1190-1253`（CFG→LLIR 映射无 U 型项）；`llir_fusion.zig:485`、`:513`
+  （只匹配 C 型）；VM `interpreter_dispatch.zig:1121-1122`；
+  `probes/README.md:242-246`；规范 `Stilla LLIR Instruction Set.md:1470-1481`。
+- **建议工作**：评估是否需要一条发射路径（例如 pc 相对常量或大立即数物化的新
+  构造）；若需要则设计并实现 lowering 与消费方，若确认无消费者则明确记录二者为
+  「有意不发射」，或考虑从 ISA 移除（属规范决策）。两种方向都需在文档中固定定位。
+- **验证方式**：未实现时以「无发射方」检查为准——`grep -rn "\.auipc\|\.lui"
+  src/passes` 不应出现发射点，并核对文档；若实现，则新增触发该构造的
+  `probes/*.st`，断言 AIR 出现 `auipc` / `lui` 且运行输出不变。
+- **关联**：无
+
 ---
 
 ## 测试与验证
@@ -506,11 +497,10 @@
 ### T3 其他端到端覆盖缺口
 
 - **优先级**：P2
-- **问题**：缺 cfg on/off 端到端 differential（T1 的推论）；`auipc` / `lui` 这种
-  「校验通过但 trap」的图像无测试；`--opt-list` 的可执行 / 库两种默认 profile
-  无测试。
-- **证据**：`main.zig:915-927`（opt-list 单 profile）；B2 的 `lui` 图像；T1。
-- **建议工作**：随 T1 一起加 cfg differential；为 `auipc` / `lui` 加 B2 的正 / 负例。
+- **问题**：缺 cfg on/off 端到端 differential（T1 的推论）；`--opt-list` 的可执行 /
+  库两种默认 profile 无测试。
+- **证据**：`main.zig:915-927`（opt-list 单 profile）；T1。
+- **建议工作**：随 T1 一起加 cfg differential。
 - **验证方式**：`zig build -fincremental test -Dtest-filter=parseArgs` 与
   `-Dtest-filter=frontend_pass_smoke`。
 - **关联**：无

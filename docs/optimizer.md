@@ -76,9 +76,10 @@ of the same choice: an arithmetic node whose right operand is a
 constant inside the rep's immediate window lowers as the immediate form
 (`addi.i32`, `divi.u64`) and the single-use `const` slot read drops out.
 This is distinct from the record-level peepholes that remain in
-`llir_fusion.zig` (the remaining immediate fusion outside the expander,
-the `le`/`ge` comparison `not`-kill, and the multiply-accumulate fuse),
-which run on the already-emitted record stream. The CFG-side CSE stays
+`llir_fusion.zig` — the remaining immediate fusion outside the expander,
+the `le`/`ge` comparison `not`-kill, and the multiply-accumulate fuse,
+which fuses `a + b*c` to register `madd` and `a - b*c` to register
+`msub` — which run on the already-emitted record stream. The CFG-side CSE stays
 at construction and in `cfg_cse.zig`. No CSE runs on the typed ops in
 production — `typedOps` / `printTyped` are the inspection/test surface
 for what Layer A sees.

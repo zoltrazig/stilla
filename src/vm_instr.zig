@@ -7,7 +7,7 @@
 //! executable image; wire decoding stays in `llir.zig`.
 //!
 //! Layout: `op` is `VmOpcode` — the canonical `llir.Opcode` list with an
-//! `u16` tag (273 logical opcodes; the headroom above is the expansion
+//! `u16` tag (269 logical opcodes; the headroom above is the expansion
 //! headroom, and a future tag bump is caught by the comptime size assert
 //! below). The operand is a mandatory
 //! `u32`: it holds the format-specific immediate, offset, or
@@ -197,10 +197,10 @@ test "signed immediates and pc helpers" {
     try testing.expectEqual(@as(i16, -1), offs16Signed(jr));
 }
 
-test "all 273 logical opcodes fit u16 with headroom" {
-    try testing.expectEqual(@as(usize, 273), std.meta.tags(VmOpcode).len);
+test "all 269 logical opcodes fit u16 with headroom" {
+    try testing.expectEqual(@as(usize, 269), std.meta.tags(VmOpcode).len);
     var max: u32 = 0;
     for (std.meta.tags(VmOpcode)) |op| max = @max(max, @intFromEnum(op));
-    try testing.expectEqual(@as(u32, 273), max);
+    try testing.expectEqual(@as(u32, 269), max);
     try testing.expect(max < 65536 - 256); // expansion headroom
 }

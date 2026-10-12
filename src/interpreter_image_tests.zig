@@ -89,6 +89,78 @@ test "move-wide: all twelve suffixes execute; the mixed sequence builds 0x012345
     try testing.expectEqual(@as(Value, 0x0123_4567_89ab_1234), try runHand(&k0, &u64_row, 0, &.{}));
 }
 
+test "u-type: lui sign-extends imm20 then shifts left 12" {
+    const u64_row = [_]llir.TypeDesc{primType(.uint64)};
+
+    // lui F, 1 = 1 << 12 = 0x1000.
+    const one = [_]llir.Instr{
+        llir.instrU(.lui, llir.frame_base, 1),
+        llir.instrE(.ret, llir.frame_base, 0),
+    };
+    try testing.expectEqual(@as(Value, 0x1000), try runHand(&one, &u64_row, 0, &.{}));
+
+    // lui F, -1: the sign-extended -1 shifts to 0xffff_ffff_ffff_f000.
+    // A zero-extending 20-bit immediate would yield 0x000f_ffff_ffff_f000.
+    const neg1 = [_]llir.Instr{
+        llir.instrU(.lui, llir.frame_base, -1),
+        llir.instrE(.ret, llir.frame_base, 0),
+    };
+    try testing.expectEqual(@as(Value, 0xffff_ffff_ffff_f000), try runHand(&neg1, &u64_row, 0, &.{}));
+
+    // lui F, -0x80000 (the most negative 20-bit immediate) sign-extends
+    // to -0x80000000 and shifts to 0xffff_ffff_8000_0000, pinning the
+    // full 64-bit extension.
+    const min20 = [_]llir.Instr{
+        llir.instrU(.lui, llir.frame_base, -0x80000),
+        llir.instrE(.ret, llir.frame_base, 0),
+    };
+    try testing.expectEqual(@as(Value, 0xffff_ffff_8000_0000), try runHand(&min20, &u64_row, 0, &.{}));
+}
+
+test "u-type: auipc adds the executing pc to the shifted imm20" {
+    const u64_row = [_]llir.TypeDesc{primType(.uint64)};
+    // A filler at pc 0 pushes the auipc to pc 1, so `auipc F, 1` must
+    // read 1 + 0x1000 = 0x1001 — distinct from lui's 0x1000, proving
+    // the pc term. The filler writes a different register so it cannot
+    // account for the result.
+    const seq = [_]llir.Instr{
+        llir.instrI(.movwz0, llir.frame_base + 1, 0),
+        llir.instrU(.auipc, llir.frame_base, 1),
+        llir.instrE(.ret, llir.frame_base, 0),
+    };
+    try testing.expectEqual(@as(Value, 0x1001), try runHand(&seq, &u64_row, 0, &.{}));
+
+    // A zero-immediate auipc returns its own pc: 2 + 0 = 2.
+    const at_pc2 = [_]llir.Instr{
+        llir.instrI(.movwz0, llir.frame_base + 1, 0),
+        llir.instrI(.movwz0, llir.frame_base + 1, 0),
+        llir.instrU(.auipc, llir.frame_base, 0),
+        llir.instrE(.ret, llir.frame_base, 0),
+    };
+    try testing.expectEqual(@as(Value, 2), try runHand(&at_pc2, &u64_row, 0, &.{}));
+}
+
+test "u-type: a zero destination discards and execution falls through" {
+    const u64_row = [_]llir.TypeDesc{primType(.uint64)};
+    // `lui zero, 1` writes nothing; the following ret still runs and
+    // returns the value set before it.
+    const seq = [_]llir.Instr{
+        llir.instrI(.movwz0, llir.frame_base, 0x2a),
+        llir.instrU(.lui, llir.zero_reg, 1),
+        llir.instrE(.ret, llir.frame_base, 0),
+    };
+    try testing.expectEqual(@as(Value, 0x2a), try runHand(&seq, &u64_row, 0, &.{}));
+
+    // The same for auipc: the write to zero is discarded, and pc still
+    // advances past it via fallthrough.
+    const seq_auipc = [_]llir.Instr{
+        llir.instrI(.movwz0, llir.frame_base, 0x2b),
+        llir.instrU(.auipc, llir.zero_reg, 1),
+        llir.instrE(.ret, llir.frame_base, 0),
+    };
+    try testing.expectEqual(@as(Value, 0x2b), try runHand(&seq_auipc, &u64_row, 0, &.{}));
+}
+
 test "i64 immediate forms sign-extend the 7-bit constant to 64 bits" {
     // subi c=0x80 (= -128 as i8): 10 - (-128) = 138 at 64 bits. A
     // 32-bit sign extension would add 0x00000000ffffff80 instead —
@@ -136,42 +208,6 @@ test "wide madd/msub wrap at the resolved 64-bit width" {
         llir.instrE(.ret, llir.frame_base, 0),
     };
     try testing.expectEqual(@as(Value, 0xffff_ffff_ffff_ff00), try runHand(&msub, &u64_row, 0, &.{}));
-}
-
-test "maddi: the 8-bit immediate accumulates at the resolved 64-bit width" {
-    const u64_row = [_]llir.TypeDesc{primType(.uint64)};
-
-    // acc 10 + b 7 * imm 3 = 31; the accumulator is read and rewritten.
-    const acc = [_]llir.Instr{
-        llir.instrI(.movwz0, llir.frame_base, 0xa), // %0 = 10
-        llir.instrI(.movwz0, llir.frame_base + 1, 0x7), // %1 = 7
-        llir.instrI(.movwz0, llir.frame_base + 2, 0xa), // %2 = 10
-        llir.instrR(.maddi_u32, llir.frame_base + 2, llir.frame_base + 1, 3),
-        llir.instrE(.ret, llir.frame_base + 2, 0),
-    };
-    try testing.expectEqual(@as(Value, 31), try runHand(&acc, &u64_row, 0, &.{}));
-
-    // max u64 + 2 * 1 wraps to 1 (mod 2^64).
-    const wrap = [_]llir.Instr{
-        llir.instrI(.movwz3, llir.frame_base, 0xffff),
-        llir.instrI(.movwk2, llir.frame_base, 0xffff),
-        llir.instrI(.movwk1, llir.frame_base, 0xffff),
-        llir.instrI(.movwk0, llir.frame_base, 0xffff), // %0 = max u64
-        llir.instrI(.movwz0, llir.frame_base + 1, 0x2), // %1 = 2
-        llir.instrR(.maddi_u32, llir.frame_base, llir.frame_base + 1, 1),
-        llir.instrE(.ret, llir.frame_base, 0),
-    };
-    try testing.expectEqual(@as(Value, 1), try runHand(&wrap, &u64_row, 0, &.{}));
-
-    // The 8-bit immediate sign-extends to the resolved width:
-    // 0 + 1 * (-128) = -128, not the zero-extended 128.
-    const sext = [_]llir.Instr{
-        llir.instrI(.movwz0, llir.frame_base, 0xa), // %0 = 10
-        llir.instrI(.movwz0, llir.frame_base + 1, 0x1), // %1 = 1
-        llir.instrR(.maddi_i32, llir.frame_base + 2, llir.frame_base + 1, 0x40), // %2 = 0 + 1 * (-64) — the v9 i64 imm7 window
-        llir.instrE(.ret, llir.frame_base + 2, 0),
-    };
-    try testing.expectEqual(@as(Value, 0xffff_ffff_ffff_ffc0), try runHand(&sext, &u64_row, 0, &.{}));
 }
 
 test "minu/maxu at 64-bit width compare the full unsigned cell" {
@@ -875,6 +911,118 @@ test "jalr: base-plus-offset overflow and non-entry targets trap before any writ
         try testing.expectEqual(@as(?interpreter.Termination, null), t);
         try testing.expectEqual(callee_entry, vm.runtime.pc);
         try testing.expectEqual(@as(Value, 9), try runToEnd(&vm));
+    }
+}
+
+/// Assemble a single-function, single-block hand image exactly as
+/// `runHandImage` does, but hand back the raw VM termination so a test
+/// can assert a trap where `runHand*` treats one as a test failure.
+/// Borrows every slice; the caller owns the returned termination.
+fn runHandTerm(instrs: []const llir.Instr, types: []const llir.TypeDesc, ret_type: u32, blocks: []const llir.BlockDesc) !interpreter.Termination {
+    var image: llir.LlirProgram = undefined;
+    image.instructions = instrs;
+    image.functions = &.{.{
+        .code_start = 0,
+        .code_end = @intCast(instrs.len),
+        .entry_pc = 0,
+        .signature_id = 0,
+        .f_count = 8,
+        .x_count = 0,
+        .window_count = 0,
+    }};
+    image.blocks = blocks;
+    image.signatures = &.{.{ .params_start = 0, .params_len = 0, .ret = ret_type }};
+    image.types = types;
+    image.constants = &.{};
+    image.type_decls = &.{};
+    image.type_decl_fields = &.{};
+    image.union_variants = &.{};
+    image.union_payloads = &.{};
+    image.host_types = &.{};
+    image.self_symbol = llir.no_index;
+    image.init = llir.no_index;
+    image.entry_member = llir.no_index;
+    image.symbols = &.{};
+    image.imports = &.{};
+    image.exports = &.{};
+    image.module_slots = &.{};
+    image.params = &.{};
+    image.call_args = &.{};
+    image.syscall_descs = &.{};
+    image.construct_descs = &.{};
+    image.destructure_dsts = &.{};
+    image.destructure_dst_types = &.{};
+    image.destructure_descs = &.{};
+    image.switch_arms = &.{};
+    image.switch_descs = &.{};
+    image.member_descs = &.{};
+    image.drop_descs = &.{};
+    image.strings = "";
+
+    const reject = try llir_validate.validate(&image, testing.allocator);
+    if (reject) |m| {
+        std.log.err("hand image rejected: {s}", .{m});
+        testing.allocator.free(m);
+        return error.TestUnexpectedResult;
+    }
+    return interpreter.runWithEntry(testing.allocator, &image, 0, .{});
+}
+
+test "jr: a register-held pc jumps and skips fallthrough; out-of-range traps" {
+    // `jr base, offs16` sets pc to `base + signExtend16(offs16)` when the
+    // result lies in the current function's `[code_start, code_end)` and
+    // traps otherwise. The base holds a dynamic instruction index, not a
+    // pc-relative offset.
+    const u64_row = [_]llir.TypeDesc{primType(.uint64)};
+    // Three blocks tile [0, 6); the `jr` ends its block and the target (4)
+    // is a block start.
+    const blocks = [_]llir.BlockDesc{
+        .{ .start_pc = 0, .end_pc = 2 },
+        .{ .start_pc = 2, .end_pc = 4 },
+        .{ .start_pc = 4, .end_pc = 6 },
+    };
+
+    // Offset 0: F0 holds the target pc; the two records after the `jr`
+    // are the skipped fallthrough arm. Landing at pc 4 returns 42, so a
+    // fallthrough (0xdead) would fail the assertion.
+    const zero_offs = [_]llir.Instr{
+        llir.instrI(.movwz0, llir.frame_base, 4), // F0 = target pc 4
+        llir.instrI(.jr, llir.frame_base, 0), // pc = 4 + 0
+        llir.instrI(.movwz0, llir.frame_base + 1, 0xdead), // skipped
+        llir.instrE(.ret, llir.frame_base + 1, 0), // skipped (would return 0xdead)
+        llir.instrI(.movwz0, llir.frame_base + 2, 0x2a), // landed
+        llir.instrE(.ret, llir.frame_base + 2, 0), // returns 42
+    };
+    try testing.expectEqual(@as(Value, 42), try runHandBlocks(&zero_offs, &u64_row, 0, &.{}, &blocks));
+
+    // Nonzero offset: the base holds `target - offs`, so `base + 2 == 4`.
+    const pos_offs = [_]llir.Instr{
+        llir.instrI(.movwz0, llir.frame_base, 2), // F0 = 4 - 2
+        llir.instrI(.jr, llir.frame_base, 2), // pc = 2 + 2 = 4
+        llir.instrI(.movwz0, llir.frame_base + 1, 0xdead), // skipped
+        llir.instrE(.ret, llir.frame_base + 1, 0), // skipped
+        llir.instrI(.movwz0, llir.frame_base + 2, 0x2b), // landed
+        llir.instrE(.ret, llir.frame_base + 2, 0), // returns 43
+    };
+    try testing.expectEqual(@as(Value, 43), try runHandBlocks(&pos_offs, &u64_row, 0, &.{}, &blocks));
+
+    // Trap: a target past the function's code range. The single block
+    // [0, 2) ends with the `jr`; target 100 exceeds code_end = 2.
+    const out_of_range = [_]llir.Instr{
+        llir.instrI(.movwz0, llir.frame_base, 100), // F0 = 100
+        llir.instrI(.jr, llir.frame_base, 0), // pc = 100 + 0 → trap
+    };
+    const one_block = [_]llir.BlockDesc{.{ .start_pc = 0, .end_pc = 2 }};
+    var term = try runHandTerm(&out_of_range, &u64_row, 0, &one_block);
+    defer term.deinit(testing.allocator);
+    switch (term) {
+        .normal => |v| {
+            std.log.err("jr out-of-range returned {d}", .{v});
+            return error.TestUnexpectedResult;
+        },
+        .panic => |m| {
+            try testing.expect(std.mem.indexOf(u8, m, "jr target 100 outside the code range") != null);
+        },
     }
 }
 

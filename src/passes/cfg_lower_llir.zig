@@ -584,7 +584,7 @@ pub const Builder = struct {
 
     /// True when the fusion passes deleted `ins`'s record — the image has no
     /// record at its old block-local index: a fused-away `const`, or a
-    /// `mul` folded into a `*_madd`/`*_maddi`. Instructions rewritten in
+    /// `mul` folded into a `*_madd`. Instructions rewritten in
     /// place (a fused `add` or `read_index`) still have records and are
     /// not reported. Tests that walk `blk.instrs` next to the image use
     /// this to keep their record bookkeeping aligned after the

@@ -416,19 +416,19 @@ fn allocateFunctionSlots(bld: *Builder, f: *const cfg.IrFunc, slots: *std.ArrayL
         if (coalesceSource(f, value, uses)) |source| {
             const source_slot = bld.value_slots.get(source) orelse return allocateNaiveSlots(bld, f, slots);
             const source_end = slots.items[source_slot].end;
-            // A madd-shaped add coalesces into its accumulator's cell
-            // even when the liveness fixed point extends the
-            // accumulator's end past the add (a loop artifact: a value
-            // defined and used in the same latch block gets gen-set
-            // membership that propagates around the loop). The
-            // accumulator has exactly one use — this add — so its true
-            // end IS the add position (`interval.start`); the
-            // fixed-point overshoot must not veto the in-place reuse
-            // the madd fusion (llir_fusion.zig) relies on, or the
-            // fused record writes the accumulator cell while phi edge
-            // copies still read the add result's own slot.
-            const madd_shape = value.def != null and std.meta.activeTag(value.def.?.op) == .add;
-            if ((madd_shape or source_end <= interval.start) and patterns.canInPlace(value)) {
+            // A madd/msub-shaped add or sub coalesces into its
+            // accumulator's cell even when the liveness fixed point
+            // extends the accumulator's end past the add (a loop
+            // artifact: a value defined and used in the same latch block
+            // gets gen-set membership that propagates around the loop).
+            // The accumulator has exactly one use — this add/sub — so its
+            // true end IS the add position (`interval.start`); the
+            // fixed-point overshoot must not veto the in-place reuse the
+            // madd/msub fusion (llir_fusion.zig) relies on, or the fused
+            // record writes the accumulator cell while phi edge copies
+            // still read the result's own slot.
+            const fma_shape = value.def != null and patterns.isFmaAccumulator(value.def.?.op);
+            if ((fma_shape or source_end <= interval.start) and patterns.canInPlace(value)) {
                 bld.value_slots.put(bld.arena, value, source_slot) catch return error.OutOfMemory;
                 slots.items[source_slot].end = @max(slots.items[source_slot].end, interval.end);
                 slots.items[source_slot].active = true;
@@ -536,8 +536,23 @@ fn coalesceSource(f: *const cfg.IrFunc, value: *const cfg.Value, uses: []const u
             return null;
         },
         .add => |bin| {
+            if (!patterns.isMaddAccumulator(bin)) return null;
             const product = if (patterns.isMulResult(bin.b)) bin.b else if (patterns.isMulResult(bin.a) and Builder.isInteger(bin.b.type_)) bin.a else return null;
             const accumulator = if (product == bin.b) bin.a else bin.b;
+            if (uses[product.id] != 1 or uses[accumulator.id] != 1) return null;
+            for (f.blocks) |blk| {
+                for (blk.instrs, 0..) |ins, i| {
+                    if (ins == def and i > 0 and blk.instrs[i - 1] == product.def.?) return accumulator;
+                }
+            }
+        },
+        .sub => |bin| {
+            // `a - b*c`: only the right-hand operand may be the `mul`
+            // result — subtraction does not commute, so a product on the
+            // left (`b*c - a`) is not an msub shape and never coalesces.
+            if (!patterns.isMsubAccumulator(bin)) return null;
+            const product = bin.b;
+            const accumulator = bin.a;
             if (uses[product.id] != 1 or uses[accumulator.id] != 1) return null;
             for (f.blocks) |blk| {
                 for (blk.instrs, 0..) |ins, i| {

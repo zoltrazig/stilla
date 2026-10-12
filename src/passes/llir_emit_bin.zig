@@ -12,7 +12,7 @@
 //! Format (all little-endian, fixed-width, no padding, no pointers):
 //! ```text
 //! u32 magic   = 0x52494c4c ("LLIR" as little-endian bytes)
-//! u32 version = 16
+//! u32 version = 17
 //! module symbol {start, len}: u32, u32  (self_symbol's byte range)
 //! entry member {start, len}: u32, u32   (entry_member's byte range)
 //! {tables.len} × u32 count, one per table, in the LlirProgram field order below
@@ -115,10 +115,14 @@ pub const magic: u32 = 0x52494c4c;
 /// `window_count` semantics become `3 + A`; the C-type block grows the
 /// 64-bit integer cast matrix — the 22 `cvt.*` opcodes for `i64`/`u64`
 /// sources and targets (C selectors 42–63, previously reserved) — so
-/// every C-type selector is assigned and the logical opcode set is 273.
-/// No table or header row changes; only the instruction encoding space
-/// grows.
-pub const version: u32 = 16;
+/// every C-type selector is assigned. No table or header row changes;
+/// only the instruction encoding space grows.
+/// Version 17: four R-type opcodes were retired and the following
+/// sixteen remapped down by four (R-type wire codes 100–115 become
+/// 96–111; the logical table is compacted to 269 opcodes). The
+/// instruction encoding changes, so all earlier images are rejected on
+/// the version alone.
+pub const version: u32 = 17;
 
 /// The scalar header fields serialized inside the table block (count 1
 /// + one value word each) — listed by name because `TypeId == u32`.

@@ -31,10 +31,10 @@ pub const print = @import("passes/llir_asm.zig").print;
 // 0. The generated opcode table (llir_opcodes.zig) — re-exported
 // ---------------------------------------------------------------------------
 
-/// The logical opcode set: `Opcode = enum(u16)`, the complete
-/// alignment-constrained set of Instruction Set §4–§9 — 273 opcodes with
-/// explicit logical values (the alignment holes between typed families
-/// are not members and carry no `opInfo`).
+/// The logical opcode set: `Opcode = enum(u16)`, the complete set of
+/// Instruction Set §4–§9 — 269 opcodes with explicit logical values
+/// `1–269` in table order with no holes (every value is a member and
+/// carries an `opInfo`).
 pub const Opcode = opcodes.Opcode;
 /// The six instruction formats (Instruction Set §2.2).
 pub const Format = opcodes.Format;
@@ -1543,19 +1543,11 @@ pub fn maddOpcode(src: meta.Type) ?Opcode {
     return famOp("madd", typeRep(src));
 }
 
-/// The fused multiply-accumulate-immediate opcode (`dst = dst + b *
-/// imm`), or null for non-numeric types. The imm7 interpretation
-/// follows the rep (`maddi.i32`/`maddi.i64` sign-extend,
-/// `maddi.u32`/`maddi.u64` zero-extend). No float form — the float
-/// immediate variants do not exist.
-pub fn maddiOpcode(src: meta.Type) ?Opcode {
-    return switch (src) {
-        .primitive => |k| switch (k) {
-            .int32, .uint32, .int64, .uint64 => famOp("maddi", typeRep(src)),
-            else => null,
-        },
-        else => null,
-    };
+/// The fused multiply-subtract opcode for a type (`dst = dst - b *
+/// c`): the typed rep member (`msub.i32` on `int32`, …), the float
+/// rep member for floats; null for non-numeric types.
+pub fn msubOpcode(src: meta.Type) ?Opcode {
+    return famOp("msub", typeRep(src));
 }
 
 // ---------------------------------------------------------------------------
@@ -1605,10 +1597,10 @@ test "codec: every assigned opcode round-trips through encode/decode" {
     }
 }
 
-test "codec: format counts match the frozen distribution (116/20/64/38/31/4)" {
+test "codec: format counts match the frozen distribution (112/20/64/38/31/4)" {
     var counts = [_]u32{0} ** 6;
     for (std.meta.tags(Opcode)) |op| counts[@intFromEnum(formatOf(op))] += 1;
-    try std.testing.expectEqual(@as(u32, 116), counts[@intFromEnum(Format.r)]);
+    try std.testing.expectEqual(@as(u32, 112), counts[@intFromEnum(Format.r)]);
     try std.testing.expectEqual(@as(u32, 20), counts[@intFromEnum(Format.b)]);
     try std.testing.expectEqual(@as(u32, 64), counts[@intFromEnum(Format.c)]);
     try std.testing.expectEqual(@as(u32, 38), counts[@intFromEnum(Format.e)]);
@@ -1617,15 +1609,15 @@ test "codec: format counts match the frozen distribution (116/20/64/38/31/4)" {
     // v10: the integer arithmetic families carry the full rep (§4), the
     // `sext32`/`zext32` canonicalization pair is gone, `neg` fills its
     // family's codes 0–3, and `clz`/`popcount` keep only the signed
-    // width selectors — 273 logical opcodes, values 1–273 with no
+    // width selectors — 269 logical opcodes, values 1–269 with no
     // retired logical holes.
-    try std.testing.expectEqual(@as(usize, 273), std.meta.tags(Opcode).len);
+    try std.testing.expectEqual(@as(usize, 269), std.meta.tags(Opcode).len);
 }
 
 test "codec: reserved class, reserved codes, reserved fields, and holes are rejected" {
     // The `10` reserved class.
     try std.testing.expectEqual(@as(?Decoded, null), decode(.{ 0, 0, 0, 0x80 }));
-    // R-type codes 0–115 are all assigned; 116+ are reserved.
+    // R-type codes 0–111 are all assigned; 112+ are reserved.
     try std.testing.expectEqual(@as(?Decoded, null), decode(bytesOf(@as(u32, 116) << 21)));
     try std.testing.expectEqual(@as(?Decoded, null), decode(bytesOf(@as(u32, 149) << 21)));
     try std.testing.expectEqual(@as(?Decoded, null), decode(bytesOf(@as(u32, 154) << 21)));
@@ -1667,13 +1659,13 @@ test "codec: reserved class, reserved codes, reserved fields, and holes are reje
     try std.testing.expectEqual(@as(?Decoded, null), decode(bytesOf((0b100 << 29))));
     try std.testing.expectEqual(@as(?Decoded, null), decode(bytesOf((0b101 << 29))));
     // Families are contiguous runs in table order: `add.i32` = 1,
-    // `add.f64` = 6, `sub.i32` = 7 — the logical values 1–273 carry a
+    // `add.f64` = 6, `sub.i32` = 7 — the logical values 1–269 carry a
     // member at every index (no retired holes), and decode works through
     // the dense code space.
     try std.testing.expectEqual(@as(u16, 1), @intFromEnum(Opcode.add_i32));
     try std.testing.expectEqual(@as(u16, 6), @intFromEnum(Opcode.add_f64));
     try std.testing.expectEqual(@as(u16, 7), @intFromEnum(Opcode.sub_i32));
-    try std.testing.expectEqual(@as(usize, 273), std.meta.tags(Opcode).len);
+    try std.testing.expectEqual(@as(usize, 269), std.meta.tags(Opcode).len);
 }
 
 test "codec: removed B-type codes are reserved; ble/bleu decode" {
@@ -2044,9 +2036,10 @@ test "typed immediate opcodes: rep-suffixed integer families, no float forms" {
     try std.testing.expectEqual(@as(?Opcode, null), typedOpcodeImm(.neg, .{ .primitive = .int32 }));
     try std.testing.expectEqual(Opcode.madd_f32, maddOpcode(.{ .primitive = .float32 }).?);
     try std.testing.expectEqual(Opcode.madd_i32, maddOpcode(.{ .primitive = .int32 }).?);
-    try std.testing.expectEqual(Opcode.maddi_i32, maddiOpcode(.{ .primitive = .int32 }).?);
-    try std.testing.expectEqual(Opcode.maddi_u32, maddiOpcode(.{ .primitive = .uint32 }).?);
-    try std.testing.expectEqual(@as(?Opcode, null), maddiOpcode(.{ .primitive = .float32 }));
+    try std.testing.expectEqual(Opcode.msub_f64, msubOpcode(.{ .primitive = .float64 }).?);
+    try std.testing.expectEqual(Opcode.msub_i32, msubOpcode(.{ .primitive = .int32 }).?);
+    try std.testing.expectEqual(Opcode.msub_u64, msubOpcode(.{ .primitive = .uint64 }).?);
+    try std.testing.expectEqual(@as(?Opcode, null), msubOpcode(.{ .primitive = .bool }));
 }
 
 test "repOf decodes the rep of every typed family member" {
@@ -2054,7 +2047,6 @@ test "repOf decodes the rep of every typed family member" {
     try std.testing.expectEqual(Rep.i32, repOf(.add_i32).?);
     try std.testing.expectEqual(Rep.u32, repOf(.div_u32).?);
     try std.testing.expectEqual(Rep.i64, repOf(.shr_i64).?);
-    try std.testing.expectEqual(Rep.u64, repOf(.maddi_u64).?);
     try std.testing.expectEqual(Rep.i32, repOf(.neg_i32).?);
     // The widthless bitwise ops and the branches carry no rep —
     // signedness rides in the mnemonic (compare/branch style).
@@ -2086,7 +2078,7 @@ test "typed families: integer arithmetic carries the full rep, bitwise stays wid
     // cells, §4).
     const untyped_ops = [_]Opcode{ .and_, .or_, .xor, .andi, .ori, .xori };
     inline for (untyped_ops) |op| try std.testing.expectEqual(@as(?Rep, null), repOf(op));
-    const typed_members = [_]Opcode{ .add_i32, .add_u64, .sub_i64, .mul_u32, .div_i32, .div_u64, .rem_i32, .rem_u64, .min_i32, .max_u64, .shl_i32, .shr_u64, .addi_i32, .addi_u64, .subi_i64, .muli_u32, .divi_i32, .remi_u64, .shli_i32, .shri_u64, .madd_i32, .msub_u64, .maddi_i32, .neg_i32, .neg_u64 };
+    const typed_members = [_]Opcode{ .add_i32, .add_u64, .sub_i64, .mul_u32, .div_i32, .div_u64, .rem_i32, .rem_u64, .min_i32, .max_u64, .shl_i32, .shr_u64, .addi_i32, .addi_u64, .subi_i64, .muli_u32, .divi_i32, .remi_u64, .shli_i32, .shri_u64, .madd_i32, .msub_u64, .neg_i32, .neg_u64 };
     inline for (typed_members) |op| try std.testing.expect(repOf(op) != null);
     const float_members = [_]Opcode{ .add_f32, .add_f64, .sub_f32, .sub_f64, .mul_f32, .mul_f64, .div_f32, .div_f64, .rem_f32, .rem_f64, .min_f32, .min_f64, .max_f32, .max_f64, .madd_f32, .madd_f64, .msub_f32, .msub_f64, .neg_f32, .neg_f64 };
     inline for (float_members) |op| try std.testing.expect(repOf(op) != null);
@@ -2095,24 +2087,24 @@ test "typed families: integer arithmetic carries the full rep, bitwise stays wid
 test "family layout: families are contiguous runs in table order" {
     // The v10 renumber made every family a contiguous run — no
     // alignment holes in the logical values. The typed `neg` family
-    // opens the E-type run at 201 (codes 0–3 — the slots its retired
+    // opens the E-type run at 197 (codes 0–3 — the slots its retired
     // widthless predecessors vacated), the float members follow at
-    // 205/206, and codes 6–7 (the former `sext32`/`zext32` slots) are
+    // 201/202, and codes 6–7 (the former `sext32`/`zext32` slots) are
     // reserved. `abs` keeps its declared-order exception (i32, i64,
-    // f32, f64 — no unsigned members) at 207..210 (codes 8–11).
-    try std.testing.expectEqual(@as(u16, 201), @intFromEnum(Opcode.neg_i32));
+    // f32, f64 — no unsigned members) at 203..206 (codes 8–11).
+    try std.testing.expectEqual(@as(u16, 197), @intFromEnum(Opcode.neg_i32));
     try std.testing.expectEqual(Rep.i32, repOf(.neg_i32).?);
-    try std.testing.expectEqual(@as(u16, 205), @intFromEnum(Opcode.neg_f32));
-    try std.testing.expectEqual(@as(u16, 206), @intFromEnum(Opcode.neg_f64));
-    // clz/popcount keep only the signed width selectors: `clz.i32` = 211
-    // (code 12), `clz.i64` = 212 (code 14), `popcount.i32` = 213 (code
-    // 16), `popcount.i64` = 214 (code 18) — the unsigned code slots
+    try std.testing.expectEqual(@as(u16, 201), @intFromEnum(Opcode.neg_f32));
+    try std.testing.expectEqual(@as(u16, 202), @intFromEnum(Opcode.neg_f64));
+    // clz/popcount keep only the signed width selectors: `clz.i32` = 207
+    // (code 12), `clz.i64` = 208 (code 14), `popcount.i32` = 209 (code
+    // 16), `popcount.i64` = 210 (code 18) — the unsigned code slots
     // 13/15/17/19 stay retired (counts are sign-agnostic, so the
     // unsigned types alias the signed member).
-    try std.testing.expectEqual(@as(u16, 211), @intFromEnum(Opcode.clz_i32));
-    try std.testing.expectEqual(@as(u16, 212), @intFromEnum(Opcode.clz_i64));
-    try std.testing.expectEqual(@as(u16, 213), @intFromEnum(Opcode.popcount_i32));
-    try std.testing.expectEqual(@as(u16, 214), @intFromEnum(Opcode.popcount_i64));
+    try std.testing.expectEqual(@as(u16, 207), @intFromEnum(Opcode.clz_i32));
+    try std.testing.expectEqual(@as(u16, 208), @intFromEnum(Opcode.clz_i64));
+    try std.testing.expectEqual(@as(u16, 209), @intFromEnum(Opcode.popcount_i32));
+    try std.testing.expectEqual(@as(u16, 210), @intFromEnum(Opcode.popcount_i64));
     try std.testing.expectEqual(Rep.i32, repOf(.clz_i32).?);
     try std.testing.expectEqual(Rep.i64, repOf(.clz_i64).?);
     try std.testing.expectEqual(Rep.i32, repOf(.popcount_i32).?);
@@ -2127,12 +2119,12 @@ test "family layout: families are contiguous runs in table order" {
         try std.testing.expectEqual(Rep.f64, repOf(op64).?);
     }
     // `abs` — the declared-order exception (Instruction Set §8): the
-    // members are contiguous 207..210 but carry i32, i64, f32, f64,
+    // members are contiguous 203..206 but carry i32, i64, f32, f64,
     // so the rep is NOT the member offset.
-    try std.testing.expectEqual(@as(u16, 207), @intFromEnum(Opcode.abs_i32));
-    try std.testing.expectEqual(@as(u16, 208), @intFromEnum(Opcode.abs_i64));
-    try std.testing.expectEqual(@as(u16, 209), @intFromEnum(Opcode.abs_f32));
-    try std.testing.expectEqual(@as(u16, 210), @intFromEnum(Opcode.abs_f64));
+    try std.testing.expectEqual(@as(u16, 203), @intFromEnum(Opcode.abs_i32));
+    try std.testing.expectEqual(@as(u16, 204), @intFromEnum(Opcode.abs_i64));
+    try std.testing.expectEqual(@as(u16, 205), @intFromEnum(Opcode.abs_f32));
+    try std.testing.expectEqual(@as(u16, 206), @intFromEnum(Opcode.abs_f64));
     try std.testing.expectEqual(Rep.i32, repOf(.abs_i32).?);
     try std.testing.expectEqual(Rep.i64, repOf(.abs_i64).?);
     try std.testing.expectEqual(Rep.f32, repOf(.abs_f32).?);
@@ -2140,13 +2132,13 @@ test "family layout: families are contiguous runs in table order" {
     // The widthless integer families are single members in the run;
     // typed families are six-member runs (integer-4 then float-2):
     // `add.i32` = 1 / `add.f64` = 6, `sub.i32` = 7, `div.i64` = 21,
-    // `shr.u64` = 70, `maddi.u64` = 100.
+    // `shr.u64` = 70; the R block tail ends at `cmov` = 112.
     try std.testing.expectEqual(@as(u16, 1), @intFromEnum(Opcode.add_i32));
     try std.testing.expectEqual(@as(u16, 6), @intFromEnum(Opcode.add_f64));
     try std.testing.expectEqual(@as(u16, 7), @intFromEnum(Opcode.sub_i32));
     try std.testing.expectEqual(@as(u16, 21), @intFromEnum(Opcode.div_i64));
     try std.testing.expectEqual(@as(u16, 70), @intFromEnum(Opcode.shr_u64));
-    try std.testing.expectEqual(@as(u16, 100), @intFromEnum(Opcode.maddi_u64));
+    try std.testing.expectEqual(@as(u16, 112), @intFromEnum(Opcode.cmov));
 }
 
 test "move-wide lane arithmetic" {

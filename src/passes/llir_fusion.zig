@@ -4,7 +4,7 @@
 //! emission stage — each block's record list fully written
 //! (instructions, edge copies, terminator), PCs still deferred. Out:
 //! the same lists compacted block-locally: fused sites folded to their
-//! immediate variants (`*_i`, `read_indexi`, `*_madd`/`*_maddi`), dead
+//! immediate variants (`*_i`, `read_indexi`, `*_madd`), dead
 //! `const`/`mul` records deleted, and the `fused_consts` /
 //! `consumed_instrs` marks plus the `last_fusion` density report
 //! populated. The input CFG is never rewritten — only image records
@@ -228,11 +228,11 @@ fn countTermUses(term: cfg.Terminator, uses: *std.AutoHashMapUnmanaged(*const cf
 /// (`dst = b op imm8` — the R-format `c` field carries the constant's
 /// raw 8-bit pattern, each opcode interpreting it at decode:
 /// sign-extended for the signed arithmetic and ordering forms
-/// (`addi`/`subi`/`muli`/`maddi`/`divi`/`remi`, `lti`/`gti`),
+/// (`addi`/`subi`/`muli`/`divi`/`remi`, `lti`/`gti`),
 /// zero-extended for the raw-pattern equality/unsigned forms
 /// (`eqi`/`nei`/`ltiu`/`gtiu`/`diviu`/`remiu`), the shift counts, and
 /// the bitwise masks, §3.3). The merged int family shares one set of
-/// immediate opcodes: `addi/subi/muli/divi/diviu/remi/remiu/maddi`
+/// immediate opcodes: `addi/subi/muli/divi/diviu/remi/remiu`
 /// and `eqi/nei/lti/ltiu/gti/gtiu`, plus `shli/shri/shrui` and
 /// `andi/ori/xori` — integer `le`/`ge` have no immediate forms (they
 /// synthesize to `not`(gt/lt)), and there are **no f32 immediate
@@ -333,12 +333,16 @@ pub fn peephole(b: *Builder) error{OutOfMemory}!FusionMetrics {
 
         // Pass 2a: the multiply-accumulate and immediate-index
         // fusion. A `mul` followed by an `add` whose operand is the
-        // mul result folds to `*_madd` (`dst = dst + b * c` — the
-        // accumulator is read-modify-written in place, so it must be
-        // consumed by the add and its slot becomes the result's); a
-        // const multiplier folds to `*_maddi`. `const` + `read_index`
-        // folds to `read_indexi`. The consumed instructions are
-        // remembered so pass 2b never fuses them twice.
+        // mul result folds to a register-form `*_madd` (`dst = dst +
+        // b * c`), and a `mul` followed by a `sub` whose second operand
+        // is the mul result folds to a register-form `*_msub`
+        // (`dst = dst - b * c`; subtraction does not commute, so only
+        // that shape fuses) — the accumulator is read-modify-written in
+        // place, so it must be consumed by the add/sub and its slot
+        // becomes the result's; a constant multiplier is read from its
+        // slot. A `const` + `read_index` folds to `read_indexi`. The
+        // consumed instructions are remembered so pass 2b never fuses
+        // them twice.
         for (r.start..r.start + r.len) |bi| {
             const blk = b.ordered_blocks.items[bi];
             var idx: u32 = 0;
@@ -346,6 +350,7 @@ pub fn peephole(b: *Builder) error{OutOfMemory}!FusionMetrics {
                 if (std.meta.activeTag(ins.op) == .phi) continue;
                 switch (ins.op) {
                     .add => |bin| try tryMadd(b, blk, idx, ins, bin, &uses, &def_pos, dead),
+                    .sub => |bin| try tryMsub(b, blk, idx, ins, bin, &uses, &def_pos, dead),
                     .read_index => |ri| {
                         if (constOf(ri.index)) |cv| {
                             // The literal index becomes the immediate
@@ -537,7 +542,7 @@ fn killFusedCmpNot(b: *Builder, bi: u32, site: u32, tag: llir.TypedKind, bin: cf
     dead[bi][site + 1] = true;
 }
 
-/// Fuse a `mul` + `add` pair into `*_madd`/`*_maddi` at the
+/// Fuse a `mul` + `add` pair into a register-form `*_madd` at the
 /// add's block-local record index (Instruction Set §5, Fused
 /// multiply-accumulate). The pattern: the add's operand that is a
 /// `mul` result — its second operand, or its first when the add is
@@ -548,16 +553,16 @@ fn killFusedCmpNot(b: *Builder, bi: u32, site: u32, tag: llir.TypedKind, bin: cf
 /// read-modify-write, so the accumulator must have no other reader
 /// and the result's slot is remapped to it. The product's operand
 /// order is preserved (`b`, `c` = the mul's operands); a constant
-/// multiplier folds to `*_maddi` (imm = the constant's raw bit
-/// pattern — a left-hand constant only for integer `mul`, which is
-/// commutative; an `f32` left-hand constant stays a plain `*_madd`
-/// reading the constant's slot). The mul record is deleted
-/// (per-block dead mark, consumed by the peephole compaction); both
-/// instructions are recorded as consumed.
+/// multiplier is kept as a register operand read from its slot — a
+/// left-hand constant only for integer `mul`, which is commutative
+/// (an `f32` left-hand constant stays in place). The mul record is
+/// deleted (per-block dead mark, consumed by the peephole compaction);
+/// both instructions are recorded as consumed.
 fn tryMadd(b: *Builder, blk: *const cfg.BasicBlock, idx: u32, ins: *const cfg.Instr, bin: cfg.Bin, uses: *std.AutoHashMapUnmanaged(*const cfg.Value, u32), def_pos: *const std.AutoHashMapUnmanaged(*const cfg.Value, RecPos), dead: [][]bool) error{OutOfMemory}!void {
     // The product operand: the add's second operand, or its first
     // when the add is an integer add (commuted). f32 never
     // reorders the addition.
+    if (!patterns.isMaddAccumulator(bin)) return;
     const product = blk: {
         if (patterns.isMulResult(bin.b)) break :blk bin.b;
         if (patterns.isMulResult(bin.a) and Builder.isInteger(bin.b.type_)) break :blk bin.a;
@@ -588,38 +593,20 @@ fn tryMadd(b: *Builder, blk: *const cfg.BasicBlock, idx: u32, ins: *const cfg.In
     // The fused record replaces the add record. The fused record is
     // written at the add's index; the mul record is deleted.
     const fused_idx: u32 = idx;
-    if (constOf(mul.b)) |cv| {
-        // Constant multiplier on the right: `*_maddi` when the constant
-        // fits the 8-bit immediate field (order preserved); otherwise
-        // the site stays a plain `*_madd` reading the constant's slot.
-        const op = llir.maddiOpcode(t) orelse return;
-        if (immOf(cv, .mul, t)) |imm| {
-            b.setR(blk, fused_idx, op, acc_slot, b.slotOf(mul.a), imm);
-            decrementUse(uses, mul.b);
-        } else {
-            const mo = llir.maddOpcode(t) orelse return;
-            b.setR(blk, fused_idx, mo, acc_slot, b.slotOf(mul.a), b.slotOf(mul.b));
-        }
-    } else if (constOf(mul.a)) |cv| {
-        if (Builder.isInteger(t)) {
-            // Integer `mul` commutes: `*_maddi` with the constant
-            // multiplier as the immediate, when it fits; otherwise a
-            // plain `*_madd` reading the constant's slot.
-            const op = llir.maddiOpcode(t) orelse return;
-            if (immOf(cv, .mul, t)) |imm| {
-                b.setR(blk, fused_idx, op, acc_slot, b.slotOf(mul.b), imm);
-                decrementUse(uses, mul.a);
-            } else {
-                const mo = llir.maddOpcode(t) orelse return;
-                b.setR(blk, fused_idx, mo, acc_slot, b.slotOf(mul.b), b.slotOf(mul.a));
-            }
-        } else {
-            // f32 preserves the mul operand order: a plain `*_madd`
-            // reads the constant from its slot.
-            const op = llir.maddOpcode(t) orelse return;
-            b.setR(blk, fused_idx, op, acc_slot, b.slotOf(mul.a), b.slotOf(mul.b));
-        }
+    if (constOf(mul.b) != null) {
+        // Constant multiplier on the right: order preserved, the fused
+        // register `*_madd` reads the constant from its slot (so the
+        // const record must survive — no use decrement).
+        const op = llir.maddOpcode(t) orelse return;
+        b.setR(blk, fused_idx, op, acc_slot, b.slotOf(mul.a), b.slotOf(mul.b));
+    } else if (constOf(mul.a) != null and Builder.isInteger(t)) {
+        // Integer `mul` commutes: the constant can move to the second
+        // operand position, read from its slot by a register `*_madd`.
+        const op = llir.maddOpcode(t) orelse return;
+        b.setR(blk, fused_idx, op, acc_slot, b.slotOf(mul.b), b.slotOf(mul.a));
     } else {
+        // A left-hand f32 constant preserves the mul operand order, and
+        // the no-constant case reads both slots directly.
         const op = llir.maddOpcode(t) orelse return;
         b.setR(blk, fused_idx, op, acc_slot, b.slotOf(mul.a), b.slotOf(mul.b));
     }
@@ -635,6 +622,67 @@ fn tryMadd(b: *Builder, blk: *const cfg.BasicBlock, idx: u32, ins: *const cfg.In
     // the read-modify-write dst — the fused record reads the acc slot
     // (`dst = dst + b*c`), so the acc's defining record (a const that
     // loaded the slot) must survive: keep its use count.
+    decrementUse(uses, product);
+}
+
+/// Fuse a `mul` + `sub` pair into a register-form `*_msub` at the
+/// sub's block-local record index (Instruction Set §5, Fused
+/// multiply-accumulate). The pattern is `dst = acc - b * c`: the sub's
+/// second operand must be the `mul` result and its first operand the
+/// accumulator. Subtraction does not commute — a sub whose first
+/// operand is the product (`b*c - acc`) is not an msub and never
+/// fuses, and the f32 forms do not reorder either. Both the mul result
+/// and the accumulator must be consumed by exactly this sub: the fused
+/// record is `dst = dst - b * c`, writing the accumulator's slot
+/// read-modify-write, so the accumulator must have no other reader and
+/// the result's slot is remapped to it. The product's operand order is
+/// preserved (`b`, `c` = the mul's operands); a constant multiplier is
+/// kept as a register operand read from its slot — never commuted to
+/// the second position (`sub` is not commutative). The mul record is
+/// deleted (per-block dead mark, consumed by the peephole compaction);
+/// both instructions are recorded as consumed.
+fn tryMsub(b: *Builder, blk: *const cfg.BasicBlock, idx: u32, ins: *const cfg.Instr, bin: cfg.Bin, uses: *std.AutoHashMapUnmanaged(*const cfg.Value, u32), def_pos: *const std.AutoHashMapUnmanaged(*const cfg.Value, RecPos), dead: [][]bool) error{OutOfMemory}!void {
+    // The product must be the sub's second operand: `acc - product`.
+    // Subtraction does not commute, so a product on the left is a plain
+    // `b*c - acc` and never an msub.
+    if (!patterns.isMsubAccumulator(bin)) return;
+    const product = bin.b;
+    const acc = bin.a;
+    if (product == acc) return; // `sub %m, %m` — not an msub shape
+    if ((uses.get(product) orelse 0) != 1) return; // mul result must be consumed here
+    if ((uses.get(acc) orelse 0) != 1) return; // accumulator must be consumed here
+    const product_pos = def_pos.get(product) orelse return;
+    if (product_pos.bi != b.block_ids.get(blk).?) return;
+    // The mul's record immediately precedes the sub: the typed mul is
+    // exactly one record (Instruction Set §4), no canonicalization in
+    // between.
+    if (product_pos.idx + 1 != idx) return;
+
+    const mul = product.def.?.op.mul; // Bin{a, b} — the product's operand order
+    const t = product.type_;
+    const acc_slot = b.slotOf(acc);
+    // The fused record's dst is the accumulator slot and its result
+    // reads as the sub result's slot downstream (phi edge copies,
+    // terminators). Allocation coalesces the sub result into the
+    // accumulator cell only when the intervals line up — a loop-carried
+    // accumulator's fixed-point end can overshoot the sub's position,
+    // skipping the coalesce — so skip the fusion unless the result
+    // actually landed in the accumulator cell (llir_alloc.zig).
+    if (b.slotOf(ins.results[0]) != acc_slot) return;
+    const op = llir.msubOpcode(t) orelse return;
+    // The product operand order is preserved: `dst - b*c`, with a
+    // constant multiplier read from its slot; no commutation.
+    b.setR(blk, idx, op, acc_slot, b.slotOf(mul.a), b.slotOf(mul.b));
+    // Both instructions are consumed: the sub record is deleted (the
+    // fused record stands in its place) and the mul is deleted.
+    try b.consumed_instrs.put(b.arena, ins, {});
+    try b.consumed_instrs.put(b.arena, product.def.?, {});
+    dead[product_pos.bi][product_pos.idx] = true;
+    // The product is computed internally, so the fused record reads
+    // neither mul operand's product slot. The accumulator is the
+    // read-modify-write dst — the fused record reads the acc slot
+    // (`dst = dst - b*c`), so the acc's defining record must survive:
+    // keep its use count.
     decrementUse(uses, product);
 }
 

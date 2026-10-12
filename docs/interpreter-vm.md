@@ -572,13 +572,13 @@ fallthrough(n):
 ```
 
 The handler table is `[max tag + 1]Handler` indexed by
-`@intFromEnum(op)` — `Opcode` has sparse explicit tags (1–273 with
-holes), so the raw array is the dense index space; the comptime
-initializer fills it with an exhaustive per-tag switch, and any tag
-left unassigned fails the compile (the completeness guard, §12).
-Reserved/non-dispatchable opcodes (`auipc`/`lui`) map to a trap
-handler; hole slots are dead because `decodeInstr` rejects reserved
-words at load.
+`@intFromEnum(op)` — `Opcode` has dense explicit tags (contiguous
+1–269), so the raw array is the index space; the comptime initializer
+fills it with an exhaustive per-tag switch, and any tag left
+unassigned fails the compile (the completeness guard, §12). Index 0
+is the only non-tag slot: the generic trap handler is just the
+table's initialization default, unreachable because `decodeInstr`
+rejects reserved words at load.
 
 Handlers fetch their own instruction from `code[self.pc]` at entry —
 `pc` always points at the executing token (transfer handlers move it
@@ -963,7 +963,7 @@ CLI integration: `stilla --run <input>` executes. An input
 starting with the LLIR magic loads through `readBin` → `validateLlir` →
 `run`, executing from the header's symbolic entry member — the binary
 header carries the module symbol and entry member (binary format version
-16), so a serialized artifact is self-contained and needs no side
+17), so a serialized artifact is self-contained and needs no side
 information. Anything else compiles the whole dependency closure
 (entry plus `-I` imports and the embedded standard library) into one
 per-module artifact bundle and runs the root artifact through

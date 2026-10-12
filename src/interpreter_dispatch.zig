@@ -246,23 +246,6 @@ fn fmacHandler(comptime op: llir.Opcode) Handler {
     }.run;
 }
 
-/// R-Type `dst, src, imm7`: the rep fixes the immediate interpretation —
-/// the `.i*` members sign-extend the field, the `.u*` members use it raw
-/// (zero-extended).
-fn fmacImmHandler(comptime op: llir.Opcode) Handler {
-    return struct {
-        fn run(self: *VmCtx, n: u32) void {
-            const v = self.loaded.code.items[self.runtime.pc];
-            const acc = read(self, v.a);
-            const b = read(self, v.b);
-            const rep = llir.repOf(op).?;
-            const im: u64 = if (rep == .i32 or rep == .i64) @bitCast(vm_instr.imm7Signed(v.c)) else v.c;
-            write(self, v.a, fmaciOp(self, op, acc, b, im));
-            return fallthrough(self, n);
-        }
-    }.run;
-}
-
 // --- typed unary (E-Type) --------------------------------------------------
 
 /// Typed unary (E-Type): `neg`/`abs`/`clz`/`popcount` and the float
@@ -493,6 +476,28 @@ fn hTake(self: *VmCtx, n: u32) void {
     const taken_val = read(self, v.b);
     write(self, v.b, ValueCodec.zero);
     write(self, v.a, taken_val);
+    return fallthrough(self, n);
+}
+
+/// `lui`: `dst = signExtend20(imm20) << 12` (Instruction Set §9). The
+/// 20-bit immediate's sign extends to the full 64-bit cell before the
+/// 12-bit shift, so the value is always 4 KiB-aligned. A write to
+/// `zero` discards; the instruction always falls through.
+fn hLui(self: *VmCtx, n: u32) void {
+    const v = self.loaded.code.items[self.runtime.pc];
+    const imm20: i32 = @bitCast(v.operand);
+    write(self, v.a, @bitCast(@as(i64, imm20) << 12));
+    return fallthrough(self, n);
+}
+
+/// `auipc`: `dst = current_pc + (signExtend20(imm20) << 12)`
+/// (Instruction Set §9). `current_pc` is this instruction's own pc, so
+/// the immediate is a signed pc-relative offset in 4 KiB units. A
+/// write to `zero` discards; the instruction always falls through.
+fn hAuipc(self: *VmCtx, n: u32) void {
+    const v = self.loaded.code.items[self.runtime.pc];
+    const imm20: i32 = @bitCast(v.operand);
+    write(self, v.a, llir.auipcTarget(self.runtime.pc, imm20));
     return fallthrough(self, n);
 }
 
@@ -1013,9 +1018,10 @@ fn hDrop(self: *VmCtx, n: u32) void {
 
 // --- undispatchable ------------------------------------------------------------------
 
-/// The undispatchable/reserved-opcode handler: `auipc`/`lui` and the
-/// enum holes never reach the image (load-time decode rejects reserved
-/// words), so this traps defensively. It is also the table's default.
+/// The default handler for the table's non-tag slots. Every slot filled
+/// by a tag of `llir.Opcode` gets a real handler, and load-time decode
+/// rejects reserved words, so this is unreachable at runtime — it
+/// exists only to initialize the table.
 fn hTrapGeneric(self: *VmCtx, n: u32) void {
     const v = self.loaded.code.items[self.runtime.pc];
     _ = n;
@@ -1028,9 +1034,9 @@ fn hTrapGeneric(self: *VmCtx, n: u32) void {
 /// exhaustive switch over every tag of `llir.Opcode` — any opcode
 /// without a handler is a compile error (the completeness guard the
 /// switch-based dispatch used to provide, docs/interpreter-vm.md §12).
-/// Non-tag slots (the enum's 6 holes) keep the undispatchable-trap
-/// handler; they are unreachable at runtime because `decodeInstr`
-/// rejects reserved words at load.
+/// Index 0 is the enum's only non-tag slot; it keeps the default trap
+/// handler and is unreachable at runtime because `decodeInstr` rejects
+/// reserved words at load.
 pub const handlers: [maxOpcodeValue() + 1]Handler = blk: {
     @setEvalBranchQuota(1 << 16);
     var t: [maxOpcodeValue() + 1]Handler = .{hTrapGeneric} ** (maxOpcodeValue() + 1);
@@ -1044,7 +1050,6 @@ pub const handlers: [maxOpcodeValue() + 1]Handler = blk: {
             .shli_i32, .shli_u32, .shli_i64, .shli_u64, .shri_i32, .shri_u32, .shri_i64, .shri_u64 => shiftImmHandler(op),
             .andi, .ori, .xori => bitImmHandler(op),
             .madd_i32, .madd_u32, .madd_i64, .madd_u64, .msub_i32, .msub_u32, .msub_i64, .msub_u64, .madd_f32, .madd_f64, .msub_f32, .msub_f64 => fmacHandler(op),
-            .maddi_i32, .maddi_u32, .maddi_i64, .maddi_u64 => fmacImmHandler(op),
             .neg_i32, .neg_u32, .neg_i64, .neg_u64, .neg_f32, .neg_f64, .abs_i32, .abs_i64, .abs_f32, .abs_f64, .clz_i32, .clz_i64, .popcount_i32, .popcount_i64, .sqrt_f32, .sqrt_f64, .floor_f32, .floor_f64, .ceil_f32, .ceil_f64, .trunc_f32, .trunc_f64, .round_f32, .round_f64 => unaryHandler(op),
             .seq, .seq_f32, .seq_f64, .sne, .sne_f32, .sne_f64, .slt, .sltu, .slt_f32, .slt_f64, .sle_f32, .sle_f64 => cmpHandler(op),
             .seqi, .snei, .slti, .sltiu, .sgti, .sgtiu => cmpImmHandler(op),
@@ -1095,7 +1100,8 @@ pub const handlers: [maxOpcodeValue() + 1]Handler = blk: {
             .replace_copy => hReplaceCopy,
             .replace_move => hReplaceMove,
             .drop => hDrop,
-            .auipc, .lui => hTrapGeneric,
+            .auipc => hAuipc,
+            .lui => hLui,
         };
     }
     break :blk t;
@@ -2002,24 +2008,6 @@ pub inline fn fmacOp(self: *VmCtx, op: llir.Opcode, acc: Value, b: Value, c: Val
         return canonicalIntResult(op, r);
     }
     return if (fam == .madd) acc +% b *% c else acc -% b *% c;
-}
-
-/// Read-modify-write immediate FMAC: `dst = dst + b * imm7` — the
-/// immediate already sign/zero-extended per opcode (Instruction Set
-/// §10), two separate wrap steps.
-/// Read-modify-write immediate FMAC: `dst = dst + b * imm7` — the
-/// immediate already sign/zero-extended per rep (Instruction Set
-/// §10), two separate wrap steps at the rep's width.
-pub inline fn fmaciOp(self: *VmCtx, op: llir.Opcode, acc: Value, b: Value, imm: u64) Value {
-    _ = self;
-    const rep = llir.repOf(op) orelse unreachable;
-    if (rep == .i32 or rep == .u32) {
-        const a: u32 = @truncate(acc);
-        const x: u32 = @truncate(b);
-        const i: u32 = @truncate(imm);
-        return canonicalIntResult(op, a +% x *% i);
-    }
-    return acc +% b *% imm;
 }
 
 /// One unary operation (E-Type, rep-dispatched): `neg` wraps on the
