@@ -1,11 +1,13 @@
 //! The frozen LLIR image model (Stilla LLIR Specification) plus the v9
 //! instruction codec (Stilla LLIR Instruction Set): the 4-byte fixed-width
-//! six-format encoding, the logical `Opcode` set, the shared
+//! five-format encoding, the logical `Opcode` set, the shared
 //! `encode`/`decode` mapping, the register model (F / `zero` / `ra` / T /
 //! `cond`), the frame and call arithmetic, and the descriptor and
-//! side-table records. The opcode tables are machine-generated from
-//! `.v8gen/table.json` (`llir_opcodes.zig`); everything here mirrors the
-//! two v9 specification documents and must be updated with them.
+//! side-table records. The opcode table is the hand-maintained
+//! `llir_opcodes.zig`, not generated: it mirrors the two specification
+//! documents and must be updated with them. The bit geometry each
+//! format is encoded and decoded with comes from the single
+//! `format_spec` table beside `Format`.
 //!
 //! The v9 defining property: the type of every typed operation rides in
 //! the logical opcode (the rep suffix — `add.i32`, `div.u64`, `seq.f32`),
@@ -28,16 +30,20 @@ const opcodes = @import("llir_opcodes.zig");
 pub const print = @import("passes/llir_asm.zig").print;
 
 // ---------------------------------------------------------------------------
-// 0. The generated opcode table (llir_opcodes.zig) — re-exported
+// 0. The hand-maintained opcode table (llir_opcodes.zig) — re-exported
 // ---------------------------------------------------------------------------
 
 /// The logical opcode set: `Opcode = enum(u16)`, the complete set of
-/// Instruction Set §4–§9 — 269 opcodes with explicit logical values
-/// `1–269` in table order with no holes (every value is a member and
+/// Instruction Set §4–§9 — 271 opcodes with explicit logical values
+/// `1–271` in table order with no holes (every value is a member and
 /// carries an `opInfo`).
 pub const Opcode = opcodes.Opcode;
-/// The six instruction formats (Instruction Set §2.2).
+/// The five instruction formats (Instruction Set §2.2).
 pub const Format = opcodes.Format;
+/// The wire geometry of one instruction format.
+pub const FormatSpec = opcodes.FormatSpec;
+/// The five-row wire-geometry table, in `Format` order.
+pub const format_spec = opcodes.format_spec;
 /// The numeric representation of a typed family member.
 pub const Rep = opcodes.Rep;
 /// One operand field's schema (role + special permission).
@@ -56,7 +62,7 @@ pub const opInfo = opcodes.opInfo;
 /// the only access paths are `encode`/`decode` (and the explicit
 /// little-endian `wordOf`/`bytesOf` helpers). The logical opcode and
 /// the encoded selector are different objects: the word's code field is
-/// per-format (9 bits in R, 6 in B/I/C/E, 5 in U) and only `opInfo`
+/// per-format (9 bits in R, 6 in B/I, 7 in E, 5 in U) and only `opInfo`
 /// connects it to the logical `Opcode`.
 pub const Instr = [4]u8;
 
@@ -118,35 +124,34 @@ pub fn repOf(op: Opcode) ?Rep {
 pub fn instrR(op: Opcode, a: u8, b: u8, c: u8) Instr {
     const info = opInfo(op);
     std.debug.assert(info.format == .r);
-    return bytesOf((@as(u32, info.code) << 21) | (@as(u32, a & 0x7f) << 14) | (@as(u32, b & 0x7f) << 7) | (c & 0x7f));
+    const s = format_spec[@intFromEnum(Format.r)];
+    return bytesOf(s.prefix | (@as(u32, info.code) << s.code_shift) | (@as(u32, a & 0x7f) << 14) | (@as(u32, b & 0x7f) << 7) | (c & 0x7f));
 }
 
 /// Encode a B-type instruction: `01 | code(6) | lhs(7) | rhs_or_imm7(7) | offs10`.
 pub fn instrB(op: Opcode, lhs: u8, mid: u8, offs10: i16) Instr {
     const info = opInfo(op);
     std.debug.assert(info.format == .b);
-    return bytesOf((0b01 << 30) | (@as(u32, info.code) << 24) | (@as(u32, lhs & 0x7f) << 17) | (@as(u32, mid & 0x7f) << 10) | @as(u32, @as(u16, @bitCast(offs10)) & 0x3ff));
+    const s = format_spec[@intFromEnum(Format.b)];
+    return bytesOf(s.prefix | (@as(u32, info.code) << s.code_shift) | (@as(u32, lhs & 0x7f) << 17) | (@as(u32, mid & 0x7f) << 10) | @as(u32, @as(u16, @bitCast(offs10)) & 0x3ff));
 }
 
 /// Encode an I-type instruction: `110 | code(6) | a(7) | imm16`.
 pub fn instrI(op: Opcode, a: u8, imm16: u16) Instr {
     const info = opInfo(op);
     std.debug.assert(info.format == .i);
-    return bytesOf((0b110 << 29) | (@as(u32, info.code) << 23) | (@as(u32, a & 0x7f) << 16) | imm16);
+    const s = format_spec[@intFromEnum(Format.i)];
+    return bytesOf(s.prefix | (@as(u32, info.code) << s.code_shift) | (@as(u32, a & 0x7f) << 16) | imm16);
 }
 
-/// Encode a C-type instruction: `111000 | code(6) | reserved(6)=0 | a(7) | b(7)`.
-pub fn instrC(op: Opcode, a: u8, b: u8) Instr {
-    const info = opInfo(op);
-    std.debug.assert(info.format == .c);
-    return bytesOf((0b111000 << 26) | (@as(u32, info.code) << 20) | (@as(u32, a & 0x7f) << 7) | (b & 0x7f));
-}
-
-/// Encode an E-type instruction: `111001 | code(6) | reserved(6)=0 | a(7) | b(7)`.
+/// Encode an E-type instruction: `11100 | code(7) | reserved(6)=0 | a(7) | b(7)`.
+/// One merged format: selectors 0–63 are the former C codes, 64–107 the
+/// former E codes.
 pub fn instrE(op: Opcode, a: u8, b: u8) Instr {
     const info = opInfo(op);
     std.debug.assert(info.format == .e);
-    return bytesOf((0b111001 << 26) | (@as(u32, info.code) << 20) | (@as(u32, a & 0x7f) << 7) | (b & 0x7f));
+    const s = format_spec[@intFromEnum(Format.e)];
+    return bytesOf(s.prefix | (@as(u32, info.code) << s.code_shift) | (@as(u32, a & 0x7f) << 7) | (b & 0x7f));
 }
 
 /// Encode the unconditional jump as `jal`'s U-type word — prefix
@@ -164,13 +169,9 @@ pub fn instrJ(offs20: i32) Instr {
 pub fn instrU(op: Opcode, a: u8, imm20: i32) Instr {
     const info = opInfo(op);
     std.debug.assert(info.format == .u and (op != .j or a == zero_reg));
-    const prefix: u32 = switch (info.code) {
-        0 => 0b11101, // jal
-        1 => 0b11110, // auipc
-        2 => 0b11111, // lui
-        else => unreachable,
-    };
-    return bytesOf((prefix << 27) | (@as(u32, a & 0x7f) << 20) | (@as(u32, @bitCast(imm20)) & 0xfffff));
+    const s = format_spec[@intFromEnum(Format.u)];
+    const raw = @as(u32, info.code) + s.code_base;
+    return bytesOf(s.prefix | (raw << s.code_shift) | (@as(u32, a & 0x7f) << 20) | (@as(u32, @bitCast(imm20)) & 0xfffff));
 }
 
 /// The reverse `(format, code) → Opcode` mapping, derived at comptime
@@ -178,12 +179,12 @@ pub fn instrU(op: Opcode, a: u8, imm20: i32) Instr {
 /// Exception: `.j` shares `(.u, 0)` with `.jal` and stays out of the
 /// table, because prefix `11101` includes its `a` field in the
 /// discriminant: `a = zero` selects `.j` (Instruction Set §9.1).
-const code_to_op: [6][512]?Opcode = initCodeToOp();
+const code_to_op: [5][512]?Opcode = initCodeToOp();
 
-fn initCodeToOp() [6][512]?Opcode {
+fn initCodeToOp() [5][512]?Opcode {
     @setEvalBranchQuota(100_000);
-    var t: [6][512]?Opcode = undefined;
-    for (0..6) |f| {
+    var t: [5][512]?Opcode = undefined;
+    for (0..5) |f| {
         for (0..512) |c| t[f][c] = null;
     }
     for (std.meta.tags(Opcode)) |op| {
@@ -208,17 +209,38 @@ fn sext20(raw: u32) i32 {
     return @as(i32, @bitCast(raw << 12)) >> 12;
 }
 
+/// Select the format of a raw word from the `format_spec` discriminant
+/// intervals (pairwise disjoint), or null for the reserved `10` class
+/// and unassigned `11` prefixes.
+fn formatOfWord(w: u32) ?Format {
+    for (std.meta.tags(Format)) |f| {
+        const s = format_spec[@intFromEnum(f)];
+        const d = (w >> s.disc_shift) & s.disc_mask;
+        if (d >= s.disc_first and d <= s.disc_last) return f;
+    }
+    return null;
+}
+
 /// Decode one instruction record into its logical opcode and operands,
 /// or null for a reserved word: the `10` reserved class, an unassigned
-/// code in any format, an alignment hole, a nonzero C/E reserved field,
-/// or an unassigned `11` prefix.
+/// code in any format, an alignment hole, a nonzero E reserved field,
+/// or a `11101` prefix whose `a` field is neither `ra` nor `zero`.
 pub fn decode(instr: Instr) ?Decoded {
     const w = wordOf(instr);
-    const top = (w >> 30) & 0b11;
-    if (top == 0b00) {
-        const code: u16 = @truncate((w >> 21) & 0x1ff);
-        const op = opFromCode(.r, code) orelse return null;
-        return .{
+    const f = formatOfWord(w) orelse return null;
+    const s = format_spec[@intFromEnum(f)];
+    if (s.reserved_mask != 0 and (w & s.reserved_mask) != 0) return null;
+    const code: u16 = @intCast(((w >> s.code_shift) & s.code_mask) - s.code_base);
+    // Prefix `11101` includes its `a` field in the discriminant: it
+    // holds both jumps — `a = ra` → `jal` (direct call), `a = zero` →
+    // `j` (no link, no frame); any other `a` value is unclean
+    // (Instruction Set §9.1).
+    const op: Opcode = if (f == .u and code == 0) blk: {
+        const a: u8 = @truncate((w >> 20) & 0x7f);
+        break :blk if (a == ra_reg) Opcode.jal else if (a == zero_reg) Opcode.j else return null;
+    } else opFromCode(f, code) orelse return null;
+    return switch (f) {
+        .r => .{
             .op = op,
             .format = .r,
             .a = @truncate((w >> 14) & 0x7f),
@@ -227,12 +249,8 @@ pub fn decode(instr: Instr) ?Decoded {
             .imm16 = 0,
             .offs10 = 0,
             .imm20 = 0,
-        };
-    }
-    if (top == 0b01) {
-        const code: u16 = @truncate((w >> 24) & 0x3f);
-        const op = opFromCode(.b, code) orelse return null;
-        return .{
+        },
+        .b => .{
             .op = op,
             .format = .b,
             .a = @truncate((w >> 17) & 0x7f),
@@ -241,14 +259,8 @@ pub fn decode(instr: Instr) ?Decoded {
             .imm16 = 0,
             .offs10 = sext10(@truncate(w & 0x3ff)),
             .imm20 = 0,
-        };
-    }
-    if (top == 0b10) return null; // reserved class
-    const t3 = (w >> 29) & 0b111;
-    if (t3 == 0b110) {
-        const code: u16 = @truncate((w >> 23) & 0x3f);
-        const op = opFromCode(.i, code) orelse return null;
-        return .{
+        },
+        .i => .{
             .op = op,
             .format = .i,
             .a = @truncate((w >> 16) & 0x7f),
@@ -257,50 +269,27 @@ pub fn decode(instr: Instr) ?Decoded {
             .imm16 = @truncate(w & 0xffff),
             .offs10 = 0,
             .imm20 = 0,
-        };
-    }
-    if (t3 != 0b111) return null;
-    const s6 = (w >> 26) & 0x3f;
-    if (s6 == 0b111000 or s6 == 0b111001) {
-        const code: u16 = @truncate((w >> 20) & 0x3f);
-        if (((w >> 14) & 0x3f) != 0) return null; // reserved field must be zero
-        const fmt: Format = if (s6 == 0b111000) .c else .e;
-        const op = opFromCode(fmt, code) orelse return null;
-        return .{
+        },
+        .e => .{
             .op = op,
-            .format = fmt,
+            .format = f,
             .a = @truncate((w >> 7) & 0x7f),
             .b = @truncate(w & 0x7f),
             .c = 0,
             .imm16 = 0,
             .offs10 = 0,
             .imm20 = 0,
-        };
-    }
-    const s5 = (w >> 27) & 0x1f;
-    const code: u16 = if (s5 == 0b11101) 0 else if (s5 == 0b11110) 1 else if (s5 == 0b11111) 2 else return null;
-    const a: u8 = @truncate((w >> 20) & 0x7f);
-    // Prefix `11101` includes its `a` field in the discriminant: it
-    // holds both jumps — `a = ra` → `jal` (direct call), `a = zero` →
-    // `j` (no link, no frame); any other `a` value is unclean
-    // (Instruction Set §9.1).
-    const op: Opcode = if (code != 0)
-        opFromCode(.u, code) orelse return null
-    else if (a == ra_reg)
-        .jal
-    else if (a == zero_reg)
-        .j
-    else
-        return null;
-    return .{
-        .op = op,
-        .format = .u,
-        .a = a,
-        .b = 0,
-        .c = 0,
-        .imm16 = 0,
-        .offs10 = 0,
-        .imm20 = sext20(w & 0xfffff),
+        },
+        .u => .{
+            .op = op,
+            .format = .u,
+            .a = @truncate((w >> 20) & 0x7f),
+            .b = 0,
+            .c = 0,
+            .imm16 = 0,
+            .offs10 = 0,
+            .imm20 = sext20(w & 0xfffff),
+        },
     };
 }
 
@@ -333,7 +322,7 @@ pub const frame_count_max: ValueReg = 109;
 pub const zero_reg: ValueReg = 0x00;
 
 /// The single condition register: the block-local short-lived
-/// destination of the C-Type comparisons, and a legal operand of
+/// destination of the E-type comparisons, and a legal operand of
 /// `not`/`copy`/`cmov` per Instruction Set §3.2. Not a frame slot;
 /// fast-bank index 1.
 pub const cond_reg: ValueReg = 0x01;
@@ -1029,7 +1018,7 @@ pub const LlirProgram = struct {
 /// A field-level schema violation.
 pub const Issue = enum {
     /// Not an assigned opcode value (reserved class/code, alignment hole,
-    /// nonzero C/E reserved field).
+    /// nonzero E reserved field).
     unknown_opcode,
     /// A register-role field is neither a valid slot, a T register,
     /// nor a special register — including reserved encodings and
@@ -1342,7 +1331,7 @@ fn bitCountOp(comptime base: []const u8, t: meta.Type) ?Opcode {
 /// width, and self-canonicalizes its result cell (§4) — no
 /// canonicalization records exist. The bitwise ops stay widthless
 /// (rep-agnostic on canonical cells). Float width stays explicit in the
-/// rep suffix. Comparisons resolve to the C-Type `seq`/`sne`/`slt`/`sle`
+/// rep suffix. Comparisons resolve to the E-type `seq`/`sne`/`slt`/`sle`
 /// families (the destination is the implicit `cond`); `sle` is the one
 /// float non-strict ordering primitive (`a <= b` ≡ `sle a, b`, `a >= b`
 /// ≡ `sle b, a` — the swap preserves the NaN behavior), `sgt lhs, rhs`
@@ -1368,7 +1357,7 @@ pub fn typedOpcode(kind: TypedKind, src: meta.Type, dst: meta.Type) ?Opcode {
         .abs => famOp("abs", typeRep(src)),
         .clz => bitCountOp("clz", src),
         .popcount => bitCountOp("popcount", src),
-        // C-Type comparisons: `seq`/`sne`/`slt`/`sle`, implicit cond.
+        // E-type comparisons: `seq`/`sne`/`slt`/`sle`, implicit cond.
         .eq => cmpFam("seq", src),
         .ne => cmpFam("sne", src),
         .lt => cmpFam("slt", src),
@@ -1485,7 +1474,7 @@ fn castOp(src: meta.Type, dst: meta.Type) ?Opcode {
 
 /// The immediate variant of a typed family (`dst = b op imm7`), or null
 /// when the type has no such form. The integer immediate families are
-/// integer-4 only (no float forms); comparison immediates are C-Type and
+/// integer-4 only (no float forms); comparison immediates are E-type and
 /// write `cond`; unary families have no immediate forms.
 fn cmpImmOp(comptime base: []const u8, src: meta.Type) ?Opcode {
     return switch (src) {
@@ -1557,6 +1546,16 @@ pub fn msubOpcode(src: meta.Type) ?Opcode {
 // live in frontend_llir_core_tests.zig).
 // ---------------------------------------------------------------------------
 
+/// Re-select `instr`'s format-specific `code` field in place, keeping
+/// every other bit. Test-only: it derives reserved/unassigned probe
+/// words from the encoders and `format_spec` instead of hand-written
+/// bit literals.
+fn reselect(instr: Instr, comptime format: Format, code: u16) Instr {
+    const s = format_spec[@intFromEnum(format)];
+    const w = wordOf(instr);
+    return bytesOf((w & ~(@as(u32, s.code_mask) << s.code_shift)) | (@as(u32, code + s.code_base) << s.code_shift));
+}
+
 test "Instr is exactly 4 bytes" {
     try std.testing.expectEqual(@as(usize, 4), @sizeOf(Instr));
 }
@@ -1573,7 +1572,6 @@ test "codec: every assigned opcode round-trips through encode/decode" {
             .r => instrR(op, a, b, c),
             .b => instrB(op, a, b, @intCast(c)),
             .i => instrI(op, a, @as(u16, b) | (@as(u16, c) << 8)),
-            .c => instrC(op, a, b),
             .e => instrE(op, a, b),
             // Prefix-11101 words must carry their legal register values:
             // `j` the `zero` encoding, `jal`'s link exactly ra.
@@ -1591,7 +1589,6 @@ test "codec: every assigned opcode round-trips through encode/decode" {
             .r => instrR(d.op, d.a, d.b, d.c),
             .b => instrB(d.op, d.a, d.b, d.offs10),
             .i => instrI(d.op, d.a, d.imm16),
-            .c => instrC(d.op, d.a, d.b),
             .e => instrE(d.op, d.a, d.b),
             .u => instrU(d.op, d.a, d.imm20),
         };
@@ -1599,93 +1596,120 @@ test "codec: every assigned opcode round-trips through encode/decode" {
     }
 }
 
-test "codec: format counts match the frozen distribution (112/20/64/38/31/4)" {
-    var counts = [_]u32{0} ** 6;
+test "codec: format counts match the frozen distribution (112/22/102/31/4)" {
+    var counts = [_]u32{0} ** 5;
     for (std.meta.tags(Opcode)) |op| counts[@intFromEnum(formatOf(op))] += 1;
     try std.testing.expectEqual(@as(u32, 112), counts[@intFromEnum(Format.r)]);
-    try std.testing.expectEqual(@as(u32, 20), counts[@intFromEnum(Format.b)]);
-    try std.testing.expectEqual(@as(u32, 64), counts[@intFromEnum(Format.c)]);
-    try std.testing.expectEqual(@as(u32, 38), counts[@intFromEnum(Format.e)]);
+    try std.testing.expectEqual(@as(u32, 22), counts[@intFromEnum(Format.b)]);
+    try std.testing.expectEqual(@as(u32, 102), counts[@intFromEnum(Format.e)]);
     try std.testing.expectEqual(@as(u32, 31), counts[@intFromEnum(Format.i)]);
     try std.testing.expectEqual(@as(u32, 4), counts[@intFromEnum(Format.u)]);
     // v10: the integer arithmetic families carry the full rep (§4), the
-    // `sext32`/`zext32` canonicalization pair is gone, `neg` fills its
-    // family's codes 0–3, and `clz`/`popcount` keep only the signed
-    // width selectors — 269 logical opcodes, values 1–269 with no
-    // retired logical holes.
-    try std.testing.expectEqual(@as(usize, 269), std.meta.tags(Opcode).len);
+    // `sext32`/`zext32` canonicalization pair is gone, `neg` opens the
+    // former-E block at selectors 64–67, and `clz`/`popcount` keep only
+    // the signed width selectors — 271 logical opcodes, values 1–271 with
+    // no retired logical holes.
+    try std.testing.expectEqual(@as(usize, 271), std.meta.tags(Opcode).len);
 }
 
 test "codec: reserved class, reserved codes, reserved fields, and holes are rejected" {
     // The `10` reserved class.
     try std.testing.expectEqual(@as(?Decoded, null), decode(.{ 0, 0, 0, 0x80 }));
     // R-type codes 0–111 are all assigned; 112+ are reserved.
-    try std.testing.expectEqual(@as(?Decoded, null), decode(bytesOf(@as(u32, 116) << 21)));
-    try std.testing.expectEqual(@as(?Decoded, null), decode(bytesOf(@as(u32, 149) << 21)));
-    try std.testing.expectEqual(@as(?Decoded, null), decode(bytesOf(@as(u32, 154) << 21)));
-    try std.testing.expectEqual(@as(?Decoded, null), decode(bytesOf((0b01 << 30) | (50 << 24))));
-    // E-type codes 6/7 (the former `sext32`/`zext32` slots) are
-    // reserved in v10 — decode rejects them; 43 is the generic `take`.
-    try std.testing.expectEqual(@as(?Decoded, null), decode(bytesOf((0b111001 << 26) | (6 << 20))));
-    try std.testing.expectEqual(@as(?Decoded, null), decode(bytesOf((0b111001 << 26) | (7 << 20))));
-    try std.testing.expectEqual(Opcode.take, decode(bytesOf((0b111001 << 26) | (43 << 20))).?.op);
-    // clz/popcount keep the signed width selectors 12/14/16/18; the
-    // retired unsigned codes 13/15/17/19 are rejected as holes.
-    try std.testing.expectEqual(Opcode.clz_i32, decode(bytesOf((0b111001 << 26) | (12 << 20))).?.op);
-    try std.testing.expectEqual(Opcode.clz_i64, decode(bytesOf((0b111001 << 26) | (14 << 20))).?.op);
-    try std.testing.expectEqual(Opcode.popcount_i32, decode(bytesOf((0b111001 << 26) | (16 << 20))).?.op);
-    try std.testing.expectEqual(Opcode.popcount_i64, decode(bytesOf((0b111001 << 26) | (18 << 20))).?.op);
-    try std.testing.expectEqual(@as(?Decoded, null), decode(bytesOf((0b111001 << 26) | (13 << 20))));
-    try std.testing.expectEqual(@as(?Decoded, null), decode(bytesOf((0b111001 << 26) | (15 << 20))));
-    try std.testing.expectEqual(@as(?Decoded, null), decode(bytesOf((0b111001 << 26) | (17 << 20))));
-    try std.testing.expectEqual(@as(?Decoded, null), decode(bytesOf((0b111001 << 26) | (19 << 20))));
-    try std.testing.expectEqual(@as(?Decoded, null), decode(bytesOf((0b111001 << 26) | (44 << 20))));
-    try std.testing.expectEqual(@as(?Decoded, null), decode(bytesOf((0b110 << 29) | (32 << 23))));
+    try std.testing.expectEqual(@as(?Decoded, null), decode(reselect(instrR(.add_i32, 0, 0, 0), .r, 116)));
+    try std.testing.expectEqual(@as(?Decoded, null), decode(reselect(instrR(.add_i32, 0, 0, 0), .r, 149)));
+    try std.testing.expectEqual(@as(?Decoded, null), decode(reselect(instrR(.add_i32, 0, 0, 0), .r, 154)));
+    try std.testing.expectEqual(@as(?Decoded, null), decode(reselect(instrB(.blt, 0, 0, 0), .b, 50)));
+    // E-type selectors 70/71 (the former `sext32`/`zext32` slots) are
+    // reserved holes; 107 is the generic `take`.
+    try std.testing.expectEqual(@as(?Decoded, null), decode(reselect(instrE(.take, 0, 0), .e, 70)));
+    try std.testing.expectEqual(@as(?Decoded, null), decode(reselect(instrE(.take, 0, 0), .e, 71)));
+    try std.testing.expectEqual(Opcode.take, decode(instrE(.take, 0, 0)).?.op);
+    // clz/popcount keep the signed width selectors 76/78/80/82; the
+    // retired unsigned selectors 77/79/81/83 are rejected as holes.
+    try std.testing.expectEqual(Opcode.clz_i32, decode(instrE(.clz_i32, 0, 0)).?.op);
+    try std.testing.expectEqual(Opcode.clz_i64, decode(instrE(.clz_i64, 0, 0)).?.op);
+    try std.testing.expectEqual(Opcode.popcount_i32, decode(instrE(.popcount_i32, 0, 0)).?.op);
+    try std.testing.expectEqual(Opcode.popcount_i64, decode(instrE(.popcount_i64, 0, 0)).?.op);
+    try std.testing.expectEqual(@as(?Decoded, null), decode(reselect(instrE(.take, 0, 0), .e, 77)));
+    try std.testing.expectEqual(@as(?Decoded, null), decode(reselect(instrE(.take, 0, 0), .e, 79)));
+    try std.testing.expectEqual(@as(?Decoded, null), decode(reselect(instrE(.take, 0, 0), .e, 81)));
+    try std.testing.expectEqual(@as(?Decoded, null), decode(reselect(instrE(.take, 0, 0), .e, 83)));
+    // The merged E selector space ends at 107: 108–127 are reserved.
+    try std.testing.expectEqual(@as(?Decoded, null), decode(reselect(instrE(.take, 0, 0), .e, 108)));
+    try std.testing.expectEqual(@as(?Decoded, null), decode(reselect(instrE(.take, 0, 0), .e, 127)));
+    try std.testing.expectEqual(@as(?Decoded, null), decode(reselect(instrI(.const_, 0, 0), .i, 32)));
     // The reserved I-type selector 10 (the former `result_take`) is
     // unassigned: v10 rejects it on its code alone.
-    try std.testing.expectEqual(@as(?Decoded, null), decode(bytesOf((0b110 << 29) | (10 << 23))));
-    // The former E-selector-63 J-Type carve-out is gone: clean words at
-    // selector 63 are unassigned and dirty ones fail the reserved-field
-    // check. Prefix `11101` includes its `a` field in the discriminant:
-    // `ra` → `jal`, `zero` → `j`, any other `a` value rejected
+    try std.testing.expectEqual(@as(?Decoded, null), decode(reselect(instrI(.const_, 0, 0), .i, 10)));
+    // Prefix `11101` includes its `a` field in the discriminant: `ra` →
+    // `jal`, `zero` → `j`, any other `a` value rejected
     // (Instruction Set §9.1).
-    try std.testing.expectEqual(@as(?Decoded, null), decode(bytesOf((0b111001 << 26) | (63 << 20))));
-    try std.testing.expectEqual(@as(?Decoded, null), decode(bytesOf((0b111001 << 26) | (63 << 20) | 0xffffc)));
-    try std.testing.expectEqual(Opcode.jal, decode(bytesOf((0b11101 << 27) | (@as(u32, ra_reg) << 20) | 4)).?.op);
-    try std.testing.expectEqual(Opcode.j, decode(bytesOf((0b11101 << 27) | (@as(u32, zero_reg) << 20) | 4)).?.op);
-    try std.testing.expectEqual(@as(?Decoded, null), decode(bytesOf((0b11101 << 27) | (@as(u32, cond_reg) << 20))));
-    try std.testing.expectEqual(@as(?Decoded, null), decode(bytesOf((0b11101 << 27) | (@as(u32, frame_base) << 20))));
-    // Nonzero C/E reserved fields.
-    try std.testing.expectEqual(@as(?Decoded, null), decode(bytesOf((0b111000 << 26) | (1 << 14))));
-    try std.testing.expectEqual(@as(?Decoded, null), decode(bytesOf((0b111001 << 26) | (1 << 14))));
-    // Unassigned `11` prefixes.
-    try std.testing.expectEqual(@as(?Decoded, null), decode(bytesOf((0b100 << 29))));
-    try std.testing.expectEqual(@as(?Decoded, null), decode(bytesOf((0b101 << 29))));
+    try std.testing.expectEqual(Opcode.jal, decode(instrU(.jal, ra_reg, 4)).?.op);
+    try std.testing.expectEqual(Opcode.j, decode(instrU(.j, zero_reg, 4)).?.op);
+    try std.testing.expectEqual(@as(?Decoded, null), decode(instrU(.jal, cond_reg, 0)));
+    try std.testing.expectEqual(@as(?Decoded, null), decode(instrU(.jal, frame_base, 0)));
+    // Nonzero E reserved fields (bits 19:14).
+    try std.testing.expectEqual(@as(?Decoded, null), decode(bytesOf(wordOf(instrE(.seq, 0, 0)) | (@as(u32, 1) << 14))));
+    try std.testing.expectEqual(@as(?Decoded, null), decode(bytesOf(wordOf(instrE(.take, 0, 0)) | (@as(u32, 1) << 14))));
+    // `10`-class reserved words.
+    try std.testing.expectEqual(@as(?Decoded, null), decode(bytesOf(0x80000000)));
+    try std.testing.expectEqual(@as(?Decoded, null), decode(bytesOf(0xA0000000)));
     // Families are contiguous runs in table order: `add.i32` = 1,
-    // `add.f64` = 6, `sub.i32` = 7 — the logical values 1–269 carry a
+    // `add.f64` = 6, `sub.i32` = 7 — the logical values 1–271 carry a
     // member at every index (no retired holes), and decode works through
     // the dense code space.
     try std.testing.expectEqual(@as(u16, 1), @intFromEnum(Opcode.add_i32));
     try std.testing.expectEqual(@as(u16, 6), @intFromEnum(Opcode.add_f64));
     try std.testing.expectEqual(@as(u16, 7), @intFromEnum(Opcode.sub_i32));
-    try std.testing.expectEqual(@as(usize, 269), std.meta.tags(Opcode).len);
+    try std.testing.expectEqual(@as(usize, 271), std.meta.tags(Opcode).len);
+}
+
+test "codec: R selector bits are pinned to §2.2 independently of format_spec" {
+    // Hand-computed from §2.2 (`00 | code(9)@21 | a@14 | b@7 | c@0`), not
+    // derived from `format_spec`, so these words anchor R's selector
+    // position independently of the geometry the encoder reads.
+    try std.testing.expectEqual(@as(u16, 6), opInfo(.sub_i32).code);
+    try std.testing.expectEqual(Opcode.sub_i32, decode(bytesOf(0x00C00000)).?.op);
+    // R selector 116 is unassigned.
+    try std.testing.expectEqual(@as(?Decoded, null), decode(bytesOf(0x0E800000)));
 }
 
 test "codec: removed B-type codes are reserved; ble/bleu decode" {
     // The removed immediate branches left codes 28/29/32/33/36/37
-    // reserved (B-type codes 0–19 are assigned, 20+ reserved). The
+    // reserved (B-type codes 0–21 are assigned, 22+ reserved). The
     // `ble`/`bleu` families own codes 10–13 (after the `blt` family's
     // 6–9).
-    try std.testing.expectEqual(@as(?Decoded, null), decode(bytesOf((0b01 << 30) | (28 << 24))));
-    try std.testing.expectEqual(@as(?Decoded, null), decode(bytesOf((0b01 << 30) | (29 << 24))));
-    try std.testing.expectEqual(@as(?Decoded, null), decode(bytesOf((0b01 << 30) | (32 << 24))));
-    try std.testing.expectEqual(@as(?Decoded, null), decode(bytesOf((0b01 << 30) | (33 << 24))));
-    try std.testing.expectEqual(@as(?Decoded, null), decode(bytesOf((0b01 << 30) | (36 << 24))));
-    try std.testing.expectEqual(@as(?Decoded, null), decode(bytesOf((0b01 << 30) | (37 << 24))));
-    try std.testing.expectEqual(Opcode.ble, decode(bytesOf((0b01 << 30) | (10 << 24))).?.op);
-    try std.testing.expectEqual(Opcode.bleu, decode(bytesOf((0b01 << 30) | (11 << 24))).?.op);
-    try std.testing.expectEqual(Opcode.ble_f32, decode(bytesOf((0b01 << 30) | (12 << 24))).?.op);
-    try std.testing.expectEqual(Opcode.ble_f64, decode(bytesOf((0b01 << 30) | (13 << 24))).?.op);
+    try std.testing.expectEqual(@as(?Decoded, null), decode(reselect(instrB(.blt, 0, 0, 0), .b, 28)));
+    try std.testing.expectEqual(@as(?Decoded, null), decode(reselect(instrB(.blt, 0, 0, 0), .b, 29)));
+    try std.testing.expectEqual(@as(?Decoded, null), decode(reselect(instrB(.blt, 0, 0, 0), .b, 32)));
+    try std.testing.expectEqual(@as(?Decoded, null), decode(reselect(instrB(.blt, 0, 0, 0), .b, 33)));
+    try std.testing.expectEqual(@as(?Decoded, null), decode(reselect(instrB(.blt, 0, 0, 0), .b, 36)));
+    try std.testing.expectEqual(@as(?Decoded, null), decode(reselect(instrB(.blt, 0, 0, 0), .b, 37)));
+    try std.testing.expectEqual(Opcode.ble, decode(instrB(.ble, 0, 0, 0)).?.op);
+    try std.testing.expectEqual(Opcode.bleu, decode(instrB(.bleu, 0, 0, 0)).?.op);
+    try std.testing.expectEqual(Opcode.ble_f32, decode(instrB(.ble_f32, 0, 0, 0)).?.op);
+    try std.testing.expectEqual(Opcode.ble_f64, decode(instrB(.ble_f64, 0, 0, 0)).?.op);
+    // The immediate branches occupy codes 14–21: `blti`/`bltiu` (14/15),
+    // `bgti`/`bgtiu` (16/17), `beqi`/`bnei` (18/19), `tbz`/`tbnz` (20/21).
+    try std.testing.expectEqual(Opcode.bgti, decode(instrB(.bgti, 0, 0, 0)).?.op);
+    try std.testing.expectEqual(Opcode.bgtiu, decode(instrB(.bgtiu, 0, 0, 0)).?.op);
+    try std.testing.expectEqual(Opcode.tbz, decode(instrB(.tbz, 0, 0, 0)).?.op);
+    try std.testing.expectEqual(Opcode.tbnz, decode(instrB(.tbnz, 0, 0, 0)).?.op);
+}
+
+test "codec: the five format discriminants are pairwise disjoint" {
+    for (std.meta.tags(Format)) |f| {
+        const s = format_spec[@intFromEnum(f)];
+        const w = s.prefix | ((@as(u32, 0) + s.code_base) << s.code_shift);
+        try std.testing.expectEqual(f, formatOfWord(w).?);
+        for (std.meta.tags(Format)) |g| {
+            if (g == f) continue;
+            const t = format_spec[@intFromEnum(g)];
+            const d = (w >> t.disc_shift) & t.disc_mask;
+            try std.testing.expect(d < t.disc_first or d > t.disc_last);
+        }
+    }
 }
 
 test "codec: golden words from Instruction Set §16" {
@@ -1695,20 +1719,28 @@ test "codec: golden words from Instruction Set §16" {
         }
     };
     try std.testing.expectEqualSlices(u8, &G.bytes(0x00050a96), &instrR(.add_i32, frame_base + 1, frame_base + 2, frame_base + 3));
-    try std.testing.expectEqualSlices(u8, &G.bytes(0xe10009ff), &instrC(.slti, frame_base, 0x7f));
-    try std.testing.expectEqualSlices(u8, &G.bytes(0x522617ff), &instrB(.tbz, frame_base, 5, -1));
+    // The former C words (0xe10009ff, 0xe0000a15) and E word
+    // (0xe4000994) are all E-type now: the merged selector keeps every
+    // byte identical, so these goldens pin both former sub-spaces at once.
+    try std.testing.expectEqualSlices(u8, &G.bytes(0xe10009ff), &instrE(.slti, frame_base, 0x7f));
+    try std.testing.expectEqualSlices(u8, &G.bytes(0x542617ff), &instrB(.tbz, frame_base, 5, -1));
     try std.testing.expectEqualSlices(u8, &G.bytes(0x402857fe), &instrB(.beq, frame_base + 1, frame_base + 2, -2));
     try std.testing.expectEqualSlices(u8, &G.bytes(0x4e29fc00), &instrB(.blti, frame_base + 1, 0x7f, 0));
     try std.testing.expectEqualSlices(u8, &G.bytes(0x4f29fc00), &instrB(.bltiu, frame_base + 1, 0x7f, 0));
+    try std.testing.expectEqualSlices(u8, &G.bytes(0x5029fc00), &instrB(.bgti, frame_base + 1, 0x7f, 0));
+    try std.testing.expectEqualSlices(u8, &G.bytes(0x5129fc00), &instrB(.bgtiu, frame_base + 1, 0x7f, 0));
     try std.testing.expectEqualSlices(u8, &G.bytes(0xe82fffff), &instrU(.jal, ra_reg, -1));
     try std.testing.expectEqualSlices(u8, &G.bytes(0xe80ffffc), &instrJ(-4));
     try std.testing.expectEqualSlices(u8, &G.bytes(0xc583ffff), &instrI(.jalr, temp_base, 0xffff));
-    try std.testing.expectEqualSlices(u8, &G.bytes(0xe1b00994), &instrC(.cvt_i32_u32, frame_base, frame_base + 1));
-    try std.testing.expectEqualSlices(u8, &G.bytes(0xe0000a15), &instrC(.seq, frame_base + 1, frame_base + 2));
+    try std.testing.expectEqualSlices(u8, &G.bytes(0xe1b00994), &instrE(.cvt_i32_u32, frame_base, frame_base + 1));
+    try std.testing.expectEqualSlices(u8, &G.bytes(0xe0000a15), &instrE(.seq, frame_base + 1, frame_base + 2));
     try std.testing.expectEqualSlices(u8, &G.bytes(0xe4000994), &instrE(.neg_i32, frame_base, frame_base + 1));
     try std.testing.expectEqualSlices(u8, &G.bytes(0xe6800000), &instrE(.ret, 0, 0));
     try std.testing.expectEqualSlices(u8, &G.bytes(0xf9300001), &instrU(.lui, frame_base, 1));
     try std.testing.expectEqualSlices(u8, &G.bytes(0xf13fffff), &instrU(.auipc, frame_base, -1));
+    // A nonzero selector in the reserved tail of the merged E range
+    // (108–127) rejects: only 0–107 are assigned.
+    try std.testing.expectEqual(@as(?Decoded, null), decode(reselect(instrE(.take, 0, 0), .e, 108)));
     // And decode the golden words back to the named opcodes.
     try std.testing.expectEqual(Opcode.add_i32, decode(instrR(.add_i32, frame_base + 1, frame_base + 2, frame_base + 3)).?.op);
     try std.testing.expectEqual(Opcode.tbz, decode(instrB(.tbz, frame_base, 5, -1)).?.op);
@@ -1959,7 +1991,7 @@ test "typed opcodes resolve at every supported rep (typed integer schema)" {
     try std.testing.expectEqual(Opcode.clz_i64, typedOpcode(.clz, .{ .primitive = .uint64 }, undefined).?);
     try std.testing.expectEqual(Opcode.popcount_i64, typedOpcode(.popcount, .{ .primitive = .int64 }, undefined).?);
     try std.testing.expectEqual(Opcode.popcount_i64, typedOpcode(.popcount, .{ .primitive = .uint64 }, undefined).?);
-    // Comparisons: the C-Type families with implicit cond.
+    // Comparisons: the E-type families with implicit cond.
     try std.testing.expectEqual(Opcode.seq, typedOpcode(.eq, .{ .primitive = .int32 }, undefined).?);
     try std.testing.expectEqual(Opcode.sne, typedOpcode(.ne, .{ .primitive = .uint64 }, undefined).?);
     try std.testing.expectEqual(Opcode.slt_f32, typedOpcode(.lt, .{ .primitive = .float32 }, undefined).?);
@@ -2032,7 +2064,7 @@ test "typed immediate opcodes: rep-suffixed integer families, no float forms" {
     try std.testing.expectEqual(Opcode.andi, typedOpcodeImm(.bitand, .{ .primitive = .uint32 }).?);
     try std.testing.expectEqual(Opcode.ori, typedOpcodeImm(.bitor, .{ .primitive = .int64 }).?);
     try std.testing.expectEqual(Opcode.xori, typedOpcodeImm(.bitxor, .{ .primitive = .uint64 }).?);
-    // C-Type integer comparison immediates.
+    // E-type integer comparison immediates.
     try std.testing.expectEqual(Opcode.slti, typedOpcodeImm(.lt, .{ .primitive = .int32 }).?);
     try std.testing.expectEqual(Opcode.seqi, typedOpcodeImm(.eq, .{ .primitive = .uint64 }).?);
     try std.testing.expectEqual(@as(?Opcode, null), typedOpcodeImm(.add, .{ .primitive = .float32 }));
@@ -2091,24 +2123,24 @@ test "typed families: integer arithmetic carries the full rep, bitwise stays wid
 test "family layout: families are contiguous runs in table order" {
     // The v10 renumber made every family a contiguous run — no
     // alignment holes in the logical values. The typed `neg` family
-    // opens the E-type run at 197 (codes 0–3 — the slots its retired
+    // opens the E-type run at 199 (codes 0–3 — the slots its retired
     // widthless predecessors vacated), the float members follow at
-    // 201/202, and codes 6–7 (the former `sext32`/`zext32` slots) are
+    // 203/204, and codes 6–7 (the former `sext32`/`zext32` slots) are
     // reserved. `abs` keeps its declared-order exception (i32, i64,
-    // f32, f64 — no unsigned members) at 203..206 (codes 8–11).
-    try std.testing.expectEqual(@as(u16, 197), @intFromEnum(Opcode.neg_i32));
+    // f32, f64 — no unsigned members) at 205..208 (codes 8–11).
+    try std.testing.expectEqual(@as(u16, 199), @intFromEnum(Opcode.neg_i32));
     try std.testing.expectEqual(Rep.i32, repOf(.neg_i32).?);
-    try std.testing.expectEqual(@as(u16, 201), @intFromEnum(Opcode.neg_f32));
-    try std.testing.expectEqual(@as(u16, 202), @intFromEnum(Opcode.neg_f64));
-    // clz/popcount keep only the signed width selectors: `clz.i32` = 207
-    // (code 12), `clz.i64` = 208 (code 14), `popcount.i32` = 209 (code
-    // 16), `popcount.i64` = 210 (code 18) — the unsigned code slots
+    try std.testing.expectEqual(@as(u16, 203), @intFromEnum(Opcode.neg_f32));
+    try std.testing.expectEqual(@as(u16, 204), @intFromEnum(Opcode.neg_f64));
+    // clz/popcount keep only the signed width selectors: `clz.i32` = 209
+    // (code 12), `clz.i64` = 210 (code 14), `popcount.i32` = 211 (code
+    // 16), `popcount.i64` = 212 (code 18) — the unsigned code slots
     // 13/15/17/19 stay retired (counts are sign-agnostic, so the
     // unsigned types alias the signed member).
-    try std.testing.expectEqual(@as(u16, 207), @intFromEnum(Opcode.clz_i32));
-    try std.testing.expectEqual(@as(u16, 208), @intFromEnum(Opcode.clz_i64));
-    try std.testing.expectEqual(@as(u16, 209), @intFromEnum(Opcode.popcount_i32));
-    try std.testing.expectEqual(@as(u16, 210), @intFromEnum(Opcode.popcount_i64));
+    try std.testing.expectEqual(@as(u16, 209), @intFromEnum(Opcode.clz_i32));
+    try std.testing.expectEqual(@as(u16, 210), @intFromEnum(Opcode.clz_i64));
+    try std.testing.expectEqual(@as(u16, 211), @intFromEnum(Opcode.popcount_i32));
+    try std.testing.expectEqual(@as(u16, 212), @intFromEnum(Opcode.popcount_i64));
     try std.testing.expectEqual(Rep.i32, repOf(.clz_i32).?);
     try std.testing.expectEqual(Rep.i64, repOf(.clz_i64).?);
     try std.testing.expectEqual(Rep.i32, repOf(.popcount_i32).?);
@@ -2123,12 +2155,12 @@ test "family layout: families are contiguous runs in table order" {
         try std.testing.expectEqual(Rep.f64, repOf(op64).?);
     }
     // `abs` — the declared-order exception (Instruction Set §8): the
-    // members are contiguous 203..206 but carry i32, i64, f32, f64,
+    // members are contiguous 205..208 but carry i32, i64, f32, f64,
     // so the rep is NOT the member offset.
-    try std.testing.expectEqual(@as(u16, 203), @intFromEnum(Opcode.abs_i32));
-    try std.testing.expectEqual(@as(u16, 204), @intFromEnum(Opcode.abs_i64));
-    try std.testing.expectEqual(@as(u16, 205), @intFromEnum(Opcode.abs_f32));
-    try std.testing.expectEqual(@as(u16, 206), @intFromEnum(Opcode.abs_f64));
+    try std.testing.expectEqual(@as(u16, 205), @intFromEnum(Opcode.abs_i32));
+    try std.testing.expectEqual(@as(u16, 206), @intFromEnum(Opcode.abs_i64));
+    try std.testing.expectEqual(@as(u16, 207), @intFromEnum(Opcode.abs_f32));
+    try std.testing.expectEqual(@as(u16, 208), @intFromEnum(Opcode.abs_f64));
     try std.testing.expectEqual(Rep.i32, repOf(.abs_i32).?);
     try std.testing.expectEqual(Rep.i64, repOf(.abs_i64).?);
     try std.testing.expectEqual(Rep.f32, repOf(.abs_f32).?);

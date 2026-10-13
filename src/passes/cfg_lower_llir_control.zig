@@ -68,9 +68,9 @@ pub fn run(bld: *Builder) error{OutOfMemory}!void {
                 // by a comparison of the typed families, the branch
                 // reads the two compared operands directly
                 // (`beq`/`bne`/`blt`/`ble` per rep, `bltu`/`bleu` for
-                // unsigned), selects an
-                // immediate branch (`blti`/`bltiu`/`beqi`/`bnei`) when the RHS is
-                // a fittable constant, or a bit-test branch
+                // unsigned), selects an immediate branch
+                // (`blti`/`bltiu`/`bgti`/`bgtiu`/`beqi`/`bnei`) when the
+                // RHS is a fittable constant, or a bit-test branch
                 // (`tbz`/`tbnz`) for `(x & 2^k) ==/!= 0`; otherwise
                 // it tests the bool against the zero register
                 // (`bne cond, zero`). The comparison record
@@ -168,7 +168,7 @@ pub fn nextBlockOf(bld: *const Builder, bi: u32) ?*const cfg.BasicBlock {
 /// bool against zero — the B-type register form (`beq`/`bne`/
 /// `blt`/`ble` per rep, `bltu`/`bleu` for unsigned, the polarity and
 /// operand order carrying `le`/`ge`), the immediate form
-/// (`blti`/`bltiu`/`beqi`/`bnei`) when an integer
+/// (`blti`/`bltiu`/`bgti`/`bgtiu`/`beqi`/`bnei`) when an integer
 /// operand is a constant that fits the imm7 window, or the bit-test
 /// form (`tbz`/`tbnz`) for `(x & 2^k) ==/!= 0`. Null otherwise — a
 /// bool/str comparison, a float constant, or any other condition
@@ -213,7 +213,7 @@ pub fn fusedBranchOperands(cond: *const cfg.Value) ?FusedBranch {
     // The register form: both operands are live numeric values.
     if (isConstValue(bin.a) or isConstValue(bin.b)) return null;
     const sel = emit.cmpSel(tag, bin);
-    if (llir.formatOf(sel.op) != .c) return null;
+    if (!llir.opInfo(sel.op).writes_cond) return null;
     var op: llir.Opcode = undefined;
     var swap = false;
     if (Builder.isInteger(bin.a.type_) and (tag == .le or tag == .ge)) {
@@ -280,10 +280,10 @@ fn imm7Of(cv: meta.ConstValue, type_: meta.Type, equality: bool) ?u8 {
 }
 
 /// The immediate-branch selection: `lhs op imm` with the constant on
-/// the right fuses to `blti`/`beqi`/`bnei`; a constant on the left
-/// with `gt` swaps to `blti` (`k > a` ≡ `a < k`). Only the strict
-/// `lt` and the equality forms remain — there is no `le`/`ge`/`gt`
-/// immediate branch, so every other ordering
+/// the right fuses to `blti`/`bgti`/`beqi`/`bnei`; a constant on the
+/// left swaps and flips the operator — `gt` to `blti` (`k > a` ≡
+/// `a < k`) and `lt` to `bgti` (`k < a` ≡ `a > k`). There is no
+/// `le`/`ge` immediate branch, so every other ordering
 /// falls back to the register form with the constant materialized.
 /// The immediate family is chosen by the value operand's type.
 fn immBranchOf(tag: cfg.OpTag, value: *const cfg.Value, cv: meta.ConstValue, const_left: bool) ?FusedBranch {
@@ -291,7 +291,7 @@ fn immBranchOf(tag: cfg.OpTag, value: *const cfg.Value, cv: meta.ConstValue, con
     const imm7 = imm7Of(cv, value.type_, equality) orelse return null;
     const base: ?[]const u8 = if (const_left)
         switch (tag) {
-            .lt => null, // k < a ≡ a > k — no `bgti`
+            .lt => "bgti", // k < a ≡ a > k
             .gt => "blti", // k > a ≡ a < k
             .eq => "beqi",
             .ne => "bnei",
@@ -299,14 +299,19 @@ fn immBranchOf(tag: cfg.OpTag, value: *const cfg.Value, cv: meta.ConstValue, con
         }
     else switch (tag) {
         .lt => "blti",
-        .gt => null, // a > k — no `bgti`
+        .gt => "bgti", // a > k
         .eq => "beqi",
         .ne => "bnei",
         else => null, // le / ge
     };
     const b = base orelse return null;
     const unsigned = value.type_.primitive == .uint32 or value.type_.primitive == .uint64 or value.type_.primitive == .byte;
-    const name = if (std.mem.eql(u8, b, "blti") and unsigned) "bltiu" else b;
+    const name = if (unsigned and std.mem.eql(u8, b, "blti"))
+        "bltiu"
+    else if (unsigned and std.mem.eql(u8, b, "bgti"))
+        "bgtiu"
+    else
+        b;
     return .{ .imm = .{ .op = famOpName(name, null) orelse return null, .lhs = value, .imm7 = imm7 } };
 }
 
@@ -346,7 +351,7 @@ fn isAndOfPow2(v: *const cfg.Value) bool {
     return false;
 }
 
-/// The C-Type comparison → B-Type branch family (`seq`→`beq`,
+/// The E-type comparison → B-Type branch family (`seq`→`beq`,
 /// `sne`→`bne`, `slt`→`blt`, `sltu`→`bltu`; the float `sle` never
 /// reaches here — `le`/`ge` fusion selects `ble` in
 /// `fusedBranchOperands`).
@@ -395,8 +400,8 @@ fn famOpName(base: []const u8, rep: ?llir.Rep) ?llir.Opcode {
 /// `ble`/`bleu`. `beq ↔ bne` (incl. the float equality forms),
 /// `beqi ↔ bnei`, and `tbz ↔ tbnz` invert with no swap. Float
 /// `blt`/`ble` (NaN-ordered — both false on NaN, so not
-/// complementary) and the immediate `blti`/`bltiu` (no `bgei`)
-/// have no inverse — null.
+/// complementary) and the immediate `blti`/`bltiu`/`bgti`/`bgtiu`
+/// (no `bgei`) have no inverse — null.
 /// True when the branch's predicate may be inverted for the
 /// long-branch expansion and the inverted one-record form.
 pub const BranchInverse = struct { op: llir.Opcode, swap: bool = false };

@@ -261,7 +261,7 @@ fn unaryHandler(comptime op: llir.Opcode) Handler {
     }.run;
 }
 
-// --- C-Type comparisons (implicit cond destination) -----------------------
+// --- E-type comparisons (implicit cond destination) -----------------------
 
 fn cmpHandler(comptime op: llir.Opcode) Handler {
     return struct {
@@ -333,7 +333,7 @@ fn hCmov(self: *VmCtx, n: u32) void {
     return fallthrough(self, n);
 }
 
-// --- casts (C-Type) --------------------------------------------------------
+// --- casts (E-type) --------------------------------------------------------
 
 fn castHandler(comptime op: llir.Opcode) Handler {
     return struct {
@@ -526,6 +526,8 @@ fn branchImmHandler(comptime op: llir.Opcode) Handler {
                 .bnei => a != im7,
                 .blti => intOrdCmp(true, false, a, im7),
                 .bltiu => intOrdCmp(true, true, a, v.b),
+                .bgti => intOrdCmp(false, false, a, im7),
+                .bgtiu => intOrdCmp(false, true, a, v.b),
                 else => unreachable,
             };
             if (taken) {
@@ -1069,7 +1071,7 @@ pub const handlers: [maxOpcodeValue() + 1]Handler = blk: {
             .jalr => hJalr,
             .take => hTake,
             .beq, .beq_f32, .beq_f64, .bne, .bne_f32, .bne_f64, .blt, .bltu, .blt_f32, .blt_f64, .ble, .bleu, .ble_f32, .ble_f64 => branchHandler(op),
-            .beqi, .bnei, .blti, .bltiu => branchImmHandler(op),
+            .beqi, .bnei, .blti, .bltiu, .bgti, .bgtiu => branchImmHandler(op),
             .tbz => hTbz,
             .tbnz => hTbnz,
             .switch_ => hSwitch,
@@ -2074,7 +2076,7 @@ pub inline fn unOp(self: *VmCtx, op: llir.Opcode, av: Value) Value {
     };
 }
 
-/// The C-Type comparison (`seq`/`sne`/`slt`/`sle`, rep-dispatched)
+/// The E-type comparison (`seq`/`sne`/`slt`/`sle`, rep-dispatched)
 /// — writes the implicit `cond`. IEEE ordered/NaN semantics: `seq`
 /// false on NaN, `sne` true, `slt`/`sle` false on NaN.
 pub inline fn cmpC(self: *VmCtx, op: llir.Opcode, a: Value, b: Value) bool {
@@ -2195,7 +2197,7 @@ pub inline fn ordCmp(less: bool, rep: llir.Rep, a: Value, b: Value) bool {
     };
 }
 
-/// One C-Type cast `cvt.<src>.<dst>` (the 42 explicit spellings):
+/// One E-type cast `cvt.<src>.<dst>` (the 42 explicit spellings):
 /// integer→integer truncates to the target width (the same-width
 /// `i64 ↔ u64` forms reinterpret the full 64-bit cell), int→float
 /// converts (round-to-nearest; precision may be lost), float→int

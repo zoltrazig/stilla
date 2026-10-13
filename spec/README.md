@@ -55,7 +55,7 @@ flowchart TD
 | [Stilla Runtime Specification](Stilla%20Runtime%20Specification.md) | Execution model, module instantiation, evaluation order, cleanup, panic, host contract | Runtime / VM |
 | [Stilla AIR Specification](air.md) | The canonical SSA control-flow-graph IR: values, instructions, ownership, module storage, text form | CFG lowering output |
 | [Stilla LLIR Specification](Stilla%20LLIR%20Specification.md) | The fixed-width LLIR projection: program image, registers, frames, call/return contract | AIR → LLIR |
-| [Stilla LLIR Instruction Set](Stilla%20LLIR%20Instruction%20Set.md) | The canonical instruction set: 4-byte R/B/I/C/E/U encoding, typed opcode tables, operand and special-register rules, descriptor records | LLIR encoding |
+| [Stilla LLIR Instruction Set](Stilla%20LLIR%20Instruction%20Set.md) | The canonical instruction set: 4-byte R/B/I/E/U encoding, typed opcode tables, operand and special-register rules, descriptor records | LLIR encoding |
 | [Stilla Standard Library](Stilla%20Standard%20Library.md) | The importable standard-library modules and the opaque-collection contract | Runtime modules |
 | [Stilla Intrinsics Specification](Stilla%20Intrinsics%20Specification.md) | Frontend recognition and mandatory expansion of non-source standard-library leaves | Standard library → AIR |
 

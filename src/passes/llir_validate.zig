@@ -870,9 +870,9 @@ fn checkCondLifetime(image: *const llir.LlirProgram, allocator: std.mem.Allocato
                     }
                 },
                 else => {
-                    // Every C-Type comparison unconditionally writes cond.
-                    if (llir.formatOf(d.op) == .c and llir.opInfo(d.op).a != .dst) cond_defined = true;
-                    if (d.op == .bool_eq or d.op == .bool_ne or d.op == .str_eq or d.op == .str_ne) cond_defined = true;
+                    // Ops that write cond (the comparison families)
+                    // unconditionally define it.
+                    if (llir.opInfo(d.op).writes_cond) cond_defined = true;
                 },
             }
         }

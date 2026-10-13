@@ -270,7 +270,7 @@ test "LLIR assembly: i64/u64/f64 ops and conversions print stable serialized nam
     // The assembly projection is a projection of
     // the *serialized* image, so the v9 typed opcode names print with
     // their rep suffixes (`mul`/`shru` — the width rides in the
-    // opcode, never a load-time derivative), the C-Type comparisons
+    // opcode, never a load-time derivative), the E-type comparisons
     // print with the implicit `cond` (no destination field), the 20
     // explicit `cvt.<src>.<dst>` conversions print their dedicated
     // names, and full-width constants print from their complete 64-bit
@@ -298,7 +298,7 @@ test "LLIR assembly: i64/u64/f64 ops and conversions print stable serialized nam
     try testing.expect(std.mem.indexOf(u8, asm1, "\n    mul.f64 r19, r19, r20") != null);
     try testing.expect(std.mem.indexOf(u8, asm1, "\n    sle.f64 r20, r19") != null); // `a >= b` ≡ `sle b, a`
     // The explicit conversion matrix: one opcode per (src, dst) pair,
-    // the C-Type form with no destination discriminator.
+    // the E-type form with no destination discriminator.
     try testing.expect(std.mem.indexOf(u8, asm1, "\n    cvt.b.f64 r20, r19") != null);
     try testing.expect(std.mem.indexOf(u8, asm1, "\n    cvt.i32.f64 r20, r19") != null);
     try testing.expect(std.mem.indexOf(u8, asm1, "\n    cvt.u32.f64 r20, r19") != null);
@@ -450,8 +450,8 @@ test "LLIR assembly: all seven formats print mnemonic, operands, and negative of
     const rows = [_]llir.Instr{
         llir.instrR(.add_i32, llir.frame_base + 3, llir.frame_base + 1, llir.frame_base + 2),
         llir.instrE(.neg_i32, llir.frame_base + 1, llir.frame_base),
-        llir.instrC(.cvt_i32_u32, llir.frame_base + 1, llir.frame_base),
-        llir.instrC(.slti, llir.frame_base + 1, 63),
+        llir.instrE(.cvt_i32_u32, llir.frame_base + 1, llir.frame_base),
+        llir.instrE(.slti, llir.frame_base + 1, 63),
         llir.instrI(.jr, llir.frame_base + 5, 0xfff0), // -16
         llir.instrI(.jalr, llir.frame_base + 5, 0xf800), // -2048
         llir.instrI(.movwz1, llir.frame_base + 7, 0xffff),
@@ -460,11 +460,13 @@ test "LLIR assembly: all seven formats print mnemonic, operands, and negative of
         llir.instrB(.bltu, llir.frame_base + 2, llir.frame_base + 1, -9),
         llir.instrB(.blti, llir.frame_base + 1, 65, -10),
         llir.instrB(.bltiu, llir.frame_base + 1, 127, -11),
-        llir.instrB(.beqi, llir.frame_base + 1, 5, -12),
-        llir.instrB(.bnei, llir.frame_base + 1, 127, -13),
-        llir.instrB(.tbz, llir.frame_base, 5, -14),
-        llir.instrB(.tbnz, llir.frame_base, 63, -15),
-        llir.instrJ(-16), // pc16 -> entry, the link-less `j`
+        llir.instrB(.bgti, llir.frame_base + 1, 65, -12),
+        llir.instrB(.bgtiu, llir.frame_base + 1, 127, -13),
+        llir.instrB(.beqi, llir.frame_base + 1, 5, -14),
+        llir.instrB(.bnei, llir.frame_base + 1, 127, -15),
+        llir.instrB(.tbz, llir.frame_base, 5, -16),
+        llir.instrB(.tbnz, llir.frame_base, 63, -17),
+        llir.instrJ(-18), // pc18 -> entry, the link-less `j`
     };
     const recs = try testing.allocator.alloc(llir.Instr, rows.len);
     defer testing.allocator.free(recs);
@@ -491,6 +493,8 @@ test "LLIR assembly: all seven formats print mnemonic, operands, and negative of
         "\n    bltu r21, r20, $app.init.entry\n",
         "\n    blti r20, 65, $app.init.entry\n",
         "\n    bltiu r20, 127, $app.init.entry\n",
+        "\n    bgti r20, 65, $app.init.entry\n",
+        "\n    bgtiu r20, 127, $app.init.entry\n",
         "\n    beqi r20, 5, $app.init.entry\n",
         "\n    bnei r20, 127, $app.init.entry\n",
         "\n    tbz r19, 5, $app.init.entry\n",
@@ -590,7 +594,7 @@ test "LLIR assembly: comparison swaps and the immediate-compare aliases print th
     // Float equality has no swap: ordered `seq.f64 lhs, rhs` verbatim.
     try testing.expect(std.mem.indexOf(u8, text, "\n    seq.f64 r19, r20\n") != null);
 
-    // The immediate-compare aliases print C-Type rows with literal values.
+    // The immediate-compare aliases print E-type rows with literal values.
     try testing.expect(std.mem.indexOf(u8, text, "\n    snei r19, 5\n") != null);
     try testing.expect(std.mem.indexOf(u8, text, "\n    sgti r21, 10\n") != null);
     try testing.expect(std.mem.indexOf(u8, text, "\n    slti r23, 9\n") != null);

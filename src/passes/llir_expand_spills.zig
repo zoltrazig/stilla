@@ -26,7 +26,7 @@ const Builder = lower.Builder;
 /// records carry their reserved sentinel byte (a free T-range code no
 /// emitter produces), and only schema dst/src roles are consulted, so
 /// immediates and IDs holding the same byte pattern pass through. The
-/// register fields are read per format (R: a/b/c, B/C/E: a/b, I/U: a).
+/// register fields are read per format (R: a/b/c, B/E: a/b, I/U: a).
 ///
 /// Restricted positions (the `slot_*` sources and the `release_ret`
 /// cleanup source — Instruction Set §6/§8 allows only F there) route
@@ -54,7 +54,7 @@ pub fn expandSpills(bld: *Builder) error{OutOfMemory}!void {
                 defer src_takes.deinit(bld.arena);
                 const max_slot: u8 = switch (info.format) {
                     .r => 2,
-                    .b, .c, .e => 1,
+                    .b, .e => 1,
                     .i, .u => 0,
                 };
                 var fields = [3]u8{ d.a, d.b, d.c };
@@ -152,7 +152,6 @@ fn reencode(d: llir.Decoded, fields: [3]u8) llir.Instr {
         .r => llir.instrR(d.op, fields[0], fields[1], fields[2]),
         .b => llir.instrB(d.op, fields[0], fields[1], d.offs10),
         .i => llir.instrI(d.op, fields[0], d.imm16),
-        .c => llir.instrC(d.op, fields[0], fields[1]),
         .e => llir.instrE(d.op, fields[0], fields[1]),
         .u => llir.instrU(d.op, fields[0], d.imm20),
     };

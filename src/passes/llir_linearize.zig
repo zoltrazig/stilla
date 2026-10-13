@@ -81,7 +81,7 @@ pub fn run(bld: *Builder) error{OutOfMemory}!void {
         // ±512 inverts (the integer reps, `beq`/`bne`, the immediate
         // families, `tbz`/`tbnz`) and gains a link-less `j` right after
         // it, or — for a NaN-ordered float `blt`/`ble` or an
-        // immediate `blti`/`bltiu` — expands to
+        // immediate `blti`/`bltiu`/`bgti`/`bgtiu` — expands to
         // the three-record non-inverting trampoline. The inserted
         //
         // records shift the layout, so the round re-runs.
@@ -105,7 +105,8 @@ pub fn run(bld: *Builder) error{OutOfMemory}!void {
                     try recs.insert(bld.arena, term + 1, llir.instrJ(0)); // placeholder: target by the fixup below
                 } else {
                     // NaN-ordered float `blt`/`ble` (or the immediate
-                    // `blti`/`bltiu`, which has no complement): the predicate
+                    // `blti`/`bltiu`/`bgti`/`bgtiu`, which has no
+                    // complement): the predicate
                     // cannot be inverted, so use the non-inverting
                     // trampoline `P lhs, rhs, +2; j +2; j
                     // far_target` — the predicate, when true,
@@ -154,7 +155,8 @@ pub fn run(bld: *Builder) error{OutOfMemory}!void {
                     // Integer expansions insert one `j` (pc + 1)
                     // carrying the branch's original target; the
                     // non-inverting trampoline (float `blt`/`ble`,
-                    // immediate `blti`/`bltiu`) inserts a committed
+                    // immediate `blti`/`bltiu`/`bgti`/`bgtiu`) inserts
+                    // a committed
                     // `j, +2` skip at pc + 1 and a far jump at
                     // pc + 2. A trailing `j` (the two-record form)
                     // carries the else target. A real branch
@@ -164,7 +166,7 @@ pub fn run(bld: *Builder) error{OutOfMemory}!void {
                     // `j`. Distinguish the two shapes by the
                     // committed +2-skip marker at pc + 1 — never by the
                     // operand rep, which would misclassify the integer
-                    // `blti`/`bltiu` trampolines as inverted and
+                    // `blti`/`bltiu`/`bgti`/`bgtiu` trampolines as inverted and
                     // rewrite their `+2` skip into a far jump.
                     const has_skip: bool = (branch_pc + 1) < blk_end and isSkipJInstr(bld.instructions.items[branch_pc + 1]);
                     const far: u32 = if (has_skip) branch_pc + 2 else branch_pc + 1;
@@ -264,7 +266,7 @@ fn isJInstr(instr: llir.Instr) bool {
 
 /// Whether `instr` is the committed `j +2` skip — the
 /// non-inverting long-branch trampoline's middle record (float
-/// `blt`/`ble` and the complement-less `blti`/`bltiu`), inserted
+/// `blt`/`ble` and the complement-less `blti`/`bltiu`/`bgti`/`bgtiu`), inserted
 /// with its `+2` offset final and never rewritten by the PC fixup.
 fn isSkipJInstr(instr: llir.Instr) bool {
     const d = llir.decode(instr) orelse return false;

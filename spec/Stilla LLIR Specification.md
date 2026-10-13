@@ -82,7 +82,7 @@ allocator's volatile hot values, a T temporary, and under F pressure an X
 spill cell (§3) — plus the specials
 `zero`, `ra`, and `cond` (§3): `zero` reads as the type's zero and
 discards writes in the RISC-V `x0` style, `ra` is the fixed link register
-of the call convention, and `cond` holds the bool condition the C-type
+of the call convention, and `cond` holds the bool condition the E-type
 comparisons write and `cmov` reads implicitly.
 
 The frontend has already proved SSA dominance, ownership, borrow provenance,
@@ -101,7 +101,7 @@ instruction array plus typed, read-only side tables. There is no
 program-global `ModuleId`, `MemberId`, or `HostBindingId` linking and no
 whole-program flattened module table — cross-module identity rides only on
 canonical module and member **symbols** (byte-exact strings). Every
-instruction is exactly 4 bytes (the six-format encoding); the encoding,
+instruction is exactly 4 bytes (the five-format encoding); the encoding,
 sentinel constants, and operand-field rules are defined in the [Stilla LLIR
 Instruction Set](Stilla%20LLIR%20Instruction%20Set.md).
 
@@ -742,7 +742,7 @@ grow the stack: the current frame is reused for the next self-call.
 
 # 6. Instruction set
 
-The canonical instruction-set definition — the 4-byte six-format encoding,
+The canonical instruction-set definition — the 4-byte five-format encoding,
 the register and special-register operand rules (the F/T two-level model
 plus `zero`/`ra`/`cond`), the complete typed opcode tables with per-opcode
 logical values, encoded selectors, schemas, reps, and trap behavior, and
@@ -750,12 +750,16 @@ the descriptor and side-table records instruction operands reference —
 lives in the standalone [Stilla LLIR Instruction
 Set](Stilla%20LLIR%20Instruction%20Set.md). This specification references
 it for the instruction-level definitions: the encoding, the operand and
-special-register rules, the format classes (R/B/I/C/E/U), the opcode
+special-register rules, the format classes (R/B/I/E/U), the opcode
 tables, the descriptor records, and the side-table records. The complete
-set is **269 logical opcodes**: R-type 112, B-type 20, I-type 31, C-type
-64, E-type 38, U-type 4 (the generic `take` sits at the end of the E-type,
-the I-type keeps selector 10 reserved so the `slot_*` encodings are
-unchanged, and the C-type carries the full 64-bit integer cast matrix, §7).
+set is **271 logical opcodes**: R-type 112, B-type 22, I-type 31, E-type
+102, U-type 4. The E-type is one format spanning selectors `0–127`:
+selectors `0–63` are the comparisons and casts (the former C-type, whose
+64 selectors carry the full 64-bit integer cast matrix, §7), and selectors
+`64–107` the 38 unary, transfer, lifecycle, and control opcodes (with the
+generic `take` at the end and the reserved holes `70/71/77/79/81/83`,
+§8); selectors `108–127` are reserved. The I-type keeps selector 10
+reserved so the `slot_*` encodings are unchanged.
 
 # 7. Control flow, effects, and traps
 
@@ -782,8 +786,9 @@ expanded by the lowering into an inverted branch skipping a `j`
 (the invertible forms — integer `blt`/`ble`/`bltu`/`bleu` with the operands
 swapped, `beq`/`bne` incl. the float equality forms, `beqi`/`bnei`,
 `tbz`/`tbnz`) or a three-record non-inverting trampoline
-(float `blt`/`ble`, NaN-ordered; the immediate `blti`/`bltiu`, which have
-no inverting complement); offsets that still overflow are
+(float `blt`/`ble`, NaN-ordered; the immediate `blti`/`bltiu` and
+`bgti`/`bgtiu`, which have no inverting complement); offsets that still
+overflow are
 `error.ProgramTooLarge`, never a silent truncation (Instruction Set
 §11.1). None of the branch instructions change `fp` or `sp`, and a target
 outside the executable range traps. A system call reads its arguments from
@@ -919,16 +924,18 @@ canonical bytes; little-endian word assembly happens only inside
 representation of Zig `extern struct`s or any Zig ABI layout directly.
 
 **The version number is the format boundary: the binary format version is
-17**, and every earlier image is rejected on the version alone. Version 17
-retired four R-type opcodes and remapped the following sixteen down by
-four (R-type wire codes 100–115 become 96–111; the logical table is now
-269 opcodes). The instruction stream is the Instruction Set's v10 encoding:
-the bit layouts,
+18**, and every earlier image is rejected on the version alone. Version 18
+added `bgti`/`bgtiu` at B-type codes 16/17 and moved `beqi`/`bnei`/`tbz`/
+`tbnz` to 18/19/20/21 (the B-type codes 0–21 are assigned), and the
+logical table is now 271 opcodes. Version 17 retired four R-type opcodes
+and remapped the following sixteen down by four (R-type wire codes 100–115
+become 96–111; the logical table was then 269 opcodes). The instruction
+stream is the Instruction Set's v10 encoding: the bit layouts,
 the typed opcode assignment, the register model (`frame_count_max` = 109,
 the fast bank, the specials), the immediate ranges, and the call
 convention of §4–§5; any change to the opcode assignment, the ranges, or
 any table's row layout is a new version. The built-in reader rejects any
-version other than 17 on its magic/version alone, **before the header
+version other than 18 on its magic/version alone, **before the header
 symbols or a single table count is decoded** — and no two readers
 disagree about a version's table set.
 

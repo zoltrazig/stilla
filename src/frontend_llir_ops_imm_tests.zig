@@ -32,7 +32,7 @@ const findFunc = helpers.findFunc;
 
 /// The v9 immediate families: the integer-4
 /// `addi`/`subi`/`muli`/`divi`/`remi`, `shli`/`shri`,
-/// `andi`/`ori`/`xori` (mask semantics), and C-Type comparisons
+/// `andi`/`ori`/`xori` (mask semantics), and E-type comparisons
 /// `slti`/`sgti`/`seqi`/`snei`. The rep-suffixed names make
 /// the families non-contiguous, so the check is on the name prefix.
 fn isImmediateFamily(op: llir.Opcode) bool {
@@ -49,7 +49,7 @@ fn isImmediateFamily(op: llir.Opcode) bool {
 test "LLIR lowering: compiled const+op folds to immediate variants" {
     // Source-level literals lower to `const` instructions (the printer
     // may re-inline them, but the records exist), and the peephole folds
-    // each const+op pair: `a + 2` → R-Type `addi`, `3 < a` → C-Type
+    // each const+op pair: `a + 2` → R-Type `addi`, `3 < a` → E-type
     // `sgti`. f32 has no
     // immediate forms (Instruction Set §7) — `a * 2.5` stays a
     // `const` + `mul_f32` pair, the constant reading its slot.
@@ -83,7 +83,7 @@ test "LLIR lowering: compiled const+op folds to immediate variants" {
             .sgti => {
                 n_gti += 1;
                 try testing.expectEqual(@as(u32, 3), llir.decode(rec).?.b);
-                try testing.expectEqual(llir.Format.c, llir.decode(rec).?.format);
+                try testing.expectEqual(llir.Format.e, llir.decode(rec).?.format);
             },
             .mul_f32 => n_f32_mul += 1, // no f32 immediate forms — the const reads its slot
             else => {},
@@ -553,7 +553,7 @@ test "LLIR lowering: immediate semantics — raw bit patterns, commute, swap+fli
             .sgti => {
                 n_gti += 1;
                 try testing.expectEqual(@as(u32, 3), d.b);
-                try testing.expectEqual(llir.Format.c, d.format);
+                try testing.expectEqual(llir.Format.e, d.format);
             },
             // The f32 constants never fuse — `2.5 + %0` and `3.5 * %2`
             // read the constant slots (no f32 immediate forms,
@@ -563,7 +563,7 @@ test "LLIR lowering: immediate semantics — raw bit patterns, commute, swap+fli
             .seqi => {
                 n_eqi += 1;
                 try testing.expect(d.b <= 0x7f);
-                try testing.expectEqual(llir.Format.c, d.format);
+                try testing.expectEqual(llir.Format.e, d.format);
             },
             // `9 >= %0` (byte, constant on the left) does not fuse —
             // integer le/ge have no immediate forms — so the `ge` record

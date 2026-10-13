@@ -50,7 +50,7 @@
 //! - `llir`    — the frozen LLIR model
 //!               (spec/Stilla LLIR Instruction Set.md, spec/Stilla
 //!               LLIR Specification.md): the
-//!               4-byte v9 `Instr` (`[4]u8`, six formats), the 269-strong logical `Opcode` table with
+//!               4-byte v9 `Instr` (`[4]u8`, five formats), the 271-strong logical `Opcode` table with
 //!               per-opcode schemas, reps, and the shared
 //!               `encode`/`decode`, the
 //!               special registers (`zero`/`ra`/`cond`), the frame/call contract, descriptors and

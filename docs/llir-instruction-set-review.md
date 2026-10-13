@@ -6,7 +6,7 @@ This report reviews `Stilla LLIR Instruction Set.md` for internal consistency an
 
 ## Verdict
 
-The document is **largely self-consistent**. The headline numbers all recompute correctly: the per-format assignment counts `112 / 20 / 31 / 64 / 38 / 4 = 269`, the logical-value ranges `R 1–112, B 113–132, C 133–196, E 197–234, I 235–265, U 266–269`, the derived family sizes (42 casts `= 7×7−7`, 22 comparisons, 20 B-type, 12 move-wide, E `44−6=38`), and all 15 `§16` golden words decode and re-encode consistently. Every internal `§N`/`§N.M` target resolves except one (`§12.1`), and the sibling targets invoked exist and support their claims.
+The document is **largely self-consistent**. The headline numbers all recompute correctly: the per-format assignment counts `112 / 22 / 31 / 102 / 4 = 271`, the logical-value ranges `R 1–112, B 113–134, E 135–236, I 237–267, U 268–271`, the derived family sizes (42 casts `= 7×7−7`, 22 comparisons, 22 B-type, 12 move-wide, E `64 + (44−6) = 102`), and all 17 `§16` golden words decode and re-encode consistently. Every internal `§N`/`§N.M` target resolves except one (`§12.1`), and the sibling targets invoked exist and support their claims.
 
 The defects found are enumerated below, grouped by severity. Two are factual correctness problems that change what an implementer would build (`§16`'s `jal`/`j` hand-check, `§10`'s shift-masking examples), two are direct contradictions between sections, and the remainder are cross-spec model drift, encoding-design decisions, and documentation hygiene. A prioritized overhaul plan closes the report.
 
@@ -41,9 +41,9 @@ X-1, X-2, DOC-1, and DOC-2 (all High) have since been resolved in their owning d
 
 ### X-3 (Medium) — E-type counts violate the `§4` family rule
 
-- **Location.** `§4`: *"contiguous run… at +1 each"*; `§8` clz/popcount selectors (`clz.i32`=12, `clz.i64`=14, `popcount.i32`=16, `popcount.i64`=18).
-- **Problem.** The retired unsigned-alias holes 13/15/17/19 separate the members, so "contiguous except the reserved holes" and the "+1 each" rule cannot both hold.
-- **Evidence.** `§8` selector layout versus the `§4` family rule. (Overlaps the reservation-rationale finding DES-8/Doc8.)
+- **Location.** `§4`: *"contiguous run… at +1 each"*; `§8` clz/popcount selectors (`clz.i32`=76, `clz.i64`=78, `popcount.i32`=80, `popcount.i64`=82).
+- **Problem.** The retired unsigned-alias holes 77/79/81 separate the members, so "contiguous except the reserved holes" and the "+1 each" rule cannot both hold.
+- **Evidence.** `§8` selector layout versus the `§4` family rule. (Overlaps the reservation-rationale finding DES-8/Doc8.) Merging the former C/E prefixes into one E-type format renumbers these selectors by +64 but leaves the holes in place.
 - **Suggested direction.** State the exception explicitly (per-family holes), or restate `§4` as a default plus an explicit exception list (see DOC-7).
 
 ### X-4 (Medium) — `load_member`'s `MemberDesc.ref` misdescribed
@@ -91,7 +91,7 @@ X-1, X-2, DOC-1, and DOC-2 (all High) have since been resolved in their owning d
 ### X-10 (Low) — `§4` "no integer `le`/`ge` opcodes" is unscoped
 
 - **Location.** `§4`: *"Integer `le`/`ge` have no opcodes"*.
-- **Problem.** True only for the cond-producing C-type comparisons; the B-type integer branches `ble`/`bleu` exist.
+- **Problem.** True only for the cond-producing E-type comparisons (selectors 0–63); the B-type integer branches `ble`/`bleu` exist.
 - **Evidence.** `§5.1` register branches; the `§4` comparison paragraph.
 - **Suggested direction.** Scope the statement to the comparison (cond-producing) families.
 
@@ -130,7 +130,7 @@ X-1, X-2, DOC-1, and DOC-2 (all High) have since been resolved in their owning d
 ### M-1 (Low) — `§10` immediate-window table gaps
 
 - **Location.** `§10`: *"mask/unsigned fused immediate … `[0, 127]`"*.
-- **Problem.** The unsigned-window row omits the C-type unsigned immediate comparisons `sltiu`/`sgtiu` (which `§7` states). Separately, `read_indexi`'s imm7 index extension is never stated in `§10` — it zero-extends.
+- **Problem.** The unsigned-window row omits the E-type unsigned immediate comparisons `sltiu`/`sgtiu` (which `§7` states). Separately, `read_indexi`'s imm7 index extension is never stated in `§10` — it zero-extends.
 - **Evidence.** `§7` immediate comparisons; `§4` inline-ID rows.
 - **Suggested direction.** Add `sltiu`/`sgtiu` to the row and state `read_indexi`'s zero-extension.
 
@@ -184,9 +184,10 @@ X-1, X-2, DOC-1, and DOC-2 (all High) have since been resolved in their owning d
 ### DES-3 (Medium) — Immediate-branch asymmetry
 
 - **Location.** `§5.2`.
-- **Problem.** C-type has `slti`+`sgti`, but B-type has only `blti`/`bltiu`/`beqi`/`bnei`; an `a > k` branch therefore forces constant materialization even though 44 B codes are free.
-- **Evidence.** `§5.2` versus the C-type immediate comparisons in `§7`.
+- **Problem.** E-type has `slti`+`sgti` (selectors 0–63), but B-type has only `blti`/`bltiu`/`beqi`/`bnei`; an `a > k` branch therefore forces constant materialization even though 42 of the 64 B codes (22–63) are free.
+- **Evidence.** `§5.2` versus the E-type immediate comparisons in `§7`.
 - **Suggested direction.** Add `bgti`/`bgtiu` (with the same ripple list as any opcode addition), or document the omission as deliberate.
+- **Resolved.** Added `bgti`/`bgtiu` (B-type codes 16/17; strict `>` immediate branches, signed `[-64,63]` / unsigned `[0,127]`) and wired them through the mirror, interpreter, fusion lowering, specs, and tests; the `a > k` / `k < a` cases now fuse without materializing the constant.
 
 ### DES-4 (Medium) — `ge`/`gt` operand-swap aliases overgeneralized
 
@@ -245,8 +246,8 @@ X-1, X-2, DOC-1, and DOC-2 (all High) have since been resolved in their owning d
 
 ### DOC-3 (Low) — Section order does not match numeric logical-value order
 
-- **Location.** `§4–§9` ordering `R / B / I / C / E / U`.
-- **Problem.** The `§6` I-type section carries the numerically later logical values 235–265, so the section order does not track the logical-value order. The mismatch is intentional (grouping by format class), but it is easy to misread.
+- **Location.** `§4–§9` ordering `R / B / I / E / U`.
+- **Problem.** The `§6` I-type section carries the numerically later logical values 237–267, so the section order does not track the logical-value order. The mismatch is intentional (grouping by format class), but it is easy to misread.
 - **Evidence.** `§4` logical ranges.
 - **Suggested direction.** Keep the order and add a compact format → section → encoded-selector range → logical-value range index near the top; do not renumber.
 
@@ -314,7 +315,7 @@ X-1, X-2, DOC-1, and DOC-2 (all High) have since been resolved in their owning d
 
 ## Prioritized overhaul plan
 
-Groups are ordered by risk: correctness fixes first, then cross-spec model alignment, then design decisions, then documentation hygiene. Every item names the files touched and how to verify the change. The document's own header contract already states that the code mirror and the document must be updated together; the generation source is `llir_opcodes.zig` (re-exported by `llir.zig`), which feeds `table.json`. **Any design change is therefore a synchronized spec-plus-mirror change**, and the verification for every opcode-affecting item is that the golden words in `§16` still decode/re-encode identically after the mirror is regenerated.
+Groups are ordered by risk: correctness fixes first, then cross-spec model alignment, then design decisions, then documentation hygiene. Every item names the files touched and how to verify the change. The document's own header contract already states that the code mirror and the document must be updated together; the opcode tables are hand-maintained in `llir_opcodes.zig` (re-exported by `llir.zig`). **Any design change is therefore a synchronized spec-plus-mirror change**, and the verification for every opcode-affecting item is that the golden words in `§16` still decode/re-encode identically after the mirror is updated.
 
 ### Correctness fixes
 
@@ -334,7 +335,7 @@ Groups are ordered by risk: correctness fixes first, then cross-spec model align
 ### Design decisions
 
 10. **Decide the `j`/`jal` prefix (DES-1).** Choose option A or B; if A, apply the full ripple list across `Stilla LLIR Instruction Set.md`, the mirror, `table.json`, `interpreter-vm.md`, and `cheatsheet.md`. Verify: the decoder's field-discrimination logic matches `§9.1` (or `§9.1` is gone) and all golden words still round-trip. — **Resolved**
-11. **Decide the immediate-branch asymmetry (DES-3).** Add `bgti`/`bgtiu` or document the omission. If added, update the mirror and golden table. Verify: `a > k` branches no longer require materialization, or the omission is stated.
+11. **Decide the immediate-branch asymmetry (DES-3).** Add `bgti`/`bgtiu` or document the omission. If added, update the mirror and golden table. Verify: `a > k` branches no longer require materialization, or the omission is stated. — **Resolved**
 12. **Scope the `ge`/`gt` swap aliases (DES-4).** Edit `§7` and reconcile with `§4`. Verify: integer `le`/`ge` synthesis and float swap behavior are both described once.
 13. **Publish one reservation policy (DES-8, DOC-7).** Add a canonical paragraph (near `§2.2`) with per-hole rationale and an explicit contiguous-family exception list. Verify: every reserved hole and family exception has a one-line reason.
 14. **Small design clarifications (DES-2, DES-5, DES-6, DES-7).** State the `10`-class intent; define "width-polymorphic position"; note register-field saturation; retype or annotate `SwitchArm.target`. Verify by re-reading `§2.1`, `§3.2`, `§3.1`, `§12`.
@@ -353,19 +354,19 @@ Groups are ordered by risk: correctness fixes first, then cross-spec model align
 The following were checked and passed.
 
 - **Cross-reference resolution.** All internal `§N`/`§N.M` targets resolve except `§12.1` (X-1). Sibling targets invoked — `Stilla LLIR Specification.md` §2/§3.1/§5/§6/§8 and `Stilla Runtime Specification.md` §6.6/§7.2 — exist and support their claims.
-- **Per-format counts.** R 112 + B 20 + I 31 + C 64 + E 38 + U 4 = 269, matching the declared logical total.
+- **Per-format counts.** R 112 + B 22 + I 31 + E 102 + U 4 = 271, matching the declared logical total.
 - **R 112** = 7 arithmetic families × 6 reps (42) + `madd`/`msub` × 6 (12) + 9 immediate families × 4 (36) + 6 widthless bitwise (`and`/`or`/`xor`/`andi`/`ori`/`xori`) + 16 untyped rows.
-- **B 20** = 14 register branches (`beq` 3, `bne` 3, `blt` 4, `ble` 4) + 4 immediate (`blti`/`bltiu`/`beqi`/`bnei`) + 2 bit-test.
-- **C 64** = 42 casts + 22 comparisons. **42 casts = 7×7−7** verified row-by-row; **22 comparisons** = `seq` 3 + `sne` 3 + `slt` 4 + `sle` 2 + scalar equality 4 + immediate 6.
-- **E 38 = 44−6** = `neg` 6 + `abs` 4 + `clz` 2 + `popcount` 2 + five float-2 families × 2 (10) + 14 untyped transfer/lifecycle/control rows, across selectors 0–43 with holes 6–7 and 13/15/17/19.
+- **B 22** = 14 register branches (`beq` 3, `bne` 3, `blt` 4, `ble` 4) + 6 immediate (`blti`/`bltiu`/`bgti`/`bgtiu`/`beqi`/`bnei`) + 2 bit-test.
+- **E selectors 0–63 (64)** = 42 casts + 22 comparisons. **42 casts = 7×7−7** verified row-by-row; **22 comparisons** = `seq` 3 + `sne` 3 + `slt` 4 + `sle` 2 + scalar equality 4 + immediate 6.
+- **E selectors 64–107 (38 = 44−6)** = `neg` 6 + `abs` 4 + `clz` 2 + `popcount` 2 + five float-2 families × 2 (10) + 14 untyped transfer/lifecycle/control rows, across selectors 64–107 with holes 70/71/77/79/81/83.
 - **I 31** = 4 references + 5 aggregate/destructure + 2 call/dispatch + 6 spill/slot + 2 jump/destruction + 12 move-wide.
-- **Logical ranges.** R 1–112, B 113–132, C 133–196, E 197–234, I 235–265, U 266–269; `j`/`jal` are 266/267 as stated in `§9.1`.
-- **`§16` golden words.** All 15 examples decode to the named opcode and re-encode to the same word (per the table's stated machine proof), including the negative-offset, imm7-signedness, and little-endian byte-order cases.
+- **Logical ranges.** R 1–112, B 113–134, E 135–236, I 237–267, U 268–271; `jal`/`j` are 268/269 as stated in `§9.1`.
+- **`§16` golden words.** All 17 examples decode to the named opcode and re-encode to the same word (per the table's stated machine proof), including the negative-offset, imm7-signedness, and little-endian byte-order cases.
 - **Register model arithmetic.** 128 encodings = 109 frame (`0x13–0x7f`) + 16 T (`0x03–0x12`) + 3 specials (`0x00–0x02`); the `frame_count_max = 109`, `temp_count = 16`, and `fast_reg_count = 0x13` constants are mutually consistent.
 
 ## Open items / not confirmable from the spec baseline
 
-- **(a) E-family code layout.** Confirm the `neg` codes and the `clz`/`popcount` holes against the generated table and codec before treating the `§4`/`§8` counts as fully verified. The spec is internally consistent here, but the selector assignment is only corroborated by the mirror.
+- **(a) E-family code layout.** Confirm the `neg` selectors and the `clz`/`popcount` holes (selectors 64–107) against the hand-maintained table in `llir_opcodes.zig` and the codec before treating the `§4`/`§8` counts as fully verified. The spec is internally consistent here, but the selector assignment is only corroborated by the mirror.
 - **(b) Codec field discrimination.** Confirm the codec implements the `§9.1` `jal`/`j` `a`-field discrimination exactly (this matters most if DES-1 option A is rejected).
 - **(c) Machine proof artifact.** The `§16` "machine proof" cannot be located from the document; its identity and invocation are unverifiable from the spec alone.
 - **(d) Adjacent cross-spec tension (out of scope for this file).** `cheatsheet.md` states (around line 170) that `str` is Copy and never dropped, while elsewhere (around line 178) and in `Stilla LLIR Specification.md` §7 `str` is listed as a counted owner. This is a cross-spec tension to investigate separately.

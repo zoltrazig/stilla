@@ -757,18 +757,10 @@ pub const Builder = struct {
         recs.items[idx] = llir.instrI(op, self.fit7(reg), self.fit16(imm16));
     }
 
-    /// The C-format emission primitive: two
-    /// 7-bit register fields — `a = dst, b = src` for the casts,
+    /// The E-format emission primitive: two 7-bit register fields whose
+    /// roles are fixed per opcode — `a = dst, b = src` for the casts,
     /// `a = lhs, b = rhs` for the comparisons (the destination is the
     /// implicit `cond`).
-    pub fn setC(self: *Builder, blk: *const cfg.BasicBlock, idx: u32, op: llir.Opcode, a: u32, b: u32) void {
-        const recs = &self.block_records.items[self.block_ids.get(blk).?];
-        std.debug.assert(idx < recs.items.len);
-        recs.items[idx] = llir.instrC(op, self.fit7(a), self.fit7(b));
-    }
-
-    /// The E-format emission primitive: two
-    /// 7-bit register fields whose roles are fixed per opcode.
     pub fn setE(self: *Builder, blk: *const cfg.BasicBlock, idx: u32, op: llir.Opcode, a: u32, b: u32) void {
         const recs = &self.block_records.items[self.block_ids.get(blk).?];
         std.debug.assert(idx < recs.items.len);

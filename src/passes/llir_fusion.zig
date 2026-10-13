@@ -95,7 +95,7 @@ fn constOf(v: *const cfg.Value) ?meta.ConstValue {
 /// `[0, 127]`); the shift counts (`shli`/`shri`) and the bitwise masks
 /// (`andi`/`ori`/`xori`) always zero-extend (`[0, 127]`, mask semantics
 /// — `andi.i32 F0, F1, 0x7f` masks with `0x0000007f`, never
-/// sign-extended). The C-Type comparisons split: the signed ordering
+/// sign-extended). The E-type comparisons split: the signed ordering
 /// (`slti`/`sgti`) and equality (`seqi`/`snei`) sign-extend (`[-64,
 /// 63]` — equality has no unsigned variant, so an unsigned equality
 /// constant only fuses inside that window), while the unsigned
@@ -470,7 +470,7 @@ pub fn peephole(b: *Builder) error{OutOfMemory}!FusionMetrics {
 fn tryFuse(b: *Builder, blk: *const cfg.BasicBlock, bi: u32, idx: u32, n: u32, dst: *const cfg.Value, tag: llir.TypedKind, bin: cfg.Bin, dead: [][]bool) error{OutOfMemory}!?*const cfg.Value {
     // The primary record's position: the register-form opcode, when
     // the family has one (comparisons on integer `gt`/`le`/`ge` lower
-    // through swapped aliases — their C-Type record is the base).
+    // through swapped aliases — their E-type record is the base).
     const site: u32 = blk: {
         if (llir.typedOpcode(tag, bin.a.type_, undefined)) |reg| {
             for (idx..idx + n) |i| {
@@ -487,8 +487,8 @@ fn tryFuse(b: *Builder, blk: *const cfg.BasicBlock, bi: u32, idx: u32, n: u32, d
         if (llir.typedOpcodeImm(tag, bin.a.type_)) |op| {
             if (immOf(cv, tag, bin.a.type_)) |imm| {
                 const imm2 = typed.shiftImm(op, imm);
-                if (llir.formatOf(op) == .c)
-                    b.setC(blk, site, op, b.slotOf(bin.a), imm2)
+                if (llir.opInfo(op).writes_cond)
+                    b.setE(blk, site, op, b.slotOf(bin.a), imm2)
                 else
                     b.setR(blk, site, op, b.slotOf(dst), b.slotOf(bin.a), imm2);
                 killFusedCmpNot(b, bi, site, tag, bin, dead);
@@ -501,7 +501,7 @@ fn tryFuse(b: *Builder, blk: *const cfg.BasicBlock, bi: u32, idx: u32, n: u32, d
         if (flipCmp(tag)) |flipped| {
             if (llir.typedOpcodeImm(flipped, bin.b.type_)) |op| {
                 if (immOf(cv, flipped, bin.b.type_)) |imm| {
-                    b.setC(blk, site, op, b.slotOf(bin.b), imm);
+                    b.setE(blk, site, op, b.slotOf(bin.b), imm);
                     killFusedCmpNot(b, bi, site, tag, bin, dead);
                     return bin.a;
                 }
@@ -515,8 +515,8 @@ fn tryFuse(b: *Builder, blk: *const cfg.BasicBlock, bi: u32, idx: u32, n: u32, d
             if (llir.typedOpcodeImm(tag, bin.b.type_)) |op| {
                 if (immOf(cv, tag, bin.b.type_)) |imm| {
                     const imm2 = typed.shiftImm(op, imm);
-                    if (llir.formatOf(op) == .c)
-                        b.setC(blk, site, op, b.slotOf(bin.b), imm2)
+                    if (llir.opInfo(op).writes_cond)
+                        b.setE(blk, site, op, b.slotOf(bin.b), imm2)
                     else
                         b.setR(blk, site, op, b.slotOf(dst), b.slotOf(bin.b), imm2);
                     return bin.a;

@@ -13,7 +13,7 @@ Stilla .st → module graph → checker (type check & ownership)
    → runtime / VM
 ```
 
-- **AIR** = canonical SSA CFG (ownership explicit). **LLIR** = read-only fixed-width projection (R/B/I/C/E/U, 4 bytes).
+- **AIR** = canonical SSA CFG (ownership explicit). **LLIR** = read-only fixed-width projection (R/B/I/E/U, 4 bytes).
 - Specs: [Core Language](Stilla%20Core%20Language%20Specification.md), [Core Types & Ownership](Stilla%20Core%20Types%20%26%20Ownership%20Specification.md), [Core Static Semantics](Stilla%20Core%20Static%20Semantics.md), [Runtime](Stilla%20Runtime%20Specification.md), [AIR](air.md), [LLIR Spec](Stilla%20LLIR%20Specification.md), [LLIR Instruction Set](Stilla%20LLIR%20Instruction%20Set.md), [Standard Library](Stilla%20Standard%20Library.md).
 
 ## Module & import

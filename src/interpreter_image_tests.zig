@@ -1,5 +1,5 @@
 //! Black-box hand-built-image interpreter tests: the loader-drawn scalar program,
-//! move-wide/immediate/wide arithmetic, C-Type comparisons and the register
+//! move-wide/immediate/wide arithmetic, E-type comparisons and the register
 //! semantics (zero/cond/ra, T bank), `take`, `j`, `jal`/`jalr`, nested calls,
 //! and the call-clobber contract.
 
@@ -175,7 +175,7 @@ test "i64 immediate forms sign-extend the 7-bit constant to 64 bits" {
 
     const cmp = [_]llir.Instr{
         llir.instrI(.movwz0, llir.frame_base, 0xa),
-        llir.instrC(.slti, llir.frame_base, 0x40),
+        llir.instrE(.slti, llir.frame_base, 0x40),
         llir.instrE(.copy, llir.frame_base + 1, llir.cond_reg),
         llir.instrE(.ret, llir.frame_base + 1, 0),
     };
@@ -296,6 +296,45 @@ test "64-bit ordered branches compare the full cell, not the low word" {
     try testing.expectEqual(@as(Value, 7), try runHandBlocks(&blt_instrs, &rows, 0, &constants, &blocks));
 }
 
+test "bgti/bgtiu: greater-than immediate branches take and fall through" {
+    // `bgti`/`bgtiu` compare the lhs against a literal 7-bit cell and take
+    // the branch when the lhs is strictly greater. The signed form
+    // sign-extends the imm7 (window [-64, 63]); the unsigned form
+    // zero-extends it ([0, 127]). Each case branches over the fall-through
+    // arm (r2 = 7) into the taken arm (r2 = 99); the branch at pc 2 reaches
+    // the taken arm at pc 5.
+    const u64_row = [_]llir.TypeDesc{primType(.uint64)};
+    const blocks = [_]llir.BlockDesc{
+        .{ .start_pc = 0, .end_pc = 3 },
+        .{ .start_pc = 3, .end_pc = 5 },
+        .{ .start_pc = 5, .end_pc = 7 },
+    };
+    const Case = struct { op: llir.Opcode, lhs: u16, imm: u8, taken: bool };
+    const cases = [_]Case{
+        // signed: 5 > 3; 3 > 3 false; 0 > -1 (0x7f sign-extends to -1).
+        .{ .op = .bgti, .lhs = 5, .imm = 3, .taken = true },
+        .{ .op = .bgti, .lhs = 3, .imm = 3, .taken = false },
+        .{ .op = .bgti, .lhs = 0, .imm = 0x7f, .taken = true },
+        // unsigned: 200 > 127; 7 > 127 false; 5 > 0.
+        .{ .op = .bgtiu, .lhs = 200, .imm = 127, .taken = true },
+        .{ .op = .bgtiu, .lhs = 7, .imm = 127, .taken = false },
+        .{ .op = .bgtiu, .lhs = 5, .imm = 0, .taken = true },
+    };
+    for (cases) |cs| {
+        const instrs = [_]llir.Instr{
+            llir.instrI(.movwz0, llir.frame_base, cs.lhs), // %0 = lhs
+            llir.instrI(.movwz0, llir.frame_base + 1, 0), // %1 = 0 (unused)
+            llir.instrB(cs.op, llir.frame_base, cs.imm, 3), // taken → pc + 3
+            llir.instrI(.movwz0, llir.frame_base + 2, 0x7), // %2 = 7 (fall-through)
+            llir.instrE(.ret, llir.frame_base + 2, 0),
+            llir.instrI(.movwz0, llir.frame_base + 2, 0x63), // %2 = 99 (taken)
+            llir.instrE(.ret, llir.frame_base + 2, 0),
+        };
+        const want: Value = if (cs.taken) 0x63 else 0x7;
+        try testing.expectEqual(want, try runHandBlocks(&instrs, &u64_row, 0, &.{}, &blocks));
+    }
+}
+
 test "f64 arithmetic: IEEE division, remainder, NaN equality — no traps" {
     var l = try load(
         \\fn half(x: float64) -> float64 { x / 2.0 }
@@ -324,7 +363,7 @@ test "f64 arithmetic: IEEE division, remainder, NaN equality — no traps" {
 
 // ---------------------------------------------------------------------------
 // Interpreter & calling convention: zero/cond
-// semantics, the C-Type comparison → cond matrix (integer + float, NaN),
+// semantics, the E-type comparison → cond matrix (integer + float, NaN),
 // `jal` link/target ordering and `j` discarding no link, nested-call
 // `ra` save/restore, `jalr` signed offset/overflow/non-entry handling,
 // the dynamic take contract-mismatch failure atomicity, T0–T15
@@ -404,11 +443,11 @@ test "fast bank: zero/ra discard, cond and T are raw-index independent" {
 }
 
 // ---------------------------------------------------------------------------
-// Integer C-Type comparison → cond matrix
+// Integer E-type comparison → cond matrix
 // ---------------------------------------------------------------------------
 
 /// Run one comparison sequence: set F0/F1 from wide cells (movwz0 then
-/// movwk1..3 to keep prior lanes), run `op` (a C-Type comparison that
+/// movwk1..3 to keep prior lanes), run `op` (a E-type comparison that
 /// writes cond), materialize cond into F2, return F2.
 fn runIntCmp(op: llir.Opcode, a: Value, b: Value, rows: []const llir.TypeDesc) !Value {
     const instrs = [_]llir.Instr{
@@ -422,15 +461,15 @@ fn runIntCmp(op: llir.Opcode, a: Value, b: Value, rows: []const llir.TypeDesc) !
         llir.instrI(.movwk1, llir.frame_base + 1, @truncate(b >> 16)),
         llir.instrI(.movwk2, llir.frame_base + 1, @truncate(b >> 32)),
         llir.instrI(.movwk3, llir.frame_base + 1, @truncate(b >> 48)), // F1 = b
-        llir.instrC(op, llir.frame_base, llir.frame_base + 1), // cond = a op b
+        llir.instrE(op, llir.frame_base, llir.frame_base + 1), // cond = a op b
         llir.instrE(.copy, llir.frame_base + 2, llir.cond_reg),
         llir.instrE(.ret, llir.frame_base + 2, 0),
     };
     return runHand(&instrs, rows, 0, &.{});
 }
 
-test "integer C-Type comparisons write cond (signed/unsigned, 32/64-bit)" {
-    // All four integer comparison opcodes, the only integer C-Type
+test "integer E-type comparisons write cond (signed/unsigned, 32/64-bit)" {
+    // All four integer comparison opcodes, the only integer E-type
     // comparison set. `slt` is signed; `sltu` unsigned. 32-bit operands
     // are sign-extended cells; 64-bit are full-width.
     const i32_rows = [_]llir.TypeDesc{ primType(.int32), primType(.int32), primType(.bool) };
@@ -483,13 +522,13 @@ test "clz/popcount runtime: the 32-bit forms count the low 32 bits, not the sign
 }
 
 // ---------------------------------------------------------------------------
-// Float C-Type comparison → cond matrix (incl. NaN)
+// Float E-type comparison → cond matrix (incl. NaN)
 // ---------------------------------------------------------------------------
 
 // f32/f64 comparison harness: `(a OP b)` into cond then ret. NaN is
 // encoded as a raw cell pattern so no reconstruction is needed. The
 // operand setup is shared with the integer matrix (`runIntCmp`).
-test "float C-Type comparisons write cond; NaN is ordered-false, ne-true" {
+test "float E-type comparisons write cond; NaN is ordered-false, ne-true" {
     const f32_nan: Value = 0x7fc0_0001;
     const f32_one: Value = vm_types.ValueCodec.encodeFloat32(1.0);
     const f32_two: Value = vm_types.ValueCodec.encodeFloat32(2.0);

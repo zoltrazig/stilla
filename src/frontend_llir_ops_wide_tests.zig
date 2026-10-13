@@ -231,7 +231,7 @@ test "LLIR lowering: 64-bit integer and f64 ops specialize by type" {
     // Walk every non-phi instruction and check its record against the
     // typed matrix: i64/u64 get the typed integer opcodes (the
     // `u` rep split for div/rem/ordering), f64 its own opcode block,
-    // and every comparison is a C-Type family member writing the
+    // and every comparison is a E-type family member writing the
     // implicit `cond`, materialized by `copy dst, cond` (le/gt are the
     // operand-swap aliases — no `gtu`+`not` synthesis exists in v9).
     var seen = std.StaticBitSet(512).initEmpty();
@@ -285,7 +285,7 @@ test "LLIR lowering: 64-bit integer and f64 ops specialize by type" {
                             else => unreachable,
                         };
                         const oprim = bin.a.type_.primitive;
-                        // v9: the C-Type families — `gt` and float
+                        // v9: the E-type families — `gt` and float
                         // `ge` lower through the operand-swap aliases
                         // (`a > b` ≡ `slt b, a`, `a >= b` ≡ `sle b, a`;
                         // the swap preserves every predicate's NaN
@@ -323,7 +323,7 @@ test "LLIR lowering: 64-bit integer and f64 ops specialize by type" {
                         const d = llir.decode(image.instructions[pc]).?;
                         try testing.expectEqual(want, d.op);
                         seen.set(@intFromEnum(want));
-                        // Every C-Type comparison writes the implicit
+                        // Every E-type comparison writes the implicit
                         // `cond`; the SSA bool result is materialized by
                         // `copy dst, cond` right after.
                         var nd = llir.decode(image.instructions[pc + 1]).?;
@@ -346,7 +346,7 @@ test "LLIR lowering: 64-bit integer and f64 ops specialize by type" {
     // the operand rep — `iadd` is `add.i64`, `usub` `sub.u64`, `udiv`
     // `div.u64`, `ineg` `neg.i64`, `ishl` `shl.i64`, `ushr` `shr.u64`
     // — the bitwise ops stay widthless, and every comparison is a
-    // C-Type family member (integer `le`/`ge` synthesize `not(slt)`).
+    // E-type family member (integer `le`/`ge` synthesize `not(slt)`).
     const want_seen = [_]llir.Opcode{
         .add_i64,
         .sub_u64,
@@ -388,7 +388,7 @@ test "LLIR lowering: 64-bit integer and f64 ops specialize by type" {
 test "LLIR lowering: f64 conversions carry the explicit cvt opcode" {
     // The eight directed pairs involving f64 (the 64-bit additions to
     // the five-type conversion matrix): v9 spells each pair as its own
-    // C-Type opcode `cvt.<src>.<dst>` (a = dst, b = src) — no
+    // E-type opcode `cvt.<src>.<dst>` (a = dst, b = src) — no
     // `c` discriminator rides in the record.
     const conv_src = try helpers.probeSource("probes/cases", "wide_f64_conversions");
     defer testing.allocator.free(conv_src);
@@ -481,7 +481,7 @@ test "LLIR lowering: 64-bit comparison branches test the full cell" {
     var b = cfg_lower_llir.Builder.init(arena.allocator(), program);
     var image = try b.lowerLlir();
 
-    // The comparison lowers to `sltu` (C-Type, implicit cond) plus
+    // The comparison lowers to `sltu` (E-type, implicit cond) plus
     // `copy dst, cond`; the branch fuses the u64 operands into a typed
     // compare-and-branch — `bltu`/`bleu` by layout polarity —
     // never the 32-bit family (`blt`/`ble`), so the full cell
@@ -743,7 +743,7 @@ test "LLIR lowering: u64 constants materialize through move-wide sequences" {
 
 test "LLIR lowering: all 20 directed casts carry the explicit cvt opcode" {
     // The Core §16.3 five-type conversion matrix (b, i32, u32, f32, f64)
-    // minus the identities: every directed pair spells its own C-Type
+    // minus the identities: every directed pair spells its own E-type
     // opcode `cvt.<src>.<dst>` (a = dst, b = src) — no `c` discriminator
     // rides in the record.
     const src = try helpers.probeSource("probes/cases", "wide_directed_casts");
@@ -807,7 +807,7 @@ test "LLIR lowering: all 20 directed casts carry the explicit cvt opcode" {
 }
 
 test "LLIR lowering: seq/sne/slt/sle over all six reps write cond, then copy dst, cond" {
-    // The C-Type comparison families: `seq`/`sne`/`slt`/`sle` over the
+    // The E-type comparison families: `seq`/`sne`/`slt`/`sle` over the
     // six reps (i32, u32, i64, u64, f32, f64) — 24 opcodes. Each
     // comparison writes the implicit `cond` and the lowering materializes
     // the SSA bool result with `copy dst, cond` immediately after. The
@@ -850,11 +850,11 @@ test "LLIR lowering: seq/sne/slt/sle over all six reps write cond, then copy dst
                 if (std.meta.activeTag(ins.op) == .phi) continue;
                 switch (ins.op) {
                     .eq, .ne, .lt, .ge => |bin| {
-                        // The comparison: C-Type, a = lhs slot, b = rhs
+                        // The comparison: E-type, a = lhs slot, b = rhs
                         // slot, implicit `cond` destination.
                         const d = llir.decode(image.instructions[pc]).?;
                         try testing.expectEqual(case_.want, d.op);
-                        try testing.expectEqual(llir.Format.c, llir.opInfo(d.op).format);
+                        try testing.expectEqual(llir.Format.e, llir.opInfo(d.op).format);
                         const a_slot = b.slotOf(if (case_.swapped) bin.b else bin.a);
                         const b_slot = b.slotOf(if (case_.swapped) bin.a else bin.b);
                         try testing.expectEqual(a_slot, d.a);

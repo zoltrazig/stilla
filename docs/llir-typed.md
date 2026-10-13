@@ -86,10 +86,10 @@ expansion:
 | --- | --- |
 | `add.i32` / `sub.i32` / `mul.i32` / `div.i32` / `rem.i32` / `min.i32` / `max.i32` | the one R-format record |
 | every other typed integer rep (`*.u32`, `*.i64`, `*.u64`) | the one R-format record |
-| `neg.i32` (and the other integer reps) | the one E-format record |
+| `neg.i32` (and the other integer reps) | the one E-type record (selectors 64–107) |
 | `shl`/`shr` (any rep) | the one R-format record; the count masks mod the width inside the opcode |
 | `bitand`/`bitor`/`bitxor` | `and`/`or`/`xor` — widthless, canonicality-preserving, no canonicalization needed |
-| `cvt.*.i32` / `cvt.*.u32` | the C-type cast record; the cell is canonical by construction |
+| `cvt.*.i32` / `cvt.*.u32` | the E-type cast record (selectors 0–63); the cell is canonical by construction |
 
 Immediate fusion folds into the same single record: a constant right
 operand inside the rep's immediate window lowers as the immediate form
@@ -107,7 +107,7 @@ The typed layer behind the emitter is wired:
   arithmetic/shift op became a four-member typed family
   (`add.i32`/`add.u32`/`add.i64`/`add.u64`, …), `neg` a typed
   integer family, and the `sext32`/`zext32` canonicalization opcodes
-  were removed (their E-type codes are reserved). The value-form
+  were removed (their E-type selectors are reserved). The value-form
   lattice, the staging-register sequences, and the budget's
   sequence-shape derivation (`arithSeqCount`,
   `fusedStagingReduction`) were deleted with them — one arithmetic

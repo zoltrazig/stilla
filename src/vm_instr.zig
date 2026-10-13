@@ -7,7 +7,7 @@
 //! executable image; wire decoding stays in `llir.zig`.
 //!
 //! Layout: `op` is `VmOpcode` — the canonical `llir.Opcode` list with an
-//! `u16` tag (269 logical opcodes; the headroom above is the expansion
+//! `u16` tag (271 logical opcodes; the headroom above is the expansion
 //! headroom, and a future tag bump is caught by the comptime size assert
 //! below). The operand is a mandatory
 //! `u32`: it holds the format-specific immediate, offset, or
@@ -41,7 +41,7 @@ pub const VmInstr = extern struct {
     ///   R — 0 (the immediate forms carry their imm7 in `c`);
     ///   B — the sign-extended 10-bit branch offset;
     ///   I — the zero-extended `imm16` (ID or lane value);
-    ///   C/E — 0;
+    ///   E — 0;
     ///   U — the sign-extended 20-bit `jal`/`auipc`/`lui` immediate.
     ///   Exception: a published `jal`'s operand is **not** the immediate —
     ///   publishArtifact rewrites it to the callee's function registry
@@ -76,7 +76,7 @@ pub const DecodeError = error{ReservedWord};
 /// The total LLIR → VmInstr conversion: decode the wire record and pack
 /// its operands into the fixed-size image instruction. Fails on any
 /// reserved word — the reserved class, an unassigned code, an alignment
-/// hole, a nonzero C/E reserved field, or an unclean `11101` `a` field —
+/// hole, a nonzero E reserved field, or an unclean `11101` `a` field —
 /// before the instruction can enter the image.
 pub fn decodeInstr(instr: llir.Instr) DecodeError!VmInstr {
     const d = llir.decode(instr) orelse return error.ReservedWord;
@@ -86,7 +86,7 @@ pub fn decodeInstr(instr: llir.Instr) DecodeError!VmInstr {
         .b = d.b,
         .c = d.c,
         .operand = switch (d.format) {
-            .r, .c, .e => 0,
+            .r, .e => 0,
             .b => @bitCast(@as(i32, d.offs10)),
             .i => @as(u32, d.imm16),
             .u => @bitCast(d.imm20),
@@ -152,7 +152,6 @@ test "decodeInstr maps every opcode of every format 1:1" {
             .r => llir.instrR(op, a, b, c),
             .b => llir.instrB(op, a, b, @intCast(c & 0x3f)),
             .i => llir.instrI(op, a, @as(u16, @truncate(n)) | 0x1234),
-            .c => llir.instrC(op, a, b),
             .e => llir.instrE(op, a, b),
             .u => llir.instrU(
                 op,
@@ -168,7 +167,7 @@ test "decodeInstr maps every opcode of every format 1:1" {
             .r => try testing.expectEqual(@as(u32, 0), v.operand),
             .b => try testing.expectEqual(@as(i32, @intCast(c & 0x3f)), branchOffset(v)),
             .i => try testing.expectEqual(@as(u32, @as(u16, @truncate(n)) | 0x1234), v.operand),
-            .c, .e => try testing.expectEqual(@as(u32, 0), v.operand),
+            .e => try testing.expectEqual(@as(u32, 0), v.operand),
             .u => try testing.expectEqual(@as(i32, @bitCast(@as(u32, b) | (@as(u32, c) << 8))), @as(i32, @bitCast(v.operand))),
         }
     }
@@ -178,9 +177,9 @@ test "decodeInstr rejects reserved words before execution" {
     // The `10` reserved class, an unassigned code, and an unclean
     // `11101` `a` field all fail the load, never reach the image.
     try testing.expectError(error.ReservedWord, decodeInstr(.{ 0, 0, 0, 0x80 }));
-    try testing.expectError(error.ReservedWord, decodeInstr(llir.bytesOf(@as(u32, 116) << 21)));
-    try testing.expectError(error.ReservedWord, decodeInstr(llir.bytesOf((0b11101 << 27) | (@as(u32, llir.cond_reg) << 20))));
-    try testing.expectError(error.ReservedWord, decodeInstr(llir.bytesOf((0b111001 << 26) | (1 << 14))));
+    try testing.expectError(error.ReservedWord, decodeInstr(llir.bytesOf(llir.format_spec[@intFromEnum(llir.Format.r)].prefix | (@as(u32, 116) << llir.format_spec[@intFromEnum(llir.Format.r)].code_shift))));
+    try testing.expectError(error.ReservedWord, decodeInstr(llir.instrU(.jal, llir.cond_reg, 0)));
+    try testing.expectError(error.ReservedWord, decodeInstr(llir.bytesOf(llir.wordOf(llir.instrE(.neg_i32, 0, 0)) | (@as(u32, 1) << 14))));
 }
 
 test "signed immediates and pc helpers" {
@@ -197,10 +196,10 @@ test "signed immediates and pc helpers" {
     try testing.expectEqual(@as(i16, -1), offs16Signed(jr));
 }
 
-test "all 269 logical opcodes fit u16 with headroom" {
-    try testing.expectEqual(@as(usize, 269), std.meta.tags(VmOpcode).len);
+test "all 271 logical opcodes fit u16 with headroom" {
+    try testing.expectEqual(@as(usize, 271), std.meta.tags(VmOpcode).len);
     var max: u32 = 0;
     for (std.meta.tags(VmOpcode)) |op| max = @max(max, @intFromEnum(op));
-    try testing.expectEqual(@as(u32, 269), max);
+    try testing.expectEqual(@as(u32, 271), max);
     try testing.expect(max < 65536 - 256); // expansion headroom
 }

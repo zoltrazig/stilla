@@ -70,8 +70,8 @@ open.
 
 **LLIR backend: CFG → frozen image → bytes**
 
-- [x] **Instruction set** — fixed-width 4-byte `Instr` in six formats, a
-  ~270-opcode table with per-op schemas, `zero`/`ra`/`cond` registers, the
+- [x] **Instruction set** — fixed-width 4-byte `Instr` in five formats, a
+  ~271-opcode table with per-op schemas, `zero`/`ra`/`cond` registers, the
   frame/call contract, side-table records
 - [x] **Eleven-stage lowering** — prepare, allocation, lifecycle plan, edge
   blocks, budget, intern, body/edge/control emit, fusion, linearize

@@ -12,7 +12,7 @@
 //! Format (all little-endian, fixed-width, no padding, no pointers):
 //! ```text
 //! u32 magic   = 0x52494c4c ("LLIR" as little-endian bytes)
-//! u32 version = 17
+//! u32 version = 18
 //! module symbol {start, len}: u32, u32  (self_symbol's byte range)
 //! entry member {start, len}: u32, u32   (entry_member's byte range)
 //! {tables.len} × u32 count, one per table, in the LlirProgram field order below
@@ -122,7 +122,12 @@ pub const magic: u32 = 0x52494c4c;
 /// 96–111; the logical table is compacted to 269 opcodes). The
 /// instruction encoding changes, so all earlier images are rejected on
 /// the version alone.
-pub const version: u32 = 17;
+/// Version 18: `bgti`/`bgtiu` were added at B-type codes 16/17 and
+/// `beqi`/`bnei`/`tbz`/`tbnz` moved to 18/19/20/21 (the B-type codes
+/// 0–21 are assigned; the logical table is now 271 opcodes). The
+/// instruction encoding changes, so all earlier images are rejected on
+/// the version alone.
+pub const version: u32 = 18;
 
 /// The scalar header fields serialized inside the table block (count 1
 /// + one value word each) — listed by name because `TypeId == u32`.

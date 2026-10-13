@@ -614,7 +614,7 @@ const t_f64: u32 = 7;
 
 /// One instruction record, encoded per its opcode's format. The three
 /// operands map per format: R `(a, b, c)`; B `(lhs, mid, offs10)`; I
-/// `(a, imm16 = b | c << 8)`; C `(a, b)`; E `(a, b)`. Register-role
+/// `(a, imm16 = b | c << 8)`; E `(a, b)`. Register-role
 /// operands are written as logical frame indexes and encoded here;
 /// immediate/none fields pass through raw. Specials must be passed
 /// through the raw `llir.instr*` builders instead (they carry their
@@ -625,7 +625,6 @@ fn ir(op: llir.Opcode, a: u8, b: u8, c: u8) llir.Instr {
         .r => llir.instrR(op, enc(info.a, a), enc(info.b, b), enc(info.c, c)),
         .b => llir.instrB(op, enc(info.a, a), enc(info.b, b), @intCast(c)),
         .i => llir.instrI(op, enc(info.a, a), @as(u16, b) | (@as(u16, c) << 8)),
-        .c => llir.instrC(op, enc(info.a, a), enc(info.b, b)),
         .e => llir.instrE(op, enc(info.a, a), enc(info.b, b)),
         .u => unreachable, // no fixture uses the U format
     };
@@ -797,18 +796,18 @@ test "structural: reserved and unassigned words are rejected" {
         }, 1, &prim, &.{}, t_u64, &st);
     };
     // The `10` reserved class (Instruction Set §2): no format decodes it.
-    @constCast(image.instructions)[1] = llir.bytesOf(0b10 << 30);
+    @constCast(image.instructions)[1] = llir.bytesOf(0x80000000);
     try expectRejected(&image, "reserved or unknown");
-    // An unassigned R code: 154 is the first code past cmov (153).
-    @constCast(image.instructions)[1] = llir.bytesOf(@as(u32, 154) << 21);
+    // An unassigned R code: 154 is a reserved (unassigned) R selector.
+    @constCast(image.instructions)[1] = llir.bytesOf(llir.format_spec[@intFromEnum(llir.Format.r)].prefix | (@as(u32, 154) << llir.format_spec[@intFromEnum(llir.Format.r)].code_shift));
     try expectRejected(&image, "reserved or unknown");
-    // A nonzero C-type reserved field (bits 14:9) is a reserved word.
-    @constCast(image.instructions)[1] = llir.bytesOf((0b111000 << 26) | (@as(u32, 32) << 20) | (1 << 14));
+    // A nonzero E-type reserved field (bits 19:14) is a reserved word.
+    @constCast(image.instructions)[1] = llir.bytesOf(llir.format_spec[@intFromEnum(llir.Format.e)].prefix | (@as(u32, 32) << llir.format_spec[@intFromEnum(llir.Format.e)].code_shift) | (@as(u32, 1) << 14));
     try expectRejected(&image, "reserved or unknown");
 }
 
 test "structural: i64/u64 integer family matrix" {
-    // Legal: signed ops on i64, unified ops on both widths, a C-type
+    // Legal: signed ops on i64, unified ops on both widths, a E-type
     // comparison, and a 64-bit compare-and-branch.
     const image = blk: {
         var st: ImageStorage = .{};
@@ -820,7 +819,7 @@ test "structural: i64/u64 integer family matrix" {
             ir(.shr_i32, 2, 0, 1), // arithmetic shift
             ir(.neg_i32, 2, 0, 0),
             ir(.clz_i64, 2, 0, 0),
-            ir(.slt, 0, 1, 0), // C-type comparison → cond
+            ir(.slt, 0, 1, 0), // E-type comparison → cond
             ir(.ret, 2, 0, 0),
         }, 3, &prim, &.{ intConst(t_i64, 1, 0), intConst(t_i64, 2, 0) }, t_bool, &st);
     };
@@ -880,7 +879,7 @@ test "structural: f64 family matrix" {
 }
 
 test "structural: cond lifetime — reads before an in-block definition" {
-    // A `copy F0, cond` with no preceding C-type comparison in the
+    // A `copy F0, cond` with no preceding E-type comparison in the
     // block reads an undefined cond (Instruction Set §7, §14): the
     // register schema accepts the record, the lifetime check rejects
     // it.
@@ -1475,7 +1474,7 @@ test "valid images of 1 and 10,000 instructions validate with 0 allocations" {
 }
 
 test "raw-word mutation corpus never panics (Debug and ReleaseSafe)" {
-    // Mutate every byte of every instruction word of a six-format image
+    // Mutate every byte of every instruction word of a five-format image
     // to every byte value: `validate` must return a message (freed) or
     // null — it must never panic, index out of bounds, or assert. The
     // same suite runs under Debug and ReleaseSafe (`zig build -fincremental test
@@ -1485,8 +1484,8 @@ test "raw-word mutation corpus never panics (Debug and ReleaseSafe)" {
     // panic", and the counters below prove the corpus actually
     // exercises both outcomes.
     var st: ImageStorage = .{};
-    // Six-format valid image; each block ends with a B-type branch
-    // except the last (R add, B beq + tbz, C cvt, I const + movwz,
+    // Five-format valid image; each block ends with a B-type branch
+    // except the last (R add, B beq + tbz, E cvt, I const + movwz,
     // U lui, E ret).
     const image = buildImageBlocks(&.{
         ir(.add_i32, 0, 0, 1), // R
@@ -1534,7 +1533,7 @@ test "raw-word mutation corpus never panics (Debug and ReleaseSafe)" {
 // Each item has at least one fixture here: every
 // format's reserved code plus the top `10` class, opcode-specific register/
 // special schemas and the F/T frame bounds, the opcode-specific unused
-// operand-bit rejections, the 109/110 frame budget, the C-Type cast vs
+// operand-bit rejections, the 109/110 frame budget, the E-type cast vs
 // comparison operand roles, the `cond` lifetime rejections across calls and
 // block boundaries (plus the positive same-block carrier), the three B-type
 // operand schemas, the tbz/tbnz high-bit bound (and the note that the
@@ -1554,10 +1553,10 @@ test "validation: reserved codes in every format and the top-level 10 class" {
     // copied wrong). The reserved codes are one past each format's last
     // assigned code (Instruction Set §2–§6).
     const words = [_]llir.Instr{
-        llir.bytesOf(0b10 << 30), // the top-level `10` reserved class
-        llir.bytesOf((0b01 << 30) | (60 << 24)), // B-type reserved code 60
-        llir.bytesOf((0b111001 << 26) | (60 << 20)), // E-type reserved code 60
-        llir.bytesOf((0b110 << 29) | (34 << 23)), // I-type reserved code 34
+        llir.bytesOf(0x80000000), // the top-level `10` reserved class
+        llir.bytesOf(llir.format_spec[@intFromEnum(llir.Format.b)].prefix | (@as(u32, 60) << llir.format_spec[@intFromEnum(llir.Format.b)].code_shift)), // B-type reserved code 60
+        llir.bytesOf(llir.format_spec[@intFromEnum(llir.Format.e)].prefix | (@as(u32, 108) << llir.format_spec[@intFromEnum(llir.Format.e)].code_shift)), // E-type reserved selector 108 (past the merged 0–107 range)
+        llir.bytesOf(llir.format_spec[@intFromEnum(llir.Format.i)].prefix | (@as(u32, 34) << llir.format_spec[@intFromEnum(llir.Format.i)].code_shift)), // I-type reserved code 34
     };
     for (words) |w| {
         try testing.expectEqual(@as(?llir.Decoded, null), llir.decode(w)); // fixture is genuinely reserved
@@ -1628,7 +1627,7 @@ test "validation: frame budget -- 109 succeeds, 110 rejects" {
     try expectRejected(&boundary, "frame too big");
 }
 
-test "validation: C-type cast vs comparison operand roles" {
+test "validation: E-type cast vs comparison operand roles" {
     var st: ImageStorage = .{};
     // A cast is `a = dst, b = src`; `cond` is not a legal cast destination.
     const image = buildImage(&.{
@@ -1636,7 +1635,7 @@ test "validation: C-type cast vs comparison operand roles" {
         ir(.cvt_i32_u32, 1, 0, 0), // %1 = u32(%0)
         ir(.ret, 1, 0, 0),
     }, 2, &prim, &.{intConst(t_int32, 1, 0)}, t_uint32, &st);
-    @constCast(image.instructions)[1] = llir.instrC(.cvt_i32_u32, llir.cond_reg, 0);
+    @constCast(image.instructions)[1] = llir.instrE(.cvt_i32_u32, llir.cond_reg, 0);
     try expectRejected(&image, "register operand is neither a slot nor a special register");
 
     // A comparison has no encoded destination: `a`/`b` are both *sources*,
@@ -1646,7 +1645,7 @@ test "validation: C-type cast vs comparison operand roles" {
         ir(.seq, 0, 1, 0), // cond = (%0 == %1)
         ir(.ret, 0, 0, 0),
     }, 2, &prim, &.{}, t_int32, &st2);
-    @constCast(image2.instructions)[0] = llir.instrC(.seq, llir.ra_reg, 1);
+    @constCast(image2.instructions)[0] = llir.instrE(.seq, llir.ra_reg, 1);
     try expectRejected(&image2, "register operand is neither a slot nor a special register");
     // The positive cast+comparison form (before the mutation) validates.
     var st3: ImageStorage = .{};
@@ -1664,7 +1663,7 @@ test "validation: cond read across a call and across a block boundary" {
     // void callee is appended by `buildCallImage`.
     var st: CallStorage = .{};
     const image = buildCallImage(&.{
-        llir.instrC(.seq, llir.frame_base, llir.frame_base + 1), // cond = (%0 == %1)
+        llir.instrE(.seq, llir.frame_base, llir.frame_base + 1), // cond = (%0 == %1)
         llir.instrU(.jal, llir.ra_reg, 3), // jal ra at pc 1 -> callee entry 4
         llir.instrE(.copy, llir.frame_base, llir.cond_reg), // copy F0, cond -- after the call
         llir.instrE(.ret, 0, 0),
@@ -1699,12 +1698,12 @@ test "validation: cond lives across a non-cond instruction within a block" {
 
 test "validation: B-type register/immediate/bit-test operand schemas" {
     // The three B-type operand schemas: register branches (beq..bleu and the
-    // f32/f64 variants), immediate branches (blti/bltiu/beqi/bnei), and the
-    // bit-test branches (tbz/tbnz). Each branch targets the next block.
-    // Immediate branches are integer-only; no float immediate branch exists
-    // (rep = null in the opcode table), so a float immediate form is not even
-    // encodable -- the codec rejects it before the loader runs.
-    const cases = [_]llir.Opcode{ .beq, .bne, .blt, .ble, .bltu, .bleu, .bltiu, .beqi, .bnei, .tbnz };
+    // f32/f64 variants), immediate branches (blti/bltiu/bgti/bgtiu/beqi/bnei),
+    // and the bit-test branches (tbz/tbnz). Each branch targets the next
+    // block. Immediate branches are integer-only; no float immediate branch
+    // exists (rep = null in the opcode table), so a float immediate form is
+    // not even encodable -- the codec rejects it before the loader runs.
+    const cases = [_]llir.Opcode{ .beq, .bne, .blt, .ble, .bltu, .bleu, .blti, .bltiu, .bgti, .bgtiu, .beqi, .bnei, .tbnz };
     for (cases) |bop| {
         var st: ImageStorage = .{};
         const mid: u8 = if (bop == .tbnz) 5 else 1; // tbnz: bit index; others: rhs/imm7
@@ -1717,13 +1716,16 @@ test "validation: B-type register/immediate/bit-test operand schemas" {
     }
 
     // Register schema: an immediate branch's `a` is a source -- a `cond`
-    // operand is rejected.
-    var st2: ImageStorage = .{};
-    const bad = buildImage(&.{
-        llir.instrB(.blti, llir.cond_reg, 1, 1), // blti cond, 1, +1
-        ir(.ret, 0, 0, 0),
-    }, 1, &prim, &.{}, t_int32, &st2);
-    try expectRejected(&bad, "register operand is neither a slot nor a special register");
+    // operand is rejected (the signed/unsigned strict and greater-than
+    // immediate branches share one schema).
+    for ([_]llir.Opcode{ .blti, .bgti, .bgtiu }) |bop| {
+        var st2: ImageStorage = .{};
+        const bad = buildImage(&.{
+            llir.instrB(bop, llir.cond_reg, 1, 1), // <bop> cond, 1, +1
+            ir(.ret, 0, 0, 0),
+        }, 1, &prim, &.{}, t_int32, &st2);
+        try expectRejected(&bad, "register operand is neither a slot nor a special register");
+    }
 }
 
 test "validation: tbz/tbnz bit-index highest bit and the 64 bound" {

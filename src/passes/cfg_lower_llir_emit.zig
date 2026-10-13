@@ -270,12 +270,12 @@ fn emitBinArith(bld: *Builder, blk: *const cfg.BasicBlock, idx: u32, op: typed.T
 }
 
 /// Emit the fast-path comparison and cast records — the v9
-/// C-Type schema: a comparison writes the implicit `cond` and the
+/// E-type schema: a comparison writes the implicit `cond` and the
 /// lowering materializes the SSA bool result with `copy dst, cond`
 /// right after; `sle` is the float non-strict primitive (`a >= b`
 /// ≡ `sle b, a`, `a > b` ≡ `slt b, a` — the swap preserves the NaN
 /// behavior of every predicate). The
-/// `cvt.<src>.<dst>` casts are the single-record C-Type forms.
+/// `cvt.<src>.<dst>` casts are the single-record E-type forms.
 fn emitCompare(bld: *Builder) error{OutOfMemory}!void {
     for (bld.ordered_funcs.items, 0..) |_, fi| {
         const r = bld.block_ranges.items[fi];
@@ -288,7 +288,7 @@ fn emitCompare(bld: *Builder) error{OutOfMemory}!void {
                     .eq, .ne, .lt, .le, .gt, .ge => |bin| {
                         const dst = bld.slotOf(ins.results[0]);
                         const sel = cmpSel(std.meta.activeTag(ins.op), bin);
-                        bld.setC(blk, idx, sel.op, bld.slotOf(sel.a), bld.slotOf(sel.b));
+                        bld.setE(blk, idx, sel.op, bld.slotOf(sel.a), bld.slotOf(sel.b));
                         if (sel.invert) {
                             bld.setE(blk, idx + 1, .not, llir.cond_reg, llir.cond_reg);
                             bld.setE(blk, idx + 2, .copy, dst, llir.cond_reg);
@@ -298,7 +298,7 @@ fn emitCompare(bld: *Builder) error{OutOfMemory}!void {
                     },
                     .num_cast => |v| {
                         const op = castOpcode(v.type_, ins.results[0].type_);
-                        bld.setC(blk, idx, op, bld.slotOf(ins.results[0]), bld.slotOf(v));
+                        bld.setE(blk, idx, op, bld.slotOf(ins.results[0]), bld.slotOf(v));
                     },
                     else => {}, // earlier rows above; the remaining records later
                 }
@@ -309,7 +309,7 @@ fn emitCompare(bld: *Builder) error{OutOfMemory}!void {
 }
 
 /// The v9 cast opcode for the `(src, dst)` pair: the
-/// explicit `cvt.<src>.<dst>` C-Type spellings over the seven cast
+/// explicit `cvt.<src>.<dst>` E-type spellings over the seven cast
 /// types `b, i32, u32, i64, u64, f32, f64`. The checker restricts
 /// `num_cast` to exactly this set (Core §16.3); the identity entries
 /// are unreachable here (the checker and the CFG validator reject
@@ -346,7 +346,7 @@ fn emitSelect(bld: *Builder) error{OutOfMemory}!void {
     }
 }
 
-/// The typed C-Type comparison selection for a CFG comparison.
+/// The typed E-type comparison selection for a CFG comparison.
 /// `sle` is the float non-strict primitive (`a <= b` ≡ `sle a, b`,
 /// `a >= b` ≡ `sle b, a` — the swap preserves the NaN behavior),
 /// `gt` is the strict swap alias (`a > b` ≡ `slt b, a`), and

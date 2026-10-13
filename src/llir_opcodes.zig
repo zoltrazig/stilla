@@ -1,8 +1,12 @@
 //! Hand-maintained executable mirror of the v10 opcode table (Stilla
 //! LLIR Instruction Set.md §4–§9): the logical `Opcode = enum(u16)`
 //! with explicit logical values, the `OpInfo` schema rows, and comptime
-//! metadata, consumed by `llir.zig`. The codec/bijection tests in
-//! `llir.zig` are the executable proof of the table (counts, uniqueness,
+//! metadata, consumed by `llir.zig`. The wire geometry of the five
+//! formats — the discriminant test, the selector field, the fixed
+//! prefix, and the E reserved field — is defined once by
+//! `FormatSpec`/`format_spec`, beside `Format`; the codec's encode and
+//! decode both read it there. The codec/bijection tests in `llir.zig`
+//! are the executable proof of the table (counts, uniqueness,
 //! alignment, round-trip).
 //!
 //! v10: the integer arithmetic families are **typed** — every member
@@ -13,16 +17,19 @@
 //! pair are gone. The immediate families are the four-rep spellings
 //! (`addi.i32`…`shri.u64`); the bitwise ops (`and`/`or`/`xor` and their
 //! immediate forms) stay widthless — they are rep-agnostic on canonical
-//! cells. The E-type `neg` family fills the codes `1–3` its retired
-//! widthless predecessors vacated, and codes `6–7` (the former
-//! `sext32`/`zext32` slots) are reserved. Logical values run 1–269 in
-//! table order with no holes, and every format's encoded selectors are
-//! contiguous except the reserved holes (R 0–111, B 0–19, C 0–63, E
-//! 0–43 with `6–7` and `13/15/17/19` reserved, I 0–31 with selector 10
-//! reserved — the former `result_take` slot, kept so the `slot_*`
-//! encodings never move; U keeps `jal`/`j` on prefix 0 — which includes
-//! the `a` field in its discriminant — `auipc` 1, `lui` 2).
+//! cells. The E-type `neg` family opens the former-E block at selectors
+//! `64–67` (the codes its retired widthless predecessors vacated); the
+//! former `sext32`/`zext32` slots `70–71` stay reserved. Logical values
+//! run 1–271 in table order with no holes, and every format's encoded
+//! selectors are contiguous except the reserved holes (R 0–111, B 0–21,
+//! E 0–107 with `70/71/77/79/81/83` reserved and `108–127` reserved
+//! outright, I 0–31 with selector 10 reserved — the former `result_take`
+//! slot, kept so the `slot_*` encodings never move; U keeps `jal`/`j` on
+//! prefix 0 — which includes the `a` field in its discriminant — `auipc`
+//! 1, `lui` 2).
 
+/// The five instruction formats. The `format_spec[FormatSpec]` table
+/// below is the geometry source for the encoder and the decoder.
 pub const Format = enum(u8) {
     /// R-type: `00 | code(9) | a(7) | b(7) | c(7)`.
     r,
@@ -30,14 +37,53 @@ pub const Format = enum(u8) {
     b,
     /// I-type: `110 | code(6) | a(7) | imm16`.
     i,
-    /// C-type: `111000 | code(6) | reserved(6)=0 | a(7) | b(7)`.
-    c,
-    /// E-type: `111001 | code(6) | reserved(6)=0 | a(7) | b(7)`.
+    /// E-type: `11100 | code(7) | reserved(6)=0 | a(7) | b(7)`. One
+    /// format for the former C and E classes: selectors 0–63 are the
+    /// former C codes, 64–107 the former E codes.
     e,
     /// U-type: `op(5) | a(7) | imm20`. Four opcodes over three prefixes:
     /// `11101` includes its `a` field in the discriminant — `a = ra`
     /// selects `jal`, `a = zero` selects `j` (Instruction Set §9.1).
     u,
+};
+
+/// The wire geometry of one instruction format: the discriminant that
+/// recognizes a 32-bit word as that format, where its selector field
+/// sits, the fixed prefix an encoder ORs in, and any reserved field that
+/// must be zero on the wire. `format_spec` holds one row per `Format`
+/// and is the single canonical home of those four fields, read by both
+/// the encoder and the decoder; operand-field shifts and masks stay
+/// inline in the codec.
+///
+/// A word `w` belongs to format `f` when
+/// `d = (w >> disc_shift) & disc_mask` lies in `[disc_first, disc_last]`
+/// (the five intervals are pairwise disjoint). The encoded selector is
+/// `code = ((w >> code_shift) & code_mask) - code_base`, and a clean
+/// encoder writes `prefix | ((code + code_base) << code_shift)` plus the
+/// operand fields. For U the prefix and selector are folded into
+/// `code_base` at the discriminant position (`code_shift == disc_shift`,
+/// `code_base == disc_first`), so its `.prefix` is zero. The
+/// `reserved_mask` bits must be zero in E words.
+pub const FormatSpec = struct {
+    disc_shift: u5,
+    disc_mask: u32,
+    disc_first: u32,
+    disc_last: u32,
+    code_shift: u5,
+    code_mask: u32,
+    code_base: u16,
+    prefix: u32,
+    reserved_mask: u32,
+};
+
+/// The five rows of the wire geometry, in `Format` order
+/// (`r, b, i, e, u`).
+pub const format_spec = [5]FormatSpec{
+    .{ .disc_shift = 30, .disc_mask = 0b11, .disc_first = 0, .disc_last = 0, .code_shift = 21, .code_mask = 0x1ff, .code_base = 0, .prefix = 0x00000000, .reserved_mask = 0 },
+    .{ .disc_shift = 30, .disc_mask = 0b11, .disc_first = 0b01, .disc_last = 0b01, .code_shift = 24, .code_mask = 0x3f, .code_base = 0, .prefix = 0x40000000, .reserved_mask = 0 },
+    .{ .disc_shift = 29, .disc_mask = 0b111, .disc_first = 0b110, .disc_last = 0b110, .code_shift = 23, .code_mask = 0x3f, .code_base = 0, .prefix = 0xC0000000, .reserved_mask = 0 },
+    .{ .disc_shift = 27, .disc_mask = 0b11111, .disc_first = 0b11100, .disc_last = 0b11100, .code_shift = 20, .code_mask = 0x7f, .code_base = 0, .prefix = 0xE0000000, .reserved_mask = 0x000FC000 },
+    .{ .disc_shift = 27, .disc_mask = 0x1f, .disc_first = 0b11101, .disc_last = 0b11111, .code_shift = 27, .code_mask = 0x1f, .code_base = 0b11101, .prefix = 0x00000000, .reserved_mask = 0 },
 };
 
 /// The numeric representation of a typed family member, fixed by the
@@ -78,7 +124,7 @@ pub const Field = enum(u8) {
 pub const OpInfo = struct {
     name: []const u8,
     format: Format,
-    /// The per-format encoded selector: 9 bits (R), 6 (B/I/C/E), or
+    /// The per-format encoded selector: 9 bits (R), 6 (B/I), 7 (E), or
     /// the 5-bit U prefix index 0–2 (jal/auipc/lui).
     code: u16,
     rep: ?Rep,
@@ -87,9 +133,13 @@ pub const OpInfo = struct {
     c: Field,
     may_trap: bool,
     terminator: bool,
+    /// True when the opcode writes the shared condition register `cond`
+    /// (the comparison families). The validator keys cond availability
+    /// on this attribute, never on the wire format.
+    writes_cond: bool = false,
 };
-/// The complete logical opcode set — 269 opcodes with explicit logical
-/// values, contiguous 1–269 in table order (each format's encoded
+/// The complete logical opcode set — 271 opcodes with explicit logical
+/// values, contiguous 1–271 in table order (each format's encoded
 /// selectors are likewise contiguous runs, so a family's members are
 /// consecutive — no alignment holes, no inherited slots). Names are
 /// the canonical spellings with dots replaced by underscores;
@@ -227,174 +277,177 @@ pub const Opcode = enum(u16) {
     ble_f64 = 126,
     blti = 127,
     bltiu = 128,
-    beqi = 129,
-    bnei = 130,
-    tbz = 131,
-    tbnz = 132,
+    bgti = 129,
+    bgtiu = 130,
+    beqi = 131,
+    bnei = 132,
+    tbz = 133,
+    tbnz = 134,
 
-    // --- C-type (111000 | code(6) | reserved(6)=0 | a(7) | b(7)) ---
-    seq = 133,
-    seq_f32 = 134,
-    seq_f64 = 135,
-    sne = 136,
-    sne_f32 = 137,
-    sne_f64 = 138,
-    slt = 139,
-    sltu = 140,
-    slt_f32 = 141,
-    slt_f64 = 142,
-    sle_f32 = 143,
-    sle_f64 = 144,
-    bool_eq = 145,
-    bool_ne = 146,
-    str_eq = 147,
-    str_ne = 148,
-    slti = 149,
-    sltiu = 150,
-    sgti = 151,
-    sgtiu = 152,
-    seqi = 153,
-    snei = 154,
-    cvt_b_i32 = 155,
-    cvt_b_u32 = 156,
-    cvt_b_f32 = 157,
-    cvt_b_f64 = 158,
-    cvt_i32_b = 159,
-    cvt_i32_u32 = 160,
-    cvt_i32_f32 = 161,
-    cvt_i32_f64 = 162,
-    cvt_u32_b = 163,
-    cvt_u32_i32 = 164,
-    cvt_u32_f32 = 165,
-    cvt_u32_f64 = 166,
-    cvt_f32_b = 167,
-    cvt_f32_i32 = 168,
-    cvt_f32_u32 = 169,
-    cvt_f32_f64 = 170,
-    cvt_f64_b = 171,
-    cvt_f64_i32 = 172,
-    cvt_f64_u32 = 173,
-    cvt_f64_f32 = 174,
+    // --- E-type, former C block (11100 | code(7) 0–63 | reserved(6)=0 | a(7) | b(7)) ---
+    seq = 135,
+    seq_f32 = 136,
+    seq_f64 = 137,
+    sne = 138,
+    sne_f32 = 139,
+    sne_f64 = 140,
+    slt = 141,
+    sltu = 142,
+    slt_f32 = 143,
+    slt_f64 = 144,
+    sle_f32 = 145,
+    sle_f64 = 146,
+    bool_eq = 147,
+    bool_ne = 148,
+    str_eq = 149,
+    str_ne = 150,
+    slti = 151,
+    sltiu = 152,
+    sgti = 153,
+    sgtiu = 154,
+    seqi = 155,
+    snei = 156,
+    cvt_b_i32 = 157,
+    cvt_b_u32 = 158,
+    cvt_b_f32 = 159,
+    cvt_b_f64 = 160,
+    cvt_i32_b = 161,
+    cvt_i32_u32 = 162,
+    cvt_i32_f32 = 163,
+    cvt_i32_f64 = 164,
+    cvt_u32_b = 165,
+    cvt_u32_i32 = 166,
+    cvt_u32_f32 = 167,
+    cvt_u32_f64 = 168,
+    cvt_f32_b = 169,
+    cvt_f32_i32 = 170,
+    cvt_f32_u32 = 171,
+    cvt_f32_f64 = 172,
+    cvt_f64_b = 173,
+    cvt_f64_i32 = 174,
+    cvt_f64_u32 = 175,
+    cvt_f64_f32 = 176,
     // The 64-bit integer cast matrix (codes 42–63): `i64`/`u64` sources
     // and targets complete the `7 × 7` cast matrix over
     // `b, i32, u32, i64, u64, f32, f64` minus the identity entries.
-    cvt_b_i64 = 175,
-    cvt_b_u64 = 176,
-    cvt_i32_i64 = 177,
-    cvt_i32_u64 = 178,
-    cvt_u32_i64 = 179,
-    cvt_u32_u64 = 180,
-    cvt_i64_b = 181,
-    cvt_i64_i32 = 182,
-    cvt_i64_u32 = 183,
-    cvt_i64_u64 = 184,
-    cvt_i64_f32 = 185,
-    cvt_i64_f64 = 186,
-    cvt_u64_b = 187,
-    cvt_u64_i32 = 188,
-    cvt_u64_u32 = 189,
-    cvt_u64_i64 = 190,
-    cvt_u64_f32 = 191,
-    cvt_u64_f64 = 192,
-    cvt_f32_i64 = 193,
-    cvt_f32_u64 = 194,
-    cvt_f64_i64 = 195,
-    cvt_f64_u64 = 196,
+    cvt_b_i64 = 177,
+    cvt_b_u64 = 178,
+    cvt_i32_i64 = 179,
+    cvt_i32_u64 = 180,
+    cvt_u32_i64 = 181,
+    cvt_u32_u64 = 182,
+    cvt_i64_b = 183,
+    cvt_i64_i32 = 184,
+    cvt_i64_u32 = 185,
+    cvt_i64_u64 = 186,
+    cvt_i64_f32 = 187,
+    cvt_i64_f64 = 188,
+    cvt_u64_b = 189,
+    cvt_u64_i32 = 190,
+    cvt_u64_u32 = 191,
+    cvt_u64_i64 = 192,
+    cvt_u64_f32 = 193,
+    cvt_u64_f64 = 194,
+    cvt_f32_i64 = 195,
+    cvt_f32_u64 = 196,
+    cvt_f64_i64 = 197,
+    cvt_f64_u64 = 198,
 
-    // --- E-type (111001 | code(6) | reserved(6)=0 | a(7) | b(7)) ---
-    // `neg` is the typed integer-4 family: it fills codes 0–3 that its
-    // retired widthless predecessors vacated; codes 6–7 (the former
-    // `sext32`/`zext32` slots) are reserved.
-    neg_i32 = 197,
-    neg_u32 = 198,
-    neg_i64 = 199,
-    neg_u64 = 200,
-    neg_f32 = 201,
-    neg_f64 = 202,
-    abs_i32 = 203,
-    abs_i64 = 204,
-    abs_f32 = 205,
-    abs_f64 = 206,
+    // --- E-type, former E block (11100 | code(7) 64–107 | reserved(6)=0 | a(7) | b(7)) ---
+    // `neg` is the typed integer-4 family: it opens the block at selectors
+    // 64–67, the codes its retired widthless predecessors vacated; selectors
+    // 70–71 (the former `sext32`/`zext32` slots) are reserved.
+    neg_i32 = 199,
+    neg_u32 = 200,
+    neg_i64 = 201,
+    neg_u64 = 202,
+    neg_f32 = 203,
+    neg_f64 = 204,
+    abs_i32 = 205,
+    abs_i64 = 206,
+    abs_f32 = 207,
+    abs_f64 = 208,
     // clz/popcount are sign-agnostic, so the unsigned types alias the
     // signed member of the same width; the retired `clz_u32`/`clz_u64`/
-    // `popcount_u32`/`popcount_u64` slots (13/15/17/19) stay unused.
-    clz_i32 = 207,
-    clz_i64 = 208,
-    popcount_i32 = 209,
-    popcount_i64 = 210,
-    sqrt_f32 = 211,
-    sqrt_f64 = 212,
-    floor_f32 = 213,
-    floor_f64 = 214,
-    ceil_f32 = 215,
-    ceil_f64 = 216,
-    trunc_f32 = 217,
-    trunc_f64 = 218,
-    round_f32 = 219,
-    round_f64 = 220,
-    not = 221,
-    read_tag = 222,
-    copy = 223,
-    borrow = 224,
-    move = 225,
-    release = 226,
-    copy_retain = 227,
-    replace_copy = 228,
-    replace_move = 229,
-    release_ret = 230,
-    ret = 231,
-    tailcall_self = 232,
-    trap = 233,
+    // `popcount_u32`/`popcount_u64` slots (selectors 77/79/81/83) stay
+    // unused.
+    clz_i32 = 209,
+    clz_i64 = 210,
+    popcount_i32 = 211,
+    popcount_i64 = 212,
+    sqrt_f32 = 213,
+    sqrt_f64 = 214,
+    floor_f32 = 215,
+    floor_f64 = 216,
+    ceil_f32 = 217,
+    ceil_f64 = 218,
+    trunc_f32 = 219,
+    trunc_f64 = 220,
+    round_f32 = 221,
+    round_f64 = 222,
+    not = 223,
+    read_tag = 224,
+    copy = 225,
+    borrow = 226,
+    move = 227,
+    release = 228,
+    copy_retain = 229,
+    replace_copy = 230,
+    replace_move = 231,
+    release_ret = 232,
+    ret = 233,
+    tailcall_self = 234,
+    trap = 235,
 
     /// The generic take — a plain register transfer (`a = take(b)`)
     /// that clears its source, never a call-specific opcode. It closes
-    /// the E-type run (E-code 43, after `trap`): the v10 successor of
+    /// the E-type run (selector 107, after `trap`): the v10 successor of
     /// `result_take`, whose I-type selector 10 stays reserved so the
     /// `slot_*` encodings never move (Instruction Set §4).
-    take = 234,
+    take = 236,
 
     // --- I-type (110 | code(6) | a(7) | imm16) ---
-    const_ = 235,
-    fn_ref = 236,
-    module_ref = 237,
-    syscall = 238,
-    construct = 239,
-    store_member = 240,
-    unpack_struct = 241,
-    unpack_tuple = 242,
-    split_list = 243,
-    switch_ = 244,
-    jalr = 245,
-    spill_take = 246,
-    spill_put = 247,
-    slot_retain = 248,
-    slot_move = 249,
-    slot_borrow = 250,
-    slot_copy = 251,
-    jr = 252,
-    drop = 253,
-    movwn0 = 254,
-    movwn1 = 255,
-    movwn2 = 256,
-    movwn3 = 257,
-    movwz0 = 258,
-    movwz1 = 259,
-    movwz2 = 260,
-    movwz3 = 261,
-    movwk0 = 262,
-    movwk1 = 263,
-    movwk2 = 264,
-    movwk3 = 265,
+    const_ = 237,
+    fn_ref = 238,
+    module_ref = 239,
+    syscall = 240,
+    construct = 241,
+    store_member = 242,
+    unpack_struct = 243,
+    unpack_tuple = 244,
+    split_list = 245,
+    switch_ = 246,
+    jalr = 247,
+    spill_take = 248,
+    spill_put = 249,
+    slot_retain = 250,
+    slot_move = 251,
+    slot_borrow = 252,
+    slot_copy = 253,
+    jr = 254,
+    drop = 255,
+    movwn0 = 256,
+    movwn1 = 257,
+    movwn2 = 258,
+    movwn3 = 259,
+    movwz0 = 260,
+    movwz1 = 261,
+    movwz2 = 262,
+    movwz3 = 263,
+    movwk0 = 264,
+    movwk1 = 265,
+    movwk2 = 266,
+    movwk3 = 267,
 
     // --- U-type (op(5) | a(7) | imm20); 11101 incl. `a` selects jal/j ---
-    jal = 266,
+    jal = 268,
 
     /// The unconditional intra-function jump: no link, no frame — it
     /// shares `jal`'s U-type prefix `11101`, whose discriminant includes
     /// its `a` field: `a = zero` selects this no-link form (§9.1).
-    j = 267,
-    auipc = 268,
-    lui = 269,
+    j = 269,
+    auipc = 270,
+    lui = 271,
 };
 
 /// The schema row of every logical opcode. Exhaustive over `Opcode`:
@@ -530,112 +583,114 @@ pub fn opInfo(op: Opcode) OpInfo {
         .ble_f64 => .{ .name = "ble.f64", .format = .b, .code = 13, .rep = .f64, .a = .src, .b = .src, .c = .offs10, .may_trap = false, .terminator = false },
         .blti => .{ .name = "blti", .format = .b, .code = 14, .rep = null, .a = .src, .b = .imm, .c = .offs10, .may_trap = false, .terminator = false },
         .bltiu => .{ .name = "bltiu", .format = .b, .code = 15, .rep = null, .a = .src, .b = .imm, .c = .offs10, .may_trap = false, .terminator = false },
-        .beqi => .{ .name = "beqi", .format = .b, .code = 16, .rep = null, .a = .src, .b = .imm, .c = .offs10, .may_trap = false, .terminator = false },
-        .bnei => .{ .name = "bnei", .format = .b, .code = 17, .rep = null, .a = .src, .b = .imm, .c = .offs10, .may_trap = false, .terminator = false },
-        .tbz => .{ .name = "tbz", .format = .b, .code = 18, .rep = null, .a = .tested, .b = .mask, .c = .offs10, .may_trap = false, .terminator = false },
-        .tbnz => .{ .name = "tbnz", .format = .b, .code = 19, .rep = null, .a = .tested, .b = .mask, .c = .offs10, .may_trap = false, .terminator = false },
-        .seq => .{ .name = "seq", .format = .c, .code = 0, .rep = null, .a = .src, .b = .src, .c = .none, .may_trap = false, .terminator = false },
-        .seq_f32 => .{ .name = "seq.f32", .format = .c, .code = 1, .rep = .f32, .a = .src, .b = .src, .c = .none, .may_trap = false, .terminator = false },
-        .seq_f64 => .{ .name = "seq.f64", .format = .c, .code = 2, .rep = .f64, .a = .src, .b = .src, .c = .none, .may_trap = false, .terminator = false },
-        .sne => .{ .name = "sne", .format = .c, .code = 3, .rep = null, .a = .src, .b = .src, .c = .none, .may_trap = false, .terminator = false },
-        .sne_f32 => .{ .name = "sne.f32", .format = .c, .code = 4, .rep = .f32, .a = .src, .b = .src, .c = .none, .may_trap = false, .terminator = false },
-        .sne_f64 => .{ .name = "sne.f64", .format = .c, .code = 5, .rep = .f64, .a = .src, .b = .src, .c = .none, .may_trap = false, .terminator = false },
-        .slt => .{ .name = "slt", .format = .c, .code = 6, .rep = null, .a = .src, .b = .src, .c = .none, .may_trap = false, .terminator = false },
-        .sltu => .{ .name = "sltu", .format = .c, .code = 7, .rep = null, .a = .src, .b = .src, .c = .none, .may_trap = false, .terminator = false },
-        .slt_f32 => .{ .name = "slt.f32", .format = .c, .code = 8, .rep = .f32, .a = .src, .b = .src, .c = .none, .may_trap = false, .terminator = false },
-        .slt_f64 => .{ .name = "slt.f64", .format = .c, .code = 9, .rep = .f64, .a = .src, .b = .src, .c = .none, .may_trap = false, .terminator = false },
-        .sle_f32 => .{ .name = "sle.f32", .format = .c, .code = 10, .rep = .f32, .a = .src, .b = .src, .c = .none, .may_trap = false, .terminator = false },
-        .sle_f64 => .{ .name = "sle.f64", .format = .c, .code = 11, .rep = .f64, .a = .src, .b = .src, .c = .none, .may_trap = false, .terminator = false },
-        .bool_eq => .{ .name = "bool_eq", .format = .c, .code = 12, .rep = null, .a = .src, .b = .src, .c = .none, .may_trap = false, .terminator = false },
-        .bool_ne => .{ .name = "bool_ne", .format = .c, .code = 13, .rep = null, .a = .src, .b = .src, .c = .none, .may_trap = false, .terminator = false },
-        .str_eq => .{ .name = "str_eq", .format = .c, .code = 14, .rep = null, .a = .src_real, .b = .src_real, .c = .none, .may_trap = false, .terminator = false },
-        .str_ne => .{ .name = "str_ne", .format = .c, .code = 15, .rep = null, .a = .src_real, .b = .src_real, .c = .none, .may_trap = false, .terminator = false },
-        .slti => .{ .name = "slti", .format = .c, .code = 16, .rep = null, .a = .src, .b = .imm, .c = .none, .may_trap = false, .terminator = false },
-        .sltiu => .{ .name = "sltiu", .format = .c, .code = 17, .rep = null, .a = .src, .b = .imm, .c = .none, .may_trap = false, .terminator = false },
-        .sgti => .{ .name = "sgti", .format = .c, .code = 18, .rep = null, .a = .src, .b = .imm, .c = .none, .may_trap = false, .terminator = false },
-        .sgtiu => .{ .name = "sgtiu", .format = .c, .code = 19, .rep = null, .a = .src, .b = .imm, .c = .none, .may_trap = false, .terminator = false },
-        .seqi => .{ .name = "seqi", .format = .c, .code = 20, .rep = null, .a = .src, .b = .imm, .c = .none, .may_trap = false, .terminator = false },
-        .snei => .{ .name = "snei", .format = .c, .code = 21, .rep = null, .a = .src, .b = .imm, .c = .none, .may_trap = false, .terminator = false },
-        .cvt_b_i32 => .{ .name = "cvt.b.i32", .format = .c, .code = 22, .rep = null, .a = .dst, .b = .src, .c = .none, .may_trap = false, .terminator = false },
-        .cvt_b_u32 => .{ .name = "cvt.b.u32", .format = .c, .code = 23, .rep = null, .a = .dst, .b = .src, .c = .none, .may_trap = false, .terminator = false },
-        .cvt_b_f32 => .{ .name = "cvt.b.f32", .format = .c, .code = 24, .rep = null, .a = .dst, .b = .src, .c = .none, .may_trap = false, .terminator = false },
-        .cvt_b_f64 => .{ .name = "cvt.b.f64", .format = .c, .code = 25, .rep = null, .a = .dst, .b = .src, .c = .none, .may_trap = false, .terminator = false },
-        .cvt_i32_b => .{ .name = "cvt.i32.b", .format = .c, .code = 26, .rep = null, .a = .dst, .b = .src, .c = .none, .may_trap = false, .terminator = false },
-        .cvt_i32_u32 => .{ .name = "cvt.i32.u32", .format = .c, .code = 27, .rep = null, .a = .dst, .b = .src, .c = .none, .may_trap = false, .terminator = false },
-        .cvt_i32_f32 => .{ .name = "cvt.i32.f32", .format = .c, .code = 28, .rep = null, .a = .dst, .b = .src, .c = .none, .may_trap = false, .terminator = false },
-        .cvt_i32_f64 => .{ .name = "cvt.i32.f64", .format = .c, .code = 29, .rep = null, .a = .dst, .b = .src, .c = .none, .may_trap = false, .terminator = false },
-        .cvt_u32_b => .{ .name = "cvt.u32.b", .format = .c, .code = 30, .rep = null, .a = .dst, .b = .src, .c = .none, .may_trap = false, .terminator = false },
-        .cvt_u32_i32 => .{ .name = "cvt.u32.i32", .format = .c, .code = 31, .rep = null, .a = .dst, .b = .src, .c = .none, .may_trap = false, .terminator = false },
-        .cvt_u32_f32 => .{ .name = "cvt.u32.f32", .format = .c, .code = 32, .rep = null, .a = .dst, .b = .src, .c = .none, .may_trap = false, .terminator = false },
-        .cvt_u32_f64 => .{ .name = "cvt.u32.f64", .format = .c, .code = 33, .rep = null, .a = .dst, .b = .src, .c = .none, .may_trap = false, .terminator = false },
-        .cvt_f32_b => .{ .name = "cvt.f32.b", .format = .c, .code = 34, .rep = null, .a = .dst, .b = .src, .c = .none, .may_trap = false, .terminator = false },
-        .cvt_f32_i32 => .{ .name = "cvt.f32.i32", .format = .c, .code = 35, .rep = null, .a = .dst, .b = .src, .c = .none, .may_trap = false, .terminator = false },
-        .cvt_f32_u32 => .{ .name = "cvt.f32.u32", .format = .c, .code = 36, .rep = null, .a = .dst, .b = .src, .c = .none, .may_trap = false, .terminator = false },
-        .cvt_f32_f64 => .{ .name = "cvt.f32.f64", .format = .c, .code = 37, .rep = null, .a = .dst, .b = .src, .c = .none, .may_trap = false, .terminator = false },
-        .cvt_f64_b => .{ .name = "cvt.f64.b", .format = .c, .code = 38, .rep = null, .a = .dst, .b = .src, .c = .none, .may_trap = false, .terminator = false },
-        .cvt_f64_i32 => .{ .name = "cvt.f64.i32", .format = .c, .code = 39, .rep = null, .a = .dst, .b = .src, .c = .none, .may_trap = false, .terminator = false },
-        .cvt_f64_u32 => .{ .name = "cvt.f64.u32", .format = .c, .code = 40, .rep = null, .a = .dst, .b = .src, .c = .none, .may_trap = false, .terminator = false },
-        .cvt_f64_f32 => .{ .name = "cvt.f64.f32", .format = .c, .code = 41, .rep = null, .a = .dst, .b = .src, .c = .none, .may_trap = false, .terminator = false },
-        .cvt_b_i64 => .{ .name = "cvt.b.i64", .format = .c, .code = 42, .rep = null, .a = .dst, .b = .src, .c = .none, .may_trap = false, .terminator = false },
-        .cvt_b_u64 => .{ .name = "cvt.b.u64", .format = .c, .code = 43, .rep = null, .a = .dst, .b = .src, .c = .none, .may_trap = false, .terminator = false },
-        .cvt_i32_i64 => .{ .name = "cvt.i32.i64", .format = .c, .code = 44, .rep = null, .a = .dst, .b = .src, .c = .none, .may_trap = false, .terminator = false },
-        .cvt_i32_u64 => .{ .name = "cvt.i32.u64", .format = .c, .code = 45, .rep = null, .a = .dst, .b = .src, .c = .none, .may_trap = false, .terminator = false },
-        .cvt_u32_i64 => .{ .name = "cvt.u32.i64", .format = .c, .code = 46, .rep = null, .a = .dst, .b = .src, .c = .none, .may_trap = false, .terminator = false },
-        .cvt_u32_u64 => .{ .name = "cvt.u32.u64", .format = .c, .code = 47, .rep = null, .a = .dst, .b = .src, .c = .none, .may_trap = false, .terminator = false },
-        .cvt_i64_b => .{ .name = "cvt.i64.b", .format = .c, .code = 48, .rep = null, .a = .dst, .b = .src, .c = .none, .may_trap = false, .terminator = false },
-        .cvt_i64_i32 => .{ .name = "cvt.i64.i32", .format = .c, .code = 49, .rep = null, .a = .dst, .b = .src, .c = .none, .may_trap = false, .terminator = false },
-        .cvt_i64_u32 => .{ .name = "cvt.i64.u32", .format = .c, .code = 50, .rep = null, .a = .dst, .b = .src, .c = .none, .may_trap = false, .terminator = false },
-        .cvt_i64_u64 => .{ .name = "cvt.i64.u64", .format = .c, .code = 51, .rep = null, .a = .dst, .b = .src, .c = .none, .may_trap = false, .terminator = false },
-        .cvt_i64_f32 => .{ .name = "cvt.i64.f32", .format = .c, .code = 52, .rep = null, .a = .dst, .b = .src, .c = .none, .may_trap = false, .terminator = false },
-        .cvt_i64_f64 => .{ .name = "cvt.i64.f64", .format = .c, .code = 53, .rep = null, .a = .dst, .b = .src, .c = .none, .may_trap = false, .terminator = false },
-        .cvt_u64_b => .{ .name = "cvt.u64.b", .format = .c, .code = 54, .rep = null, .a = .dst, .b = .src, .c = .none, .may_trap = false, .terminator = false },
-        .cvt_u64_i32 => .{ .name = "cvt.u64.i32", .format = .c, .code = 55, .rep = null, .a = .dst, .b = .src, .c = .none, .may_trap = false, .terminator = false },
-        .cvt_u64_u32 => .{ .name = "cvt.u64.u32", .format = .c, .code = 56, .rep = null, .a = .dst, .b = .src, .c = .none, .may_trap = false, .terminator = false },
-        .cvt_u64_i64 => .{ .name = "cvt.u64.i64", .format = .c, .code = 57, .rep = null, .a = .dst, .b = .src, .c = .none, .may_trap = false, .terminator = false },
-        .cvt_u64_f32 => .{ .name = "cvt.u64.f32", .format = .c, .code = 58, .rep = null, .a = .dst, .b = .src, .c = .none, .may_trap = false, .terminator = false },
-        .cvt_u64_f64 => .{ .name = "cvt.u64.f64", .format = .c, .code = 59, .rep = null, .a = .dst, .b = .src, .c = .none, .may_trap = false, .terminator = false },
-        .cvt_f32_i64 => .{ .name = "cvt.f32.i64", .format = .c, .code = 60, .rep = null, .a = .dst, .b = .src, .c = .none, .may_trap = false, .terminator = false },
-        .cvt_f32_u64 => .{ .name = "cvt.f32.u64", .format = .c, .code = 61, .rep = null, .a = .dst, .b = .src, .c = .none, .may_trap = false, .terminator = false },
-        .cvt_f64_i64 => .{ .name = "cvt.f64.i64", .format = .c, .code = 62, .rep = null, .a = .dst, .b = .src, .c = .none, .may_trap = false, .terminator = false },
-        .cvt_f64_u64 => .{ .name = "cvt.f64.u64", .format = .c, .code = 63, .rep = null, .a = .dst, .b = .src, .c = .none, .may_trap = false, .terminator = false },
-        .neg_i32 => .{ .name = "neg.i32", .format = .e, .code = 0, .rep = .i32, .a = .dst, .b = .src, .c = .none, .may_trap = false, .terminator = false },
-        .neg_u32 => .{ .name = "neg.u32", .format = .e, .code = 1, .rep = .u32, .a = .dst, .b = .src, .c = .none, .may_trap = false, .terminator = false },
-        .neg_i64 => .{ .name = "neg.i64", .format = .e, .code = 2, .rep = .i64, .a = .dst, .b = .src, .c = .none, .may_trap = false, .terminator = false },
-        .neg_u64 => .{ .name = "neg.u64", .format = .e, .code = 3, .rep = .u64, .a = .dst, .b = .src, .c = .none, .may_trap = false, .terminator = false },
-        .neg_f32 => .{ .name = "neg.f32", .format = .e, .code = 4, .rep = .f32, .a = .dst, .b = .src, .c = .none, .may_trap = false, .terminator = false },
-        .neg_f64 => .{ .name = "neg.f64", .format = .e, .code = 5, .rep = .f64, .a = .dst, .b = .src, .c = .none, .may_trap = false, .terminator = false },
-        .abs_i32 => .{ .name = "abs.i32", .format = .e, .code = 8, .rep = .i32, .a = .dst, .b = .src, .c = .none, .may_trap = false, .terminator = false },
-        .abs_i64 => .{ .name = "abs.i64", .format = .e, .code = 9, .rep = .i64, .a = .dst, .b = .src, .c = .none, .may_trap = false, .terminator = false },
-        .abs_f32 => .{ .name = "abs.f32", .format = .e, .code = 10, .rep = .f32, .a = .dst, .b = .src, .c = .none, .may_trap = false, .terminator = false },
-        .abs_f64 => .{ .name = "abs.f64", .format = .e, .code = 11, .rep = .f64, .a = .dst, .b = .src, .c = .none, .may_trap = false, .terminator = false },
-        .clz_i32 => .{ .name = "clz.i32", .format = .e, .code = 12, .rep = .i32, .a = .dst, .b = .src, .c = .none, .may_trap = false, .terminator = false },
-        .clz_i64 => .{ .name = "clz.i64", .format = .e, .code = 14, .rep = .i64, .a = .dst, .b = .src, .c = .none, .may_trap = false, .terminator = false },
-        .popcount_i32 => .{ .name = "popcount.i32", .format = .e, .code = 16, .rep = .i32, .a = .dst, .b = .src, .c = .none, .may_trap = false, .terminator = false },
-        .popcount_i64 => .{ .name = "popcount.i64", .format = .e, .code = 18, .rep = .i64, .a = .dst, .b = .src, .c = .none, .may_trap = false, .terminator = false },
-        .sqrt_f32 => .{ .name = "sqrt.f32", .format = .e, .code = 20, .rep = .f32, .a = .dst, .b = .src, .c = .none, .may_trap = false, .terminator = false },
-        .sqrt_f64 => .{ .name = "sqrt.f64", .format = .e, .code = 21, .rep = .f64, .a = .dst, .b = .src, .c = .none, .may_trap = false, .terminator = false },
-        .floor_f32 => .{ .name = "floor.f32", .format = .e, .code = 22, .rep = .f32, .a = .dst, .b = .src, .c = .none, .may_trap = false, .terminator = false },
-        .floor_f64 => .{ .name = "floor.f64", .format = .e, .code = 23, .rep = .f64, .a = .dst, .b = .src, .c = .none, .may_trap = false, .terminator = false },
-        .ceil_f32 => .{ .name = "ceil.f32", .format = .e, .code = 24, .rep = .f32, .a = .dst, .b = .src, .c = .none, .may_trap = false, .terminator = false },
-        .ceil_f64 => .{ .name = "ceil.f64", .format = .e, .code = 25, .rep = .f64, .a = .dst, .b = .src, .c = .none, .may_trap = false, .terminator = false },
-        .trunc_f32 => .{ .name = "trunc.f32", .format = .e, .code = 26, .rep = .f32, .a = .dst, .b = .src, .c = .none, .may_trap = false, .terminator = false },
-        .trunc_f64 => .{ .name = "trunc.f64", .format = .e, .code = 27, .rep = .f64, .a = .dst, .b = .src, .c = .none, .may_trap = false, .terminator = false },
-        .round_f32 => .{ .name = "round.f32", .format = .e, .code = 28, .rep = .f32, .a = .dst, .b = .src, .c = .none, .may_trap = false, .terminator = false },
-        .round_f64 => .{ .name = "round.f64", .format = .e, .code = 29, .rep = .f64, .a = .dst, .b = .src, .c = .none, .may_trap = false, .terminator = false },
-        .not => .{ .name = "not", .format = .e, .code = 30, .rep = null, .a = .cond, .b = .cond, .c = .none, .may_trap = false, .terminator = false },
-        .read_tag => .{ .name = "read_tag", .format = .e, .code = 31, .rep = null, .a = .dst, .b = .src_real, .c = .none, .may_trap = false, .terminator = false },
-        .copy => .{ .name = "copy", .format = .e, .code = 32, .rep = null, .a = .cond, .b = .cond, .c = .none, .may_trap = false, .terminator = false },
-        .borrow => .{ .name = "borrow", .format = .e, .code = 33, .rep = null, .a = .dst_real, .b = .src_real, .c = .none, .may_trap = false, .terminator = false },
-        .move => .{ .name = "move", .format = .e, .code = 34, .rep = null, .a = .dst_real, .b = .src_real, .c = .none, .may_trap = false, .terminator = false },
-        .release => .{ .name = "release", .format = .e, .code = 35, .rep = null, .a = .src_real, .b = .none, .c = .none, .may_trap = false, .terminator = false },
-        .copy_retain => .{ .name = "copy_retain", .format = .e, .code = 36, .rep = null, .a = .dst, .b = .src_real, .c = .none, .may_trap = false, .terminator = false },
-        .replace_copy => .{ .name = "replace_copy", .format = .e, .code = 37, .rep = null, .a = .dst, .b = .src_real, .c = .none, .may_trap = false, .terminator = false },
-        .replace_move => .{ .name = "replace_move", .format = .e, .code = 38, .rep = null, .a = .dst, .b = .src_real, .c = .none, .may_trap = false, .terminator = false },
-        .release_ret => .{ .name = "release_ret", .format = .e, .code = 39, .rep = null, .a = .src, .b = .src_f, .c = .none, .may_trap = false, .terminator = true },
-        .ret => .{ .name = "ret", .format = .e, .code = 40, .rep = null, .a = .src, .b = .none, .c = .none, .may_trap = false, .terminator = true },
-        .tailcall_self => .{ .name = "tailcall_self", .format = .e, .code = 41, .rep = null, .a = .none, .b = .none, .c = .none, .may_trap = false, .terminator = true },
-        .trap => .{ .name = "trap", .format = .e, .code = 42, .rep = null, .a = .none, .b = .none, .c = .none, .may_trap = false, .terminator = true },
-        .take => .{ .name = "take", .format = .e, .code = 43, .rep = null, .a = .dst, .b = .src_real, .c = .none, .may_trap = false, .terminator = false },
+        .bgti => .{ .name = "bgti", .format = .b, .code = 16, .rep = null, .a = .src, .b = .imm, .c = .offs10, .may_trap = false, .terminator = false },
+        .bgtiu => .{ .name = "bgtiu", .format = .b, .code = 17, .rep = null, .a = .src, .b = .imm, .c = .offs10, .may_trap = false, .terminator = false },
+        .beqi => .{ .name = "beqi", .format = .b, .code = 18, .rep = null, .a = .src, .b = .imm, .c = .offs10, .may_trap = false, .terminator = false },
+        .bnei => .{ .name = "bnei", .format = .b, .code = 19, .rep = null, .a = .src, .b = .imm, .c = .offs10, .may_trap = false, .terminator = false },
+        .tbz => .{ .name = "tbz", .format = .b, .code = 20, .rep = null, .a = .tested, .b = .mask, .c = .offs10, .may_trap = false, .terminator = false },
+        .tbnz => .{ .name = "tbnz", .format = .b, .code = 21, .rep = null, .a = .tested, .b = .mask, .c = .offs10, .may_trap = false, .terminator = false },
+        .seq => .{ .name = "seq", .format = .e, .code = 0, .rep = null, .a = .src, .b = .src, .c = .none, .may_trap = false, .terminator = false, .writes_cond = true },
+        .seq_f32 => .{ .name = "seq.f32", .format = .e, .code = 1, .rep = .f32, .a = .src, .b = .src, .c = .none, .may_trap = false, .terminator = false, .writes_cond = true },
+        .seq_f64 => .{ .name = "seq.f64", .format = .e, .code = 2, .rep = .f64, .a = .src, .b = .src, .c = .none, .may_trap = false, .terminator = false, .writes_cond = true },
+        .sne => .{ .name = "sne", .format = .e, .code = 3, .rep = null, .a = .src, .b = .src, .c = .none, .may_trap = false, .terminator = false, .writes_cond = true },
+        .sne_f32 => .{ .name = "sne.f32", .format = .e, .code = 4, .rep = .f32, .a = .src, .b = .src, .c = .none, .may_trap = false, .terminator = false, .writes_cond = true },
+        .sne_f64 => .{ .name = "sne.f64", .format = .e, .code = 5, .rep = .f64, .a = .src, .b = .src, .c = .none, .may_trap = false, .terminator = false, .writes_cond = true },
+        .slt => .{ .name = "slt", .format = .e, .code = 6, .rep = null, .a = .src, .b = .src, .c = .none, .may_trap = false, .terminator = false, .writes_cond = true },
+        .sltu => .{ .name = "sltu", .format = .e, .code = 7, .rep = null, .a = .src, .b = .src, .c = .none, .may_trap = false, .terminator = false, .writes_cond = true },
+        .slt_f32 => .{ .name = "slt.f32", .format = .e, .code = 8, .rep = .f32, .a = .src, .b = .src, .c = .none, .may_trap = false, .terminator = false, .writes_cond = true },
+        .slt_f64 => .{ .name = "slt.f64", .format = .e, .code = 9, .rep = .f64, .a = .src, .b = .src, .c = .none, .may_trap = false, .terminator = false, .writes_cond = true },
+        .sle_f32 => .{ .name = "sle.f32", .format = .e, .code = 10, .rep = .f32, .a = .src, .b = .src, .c = .none, .may_trap = false, .terminator = false, .writes_cond = true },
+        .sle_f64 => .{ .name = "sle.f64", .format = .e, .code = 11, .rep = .f64, .a = .src, .b = .src, .c = .none, .may_trap = false, .terminator = false, .writes_cond = true },
+        .bool_eq => .{ .name = "bool_eq", .format = .e, .code = 12, .rep = null, .a = .src, .b = .src, .c = .none, .may_trap = false, .terminator = false, .writes_cond = true },
+        .bool_ne => .{ .name = "bool_ne", .format = .e, .code = 13, .rep = null, .a = .src, .b = .src, .c = .none, .may_trap = false, .terminator = false, .writes_cond = true },
+        .str_eq => .{ .name = "str_eq", .format = .e, .code = 14, .rep = null, .a = .src_real, .b = .src_real, .c = .none, .may_trap = false, .terminator = false, .writes_cond = true },
+        .str_ne => .{ .name = "str_ne", .format = .e, .code = 15, .rep = null, .a = .src_real, .b = .src_real, .c = .none, .may_trap = false, .terminator = false, .writes_cond = true },
+        .slti => .{ .name = "slti", .format = .e, .code = 16, .rep = null, .a = .src, .b = .imm, .c = .none, .may_trap = false, .terminator = false, .writes_cond = true },
+        .sltiu => .{ .name = "sltiu", .format = .e, .code = 17, .rep = null, .a = .src, .b = .imm, .c = .none, .may_trap = false, .terminator = false, .writes_cond = true },
+        .sgti => .{ .name = "sgti", .format = .e, .code = 18, .rep = null, .a = .src, .b = .imm, .c = .none, .may_trap = false, .terminator = false, .writes_cond = true },
+        .sgtiu => .{ .name = "sgtiu", .format = .e, .code = 19, .rep = null, .a = .src, .b = .imm, .c = .none, .may_trap = false, .terminator = false, .writes_cond = true },
+        .seqi => .{ .name = "seqi", .format = .e, .code = 20, .rep = null, .a = .src, .b = .imm, .c = .none, .may_trap = false, .terminator = false, .writes_cond = true },
+        .snei => .{ .name = "snei", .format = .e, .code = 21, .rep = null, .a = .src, .b = .imm, .c = .none, .may_trap = false, .terminator = false, .writes_cond = true },
+        .cvt_b_i32 => .{ .name = "cvt.b.i32", .format = .e, .code = 22, .rep = null, .a = .dst, .b = .src, .c = .none, .may_trap = false, .terminator = false },
+        .cvt_b_u32 => .{ .name = "cvt.b.u32", .format = .e, .code = 23, .rep = null, .a = .dst, .b = .src, .c = .none, .may_trap = false, .terminator = false },
+        .cvt_b_f32 => .{ .name = "cvt.b.f32", .format = .e, .code = 24, .rep = null, .a = .dst, .b = .src, .c = .none, .may_trap = false, .terminator = false },
+        .cvt_b_f64 => .{ .name = "cvt.b.f64", .format = .e, .code = 25, .rep = null, .a = .dst, .b = .src, .c = .none, .may_trap = false, .terminator = false },
+        .cvt_i32_b => .{ .name = "cvt.i32.b", .format = .e, .code = 26, .rep = null, .a = .dst, .b = .src, .c = .none, .may_trap = false, .terminator = false },
+        .cvt_i32_u32 => .{ .name = "cvt.i32.u32", .format = .e, .code = 27, .rep = null, .a = .dst, .b = .src, .c = .none, .may_trap = false, .terminator = false },
+        .cvt_i32_f32 => .{ .name = "cvt.i32.f32", .format = .e, .code = 28, .rep = null, .a = .dst, .b = .src, .c = .none, .may_trap = false, .terminator = false },
+        .cvt_i32_f64 => .{ .name = "cvt.i32.f64", .format = .e, .code = 29, .rep = null, .a = .dst, .b = .src, .c = .none, .may_trap = false, .terminator = false },
+        .cvt_u32_b => .{ .name = "cvt.u32.b", .format = .e, .code = 30, .rep = null, .a = .dst, .b = .src, .c = .none, .may_trap = false, .terminator = false },
+        .cvt_u32_i32 => .{ .name = "cvt.u32.i32", .format = .e, .code = 31, .rep = null, .a = .dst, .b = .src, .c = .none, .may_trap = false, .terminator = false },
+        .cvt_u32_f32 => .{ .name = "cvt.u32.f32", .format = .e, .code = 32, .rep = null, .a = .dst, .b = .src, .c = .none, .may_trap = false, .terminator = false },
+        .cvt_u32_f64 => .{ .name = "cvt.u32.f64", .format = .e, .code = 33, .rep = null, .a = .dst, .b = .src, .c = .none, .may_trap = false, .terminator = false },
+        .cvt_f32_b => .{ .name = "cvt.f32.b", .format = .e, .code = 34, .rep = null, .a = .dst, .b = .src, .c = .none, .may_trap = false, .terminator = false },
+        .cvt_f32_i32 => .{ .name = "cvt.f32.i32", .format = .e, .code = 35, .rep = null, .a = .dst, .b = .src, .c = .none, .may_trap = false, .terminator = false },
+        .cvt_f32_u32 => .{ .name = "cvt.f32.u32", .format = .e, .code = 36, .rep = null, .a = .dst, .b = .src, .c = .none, .may_trap = false, .terminator = false },
+        .cvt_f32_f64 => .{ .name = "cvt.f32.f64", .format = .e, .code = 37, .rep = null, .a = .dst, .b = .src, .c = .none, .may_trap = false, .terminator = false },
+        .cvt_f64_b => .{ .name = "cvt.f64.b", .format = .e, .code = 38, .rep = null, .a = .dst, .b = .src, .c = .none, .may_trap = false, .terminator = false },
+        .cvt_f64_i32 => .{ .name = "cvt.f64.i32", .format = .e, .code = 39, .rep = null, .a = .dst, .b = .src, .c = .none, .may_trap = false, .terminator = false },
+        .cvt_f64_u32 => .{ .name = "cvt.f64.u32", .format = .e, .code = 40, .rep = null, .a = .dst, .b = .src, .c = .none, .may_trap = false, .terminator = false },
+        .cvt_f64_f32 => .{ .name = "cvt.f64.f32", .format = .e, .code = 41, .rep = null, .a = .dst, .b = .src, .c = .none, .may_trap = false, .terminator = false },
+        .cvt_b_i64 => .{ .name = "cvt.b.i64", .format = .e, .code = 42, .rep = null, .a = .dst, .b = .src, .c = .none, .may_trap = false, .terminator = false },
+        .cvt_b_u64 => .{ .name = "cvt.b.u64", .format = .e, .code = 43, .rep = null, .a = .dst, .b = .src, .c = .none, .may_trap = false, .terminator = false },
+        .cvt_i32_i64 => .{ .name = "cvt.i32.i64", .format = .e, .code = 44, .rep = null, .a = .dst, .b = .src, .c = .none, .may_trap = false, .terminator = false },
+        .cvt_i32_u64 => .{ .name = "cvt.i32.u64", .format = .e, .code = 45, .rep = null, .a = .dst, .b = .src, .c = .none, .may_trap = false, .terminator = false },
+        .cvt_u32_i64 => .{ .name = "cvt.u32.i64", .format = .e, .code = 46, .rep = null, .a = .dst, .b = .src, .c = .none, .may_trap = false, .terminator = false },
+        .cvt_u32_u64 => .{ .name = "cvt.u32.u64", .format = .e, .code = 47, .rep = null, .a = .dst, .b = .src, .c = .none, .may_trap = false, .terminator = false },
+        .cvt_i64_b => .{ .name = "cvt.i64.b", .format = .e, .code = 48, .rep = null, .a = .dst, .b = .src, .c = .none, .may_trap = false, .terminator = false },
+        .cvt_i64_i32 => .{ .name = "cvt.i64.i32", .format = .e, .code = 49, .rep = null, .a = .dst, .b = .src, .c = .none, .may_trap = false, .terminator = false },
+        .cvt_i64_u32 => .{ .name = "cvt.i64.u32", .format = .e, .code = 50, .rep = null, .a = .dst, .b = .src, .c = .none, .may_trap = false, .terminator = false },
+        .cvt_i64_u64 => .{ .name = "cvt.i64.u64", .format = .e, .code = 51, .rep = null, .a = .dst, .b = .src, .c = .none, .may_trap = false, .terminator = false },
+        .cvt_i64_f32 => .{ .name = "cvt.i64.f32", .format = .e, .code = 52, .rep = null, .a = .dst, .b = .src, .c = .none, .may_trap = false, .terminator = false },
+        .cvt_i64_f64 => .{ .name = "cvt.i64.f64", .format = .e, .code = 53, .rep = null, .a = .dst, .b = .src, .c = .none, .may_trap = false, .terminator = false },
+        .cvt_u64_b => .{ .name = "cvt.u64.b", .format = .e, .code = 54, .rep = null, .a = .dst, .b = .src, .c = .none, .may_trap = false, .terminator = false },
+        .cvt_u64_i32 => .{ .name = "cvt.u64.i32", .format = .e, .code = 55, .rep = null, .a = .dst, .b = .src, .c = .none, .may_trap = false, .terminator = false },
+        .cvt_u64_u32 => .{ .name = "cvt.u64.u32", .format = .e, .code = 56, .rep = null, .a = .dst, .b = .src, .c = .none, .may_trap = false, .terminator = false },
+        .cvt_u64_i64 => .{ .name = "cvt.u64.i64", .format = .e, .code = 57, .rep = null, .a = .dst, .b = .src, .c = .none, .may_trap = false, .terminator = false },
+        .cvt_u64_f32 => .{ .name = "cvt.u64.f32", .format = .e, .code = 58, .rep = null, .a = .dst, .b = .src, .c = .none, .may_trap = false, .terminator = false },
+        .cvt_u64_f64 => .{ .name = "cvt.u64.f64", .format = .e, .code = 59, .rep = null, .a = .dst, .b = .src, .c = .none, .may_trap = false, .terminator = false },
+        .cvt_f32_i64 => .{ .name = "cvt.f32.i64", .format = .e, .code = 60, .rep = null, .a = .dst, .b = .src, .c = .none, .may_trap = false, .terminator = false },
+        .cvt_f32_u64 => .{ .name = "cvt.f32.u64", .format = .e, .code = 61, .rep = null, .a = .dst, .b = .src, .c = .none, .may_trap = false, .terminator = false },
+        .cvt_f64_i64 => .{ .name = "cvt.f64.i64", .format = .e, .code = 62, .rep = null, .a = .dst, .b = .src, .c = .none, .may_trap = false, .terminator = false },
+        .cvt_f64_u64 => .{ .name = "cvt.f64.u64", .format = .e, .code = 63, .rep = null, .a = .dst, .b = .src, .c = .none, .may_trap = false, .terminator = false },
+        .neg_i32 => .{ .name = "neg.i32", .format = .e, .code = 64, .rep = .i32, .a = .dst, .b = .src, .c = .none, .may_trap = false, .terminator = false },
+        .neg_u32 => .{ .name = "neg.u32", .format = .e, .code = 65, .rep = .u32, .a = .dst, .b = .src, .c = .none, .may_trap = false, .terminator = false },
+        .neg_i64 => .{ .name = "neg.i64", .format = .e, .code = 66, .rep = .i64, .a = .dst, .b = .src, .c = .none, .may_trap = false, .terminator = false },
+        .neg_u64 => .{ .name = "neg.u64", .format = .e, .code = 67, .rep = .u64, .a = .dst, .b = .src, .c = .none, .may_trap = false, .terminator = false },
+        .neg_f32 => .{ .name = "neg.f32", .format = .e, .code = 68, .rep = .f32, .a = .dst, .b = .src, .c = .none, .may_trap = false, .terminator = false },
+        .neg_f64 => .{ .name = "neg.f64", .format = .e, .code = 69, .rep = .f64, .a = .dst, .b = .src, .c = .none, .may_trap = false, .terminator = false },
+        .abs_i32 => .{ .name = "abs.i32", .format = .e, .code = 72, .rep = .i32, .a = .dst, .b = .src, .c = .none, .may_trap = false, .terminator = false },
+        .abs_i64 => .{ .name = "abs.i64", .format = .e, .code = 73, .rep = .i64, .a = .dst, .b = .src, .c = .none, .may_trap = false, .terminator = false },
+        .abs_f32 => .{ .name = "abs.f32", .format = .e, .code = 74, .rep = .f32, .a = .dst, .b = .src, .c = .none, .may_trap = false, .terminator = false },
+        .abs_f64 => .{ .name = "abs.f64", .format = .e, .code = 75, .rep = .f64, .a = .dst, .b = .src, .c = .none, .may_trap = false, .terminator = false },
+        .clz_i32 => .{ .name = "clz.i32", .format = .e, .code = 76, .rep = .i32, .a = .dst, .b = .src, .c = .none, .may_trap = false, .terminator = false },
+        .clz_i64 => .{ .name = "clz.i64", .format = .e, .code = 78, .rep = .i64, .a = .dst, .b = .src, .c = .none, .may_trap = false, .terminator = false },
+        .popcount_i32 => .{ .name = "popcount.i32", .format = .e, .code = 80, .rep = .i32, .a = .dst, .b = .src, .c = .none, .may_trap = false, .terminator = false },
+        .popcount_i64 => .{ .name = "popcount.i64", .format = .e, .code = 82, .rep = .i64, .a = .dst, .b = .src, .c = .none, .may_trap = false, .terminator = false },
+        .sqrt_f32 => .{ .name = "sqrt.f32", .format = .e, .code = 84, .rep = .f32, .a = .dst, .b = .src, .c = .none, .may_trap = false, .terminator = false },
+        .sqrt_f64 => .{ .name = "sqrt.f64", .format = .e, .code = 85, .rep = .f64, .a = .dst, .b = .src, .c = .none, .may_trap = false, .terminator = false },
+        .floor_f32 => .{ .name = "floor.f32", .format = .e, .code = 86, .rep = .f32, .a = .dst, .b = .src, .c = .none, .may_trap = false, .terminator = false },
+        .floor_f64 => .{ .name = "floor.f64", .format = .e, .code = 87, .rep = .f64, .a = .dst, .b = .src, .c = .none, .may_trap = false, .terminator = false },
+        .ceil_f32 => .{ .name = "ceil.f32", .format = .e, .code = 88, .rep = .f32, .a = .dst, .b = .src, .c = .none, .may_trap = false, .terminator = false },
+        .ceil_f64 => .{ .name = "ceil.f64", .format = .e, .code = 89, .rep = .f64, .a = .dst, .b = .src, .c = .none, .may_trap = false, .terminator = false },
+        .trunc_f32 => .{ .name = "trunc.f32", .format = .e, .code = 90, .rep = .f32, .a = .dst, .b = .src, .c = .none, .may_trap = false, .terminator = false },
+        .trunc_f64 => .{ .name = "trunc.f64", .format = .e, .code = 91, .rep = .f64, .a = .dst, .b = .src, .c = .none, .may_trap = false, .terminator = false },
+        .round_f32 => .{ .name = "round.f32", .format = .e, .code = 92, .rep = .f32, .a = .dst, .b = .src, .c = .none, .may_trap = false, .terminator = false },
+        .round_f64 => .{ .name = "round.f64", .format = .e, .code = 93, .rep = .f64, .a = .dst, .b = .src, .c = .none, .may_trap = false, .terminator = false },
+        .not => .{ .name = "not", .format = .e, .code = 94, .rep = null, .a = .cond, .b = .cond, .c = .none, .may_trap = false, .terminator = false },
+        .read_tag => .{ .name = "read_tag", .format = .e, .code = 95, .rep = null, .a = .dst, .b = .src_real, .c = .none, .may_trap = false, .terminator = false },
+        .copy => .{ .name = "copy", .format = .e, .code = 96, .rep = null, .a = .cond, .b = .cond, .c = .none, .may_trap = false, .terminator = false },
+        .borrow => .{ .name = "borrow", .format = .e, .code = 97, .rep = null, .a = .dst_real, .b = .src_real, .c = .none, .may_trap = false, .terminator = false },
+        .move => .{ .name = "move", .format = .e, .code = 98, .rep = null, .a = .dst_real, .b = .src_real, .c = .none, .may_trap = false, .terminator = false },
+        .release => .{ .name = "release", .format = .e, .code = 99, .rep = null, .a = .src_real, .b = .none, .c = .none, .may_trap = false, .terminator = false },
+        .copy_retain => .{ .name = "copy_retain", .format = .e, .code = 100, .rep = null, .a = .dst, .b = .src_real, .c = .none, .may_trap = false, .terminator = false },
+        .replace_copy => .{ .name = "replace_copy", .format = .e, .code = 101, .rep = null, .a = .dst, .b = .src_real, .c = .none, .may_trap = false, .terminator = false },
+        .replace_move => .{ .name = "replace_move", .format = .e, .code = 102, .rep = null, .a = .dst, .b = .src_real, .c = .none, .may_trap = false, .terminator = false },
+        .release_ret => .{ .name = "release_ret", .format = .e, .code = 103, .rep = null, .a = .src, .b = .src_f, .c = .none, .may_trap = false, .terminator = true },
+        .ret => .{ .name = "ret", .format = .e, .code = 104, .rep = null, .a = .src, .b = .none, .c = .none, .may_trap = false, .terminator = true },
+        .tailcall_self => .{ .name = "tailcall_self", .format = .e, .code = 105, .rep = null, .a = .none, .b = .none, .c = .none, .may_trap = false, .terminator = true },
+        .trap => .{ .name = "trap", .format = .e, .code = 106, .rep = null, .a = .none, .b = .none, .c = .none, .may_trap = false, .terminator = true },
+        .take => .{ .name = "take", .format = .e, .code = 107, .rep = null, .a = .dst, .b = .src_real, .c = .none, .may_trap = false, .terminator = false },
         .const_ => .{ .name = "const", .format = .i, .code = 0, .rep = null, .a = .dst, .b = .id, .c = .none, .may_trap = false, .terminator = false },
         .fn_ref => .{ .name = "fn_ref", .format = .i, .code = 1, .rep = null, .a = .dst, .b = .id, .c = .none, .may_trap = false, .terminator = false },
         .module_ref => .{ .name = "module_ref", .format = .i, .code = 2, .rep = null, .a = .dst, .b = .id, .c = .none, .may_trap = false, .terminator = false },

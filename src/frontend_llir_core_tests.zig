@@ -597,18 +597,20 @@ test "LLIR lowering: inverted-branch reach to a backward target is a signed dist
     // distance is negative — the budget's unsigned subtraction overflowed
     // (a Debug panic) instead of answering "out of reach". Regression:
     // seed-12 stsmith output (short-circuit `and`/`or` over inlined
-    // calls) crashed the LLIR budget on exactly this shape.
+    // calls) crashed the LLIR budget on exactly this shape. The condition
+    // is a register `lt` (fusing to the invertible `blt`); a constant
+    // operand would fuse to the complement-less `blti`/`bgti`, whose
+    // non-invertible two-record form never reaches the reach check.
     var t = try cfg_parse.parseText(
         \\module "app" {
-        \\func @loop(x: int32) -> int32 {
+        \\func @loop(x: int32, y: int32) -> int32 {
         \\entry:
-        \\    %1: int32 = const 0
         \\    j head
         \\head:
-        \\    %2: bool = lt %1, %0
+        \\    %2: bool = lt %0, %1
         \\    j body
         \\body:
-        \\    %3: int32 = add %1, %1
+        \\    %3: int32 = add %0, %1
         \\    br %2 ? tail : head
         \\tail:
         \\    %4: int32 = add %3, %3
@@ -1662,7 +1664,7 @@ test "LLIR lowering: generic comparisons and casts specialize by type" {
                             try testing.expectEqual(llir.cond_reg, nd.b);
                             seen_cmp.set(@intFromEnum(want));
                         } else {
-                            // The C-Type comparison families (implicit
+                            // The E-type comparison families (implicit
                             // cond): the record carries the two compared
                             // operands — `gt` and float `ge` swap them
                             // (a > b ≡ slt b, a; a >= b ≡ sle b, a) —
@@ -1724,7 +1726,7 @@ test "LLIR lowering: generic comparisons and casts specialize by type" {
                         }
                     },
                     .num_cast => |v| {
-                        // The explicit cvt.<src>.<dst> C-type casts: the
+                        // The explicit cvt.<src>.<dst> E-type casts: the
                         // opcode names both the source and the
                         // destination; the record carries (a = dst slot,
                         // b = source slot).
@@ -1860,7 +1862,7 @@ test "LLIR lowering: hand-written comparison and cast records, full opcode table
     var b = cfg_lower_llir.Builder.init(arena.allocator(), program);
     const image = try b.lowerLlir();
 
-    // The explicit cvt.<src>.<dst> C-type casts: the six Core §16.3
+    // The explicit cvt.<src>.<dst> E-type casts: the six Core §16.3
     // pairs each have their own opcode naming both the source and the
     // destination.
     const cast_want = [_]llir.Opcode{
@@ -1915,7 +1917,7 @@ test "LLIR lowering: hand-written comparison and cast records, full opcode table
                             try testing.expectEqual(b.slotOf(ins.results[0]), nd.a);
                             try testing.expectEqual(llir.cond_reg, nd.b);
                         } else {
-                            // The C-Type families: the record carries the
+                            // The E-type families: the record carries the
                             // compared operands (`gt`, and float `ge`,
                             // swap them) and the result slot is
                             // materialized by `copy dst, cond` at pc + 1.

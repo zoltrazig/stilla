@@ -308,7 +308,7 @@ const Printer = struct {
                             fields[2] = .{ .value = d.c, .role = info.c };
                             n = 3;
                         },
-                        .c, .e => {
+                        .e => {
                             fields[0] = .{ .value = d.a, .role = info.a };
                             fields[1] = .{ .value = d.b, .role = info.b };
                             n = 2;

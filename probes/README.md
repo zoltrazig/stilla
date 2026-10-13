@@ -9,6 +9,16 @@ The detailed probes cover the source-reachable operation/type matrix:
 - `numeric.st`: register arithmetic and unary negation for all six numeric types
 - `integer_bits.st`: shifts and bitwise operations for all four integer types
 - `immediates.st`: integer immediate arithmetic, shifts, masks, and comparisons
+- `immediate_branch.st`: the imm7 fused integer compare-and-branch forms
+  selected at CFG → LLIR control emission
+  ([Stilla LLIR Instruction Set.md](../spec/Stilla%20LLIR%20Instruction%20Set.md)
+  §5.2) — the signed `a > 63` and constant-on-the-left `63 < a` both fuse
+  to `bgti`, the sign-extended lower bound `a > -64` to `bgti` imm `0x40`,
+  the unsigned `a > 127` / `127 < a` to `bgtiu`, and `a > 0` to `bgtiu`
+  imm `0`; the out-of-window `a > 64` and `a > 128` have no imm7 form, so
+  they materialize the constant and take the register compare. `main`
+  prints each outcome, so the consumers / SEG on-off differentials compare
+  the fused and unfused branches' observable behavior
 - `comparisons.st`: value and branch comparisons for numeric, byte, bool, and str
 - `casts.st`: the 20 non-identity casts among byte, int32, uint32, float32, and
   float64 (the five-type subset of the full 7-type / 42-cast family); the

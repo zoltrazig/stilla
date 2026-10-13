@@ -725,7 +725,7 @@ test "module-load: publication is atomic — a reserved instruction publishes no
     // instructions must not leak into the `code` arena on a later decode
     // failure.)
     var image = pr.back;
-    const bad = llir.bytesOf(@as(u32, 116) << 21); // unassigned opcode
+    const bad = llir.bytesOf(llir.format_spec[@intFromEnum(llir.Format.r)].prefix | (@as(u32, 116) << llir.format_spec[@intFromEnum(llir.Format.r)].code_shift)); // unassigned opcode
     const instrs = try testing.allocator.dupe(llir.Instr, image.instructions);
     defer testing.allocator.free(instrs);
     instrs[1] = bad;
@@ -776,7 +776,7 @@ test "module-load: a parsed-but-rejected artifact leaks no tables" {
     var dep_img = pr.bundle.artifacts.get("dep") orelse return error.TestUnexpectedResult;
     const instrs = try testing.allocator.dupe(llir.Instr, dep_img.instructions);
     defer testing.allocator.free(instrs);
-    instrs[0] = llir.bytesOf(@as(u32, 116) << 21); // unassigned opcode
+    instrs[0] = llir.bytesOf(llir.format_spec[@intFromEnum(llir.Format.r)].prefix | (@as(u32, 116) << llir.format_spec[@intFromEnum(llir.Format.r)].code_shift)); // unassigned opcode
     dep_img.instructions = instrs;
     const bytes = try llir_emit_bin.write(dep_img, testing.allocator);
     // The VM frees `bytes` after parsing; ownership is transferred to it.

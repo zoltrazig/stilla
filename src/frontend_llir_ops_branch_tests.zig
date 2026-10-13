@@ -39,7 +39,8 @@ const findFunc = helpers.findFunc;
 // operand exchange, `beqi↔bnei`, `tbz↔tbnz`), the signed offs10 ±512 and
 // imm20 ±2¹⁹ windows, and the long-branch expansion — the inverted
 // `+2`-skip form versus the non-inverting trampoline that f32/f64
-// ordered `blt`/`ble` (NaN) and the complement-less `blti`/`bltiu` use.
+// ordered `blt`/`ble` (NaN) and the complement-less `blti`/`bltiu`/
+// `bgti`/`bgtiu` use.
 // Everything decodes the lowered image directly. `expansion_rounds` on the
 // Builder counts the relaxation rounds (1 = no branch grew a target).
 // ---------------------------------------------------------------------------
@@ -297,6 +298,162 @@ test "LLIR lowering: B-type immediate windows — signed [-64,63], unsigned [0,1
     // the branch degrades to the general bool test on the comparison's
     // materialized bool against zero.
     for ([_][]const u8{ "neg65", "c64", "u128", "uneg1" }) |fname| {
+        const d = branchOfFunc(&t.program, &b, image, fname);
+        try testing.expect(d.op == .beq or d.op == .bne);
+        try testing.expectEqual(llir.zero_reg, d.b);
+    }
+}
+
+test "LLIR lowering: greater-than immediate fusion — `a > k` and `k < a` to bgti/bgtiu" {
+    // A `gt` with the constant on the right and an `lt` with the constant
+    // on the left are the same `a > k` predicate: both fuse to `bgti`
+    // (signed) / `bgtiu` (unsigned) when the constant fits the imm7
+    // window, and fall back to the general bool test otherwise. There is
+    // no `le`/`ge` immediate branch, so only these two shapes reach the
+    // greater-than immediate. Raw imm7: -64 → 0x40, 63 → 0x3f, 127 → 0x7f.
+    var t = try cfg_parse.parseText(
+        \\module "app" {
+        \\    func @sgt_neg64(a: int32) -> int32 {
+        \\    entry:
+        \\        %1: int32 = const -64
+        \\        %2: bool = gt %0, %1
+        \\        br %2 ? t : e
+        \\    t:
+        \\        ret %0
+        \\    e:
+        \\        ret %0
+        \\    }
+        \\    func @sgt_c63(a: int32) -> int32 {
+        \\    entry:
+        \\        %1: int32 = const 63
+        \\        %2: bool = gt %0, %1
+        \\        br %2 ? t : e
+        \\    t:
+        \\        ret %0
+        \\    e:
+        \\        ret %0
+        \\    }
+        \\    func @sgt_c64(a: int32) -> int32 {
+        \\    entry:
+        \\        %1: int32 = const 64
+        \\        %2: bool = gt %0, %1
+        \\        br %2 ? t : e
+        \\    t:
+        \\        ret %0
+        \\    e:
+        \\        ret %0
+        \\    }
+        \\    func @slt_neg64(a: int32) -> int32 {
+        \\    entry:
+        \\        %1: int32 = const -64
+        \\        %2: bool = lt %1, %0
+        \\        br %2 ? t : e
+        \\    t:
+        \\        ret %0
+        \\    e:
+        \\        ret %0
+        \\    }
+        \\    func @slt_neg65(a: int32) -> int32 {
+        \\    entry:
+        \\        %1: int32 = const -65
+        \\        %2: bool = lt %1, %0
+        \\        br %2 ? t : e
+        \\    t:
+        \\        ret %0
+        \\    e:
+        \\        ret %0
+        \\    }
+        \\    func @ugt_c0(a: uint32) -> uint32 {
+        \\    entry:
+        \\        %1: uint32 = const 0
+        \\        %2: bool = gt %0, %1
+        \\        br %2 ? t : e
+        \\    t:
+        \\        ret %0
+        \\    e:
+        \\        ret %0
+        \\    }
+        \\    func @ugt_c127(a: uint32) -> uint32 {
+        \\    entry:
+        \\        %1: uint32 = const 127
+        \\        %2: bool = gt %0, %1
+        \\        br %2 ? t : e
+        \\    t:
+        \\        ret %0
+        \\    e:
+        \\        ret %0
+        \\    }
+        \\    func @ugt_c128(a: uint32) -> uint32 {
+        \\    entry:
+        \\        %1: uint32 = const 128
+        \\        %2: bool = gt %0, %1
+        \\        br %2 ? t : e
+        \\    t:
+        \\        ret %0
+        \\    e:
+        \\        ret %0
+        \\    }
+        \\    func @ult_c0(a: uint32) -> uint32 {
+        \\    entry:
+        \\        %1: uint32 = const 0
+        \\        %2: bool = lt %1, %0
+        \\        br %2 ? t : e
+        \\    t:
+        \\        ret %0
+        \\    e:
+        \\        ret %0
+        \\    }
+        \\    func @ult_uneg1(a: uint32) -> uint32 {
+        \\    entry:
+        \\        %1: uint32 = const -1
+        \\        %2: bool = lt %1, %0
+        \\        br %2 ? t : e
+        \\    t:
+        \\        ret %0
+        \\    e:
+        \\        ret %0
+        \\    }
+        \\}
+    );
+    defer t.arena.deinit();
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var b = cfg_lower_llir.Builder.init(arena.allocator(), &t.program);
+    const image = try b.lowerLlir();
+    if (try llir_validate.validate(&image, testing.allocator)) |msg| {
+        testing.allocator.free(msg);
+        return error.TestUnexpectedResult;
+    }
+
+    // Signed `a > k` fuses to `bgti` at both window ends; raw imm7 for
+    // -64 is 0x40.
+    const sgt_neg64 = branchOfFunc(&t.program, &b, image, "sgt_neg64");
+    try testing.expectEqual(llir.Opcode.bgti, sgt_neg64.op);
+    try testing.expectEqual(@as(u8, 0x40), sgt_neg64.b);
+    const sgt_c63 = branchOfFunc(&t.program, &b, image, "sgt_c63");
+    try testing.expectEqual(llir.Opcode.bgti, sgt_c63.op);
+    try testing.expectEqual(@as(u8, 63), sgt_c63.b);
+    // Signed `k < a` (constant on the left) is the same predicate.
+    const slt_neg64 = branchOfFunc(&t.program, &b, image, "slt_neg64");
+    try testing.expectEqual(llir.Opcode.bgti, slt_neg64.op);
+    try testing.expectEqual(@as(u8, 0x40), slt_neg64.b);
+
+    // Unsigned `a > k` and `k < a` both select the zero-extending
+    // `bgtiu`, inclusive of 0 and 127.
+    const ugt_c0 = branchOfFunc(&t.program, &b, image, "ugt_c0");
+    try testing.expectEqual(llir.Opcode.bgtiu, ugt_c0.op);
+    try testing.expectEqual(@as(u8, 0), ugt_c0.b);
+    const ugt_c127 = branchOfFunc(&t.program, &b, image, "ugt_c127");
+    try testing.expectEqual(llir.Opcode.bgtiu, ugt_c127.op);
+    try testing.expectEqual(@as(u8, 127), ugt_c127.b);
+    const ult_c0 = branchOfFunc(&t.program, &b, image, "ult_c0");
+    try testing.expectEqual(llir.Opcode.bgtiu, ult_c0.op);
+    try testing.expectEqual(@as(u8, 0), ult_c0.b);
+
+    // Out-of-window constants never produce a fused or register branch:
+    // the branch degrades to the general bool test on the materialized
+    // comparison against zero.
+    for ([_][]const u8{ "sgt_c64", "slt_neg65", "ugt_c128", "ult_uneg1" }) |fname| {
         const d = branchOfFunc(&t.program, &b, image, fname);
         try testing.expect(d.op == .beq or d.op == .bne);
         try testing.expectEqual(llir.zero_reg, d.b);
@@ -613,11 +770,11 @@ test "LLIR lowering: branch inversions and operand-swap aliases before expansion
     try testing.expectEqual(@as(u8, 0), d_bt.b);
 }
 
-test "LLIR lowering: far branches — the non-inverting trampoline (float, blti-bltiu) and inverted +2-skip forms" {
+test "LLIR lowering: far branches — the non-inverting trampoline (float, blti-bltiu, bgti-bgtiu) and inverted +2-skip forms" {
     // A branch whose carried target lies beyond ±512 expands: the
     // invertible predicates (`beq`/`bne`, `tbz`/`tbnz`, integer ordering)
     // invert and gain a link-less `j` (`b<inverted> +2`); the complement-less
-    // immediate branches (`blti`/`bltiu`) and the NaN-ordered float
+    // immediate branches (`blti`/`bltiu`/`bgti`/`bgtiu`) and the NaN-ordered float
     // `blt`/`ble` use the three-record trampoline. Each function below
     // branches to a `then` block placed after a large else-block, forcing
     // a far target. The image must pass the structural validator — which
@@ -649,6 +806,40 @@ test "LLIR lowering: far branches — the non-inverting trampoline (float, blti-
         \\    entry:
         \\        %1: uint32 = const 7
         \\        %2: bool = lt %0, %1
+        \\        br %2 ? t : m
+        \\    m:
+    );
+    for (3..1200) |i| {
+        const line = try std.fmt.allocPrint(testing.allocator, "        %{d}: uint32 = add %0, %0\n", .{i});
+        defer testing.allocator.free(line);
+        try src.appendSlice(testing.allocator, line);
+    }
+    try src.appendSlice(testing.allocator,
+        \\        ret %0
+        \\    t:
+        \\        ret %0
+        \\    }
+        \\    func @farbgti(a: int32) -> int32 {
+        \\    entry:
+        \\        %1: int32 = const 7
+        \\        %2: bool = gt %0, %1
+        \\        br %2 ? t : m
+        \\    m:
+    );
+    for (3..1200) |i| {
+        const line = try std.fmt.allocPrint(testing.allocator, "        %{d}: int32 = add %0, %0\n", .{i});
+        defer testing.allocator.free(line);
+        try src.appendSlice(testing.allocator, line);
+    }
+    try src.appendSlice(testing.allocator,
+        \\        ret %0
+        \\    t:
+        \\        ret %0
+        \\    }
+        \\    func @farbgtiu(a: uint32) -> uint32 {
+        \\    entry:
+        \\        %1: uint32 = const 7
+        \\        %2: bool = lt %1, %0
         \\        br %2 ? t : m
         \\    m:
     );
@@ -739,6 +930,14 @@ test "LLIR lowering: far branches — the non-inverting trampoline (float, blti-
     const t_farbltiu = b.pcOf(findBlock(findFunc(&t.program, "farbltiu").blocks, "t"));
     const br_farbltiu = branch_pc_of(&t.program, &b, image, "farbltiu");
     try check_trampoline(image, br_farbltiu, .bltiu, t_farbltiu);
+
+    const t_farbgti = b.pcOf(findBlock(findFunc(&t.program, "farbgti").blocks, "t"));
+    const br_farbgti = branch_pc_of(&t.program, &b, image, "farbgti");
+    try check_trampoline(image, br_farbgti, .bgti, t_farbgti);
+
+    const t_farbgtiu = b.pcOf(findBlock(findFunc(&t.program, "farbgtiu").blocks, "t"));
+    const br_farbgtiu = branch_pc_of(&t.program, &b, image, "farbgtiu");
+    try check_trampoline(image, br_farbgtiu, .bgtiu, t_farbgtiu);
 
     const t_farfloat = b.pcOf(findBlock(findFunc(&t.program, "farfloat").blocks, "t"));
     const br_farfloat = branch_pc_of(&t.program, &b, image, "farfloat");

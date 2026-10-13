@@ -105,7 +105,7 @@ pub fn recordCount(bld: *Builder, blk: *const cfg.BasicBlock, ins: *const cfg.In
 
 /// The instruction's own record count without lifecycle trailing:
 /// the main record plus the composite expansions (`slot_*`
-/// preparation, the C-Type comparison's `copy dst, cond`, the call's
+/// preparation, the E-type comparison's `copy dst, cond`, the call's
 /// generic `take`, the select pair). Cleanup
 /// token ops produce nothing in v1.
 pub fn mainRecordCount(bld: *Builder, blk: *const cfg.BasicBlock, ins: *const cfg.Instr) error{OutOfMemory}!u32 {
@@ -133,7 +133,7 @@ pub fn mainRecordCount(bld: *Builder, blk: *const cfg.BasicBlock, ins: *const cf
         const plan = u64ConstPlan(@bitCast(ins.op.const_.int));
         n += plan.len - 1;
     }
-    // A C-Type comparison (implicit cond) emits the comparison plus
+    // A E-type comparison (implicit cond) emits the comparison plus
     // `copy dst, cond` (2 records). A non-void call emits
     // `take dst, F(L+3+O-A)` after the `jal` (1 extra record) unless
     // the allocator coalesced the result onto the alias (Step 8).
@@ -159,7 +159,7 @@ fn funcOf(bld: *const Builder, blk: *const cfg.BasicBlock) *const cfg.IrFunc {
     return bld.ordered_funcs.items[bld.funcIndexOfBlock(blk)];
 }
 
-/// True for comparisons, which all lower to C-Type and therefore
+/// True for comparisons, which all lower to E-type and therefore
 /// emit the extra `copy dst, cond` record.
 fn ctypeCmp(ins: *const cfg.Instr) bool {
     const bin = switch (ins.op) {
