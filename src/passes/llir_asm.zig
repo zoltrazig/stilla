@@ -208,9 +208,10 @@ const Printer = struct {
         switch (op) {
             .j => {
                 // The unconditional intra-function jump — encoded as
-                // `jal`'s U-type word whose register field carries
-                // `zero`, its no-link mark (Instruction Set §9.1):
-                // `j imm20`, a pc-relative label.
+                // `jal`'s U-type prefix `11101`; the prefix includes its
+                // `a` field in the discriminant, and `a = zero` (`0x00`)
+                // selects `j` (Instruction Set §9.1): `j imm20`, a
+                // pc-relative label.
                 try self.w(" ", .{});
                 try self.w("{s}", .{self.labelForPc(llir.jalTarget(pc, d.imm20)) orelse "?target"});
             },

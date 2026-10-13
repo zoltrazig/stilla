@@ -20,8 +20,8 @@
 //! contiguous except the reserved holes (R 0–111, B 0–19, C 0–63, E
 //! 0–43 with `6–7` and `13/15/17/19` reserved, I 0–31 with selector 10
 //! reserved — the former `result_take` slot, kept so the `slot_*`
-//! encodings never move; U keeps `jal`/`j` sharing prefix 0, `auipc` 1,
-//! `lui` 2).
+//! encodings never move; U keeps `jal`/`j` on prefix 0 — which includes
+//! the `a` field in its discriminant — `auipc` 1, `lui` 2).
 
 pub const Format = enum(u8) {
     /// R-type: `00 | code(9) | a(7) | b(7) | c(7)`.
@@ -35,8 +35,8 @@ pub const Format = enum(u8) {
     /// E-type: `111001 | code(6) | reserved(6)=0 | a(7) | b(7)`.
     e,
     /// U-type: `op(5) | a(7) | imm20`. Four opcodes over three prefixes:
-    /// `11101` holds both `jal` (register field `ra`) and `j` (register
-    /// field fixed `0`, Instruction Set §9.1).
+    /// `11101` includes its `a` field in the discriminant — `a = ra`
+    /// selects `jal`, `a = zero` selects `j` (Instruction Set §9.1).
     u,
 };
 
@@ -386,12 +386,12 @@ pub const Opcode = enum(u16) {
     movwk2 = 264,
     movwk3 = 265,
 
-    // --- U-type (op(5) | a(7) | imm20); 11101 splits jal/j by reg ---
+    // --- U-type (op(5) | a(7) | imm20); 11101 incl. `a` selects jal/j ---
     jal = 266,
 
     /// The unconditional intra-function jump: no link, no frame — it
-    /// encodes as `jal`'s U-type word carrying the `zero` encoding as
-    /// its no-link mark, and decodes back by that field (§9.1).
+    /// shares `jal`'s U-type prefix `11101`, whose discriminant includes
+    /// its `a` field: `a = zero` selects this no-link form (§9.1).
     j = 267,
     auipc = 268,
     lui = 269,

@@ -186,8 +186,9 @@ test "LLIR lowering: long-branch expansion — inverted branch + j, iterated to 
     try testing.expectEqual(@as(i16, 2), br1.offs10); // skip the inserted j
     const j1 = llir.decode(image.instructions[br1_pc + 1]).?;
     try testing.expectEqual(llir.Opcode.j, j1.op);
-    // The register field carries `zero`, j's no-link mark — a `ra`
-    // there would make the very same word a call.
+    // Prefix `11101` includes its `a` field in the discriminant:
+    // `a = zero` (`0x00`) selects `j`; a `ra` there would make the
+    // very same word a call.
     try testing.expectEqual(llir.zero_reg, j1.a);
     try testing.expectEqual(@as(u32, t1_pc), llir.jalTarget(br1_pc + 1, j1.imm20));
     // The +2 skip's fall-through lands on m1 (the else path).

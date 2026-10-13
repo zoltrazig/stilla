@@ -76,8 +76,8 @@ pub const DecodeError = error{ReservedWord};
 /// The total LLIR → VmInstr conversion: decode the wire record and pack
 /// its operands into the fixed-size image instruction. Fails on any
 /// reserved word — the reserved class, an unassigned code, an alignment
-/// hole, a nonzero C/E reserved field, or an unclean `11101` register
-/// field — before the instruction can enter the image.
+/// hole, a nonzero C/E reserved field, or an unclean `11101` `a` field —
+/// before the instruction can enter the image.
 pub fn decodeInstr(instr: llir.Instr) DecodeError!VmInstr {
     const d = llir.decode(instr) orelse return error.ReservedWord;
     return .{
@@ -176,7 +176,7 @@ test "decodeInstr maps every opcode of every format 1:1" {
 
 test "decodeInstr rejects reserved words before execution" {
     // The `10` reserved class, an unassigned code, and an unclean
-    // `11101` register field all fail the load, never reach the image.
+    // `11101` `a` field all fail the load, never reach the image.
     try testing.expectError(error.ReservedWord, decodeInstr(.{ 0, 0, 0, 0x80 }));
     try testing.expectError(error.ReservedWord, decodeInstr(llir.bytesOf(@as(u32, 116) << 21)));
     try testing.expectError(error.ReservedWord, decodeInstr(llir.bytesOf((0b11101 << 27) | (@as(u32, llir.cond_reg) << 20))));

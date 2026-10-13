@@ -841,9 +841,12 @@ encoding of each scalar is frozen as follows:
 
 - `bool` is exactly `0` or `1`;
 - `byte` is the low 8 bits, with the high 56 bits zero;
-- `int32` and `uint32` store their raw low 32-bit pattern sign-extended through
-  the high 32 bits; this common cell form preserves both signed and unsigned
-  32-bit ordering when the cell is compared as signed or unsigned `uint64`;
+- `int32` stores its raw low 32-bit pattern sign-extended through the high 32
+  bits — the form signed 32-bit ordering compares correctly; `uint32` stores
+  the same low 32-bit pattern zero-extended through the high 32 bits (high 32
+  bits zero), the form unsigned 32-bit ordering compares correctly. This
+  per-rep 32-bit cell form is the canonical one of the
+  [LLIR Instruction Set](Stilla%20LLIR%20Instruction%20Set.md) §4;
 - `float32` is the raw low 32-bit pattern, with the high 32 bits zero;
 - `int64`/`uint64` use all 64 bits: `int64` the two's-complement pattern, `uint64` the raw
   unsigned pattern;

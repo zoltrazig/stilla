@@ -149,18 +149,18 @@ pub fn instrE(op: Opcode, a: u8, b: u8) Instr {
     return bytesOf((0b111001 << 26) | (@as(u32, info.code) << 20) | (@as(u32, a & 0x7f) << 7) | (b & 0x7f));
 }
 
-/// Encode the unconditional jump as `jal`'s U-type word with the
-/// register field carrying `zero` — `11101 | 0x6d | imm20` — its
-/// no-link mark; conceptually a distinct opcode, same encoding slot.
-/// The low 20 bits are the signed pc-relative offset
-/// (Instruction Set §9.1).
+/// Encode the unconditional jump as `jal`'s U-type word — prefix
+/// `11101` includes its `a` field in the discriminant, and `a = zero`
+/// selects this no-link form: `11101 | zero | imm20`; conceptually a
+/// distinct opcode, same encoding slot. The low 20 bits are the signed
+/// pc-relative offset (Instruction Set §9.1).
 pub fn instrJ(offs20: i32) Instr {
     return instrU(.j, zero_reg, offs20);
 }
 
 /// Encode a U-type instruction: `op(5) | a(7) | imm20` — the three
-/// 5-bit prefixes select `jal`/`auipc`/`lui`; `j` shares `jal`'s slot
-/// and must carry the `zero` encoding (its decoder discriminator).
+/// 5-bit prefixes select `jal`/`auipc`/`lui`; prefix `11101` includes
+/// its `a` field in the discriminant, where `a = zero` selects `j`.
 pub fn instrU(op: Opcode, a: u8, imm20: i32) Instr {
     const info = opInfo(op);
     std.debug.assert(info.format == .u and (op != .j or a == zero_reg));
@@ -176,8 +176,8 @@ pub fn instrU(op: Opcode, a: u8, imm20: i32) Instr {
 /// The reverse `(format, code) → Opcode` mapping, derived at comptime
 /// from the canonical `opInfo` table — no second handwritten mapping.
 /// Exception: `.j` shares `(.u, 0)` with `.jal` and stays out of the
-/// table — the set's only field-discriminated encoding (register field
-/// 0 on `jal`'s prefix, Instruction Set §9.1).
+/// table, because prefix `11101` includes its `a` field in the
+/// discriminant: `a = zero` selects `.j` (Instruction Set §9.1).
 const code_to_op: [6][512]?Opcode = initCodeToOp();
 
 fn initCodeToOp() [6][512]?Opcode {
@@ -280,9 +280,10 @@ pub fn decode(instr: Instr) ?Decoded {
     const s5 = (w >> 27) & 0x1f;
     const code: u16 = if (s5 == 0b11101) 0 else if (s5 == 0b11110) 1 else if (s5 == 0b11111) 2 else return null;
     const a: u8 = @truncate((w >> 20) & 0x7f);
-    // The set's only field-discriminated encoding: prefix `11101` holds
-    // both jumps — `ra` → `jal` (direct call), `zero` → `j` (no link,
-    // no frame); any other register value is unclean (Instruction Set §9.1).
+    // Prefix `11101` includes its `a` field in the discriminant: it
+    // holds both jumps — `a = ra` → `jal` (direct call), `a = zero` →
+    // `j` (no link, no frame); any other `a` value is unclean
+    // (Instruction Set §9.1).
     const op: Opcode = if (code != 0)
         opFromCode(.u, code) orelse return null
     else if (a == ra_reg)
@@ -1093,8 +1094,9 @@ fn checkField(f: Field, v: u8, reg_count: u32) ?Issue {
 /// are the structural validator's job.
 pub fn checkInstr(instr: Instr, reg_count: u32) ?Issue {
     const d = decode(instr) orelse return .unknown_opcode;
-    // `j`'s schema lives entirely in decode: prefix `11101` admits only
-    // the no-link `zero` form (this opcode) and `ra` (`jal`), the rest of
+    // `j`'s schema lives entirely in decode: prefix `11101` includes its
+    // `a` field in the discriminant, admitting only the no-link
+    // `a = zero` form (this opcode) and `a = ra` (`jal`), the rest of
     // the word being the imm20 offset.
     if (d.op == .j) return null;
     const info = opInfo(d.op);
@@ -1644,8 +1646,9 @@ test "codec: reserved class, reserved codes, reserved fields, and holes are reje
     try std.testing.expectEqual(@as(?Decoded, null), decode(bytesOf((0b110 << 29) | (10 << 23))));
     // The former E-selector-63 J-Type carve-out is gone: clean words at
     // selector 63 are unassigned and dirty ones fail the reserved-field
-    // check. Prefix `11101` splits by register field: `ra` → `jal`,
-    // `0` → `j`, any other register value rejected (Instruction Set §9.1).
+    // check. Prefix `11101` includes its `a` field in the discriminant:
+    // `ra` → `jal`, `zero` → `j`, any other `a` value rejected
+    // (Instruction Set §9.1).
     try std.testing.expectEqual(@as(?Decoded, null), decode(bytesOf((0b111001 << 26) | (63 << 20))));
     try std.testing.expectEqual(@as(?Decoded, null), decode(bytesOf((0b111001 << 26) | (63 << 20) | 0xffffc)));
     try std.testing.expectEqual(Opcode.jal, decode(bytesOf((0b11101 << 27) | (@as(u32, ra_reg) << 20) | 4)).?.op);
@@ -1861,8 +1864,9 @@ test "checkInstr: field-level register/special/none validation" {
     try std.testing.expectEqual(@as(?Issue, null), checkInstr(instrE(.ret, zero_reg, 0), 4));
     try std.testing.expectEqual(Issue.nonzero_field, checkInstr(instrE(.ret, 0, 1), 4));
     try std.testing.expectEqual(Issue.nonzero_field, checkInstr(instrE(.trap, 1, 0), 4));
-    // Prefix 11101 splits by register field: ra is `jal`, zero is `j`,
-    // anything else is an unclean word rejected at decode (§9.1).
+    // Prefix 11101 includes its `a` field in the discriminant: ra is
+    // `jal`, zero is `j`, anything else is an unclean word rejected at
+    // decode (§9.1).
     try std.testing.expectEqual(@as(?Issue, null), checkInstr(instrU(.jal, ra_reg, 4), 4));
     try std.testing.expectEqual(Issue.unknown_opcode, checkInstr(instrU(.jal, cond_reg, 4), 4));
     try std.testing.expectEqual(Issue.unknown_opcode, checkInstr(instrU(.jal, 5, 4), 4));

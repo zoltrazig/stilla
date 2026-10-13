@@ -620,10 +620,10 @@ fn checkInstrAt(image: *const llir.LlirProgram, f: llir.FunctionDesc, fi: u32, s
         .jal => {
             // `jal ra` is the direct call: its static target must be a
             // function entry, followed by the take-at-return-pc contract
-            // (Instruction Set §14). On prefix `11101` register field
-            // `ra` selects `jal`; `zero` selects the intra-function jump
-            // `j`. Both decode the target from the signed 20-bit
-            // offset relative to this pc.
+            // (Instruction Set §14). Prefix `11101` includes its `a`
+            // field in the discriminant: `a = ra` selects `jal`; `a =
+            // zero` selects the intra-function jump `j`. Both decode the
+            // target from the signed 20-bit offset relative to this pc.
             const target = llir.jalTarget(pc, d.imm20);
             if (!isFunctionEntry(image.functions, target)) {
                 return fail(allocator, "function {d}: pc {d}: jal ra target {d} is not a function entry", .{ fi, pc, target });

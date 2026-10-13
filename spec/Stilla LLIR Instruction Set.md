@@ -18,8 +18,9 @@
 > every operation are written into the logical opcode at CFG → LLIR lowering
 > time, so the serialized instruction record carries its own
 > numeric semantics — loading decodes each record once into the VM's fixed
-> instruction image (§12.1, `vm_instr.zig`) and constructs no per-PC
-> execution plan beyond that 1:1 decode. Float families carry the width in the
+> instruction image ([Stilla LLIR Specification](Stilla%20LLIR%20Specification.md)
+> §8.2; [interpreter-vm](../docs/interpreter-vm.md) §1/§7, `vm_instr.zig`) and
+> constructs no per-PC execution plan beyond that 1:1 decode. Float families carry the width in the
 > opcode (`add.f32`/`add.f64`); the integer arithmetic families carry the
 > full rep (`add.i32`, `add.u32`, `add.i64`, `add.u64`) — the opcode names
 > the operand type, the VM computes at that width, and every result
@@ -113,10 +114,10 @@ code field a word actually carries (9 bits in R, 6 in B/I/C/E, 5 in U).
 single `opInfo` table; `decode` maps a word back. Neither direction
 recomputes the mapping; the table is the one source of truth, and every
 assigned opcode has exactly one encoding (`decode(encode(op)) == op`).
-The one exception to pure `(format, code)` addressing is U-type prefix
-`11101`, whose two jump members split on the register field: `ra`
-selects `jal`, the `zero` encoding (`0x00`) selects the intra-function
-`j` (§9.1).
+The U-type prefix `11101` carries two jump opcodes that share encoded
+selector 0 — the prefix's discriminant includes the `a` field, so
+`a = ra` selects `jal`, `a = zero` (`0x00`) selects the intra-function
+`j`, and any other `a` value is unclean (§9.1).
 **No encoded selector is an `enum(u16)` value**: the logical enum and the
 encoded selectors are disjoint spaces that only `opInfo` connects.
 
@@ -129,13 +130,13 @@ The top two bits classify every word; there is no fallback format:
 | `00` | R-type | `code(9) \| a(7) \| b(7) \| c(7)` (§4) |
 | `01` | B-type | `code(6) \| lhs(7) \| rhs_or_imm7(7) \| offs10` (§5) |
 | `10` | **reserved class** | every word with top bits `10` is rejected |
-| `11` | other | `110` → I-type; `111000` → C-type; `111001` → E-type; `11101`/`11110`/`11111` → the three U-type prefixes — `11101` resolves to `jal`/`j` by its register field (§6–§9) |
+| `11` | other | `110` → I-type; `111000` → C-type; `111001` → E-type; `11101`/`11110`/`11111` → the three U-type prefixes — `11101` includes its `a` field, so `ra` selects `jal` and `zero` selects `j` (§6–§9) |
 
 Within `11`, decoding proceeds in order: the 3-bit prefix `110` selects
 I-type; the 6-bit prefixes `111000`/`111001` select C-type/E-type; the
 5-bit prefixes `11101`/`11110`/`11111` select the U-type opcodes, where
-prefix `11101` resolves its register field first — `ra` → `jal`,
-`zero` (`0x00`) → `j`, any other value rejected (§9.1). The
+prefix `11101` carries its `a` field in the match — `a = ra` → `jal`,
+`a = zero` (`0x00`) → `j`, any other `a` rejected (§9.1). The
 prefixes are pairwise disjoint (the 5-bit U prefixes start with bit 27
 clear for C/E and set for U, and `110` is the only 3-bit form), so an
 ordered decoder produces exactly one format for every assigned opcode and
@@ -150,12 +151,12 @@ B-type: 01 | code(6) | lhs(7) | rhs_or_imm7(7) | offs10   64 codes, 20 assigned
 I-type: 110 | code(6) | a(7) | imm16              64 codes, 31 assigned
 C-type: 111000 | code(6) | reserved(6) = 0 | a(7) | b(7)  64 codes, 64 assigned
 E-type: 111001 | code(6) | reserved(6) = 0 | a(7) | b(7)  64 codes, 38 assigned
-U-type: op(5) | a(7) | imm20                      4 opcodes (11101 ×2 / 11110 / 11111)
+U-type: op(5) | a(7) | imm20                      4 opcodes (11101 (incl. a) ×2 / 11110 / 11111)
 ```
 
 U-type carries four opcodes under three prefixes: `auipc`/`lui` own
-`11110`/`11111`, and prefix `11101` holds both jumps, split by the
-register field (`ra` = `jal`, `zero` = `j`, §9.1). E-type keeps 38
+`11110`/`11111`, and prefix `11101` holds both jumps, its `a` field
+part of the prefix match (`ra` = `jal`, `zero` = `j`, §9.1). E-type keeps 38
 opcodes across selectors `0–43` (with `6–7` and `13/15/17/19`
 reserved); selectors `44–63` are reserved (§8, §14).
 
@@ -186,7 +187,8 @@ ownership, trap, and control-flow details.
   bits are validated to be zero.
 - **E**: `a` and `b` are 7-bit register fields whose roles are fixed by the
   opcode (§8); the six reserved bits are validated to be zero.
-- **U**: `a` is a 7-bit register field — the link for `jal` (only `ra`),
+- **U**: `a` is a 7-bit register field that also serves as the low
+  discriminant of the `11101` prefix — the link for `jal` (only `ra`),
   the fixed `zero` for `j` (its no-link mark), the destination
   for `auipc`/`lui` (§9) — and `imm20` a signed 20-bit value.
 
@@ -410,7 +412,8 @@ C-type §7 and E-type §8 precede I-type §6 in numeric order) — and every
 format's encoded selectors are contiguous except the **reserved holes**:
 R `0–111`, B `0–19`, C `0–63`, E `0–43` **with `6–7` and `13/15/17/19`
 reserved**, and I `0–31` **with selector 10 reserved**; U keeps
-`jal`/`j` sharing selector 0, `auipc` 1, `lui` 2. The reserved E-type codes
+`jal`/`j` on selector 0 (prefix `11101` matches its `a` field to tell
+them apart), `auipc` 1, `lui` 2. The reserved E-type codes
 `6–7`, `13`, `15`, `17`, `19` and the reserved I-type selector 10 are the
 layout's only alignment holes. `repOf` reads a family member's rep from its `opInfo` row.
 
@@ -1459,8 +1462,8 @@ member of the same width (`popcount.u32` → `popcount.i32`,
 # 9. Opcode tables: U-type
 
 Four opcodes share the layout `op(5) | a(7) | imm20`; three are selected
-by their 5-bit prefixes outright, while `j` shares `jal`'s prefix and is
-selected by its register field:
+by their 5-bit prefixes outright, while the `11101` prefix of `jal`/`j`
+includes its `a` field in the match:
 
 | Opcode | `op(5)` | `a` | effect |
 | --- | --- | --- | --- |
@@ -1473,7 +1476,7 @@ selected by its register field:
 frame-enter semantics are frozen in the calling convention ([LLIR
 Specification](Stilla%20LLIR%20Specification.md) §5) — it is never lowered
 to a plain jump relying on a callee prologue. `jal.a` must be exactly `ra`
-(validated); the only other legal register value on prefix `11101` is
+(validated); the only other legal `a` value on prefix `11101` is
 `zero`, which selects the link-less `j` (§9.1). `jal`/`j` are the U-type
 terminators. `auipc`/
 `lui` write their destination (an F cell, T register, or `zero` — never
@@ -1498,9 +1501,10 @@ immediate shifted left 12 as a pc-relative displacement.
 
 Conceptually `j` and `jal` differ — a frame call versus an
 intra-function jump — and they remain separate logical opcodes (266
-vs. 267). At the encoding level, however, `j` extends the U-type `jal`
-slot: it is the same word with the register field carrying the `zero`
-special register (`0x00`):
+vs. 267). At the encoding level, however, `j` lives inside the U-type
+`jal` prefix: the decoder matches prefix `11101` together with its `a`
+field, so the same word shape separates the two — `a` carrying the `zero`
+special register (`0x00`) selects `j`:
 
 | Encoding | Bits |
 | --- | --- |
@@ -1511,9 +1515,10 @@ link is kept.
 The conceptual difference rides in the logical opcode, not the layout:
 `j offs20` enters no frame and sets
 `pc = current_pc + signExtend20(offs20)` (reach `[-524288, 524287]`,
-the same 20-bit signed interval as `jal`). The ordered decoder resolves
-prefix `11101` by that field: `ra` → `jal`, `zero` (`0x00`) → `j`;
-every other register value is rejected as an unclean word.
+the same 20-bit signed interval as `jal`). The ordered decoder treats
+prefix `11101` as a prefix whose match includes its `a` field:
+`a = ra` → `jal`, `a = zero` (`0x00`) → `j`;
+every other `a` value is rejected as an unclean word.
 The assembly mnemonic remains `j`; it is never a spelling of `jal` and
 never targets a function entry.
 
@@ -1543,9 +1548,9 @@ The `.i*` members sign-extend the raw 7-bit pattern (so `0x7f` is −1);
 the `.u*` members and the mask/count forms zero-extend it (so `0x7f` is
 127; `andi F0, F1, 0x7f` masks with `0x0000007f`). Shift counts are
 masked to the rep's width by the opcode (mod 32 at the 32-bit reps, mod
-64 otherwise) — a shift never traps (`shl.i64 x, 32` is `x`; `shl.i32 x,
-32` is 0), and a fused count may be pre-reduced by the lowering with the
-opcode masking it again. **The float families have no immediate forms**
+64 otherwise) — a shift never traps (`shl.i32 x, 32` is `x`; `shl.i64 x,
+32` is `x << 32`), and a fused count may be pre-reduced by the lowering with
+the opcode masking it again. **The float families have no immediate forms**
 — every float constant materializes through `const`.
 An `imm` colliding with a special-register encoding is an ordinary
 immediate (`0x6d` inside an I-type `imm16` is the value 109; in a
@@ -1820,7 +1825,7 @@ trust-boundary list ([LLIR Specification](Stilla%20LLIR%20Specification.md) §8)
   top bits are `11` but match no format prefix, an unassigned code in any
   format (R codes 112–511; B codes 20–63; E codes 44–63;
   I codes 32–63 **and the reserved I-type selector 10**), or a `11101`
-  word whose register field is neither `ra`
+  word whose `a` field is neither `ra`
   nor `zero`;
 - a C-type/E-type word whose six reserved bits are nonzero;
 - an invalid register operand — neither a frame register (`0x13–0x7f`),
@@ -1832,8 +1837,7 @@ trust-boundary list ([LLIR Specification](Stilla%20LLIR%20Specification.md) §8)
   schema positions; a move-wide `a` naming any special; a `spill_take`/
   `spill_put` `a` naming anything but a T register; a `slot_*` source, a
   `drop` operand, a `release_ret` owner source, or a `take` source that
-  is not a real register; `zero` in a
-  *Unique*, borrowed, function, or aggregate position;
+  is not a real register;
 - an immediate exceeding its opcode's bound — a 7-bit field outside the
   rep's window (sign-extended `[-64, 63]` or zero-extended `[0, 127]` is
   structurally the same raw pattern, so the window check is about the

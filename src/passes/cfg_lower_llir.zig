@@ -787,8 +787,9 @@ pub const Builder = struct {
     }
 
     /// Write the unconditional jump `j offs20` — encoded as `jal`'s
-    /// U-type word carrying `zero`, its no-link mark (§9.1); the
-    /// offset is patched at linearization.
+    /// U-type prefix `11101` with `a = zero` (`0x00`), which the prefix's
+    /// discriminant selects as `j` (§9.1); the offset is patched at
+    /// linearization.
     pub fn setJ(self: *Builder, blk: *const cfg.BasicBlock, idx: u32, offs20: i32) void {
         const recs = &self.block_records.items[self.block_ids.get(blk).?];
         std.debug.assert(idx < recs.items.len);
