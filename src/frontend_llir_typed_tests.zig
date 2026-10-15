@@ -1,6 +1,6 @@
 //! Test file: `frontend LLIR typed` — the typed lowering layer
 //! (`passes/cfg_lower_typed.zig`) exercised over real compiled CFGs.
-//! In v10 the opcode carries the full rep (`add.i32`/`div.u32`/…) and
+//! In v11 the opcode carries the full rep (`add.i32`/`div.u32`/…) and
 //! every arithmetic instruction is exactly one record (Instruction Set
 //! §4) — there are no value forms and no canonicalization records.
 //! These black-box tests pin that boundary: the Layer A op view, the
@@ -37,7 +37,7 @@ test "typed printer is faithful to the typed record" {
 
     // The typed opcode for the type is the rep-carrying member, and the
     // record count of the arithmetic is exactly one (no canonicalization
-    // records exist in v10).
+    // records exist in v11).
     try testing.expectEqual(llir.Opcode.add_i32, llir.typedOpcode(.add, op.type_, undefined).?);
 
     // The typed assembly renders the same op with its width rep.
@@ -59,7 +59,7 @@ test "an i32 add lowers to exactly one `add.i32` record — no canonicalization"
     const image = try b.lowerLlir();
     try testing.expectEqual(@as(?[]const u8, null), try llir_validate.validate(&image, testing.allocator));
 
-    // The add record is `add.i32`; the v10 opcode set has no
+    // The add record is `add.i32`; the v11 opcode set has no
     // canonicalization opcodes at all, so one record is the whole
     // operation.
     var n_add: usize = 0;

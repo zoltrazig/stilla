@@ -308,9 +308,10 @@ test "LLIR lowering: greater-than immediate fusion — `a > k` and `k < a` to bg
     // A `gt` with the constant on the right and an `lt` with the constant
     // on the left are the same `a > k` predicate: both fuse to `bgti`
     // (signed) / `bgtiu` (unsigned) when the constant fits the imm7
-    // window, and fall back to the general bool test otherwise. There is
-    // no `le`/`ge` immediate branch, so only these two shapes reach the
-    // greater-than immediate. Raw imm7: -64 → 0x40, 63 → 0x3f, 127 → 0x7f.
+    // window, and fall back to the general bool test otherwise. The
+    // non-strict `ge` reaches the same `bgti` family through the `k-1`
+    // fold (`a >= k` ≡ `a > k-1`; see the le/ge test below). Raw imm7:
+    // -64 → 0x40, 63 → 0x3f, 127 → 0x7f.
     var t = try cfg_parse.parseText(
         \\module "app" {
         \\    func @sgt_neg64(a: int32) -> int32 {
@@ -454,6 +455,156 @@ test "LLIR lowering: greater-than immediate fusion — `a > k` and `k < a` to bg
     // the branch degrades to the general bool test on the materialized
     // comparison against zero.
     for ([_][]const u8{ "sgt_c64", "slt_neg65", "ugt_c128", "ult_uneg1" }) |fname| {
+        const d = branchOfFunc(&t.program, &b, image, fname);
+        try testing.expect(d.op == .beq or d.op == .bne);
+        try testing.expectEqual(llir.zero_reg, d.b);
+    }
+}
+
+test "LLIR lowering: non-strict ordering immediate fusion — le/ge fold to blti/bgti with a ±1 constant" {
+    // `a <= k` ≡ `a < k+1` and `a >= k` ≡ `a > k-1`: the non-strict
+    // ordering fuses through the strict immediate branch with the
+    // constant adjusted at compile time, instead of materializing the
+    // constant and testing the comparison bool against zero. The
+    // constant-on-left shapes swap and flip first (`k <= a` ≡ `a >= k`).
+    // Raw imm7: -1 → 0x7f, -64 → 0x40.
+    var t = try cfg_parse.parseText(
+        \\module "app" {
+        \\    func @sle_c0(a: int32) -> int32 {
+        \\    entry:
+        \\        %1: int32 = const 0
+        \\        %2: bool = le %0, %1
+        \\        br %2 ? t : e
+        \\    t:
+        \\        ret %0
+        \\    e:
+        \\        ret %0
+        \\    }
+        \\    func @sge_c0(a: int32) -> int32 {
+        \\    entry:
+        \\        %1: int32 = const 0
+        \\        %2: bool = ge %0, %1
+        \\        br %2 ? t : e
+        \\    t:
+        \\        ret %0
+        \\    e:
+        \\        ret %0
+        \\    }
+        \\    func @sle_m65(a: int32) -> int32 {
+        \\    entry:
+        \\        %1: int32 = const -65
+        \\        %2: bool = le %0, %1
+        \\        br %2 ? t : e
+        \\    t:
+        \\        ret %0
+        \\    e:
+        \\        ret %0
+        \\    }
+        \\    func @sle_left(a: int32) -> int32 {
+        \\    entry:
+        \\        %1: int32 = const 5
+        \\        %2: bool = le %1, %0
+        \\        br %2 ? t : e
+        \\    t:
+        \\        ret %0
+        \\    e:
+        \\        ret %0
+        \\    }
+        \\    func @sge_left(a: int32) -> int32 {
+        \\    entry:
+        \\        %1: int32 = const 5
+        \\        %2: bool = ge %1, %0
+        \\        br %2 ? t : e
+        \\    t:
+        \\        ret %0
+        \\    e:
+        \\        ret %0
+        \\    }
+        \\    func @ule_c126(a: uint32) -> uint32 {
+        \\    entry:
+        \\        %1: uint32 = const 126
+        \\        %2: bool = le %0, %1
+        \\        br %2 ? t : e
+        \\    t:
+        \\        ret %0
+        \\    e:
+        \\        ret %0
+        \\    }
+        \\    func @uge_c1(a: uint32) -> uint32 {
+        \\    entry:
+        \\        %1: uint32 = const 1
+        \\        %2: bool = ge %0, %1
+        \\        br %2 ? t : e
+        \\    t:
+        \\        ret %0
+        \\    e:
+        \\        ret %0
+        \\    }
+        \\    func @sle_c63(a: int32) -> int32 {
+        \\    entry:
+        \\        %1: int32 = const 63
+        \\        %2: bool = le %0, %1
+        \\        br %2 ? t : e
+        \\    t:
+        \\        ret %0
+        \\    e:
+        \\        ret %0
+        \\    }
+        \\    func @ule_c127(a: uint32) -> uint32 {
+        \\    entry:
+        \\        %1: uint32 = const 127
+        \\        %2: bool = le %0, %1
+        \\        br %2 ? t : e
+        \\    t:
+        \\        ret %0
+        \\    e:
+        \\        ret %0
+        \\    }
+        \\}
+    );
+    defer t.arena.deinit();
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var b = cfg_lower_llir.Builder.init(arena.allocator(), &t.program);
+    const image = try b.lowerLlir();
+    if (try llir_validate.validate(&image, testing.allocator)) |msg| {
+        testing.allocator.free(msg);
+        return error.TestUnexpectedResult;
+    }
+
+    // `a <= 0` ≡ `a < 1`; `a >= 0` ≡ `a > -1` (0x7f).
+    const sle_c0 = branchOfFunc(&t.program, &b, image, "sle_c0");
+    try testing.expectEqual(llir.Opcode.blti, sle_c0.op);
+    try testing.expectEqual(@as(u8, 1), sle_c0.b);
+    const sge_c0 = branchOfFunc(&t.program, &b, image, "sge_c0");
+    try testing.expectEqual(llir.Opcode.bgti, sge_c0.op);
+    try testing.expectEqual(@as(u8, 0x7f), sge_c0.b);
+    // `a <= -65` ≡ `a < -64` (0x40): the inclusive bound reaches one past
+    // the strict signed window.
+    const sle_m65 = branchOfFunc(&t.program, &b, image, "sle_m65");
+    try testing.expectEqual(llir.Opcode.blti, sle_m65.op);
+    try testing.expectEqual(@as(u8, 0x40), sle_m65.b);
+
+    // Constant on the left: `5 <= a` ≡ `a > 4` → bgti; `5 >= a` ≡
+    // `a < 6` → blti.
+    const sle_left = branchOfFunc(&t.program, &b, image, "sle_left");
+    try testing.expectEqual(llir.Opcode.bgti, sle_left.op);
+    try testing.expectEqual(@as(u8, 4), sle_left.b);
+    const sge_left = branchOfFunc(&t.program, &b, image, "sge_left");
+    try testing.expectEqual(llir.Opcode.blti, sge_left.op);
+    try testing.expectEqual(@as(u8, 6), sge_left.b);
+
+    // Unsigned: `a <= 126` ≡ `a < 127` → bltiu; `a >= 1` ≡ `a > 0` → bgtiu.
+    const ule_c126 = branchOfFunc(&t.program, &b, image, "ule_c126");
+    try testing.expectEqual(llir.Opcode.bltiu, ule_c126.op);
+    try testing.expectEqual(@as(u8, 127), ule_c126.b);
+    const uge_c1 = branchOfFunc(&t.program, &b, image, "uge_c1");
+    try testing.expectEqual(llir.Opcode.bgtiu, uge_c1.op);
+    try testing.expectEqual(@as(u8, 0), uge_c1.b);
+
+    // Out-of-window: `a <= 63` ≡ `a < 64` and `a <= 127u` ≡ `a < 128u` do
+    // not fuse — the branch degrades to the general bool test.
+    for ([_][]const u8{ "sle_c63", "ule_c127" }) |fname| {
         const d = branchOfFunc(&t.program, &b, image, fname);
         try testing.expect(d.op == .beq or d.op == .bne);
         try testing.expectEqual(llir.zero_reg, d.b);
@@ -1057,4 +1208,92 @@ test "LLIR lowering: offs10 and imm20 signed windows at the codec boundary" {
     try testing.expect(b.operand_overflow);
     try testing.expectEqual(@as(i32, 0), b.fit20Signed(600000, 0));
     try testing.expect(b.operand_overflow);
+}
+
+test "LLIR lowering: bool/str equality branches on the condition against zero, never bltu/bleu" {
+    // A `bool`/`str` equality (`bool_eq`/`bool_ne`/`str_eq`/`str_ne`)
+    // has no numeric ordering branch. The register fused form must
+    // reject the non-numeric rep so the branch tests the materialized
+    // condition against zero (`bne cond, zero` / `beq cond, zero`),
+    // the documented fallback (Instruction Set §5.1) — not select the
+    // unsigned-order `bltu`/`bleu` over the bool/str slots.
+    var t = try cfg_parse.parseText(
+        \\module "app" {
+        \\    func @booleq(a: bool, b: bool) -> bool {
+        \\    entry:
+        \\        %2: bool = eq %0, %1
+        \\        br %2 ? t : e
+        \\    t:
+        \\        ret %2
+        \\    e:
+        \\        ret %2
+        \\    }
+        \\    func @boolne(a: bool, b: bool) -> bool {
+        \\    entry:
+        \\        %2: bool = ne %0, %1
+        \\        br %2 ? t : e
+        \\    t:
+        \\        ret %2
+        \\    e:
+        \\        ret %2
+        \\    }
+        \\    func @streq(a: str, b: str) -> bool {
+        \\    entry:
+        \\        %2: bool = eq %0, %1
+        \\        br %2 ? t : e
+        \\    t:
+        \\        ret %2
+        \\    e:
+        \\        ret %2
+        \\    }
+        \\    func @strne(a: str, b: str) -> bool {
+        \\    entry:
+        \\        %2: bool = ne %0, %1
+        \\        br %2 ? t : e
+        \\    t:
+        \\        ret %2
+        \\    e:
+        \\        ret %2
+        \\    }
+        \\}
+    );
+    defer t.arena.deinit();
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var b = cfg_lower_llir.Builder.init(arena.allocator(), &t.program);
+    const image = try b.lowerLlir();
+    if (try llir_validate.validate(&image, testing.allocator)) |msg| {
+        testing.allocator.free(msg);
+        return error.TestUnexpectedResult;
+    }
+
+    // Each function's single B-type branch tests the condition slot
+    // against zero, and its defining record is the matching scalar
+    // comparison (never a numeric branch).
+    const cases = [_]struct { name: []const u8, cmp: llir.Opcode }{
+        .{ .name = "booleq", .cmp = .bool_eq },
+        .{ .name = "boolne", .cmp = .bool_ne },
+        .{ .name = "streq", .cmp = .str_eq },
+        .{ .name = "strne", .cmp = .str_ne },
+    };
+    for (cases) |c| {
+        const f = findFunc(&t.program, c.name);
+        const fi = b.func_ids.get(f).?;
+        const range = b.block_ranges.items[fi];
+        var seen_cmp = false;
+        for (range.start..range.start + range.len) |bi| {
+            const blk = b.ordered_blocks.items[bi];
+            var pc = b.pcOf(blk);
+            const end = image.blocks[b.block_ids.get(blk).?].end_pc;
+            while (pc < end) : (pc += 1) {
+                if (llir.decode(image.instructions[pc]).?.op == c.cmp) seen_cmp = true;
+            }
+        }
+        try testing.expect(seen_cmp);
+
+        const d = branchOfFunc(&t.program, &b, image, c.name);
+        try testing.expect(d.op == .beq or d.op == .bne);
+        try testing.expectEqual(llir.zero_reg, d.b);
+        try testing.expect(d.op != .bltu and d.op != .bleu);
+    }
 }

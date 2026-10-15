@@ -254,7 +254,7 @@ test "LLIR validation: wrong destructure descriptor kind" {
 }
 
 test "LLIR validation: wrong take source after a non-void call" {
-    // The v10 call-shape contract: a non-void `jal ra` call must be
+    // The v11 call-shape contract: a non-void `jal ra` call must be
     // followed by `take dst, F(L+3+O-A)` — the take's source register is
     // the caller's result alias (Instruction Set §6, §14). A forged
     // source register is rejected before any dataflow.
@@ -1555,7 +1555,7 @@ test "validation: reserved codes in every format and the top-level 10 class" {
     const words = [_]llir.Instr{
         llir.bytesOf(0x80000000), // the top-level `10` reserved class
         llir.bytesOf(llir.format_spec[@intFromEnum(llir.Format.b)].prefix | (@as(u32, 60) << llir.format_spec[@intFromEnum(llir.Format.b)].code_shift)), // B-type reserved code 60
-        llir.bytesOf(llir.format_spec[@intFromEnum(llir.Format.e)].prefix | (@as(u32, 108) << llir.format_spec[@intFromEnum(llir.Format.e)].code_shift)), // E-type reserved selector 108 (past the merged 0–107 range)
+        llir.bytesOf(llir.format_spec[@intFromEnum(llir.Format.e)].prefix | (@as(u32, 110) << llir.format_spec[@intFromEnum(llir.Format.e)].code_shift)), // E-type reserved selector 110 (past the merged 0–109 range)
         llir.bytesOf(llir.format_spec[@intFromEnum(llir.Format.i)].prefix | (@as(u32, 34) << llir.format_spec[@intFromEnum(llir.Format.i)].code_shift)), // I-type reserved code 34
     };
     for (words) |w| {
@@ -1616,7 +1616,7 @@ test "validation: frame budget -- 109 succeeds, 110 rejects" {
     @constCast(image.functions)[0].f_count = 110;
     try expectRejected(&image, "frame too big");
 
-    // v10 budget: the window counts against the same 109. A frame of
+    // v11 budget: the window counts against the same 109. A frame of
     // L = 107 with a window W = 2 (O = 0) sits exactly at the boundary
     // (107 + 2 = 109); one more register — here W = 3 — rejects.
     var st2: ImageStorage = .{};

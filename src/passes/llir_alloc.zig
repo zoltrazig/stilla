@@ -127,7 +127,7 @@ pub fn allocateSlots(bld: *Builder) error{OutOfMemory}!void {
             if (sl < cell_values.items.len) try cell_values.items[sl].append(bld.arena, v);
         }
         var freed_cells = std.AutoHashMapUnmanaged(u32, void){};
-        // v10 budget (spec §4.1): the window counts against the same
+        // v11 budget (spec §4.1): the window counts against the same
         // 109-register bank as the F cells (`L + 3 + O <= 109`), so the
         // spill trigger demands cells + window, not cells alone. The
         // window itself never shrinks by spilling (it is fixed by the

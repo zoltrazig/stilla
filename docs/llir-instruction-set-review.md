@@ -6,18 +6,18 @@ This report reviews `Stilla LLIR Instruction Set.md` for internal consistency an
 
 ## Verdict
 
-The document is **largely self-consistent**. The headline numbers all recompute correctly: the per-format assignment counts `112 / 22 / 31 / 102 / 4 = 271`, the logical-value ranges `R 1–112, B 113–134, E 135–236, I 237–267, U 268–271`, the derived family sizes (42 casts `= 7×7−7`, 22 comparisons, 22 B-type, 12 move-wide, E `64 + (44−6) = 102`), and all 17 `§16` golden words decode and re-encode consistently. Every internal `§N`/`§N.M` target resolves except one (`§12.1`), and the sibling targets invoked exist and support their claims.
+The document is **largely self-consistent**. The headline numbers all recompute correctly: the per-format assignment counts `112 / 22 / 31 / 104 / 4 = 273`, the logical-value ranges `R 1–112, B 113–134, E 135–238, I 239–269, U 270–273`, the derived family sizes (42 casts `= 7×7−7`, 24 comparisons, 22 B-type, 12 move-wide, E `66 + (44−6) = 104`), and all 17 `§16` golden words decode and re-encode consistently. Every internal `§N`/`§N.M` target resolves except one (`§12.1`), and the sibling targets invoked exist and support their claims.
 
 The defects found are enumerated below, grouped by severity. Two are factual correctness problems that change what an implementer would build (`§16`'s `jal`/`j` hand-check, `§10`'s shift-masking examples), two are direct contradictions between sections, and the remainder are cross-spec model drift, encoding-design decisions, and documentation hygiene. A prioritized overhaul plan closes the report.
 
 | Severity | Count | Where |
 | --- | --- | --- |
-| High | 4 | 2 consistency, 2 documentation |
-| Medium | 13 | 7 consistency, 5 design, 1 documentation |
-| Low | 22 | 5 consistency, 5 completeness, 3 design, 9 documentation |
-| **Total** | **39** | |
+| High | 5 | 3 consistency, 2 documentation |
+| Medium | 14 | 7 consistency, 1 completeness, 5 design, 1 documentation |
+| Low | 24 | 5 consistency, 7 completeness, 3 design, 9 documentation |
+| **Total** | **43** | |
 
-X-1, X-2, DOC-1, and DOC-2 (all High) have since been resolved in their owning documents; see the annotations on those findings and the correctness-fixes list below.
+X-1, X-2, X-15, DOC-1, and DOC-2 (all High) have since been resolved in their owning documents; see the annotations on those findings and the correctness-fixes list below.
 
 ---
 
@@ -41,8 +41,8 @@ X-1, X-2, DOC-1, and DOC-2 (all High) have since been resolved in their owning d
 
 ### X-3 (Medium) — E-type counts violate the `§4` family rule
 
-- **Location.** `§4`: *"contiguous run… at +1 each"*; `§8` clz/popcount selectors (`clz.i32`=76, `clz.i64`=78, `popcount.i32`=80, `popcount.i64`=82).
-- **Problem.** The retired unsigned-alias holes 77/79/81 separate the members, so "contiguous except the reserved holes" and the "+1 each" rule cannot both hold.
+- **Location.** `§4`: *"contiguous run… at +1 each"*; `§8` clz/popcount selectors (`clz.i32`=78, `clz.i64`=80, `popcount.i32`=82, `popcount.i64`=84).
+- **Problem.** The retired unsigned-alias holes 79/81/83 separate the members, so "contiguous except the reserved holes" and the "+1 each" rule cannot both hold.
 - **Evidence.** `§8` selector layout versus the `§4` family rule. (Overlaps the reservation-rationale finding DES-8/Doc8.) Merging the former C/E prefixes into one E-type format renumbers these selectors by +64 but leaves the holes in place.
 - **Suggested direction.** State the exception explicitly (per-family holes), or restate `§4` as a default plus an explicit exception list (see DOC-7).
 
@@ -88,12 +88,12 @@ X-1, X-2, DOC-1, and DOC-2 (all High) have since been resolved in their owning d
 - **Evidence.** Recomputing `0xe80ffffc` with `a = 0x02` gives `0xe82ffffc`. (Merged with the documentation-critique `§16` finding.)
 - **Suggested direction.** Fix to one consistent statement (`jal -4` = `0xe82ffffc`).
 
-### X-10 (Low) — `§4` "no integer `le`/`ge` opcodes" is unscoped
+### X-10 (Low) — `§4` integer `le`/`ge` comparison coverage is unscoped
 
-- **Location.** `§4`: *"Integer `le`/`ge` have no opcodes"*.
-- **Problem.** True only for the cond-producing E-type comparisons (selectors 0–63); the B-type integer branches `ble`/`bleu` exist.
+- **Location.** `§4`: the integer `le`/`ge` comparison description.
+- **Problem.** A statement that integer `le`/`ge` have no cond-producing opcodes is true only of the branch relations: the B-type integer branches `ble`/`bleu` exist, and the E-type comparison family supplies `sle`/`sleu`.
 - **Evidence.** `§5.1` register branches; the `§4` comparison paragraph.
-- **Suggested direction.** Scope the statement to the comparison (cond-producing) families.
+- **Resolved.** E-type now provides the cond-producing integer `sle`/`sleu` (selectors 10/11), so the register form is a single instruction; the B-type `ble`/`bleu` register branches (`§5.1`) remain the non-strict branch relations, and the immediate `le`/`ge` still fold to the strict `±1` comparison.
 
 ### X-11 (Low) — `tailcall_self`'s `a` missing from the 0-role enumeration
 
@@ -122,6 +122,14 @@ X-1, X-2, DOC-1, and DOC-2 (all High) have since been resolved in their owning d
 - **Problem.** The residual dynamic-destruction content is in `Stilla LLIR Specification.md` §7, not §6; and the numeric/trap rules live in `Stilla Core Types & Ownership Specification.md` §16.3 and `Stilla Runtime Specification.md` §7.2, not in `Stilla Core Language Specification.md`.
 - **Evidence.** The sibling specs.
 - **Suggested direction.** Retarget both references.
+
+### X-15 (High) — `bool`/`str` equality conditions fuse into an unsigned-order branch
+
+- **Location.** The fused compare-and-branch: `fusedBranchOperands` and `branchOf` in `cfg_lower_llir_control.zig`.
+- **Problem.** A `bool`/`str` equality condition over live operands is fused into a `bltu`/`bleu` (unsigned-order) B-type branch instead of the documented fallback `bne cond, zero` (or `beq cond, zero` when inverted). `fusedBranchOperands` only bails on a constant operand and on `!writes_cond`; it has no operand-family guard. `emit.cmpSel` yields `bool_eq`/`bool_ne`/`str_eq`/`str_ne` (all `writes_cond = true`), and `branchOf` maps everything that is not `seq`/`sne`/`slt` to `bltu`. The `fusedBranchOperands` doc-comment promises bool/str "stay `bne cond, zero`". This contradicts `Stilla LLIR Instruction Set.md` §5.1 ("`bne Fx, zero` on a bool slot is the general boolean test") and §7, and is a genuine miscompile: `if (a == b)` branches on an unsigned comparison of the operand cells.
+- **Evidence.** `cfg_lower_llir_control.zig:188–238` (`fusedBranchOperands`), `:358–368` (`branchOf`, `else → "bltu"`), `:173–175` (doc-comment); `llir_opcodes.zig:604–607` (`bool_eq`/`str_eq` `writes_cond = true`); `cfg_lower_llir.zig:550–555` (`isInteger` excludes `bool`/`str`); `cfg_lower_llir_emit.zig:358–361` (`cmpSel`). Empirically reproduced with `stilla --emit-asm`: `i32_eq_branch` emits `bne r19, r20` (correct), while `bool_eq_branch` emits `bool_eq r19, r20; copy r21, cond; bleu r20, r19, .else` and `str_eq_branch` emits `str_eq r19, r20; …; bleu r20, r19, .else` (wrong). The same shape is reachable under default options and panics at runtime (a probe branching on a runtime `bool` equality reported a wrong result). No test covers a direct `bool`/`str` equality branch — the branch suites exercise only integer/float/byte conditions, and `frontend_llir_ops_wide_tests.zig` blesses `bltu` for the legitimate 64-bit case.
+- **Suggested direction.** Guard the fused register form on numeric operand types (`isInteger`, or `float32`/`float64`); for `bool`/`str` return no fusion so the branch falls back to `bne`/`beq cond, zero`. Make `branchOf` total over the numeric families only (return null for anything else) rather than defaulting to `bltu`, and replace the `orelse unreachable` with a graceful null so a future family cannot silently become `bltu`. Add regression tests (bool/str `==`/`!=` branch to `bne`/`beq cond, zero`) and a probe.
+- **Resolved.** `fusedBranchOperands` (`cfg_lower_llir_control.zig`) now guards the fused register form on numeric operand types (`isInteger` or `float32`/`float64`); `bool`/`str` conditions return no fusion and fall back to `bne cond, zero` (`beq cond, zero` when inverted). `branchOf` is total over `seq`/`sne`/`slt`/`sltu` and returns null for any other family (the old `orelse unreachable` is gone), so a future comparison family cannot silently become `bltu`. Regression tests were added in `frontend_llir_ops_branch_tests.zig` and `interpreter_image_tests.zig`, and the probe `bool_str_branch.st` (with a `probes/README.md` bullet) covers the fixed path. Spec unchanged — the code now matches §5.1/§7.
 
 ---
 
@@ -162,6 +170,30 @@ X-1, X-2, DOC-1, and DOC-2 (all High) have since been resolved in their owning d
 - **Evidence.** `§3.2` ownership-discard rules; `§12`/`§13` `ParamMode` and ownership fields.
 - **Suggested direction.** Add the cross-reference where ownership classification is invoked.
 
+### M-6 (Medium) — AIR comparison constant folding omits the 64-bit reps
+
+- **Location.** `foldCmp` in `cfg_lower_emit.zig` (the AIR construction folder — no spec section).
+- **Problem.** `foldCmp` folds comparisons only for `int32`, `uint32`, `byte` (eq/ne), `float32`, `bool`, and `str`; there is no `int64`/`uint64`/`float64` arm, so 64-bit constant comparisons never fold in the AIR peephole even though the HIR folder (`cmpResult` in `hir_egraph_rules.zig`) and every downstream layer handle them. With SEG/HIR enabled this is masked; with `--no-opt seg --no-opt hir` the 64-bit comparison survives as an unfolded record.
+- **Evidence.** `cfg_lower_emit.zig:780–794` (`foldCmp`, `else => return null`), `:796` (`cmpInt`), `:818` (`cmpFloat`); `hir_egraph_rules.zig:342–378` (`cmpResult` folds `i64`/`u64`/`f32`/`f64`); `frontend_optimizer_tests.zig:581` pins the fold domain but has no 64-bit case.
+- **Suggested direction.** Add `int64`/`uint64`/`float64` arms to `foldCmp` (reuse the generic `cmpInt`/`cmpFloat` helpers); add folding tests.
+- **Resolved.** `foldCmp` (`cfg_lower_emit.zig`) now folds `int64`/`uint64`/`float64` comparisons through the shared `cmpInt`/`cmpFloat` helpers; a new `frontend_optimizer_tests.zig` case proves the AIR peephole alone folds them.
+
+### M-7 (Low) — `byte` ordering folds in HIR but not in AIR
+
+- **Location.** `cmpResult` in `hir_egraph_rules.zig` versus `cmpByte` in `cfg_lower_emit.zig`.
+- **Problem.** Byte ordering (`< <= > >=`) is accepted by the checker, defined in HIR, lowered through the `u32` family, and folded by the HIR folder, but the AIR folder's `cmpByte` folds only `eq`/`ne`, so the two folders disagree. `Stilla Core Types & Ownership Specification.md` §16.3 compounds this: line 1367 grants ordering to "the same numeric type" while the arithmetic enumeration (lines 1350–1364) excludes `byte`, leaving "numeric type" undefined for ordering.
+- **Evidence.** `hir_egraph_rules.zig:366–374`; `cfg_lower_emit.zig:809–814` (`cmpByte` returns null unless `eq`/`ne`); checker `checker_validate.zig:1034–1036` (`isOrderNumeric` includes `byte`); `Stilla Core Types & Ownership Specification.md:1350–1368`; `frontend_optimizer_tests.zig:581` asserts byte `lt` stays unfolded.
+- **Suggested direction.** Make the AIR folder fold byte ordering (unsigned 8-bit), matching HIR; and state byte's orderability explicitly where §16.3 defines the operator domains.
+- **Resolved.** `cmpByte` (`cfg_lower_emit.zig`) now folds `byte` ordering as unsigned 8-bit, matching the HIR folder; the `frontend_optimizer_tests.zig` byte/str fold test was updated, and `Stilla Core Types & Ownership Specification.md` §16.3 now states explicitly that `< <= > >=` accept `byte` (as unsigned 8-bit values).
+
+### M-8 (Low) — Checker equality diagnostic lists fewer types than it accepts
+
+- **Location.** The `eq`/`ne` error message in `validateBinary`, `checker_validate.zig`.
+- **Problem.** The message says "equality is defined for byte, int32, uint32, float32, bool, and str only" — six types — while the accepting predicate accepts nine (`byte`, `int32`, `uint32`, `int64`, `uint64`, `float32`, `float64`, `bool`, `str`) and `Stilla Core Types & Ownership Specification.md` §16.3 (line 1368) and `checker.md` require all nine. A programmer with an `int64`/`float64` equality mistake is told those types are not equality types.
+- **Evidence.** `checker_validate.zig:333–336` (message), `:1024–1030` (`isEqScalar`), stale comments at `:330–332` and `:1021–1023`; `Stilla Core Types & Ownership Specification.md:1368`; `checker.md:165–168`. Verified: `fn bad(a: int64) -> bool { a == "x" }` prints the stale message while `int64 == int64` is accepted.
+- **Suggested direction.** List all nine types in the message and the two stale comments.
+- **Resolved.** The checker equality diagnostic (`checker_validate.zig`) now lists all nine equality types and the two stale comments were corrected; `checker_tests.zig` pins the accepted 64-bit/`float64` equality and the nine-type message.
+
 ---
 
 ## Design refinements
@@ -184,7 +216,7 @@ X-1, X-2, DOC-1, and DOC-2 (all High) have since been resolved in their owning d
 ### DES-3 (Medium) — Immediate-branch asymmetry
 
 - **Location.** `§5.2`.
-- **Problem.** E-type has `slti`+`sgti` (selectors 0–63), but B-type has only `blti`/`bltiu`/`beqi`/`bnei`; an `a > k` branch therefore forces constant materialization even though 42 of the 64 B codes (22–63) are free.
+- **Problem.** E-type has `slti`+`sgti` (selectors 0–65), but B-type has only `blti`/`bltiu`/`beqi`/`bnei`; an `a > k` branch therefore forces constant materialization even though 42 of the 64 B codes (22–63) are free.
 - **Evidence.** `§5.2` versus the E-type immediate comparisons in `§7`.
 - **Suggested direction.** Add `bgti`/`bgtiu` (with the same ripple list as any opcode addition), or document the omission as deliberate.
 - **Resolved.** Added `bgti`/`bgtiu` (B-type codes 16/17; strict `>` immediate branches, signed `[-64,63]` / unsigned `[0,127]`) and wired them through the mirror, interpreter, fusion lowering, specs, and tests; the `a > k` / `k < a` cases now fuse without materializing the constant.
@@ -192,9 +224,10 @@ X-1, X-2, DOC-1, and DOC-2 (all High) have since been resolved in their owning d
 ### DES-4 (Medium) — `ge`/`gt` operand-swap aliases overgeneralized
 
 - **Location.** `§7`: *"`ge`/`gt` are operand-swap aliases"*.
-- **Problem.** The swap identity is valid for floats but not integers (there is no integer `sle`), which contradicts `§4`'s `not(slt)` synthesis for integer `le`/`ge`.
-- **Evidence.** `§7` swap paragraph versus `§4` `le`/`ge` synthesis and `§5.1` branch relations.
-- **Suggested direction.** Scope the swap aliases to the float members and explain why branches need the non-strict `ble`/`bleu` directly. Keep C at 64.
+- **Problem.** The swap identity holds only for the strict members and the float non-strict members; the integer `le`/`ge` now have their own cond-producing opcodes, so a blanket `ge`/`gt` swap alias would contradict `§4`.
+- **Evidence.** `§7` swap paragraph versus `§4` `le`/`ge` lowering and `§5.1` branch relations.
+- **Suggested direction.** Scope the swap aliases to the strict members (and the float non-strict members) and explain why branches need the non-strict `ble`/`bleu` directly.
+- **Resolved.** The aliased operator names — `sgt`/`sge` and the `bgt`/`bge` branch names — are absent from the spec entirely, and the relations are described as a **lowering transformation**: the frontend lowers `a > b` by swapping the operands of `slt`/`sltu`/`slt.f32`/`slt.f64`, the float `a >= b` by swapping the operands of `sle.f32`/`sle.f64`, and the integer `a >= b` by swapping the operands of `sle`/`sleu` — the single non-strict cond-producing opcodes (the immediate form instead folds the constant: `slti a, k+1`/`sgti a, k-1`) (`§4`); the non-strict integer relations otherwise appear as the real B-type branches `ble`/`bleu` (`§5.1`), emitted directly. In the implementation comparisons are not typed ops — `llir.TypedKind` covers arithmetic/unary/cast only — and all six comparison tags are resolved through a single `.compare` lowering rule, with tag-keyed resolvers (`llir.cmpOpcode` / `llir.cmpImmOpcode`) and shared helpers keyed by `cfg.OpTag`; the integer `le`/`ge` register form selects `sle`/`sleu` directly. E-type selectors 0–65 now carry 24 comparisons (adding `sle`/`sleu` at selectors 10/11); every other relation's opcode is unchanged.
 
 ### DES-5 (Low) — "Width-polymorphic position" is undefined
 
@@ -247,7 +280,7 @@ X-1, X-2, DOC-1, and DOC-2 (all High) have since been resolved in their owning d
 ### DOC-3 (Low) — Section order does not match numeric logical-value order
 
 - **Location.** `§4–§9` ordering `R / B / I / E / U`.
-- **Problem.** The `§6` I-type section carries the numerically later logical values 237–267, so the section order does not track the logical-value order. The mismatch is intentional (grouping by format class), but it is easy to misread.
+- **Problem.** The `§6` I-type section carries the numerically later logical values 239–269, so the section order does not track the logical-value order. The mismatch is intentional (grouping by format class), but it is easy to misread.
 - **Evidence.** `§4` logical ranges.
 - **Suggested direction.** Keep the order and add a compact format → section → encoded-selector range → logical-value range index near the top; do not renumber.
 
@@ -288,8 +321,8 @@ X-1, X-2, DOC-1, and DOC-2 (all High) have since been resolved in their owning d
 
 ### DOC-9 (Low) — Version coherence and unnamed machine proof
 
-- **Location.** Header: *"v10 encoding"*; `§16`: *"verified by the machine proof that generated this table"*.
-- **Problem.** The "v10 encoding" and the serialized "binary format version" are never related, and `§16` asserts a machine proof without naming the artifact.
+- **Location.** Header: *"v11 encoding"*; `§16`: *"verified by the machine proof that generated this table"*.
+- **Problem.** The "v11 encoding" and the serialized "binary format version" are never related, and `§16` asserts a machine proof without naming the artifact.
 - **Evidence.** Header; `Stilla LLIR Specification.md` (format-version discussion); `§16`.
 - **Suggested direction.** Add a sentence relating the encoding revision to the binary format version, and name the verifying test that generates the golden table.
 
@@ -315,7 +348,7 @@ X-1, X-2, DOC-1, and DOC-2 (all High) have since been resolved in their owning d
 
 ## Prioritized overhaul plan
 
-Groups are ordered by risk: correctness fixes first, then cross-spec model alignment, then design decisions, then documentation hygiene. Every item names the files touched and how to verify the change. The document's own header contract already states that the code mirror and the document must be updated together; the opcode tables are hand-maintained in `llir_opcodes.zig` (re-exported by `llir.zig`). **Any design change is therefore a synchronized spec-plus-mirror change**, and the verification for every opcode-affecting item is that the golden words in `§16` still decode/re-encode identically after the mirror is updated.
+Groups are ordered by risk: correctness fixes first, then pipeline completeness, then cross-spec model alignment, then design decisions, then documentation hygiene. Every item names the files touched and how to verify the change. The document's own header contract already states that the code mirror and the document must be updated together; the opcode tables are hand-maintained in `llir_opcodes.zig` (re-exported by `llir.zig`). **Any design change is therefore a synchronized spec-plus-mirror change**, and the verification for every opcode-affecting item is that the golden words in `§16` still decode/re-encode identically after the mirror is updated.
 
 ### Correctness fixes
 
@@ -324,28 +357,34 @@ Groups are ordered by risk: correctness fixes first, then cross-spec model align
 3. **Fix the `§16` `jal`/`j` sentence (X-9).** Edit `§16` to make `jal -4` = `0xe82ffffc`. Verify by hand-decoding the word.
 4. **Fix the `§10` shift examples (DOC-1).** Edit `§10`. Verify against `§4`'s `(c mod W)` and `Stilla Runtime Specification.md` §7.2. — **Resolved**
 5. **Reconcile the canonical-cell model (DOC-2).** Edit `Stilla Runtime Specification.md` §7.2 and `interpreter-vm.md` §5 to match the Instruction Set, and add forward references. Verify against `interpreter_dispatch.zig`'s `canonicalIntResult` (secondary corroboration). — **Resolved**
+6. **Stop fusing `bool`/`str` equality branches (X-15).** Edit `fusedBranchOperands` and `branchOf` in `cfg_lower_llir_control.zig` to guard the register fusion on numeric operands and let `bool`/`str` fall back to `bne`/`beq cond, zero`; make `branchOf` return null outside the numeric families. Verify: `stilla --emit-asm` on a `bool`/`str` `==`/`!=` branch emits `bne`/`beq cond, zero`, the new regression tests pass, and the probe still runs. — **Resolved**
+
+### Pipeline completeness
+
+7. **Complete the AIR comparison folder (M-6, M-7).** Edit `foldCmp` and `cmpByte` in `cfg_lower_emit.zig` to add the `int64`/`uint64`/`float64` arms and fold `byte` ordering, and state `byte`'s orderability where `Stilla Core Types & Ownership Specification.md` §16.3 defines the operator domains. Verify: `frontend_optimizer_tests.zig` gains 64-bit and byte-ordering folds, and `--no-opt seg --no-opt hir` leaves no unfolded 64-bit comparison. — **Resolved**
+8. **Correct the checker equality diagnostic (M-8).** Edit the `eq`/`ne` message and the two stale comments in `checker_validate.zig` to list all nine equality types. Verify: `fn bad(a: int64) -> bool { a == "x" }` reports all nine types while `int64 == int64` remains accepted. — **Resolved**
 
 ### Cross-spec model alignment
 
-6. **Align `MemberDesc.ref` and `store_member`'s operand (X-4, X-5).** Edit `§6` and `§12`; conform to `Stilla LLIR Specification.md` §2/§7. Verify against that spec's descriptor tables.
-7. **Correct the fast-bank count and `strings` terminology (X-7, DOC-11).** Edit `§3.1.1` (19 cells) and `§13` (artifact-owned blob). Verify against `Stilla LLIR Specification.md` §2/§3.2.
-8. **Add the missing ownership reference (M-5).** Edit `§3.2`/`§12` to cite `Stilla Core Types & Ownership Specification.md`. Verify: each ownership term used has a citation.
-9. **Fix the weak cross-references (X-14).** Edit `§4` and `§6`. Verify: the cited sections contain the referenced content.
+9. **Align `MemberDesc.ref` and `store_member`'s operand (X-4, X-5).** Edit `§6` and `§12`; conform to `Stilla LLIR Specification.md` §2/§7. Verify against that spec's descriptor tables.
+10. **Correct the fast-bank count and `strings` terminology (X-7, DOC-11).** Edit `§3.1.1` (19 cells) and `§13` (artifact-owned blob). Verify against `Stilla LLIR Specification.md` §2/§3.2.
+11. **Add the missing ownership reference (M-5).** Edit `§3.2`/`§12` to cite `Stilla Core Types & Ownership Specification.md`. Verify: each ownership term used has a citation.
+12. **Fix the weak cross-references (X-14).** Edit `§4` and `§6`. Verify: the cited sections contain the referenced content.
 
 ### Design decisions
 
-10. **Decide the `j`/`jal` prefix (DES-1).** Choose option A or B; if A, apply the full ripple list across `Stilla LLIR Instruction Set.md`, the mirror, `table.json`, `interpreter-vm.md`, and `cheatsheet.md`. Verify: the decoder's field-discrimination logic matches `§9.1` (or `§9.1` is gone) and all golden words still round-trip. — **Resolved**
-11. **Decide the immediate-branch asymmetry (DES-3).** Add `bgti`/`bgtiu` or document the omission. If added, update the mirror and golden table. Verify: `a > k` branches no longer require materialization, or the omission is stated. — **Resolved**
-12. **Scope the `ge`/`gt` swap aliases (DES-4).** Edit `§7` and reconcile with `§4`. Verify: integer `le`/`ge` synthesis and float swap behavior are both described once.
-13. **Publish one reservation policy (DES-8, DOC-7).** Add a canonical paragraph (near `§2.2`) with per-hole rationale and an explicit contiguous-family exception list. Verify: every reserved hole and family exception has a one-line reason.
-14. **Small design clarifications (DES-2, DES-5, DES-6, DES-7).** State the `10`-class intent; define "width-polymorphic position"; note register-field saturation; retype or annotate `SwitchArm.target`. Verify by re-reading `§2.1`, `§3.2`, `§3.1`, `§12`.
+13. **Decide the `j`/`jal` prefix (DES-1).** Choose option A or B; if A, apply the full ripple list across `Stilla LLIR Instruction Set.md`, the mirror, `table.json`, `interpreter-vm.md`, and `cheatsheet.md`. Verify: the decoder's field-discrimination logic matches `§9.1` (or `§9.1` is gone) and all golden words still round-trip. — **Resolved**
+14. **Decide the immediate-branch asymmetry (DES-3).** Add `bgti`/`bgtiu` or document the omission. If added, update the mirror and golden table. Verify: `a > k` branches no longer require materialization, or the omission is stated. — **Resolved**
+15. **Scope the `ge`/`gt` swap aliases (DES-4).** Edit `§7` and reconcile with `§4`. Verify: integer `le`/`ge` synthesis and float swap behavior are both described once. — **Resolved**
+16. **Publish one reservation policy (DES-8, DOC-7).** Add a canonical paragraph (near `§2.2`) with per-hole rationale and an explicit contiguous-family exception list. Verify: every reserved hole and family exception has a one-line reason.
+17. **Small design clarifications (DES-2, DES-5, DES-6, DES-7).** State the `10`-class intent; define "width-polymorphic position"; note register-field saturation; retype or annotate `SwitchArm.target`. Verify by re-reading `§2.1`, `§3.2`, `§3.1`, `§12`.
 
 ### Documentation hygiene
 
-15. **Establish canonical homes and a format index (DOC-4, DOC-3).** Move each repeated model to one section and add a format → section → selector range → logical range index near the top. Verify: no rule appears in more than one normative location.
-16. **Legend and label cleanup (DOC-5, DOC-6).** Add the trap-column legend and replace the stage label. Verify by grep for the banned label and for `trap`-column ambiguity.
-17. **Terminology and version notes (DOC-8, DOC-9).** Add the terminology note and relate the encoding revision to the binary format version; name the verifying test. Verify: overloaded terms are defined once.
-18. **Validation-list completeness (X-10, X-11, X-12, X-13, M-1, M-2, M-3, M-4).** Fill the `§10` table gaps, add `tailcall_self`'s `a`, fix the frame formula, deduplicate the tbz/tbnz clause, and document `cleanup`, the missing enums, and the `PrimitiveId` order. Verify against the mirror (secondary corroboration) and the sibling specs.
+18. **Establish canonical homes and a format index (DOC-4, DOC-3).** Move each repeated model to one section and add a format → section → selector range → logical range index near the top. Verify: no rule appears in more than one normative location.
+19. **Legend and label cleanup (DOC-5, DOC-6).** Add the trap-column legend and replace the stage label. Verify by grep for the banned label and for `trap`-column ambiguity.
+20. **Terminology and version notes (DOC-8, DOC-9).** Add the terminology note and relate the encoding revision to the binary format version; name the verifying test. Verify: overloaded terms are defined once.
+21. **Validation-list completeness (X-11, X-12, X-13, M-1, M-2, M-3, M-4).** Fill the `§10` table gaps, add `tailcall_self`'s `a`, fix the frame formula, deduplicate the tbz/tbnz clause, and document `cleanup`, the missing enums, and the `PrimitiveId` order. Verify against the mirror (secondary corroboration) and the sibling specs.
 
 ---
 
@@ -354,19 +393,34 @@ Groups are ordered by risk: correctness fixes first, then cross-spec model align
 The following were checked and passed.
 
 - **Cross-reference resolution.** All internal `§N`/`§N.M` targets resolve except `§12.1` (X-1). Sibling targets invoked — `Stilla LLIR Specification.md` §2/§3.1/§5/§6/§8 and `Stilla Runtime Specification.md` §6.6/§7.2 — exist and support their claims.
-- **Per-format counts.** R 112 + B 22 + I 31 + E 102 + U 4 = 271, matching the declared logical total.
+- **Per-format counts.** R 112 + B 22 + I 31 + E 104 + U 4 = 273, matching the declared logical total.
 - **R 112** = 7 arithmetic families × 6 reps (42) + `madd`/`msub` × 6 (12) + 9 immediate families × 4 (36) + 6 widthless bitwise (`and`/`or`/`xor`/`andi`/`ori`/`xori`) + 16 untyped rows.
 - **B 22** = 14 register branches (`beq` 3, `bne` 3, `blt` 4, `ble` 4) + 6 immediate (`blti`/`bltiu`/`bgti`/`bgtiu`/`beqi`/`bnei`) + 2 bit-test.
-- **E selectors 0–63 (64)** = 42 casts + 22 comparisons. **42 casts = 7×7−7** verified row-by-row; **22 comparisons** = `seq` 3 + `sne` 3 + `slt` 4 + `sle` 2 + scalar equality 4 + immediate 6.
-- **E selectors 64–107 (38 = 44−6)** = `neg` 6 + `abs` 4 + `clz` 2 + `popcount` 2 + five float-2 families × 2 (10) + 14 untyped transfer/lifecycle/control rows, across selectors 64–107 with holes 70/71/77/79/81/83.
+- **E selectors 0–65 (66)** = 42 casts + 24 comparisons. **42 casts = 7×7−7** verified row-by-row; **24 comparisons** = `seq` 3 + `sne` 3 + `slt` 4 + `sle` 4 + scalar equality 4 + immediate 6.
+- **E selectors 66–109 (38 = 44−6)** = `neg` 6 + `abs` 4 + `clz` 2 + `popcount` 2 + five float-2 families × 2 (10) + 14 untyped transfer/lifecycle/control rows, across selectors 66–109 with holes 72/73/79/81/83/85.
 - **I 31** = 4 references + 5 aggregate/destructure + 2 call/dispatch + 6 spill/slot + 2 jump/destruction + 12 move-wide.
-- **Logical ranges.** R 1–112, B 113–134, E 135–236, I 237–267, U 268–271; `jal`/`j` are 268/269 as stated in `§9.1`.
+- **Logical ranges.** R 1–112, B 113–134, E 135–238, I 239–269, U 270–273; `jal`/`j` are 270/271 as stated in `§9.1`.
 - **`§16` golden words.** All 17 examples decode to the named opcode and re-encode to the same word (per the table's stated machine proof), including the negative-offset, imm7-signedness, and little-endian byte-order cases.
 - **Register model arithmetic.** 128 encodings = 109 frame (`0x13–0x7f`) + 16 T (`0x03–0x12`) + 3 specials (`0x00–0x02`); the `frame_count_max = 109`, `temp_count = 16`, and `fast_reg_count = 0x13` constants are mutually consistent.
 
+## Comparison ↔ branch coverage
+
+This matrix inventories the whole comparison surface — every relation against every rep family — as a companion to the verified-correct coverage above. Each cell names the E-type comparison (the register form; the float side uses the `.f32`/`.f64` rep) followed by the B-type branch the lowering pairs with it. The table is a coverage inventory, not an all-green list: it records what exists, what is synthesized, and where the two layers disagree.
+
+| Relation | `bool` | `str` | `byte` | signed int | unsigned int | `float` |
+| --- | --- | --- | --- | --- | --- | --- |
+| `eq` | `bool_eq` → `bne cond, zero` | `str_eq` → `bne cond, zero` | `seq` → `beq`, `beqi` | `seq` → `beq`, `beqi` | `seq` → `beq`, `beqi` | `seq.f32`/`seq.f64` → `beq.f32`/`beq.f64` |
+| `ne` | `bool_ne` → `beq cond, zero` | `str_ne` → `beq cond, zero` | `sne` → `bne`, `bnei` | `sne` → `bne`, `bnei` | `sne` → `bne`, `bnei` | `sne.f32`/`sne.f64` → `bne.f32`/`bne.f64` |
+| `lt` | — | — | `sltu` → `bltu`, `bltiu` | `slt` → `blt`, `blti` | `sltu` → `bltu`, `bltiu` | `slt.f32`/`slt.f64` → `blt.f32`/`blt.f64` |
+| `le` | — | — | `sleu` → `bleu` | `sle` → `ble` | `sleu` → `bleu` | `sle.f32`/`sle.f64` → `ble.f32`/`ble.f64` |
+| `gt` | — | — | `sltu` swap → `bltu` swap, `bgtiu` | `slt` swap → `blt` swap, `bgti` | `sltu` swap → `bltu` swap, `bgtiu` | `slt.f32`/`slt.f64` swap → `blt.f32`/`blt.f64` swap |
+| `ge` | — | — | `sleu` swap → `bleu` swap | `sle` swap → `ble` swap | `sleu` swap → `bleu` swap | `sle.f32`/`sle.f64` swap → `ble.f32`/`ble.f64` swap |
+
+The empty cells are the documented asymmetries. E-type immediates (`slti`/`sltiu`/`sgti`/`sgtiu`/`seqi`/`snei`) mirror the register comparison for a constant operand, and the B column shows the fused immediate branch where one exists (`blti`/`bltiu`/`bgti`/`bgtiu`/`beqi`/`bnei`). Integer `le`/`ge` have their own cond-producing E-type opcodes — `sle` (signed) and `sleu` (unsigned, at selectors 10/11) — so the register comparison is a single instruction; the matching non-strict integer branches are the real `ble`/`bleu` (§5.1), emitted directly. A constant operand still folds to the strict immediate with the constant adjusted at compile time (`a <= k` → `blti`/`slti a, k+1`, `a >= k` → `bgti`/`sgti a, k-1`); only an out-of-window constant tests `cond` against zero. There is no greater-than register branch family, so the frontend swaps the operands of the strict branch, and there are no float immediate branches at all. The `byte` row is unsigned throughout (`sltu`/`sleu` and `bltu`/`bleu`/`bltiu`/`bgtiu`). `bool`/`str` have no compare-and-branch: the branch materializes the condition and falls back to `bne`/`beq cond, zero`, the behavior X-15 records as resolved. Bit-test conditions `(x & 2^k) ==/!= 0` pair with `tbz`/`tbnz` outside this grid.
+
 ## Open items / not confirmable from the spec baseline
 
-- **(a) E-family code layout.** Confirm the `neg` selectors and the `clz`/`popcount` holes (selectors 64–107) against the hand-maintained table in `llir_opcodes.zig` and the codec before treating the `§4`/`§8` counts as fully verified. The spec is internally consistent here, but the selector assignment is only corroborated by the mirror.
+- **(a) E-family code layout.** Confirm the `neg` selectors and the `clz`/`popcount` holes (selectors 66–109) against the hand-maintained table in `llir_opcodes.zig` and the codec before treating the `§4`/`§8` counts as fully verified. The spec is internally consistent here, but the selector assignment is only corroborated by the mirror.
 - **(b) Codec field discrimination.** Confirm the codec implements the `§9.1` `jal`/`j` `a`-field discrimination exactly (this matters most if DES-1 option A is rejected).
 - **(c) Machine proof artifact.** The `§16` "machine proof" cannot be located from the document; its identity and invocation are unverifiable from the spec alone.
 - **(d) Adjacent cross-spec tension (out of scope for this file).** `cheatsheet.md` states (around line 170) that `str` is Copy and never dropped, while elsewhere (around line 178) and in `Stilla LLIR Specification.md` §7 `str` is listed as a counted owner. This is a cross-spec tension to investigate separately.

@@ -327,12 +327,13 @@ fn validateBinary(frame: *Frame, b: *const ast.Binary) CheckError!void {
                 return frame.ck.fail(b.span, "logical operator requires bool operands (Core §16.3)", .{});
             }
         },
-        // Equality is defined only for byte, int32, uint32, float32,
-        // bool, and str — never for `any`, structs, unions, tuples,
-        // lists, boxes, functions, or modules (Core §16.3).
+        // Equality is defined only for byte, int32, uint32, int64,
+        // uint64, float32, float64, bool, and str — never for `any`,
+        // structs, unions, tuples, lists, boxes, functions, or modules
+        // (Core §16.3).
         .eq, .ne => {
             if (!(never or (isEqScalar(l) and isEqScalar(r) and meta.Type.eql(l, r)))) {
-                return frame.ck.fail(b.span, "equality is defined for byte, int32, uint32, float32, bool, and str only (Core §16.3)", .{});
+                return frame.ck.fail(b.span, "equality is defined for byte, int32, uint32, int64, uint64, float32, float64, bool, and str only (Core §16.3)", .{});
             }
         },
         // Ordering accepts operands of the same numeric type (Core §16.3).
@@ -1018,9 +1019,10 @@ fn isNever(t: meta.Type) bool {
     return t == .primitive and t.primitive == .never;
 }
 
-/// The equality domain of Core §16.3: byte, int32, uint32, float32,
-/// bool, and str. Everything else (any, never, hostdata, structs,
-/// unions, tuples, lists, boxes, functions, modules) has no `==`/`!=`.
+/// The equality domain of Core §16.3: byte, int32, uint32, int64,
+/// uint64, float32, float64, bool, and str. Everything else (any, never,
+/// hostdata, structs, unions, tuples, lists, boxes, functions, modules)
+/// has no `==`/`!=`.
 fn isEqScalar(t: meta.Type) bool {
     if (t != .primitive) return false;
     return switch (t.primitive) {

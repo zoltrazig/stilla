@@ -24,6 +24,7 @@ const lower = @import("cfg_lower_llir.zig");
 const intern = @import("cfg_lower_llir_intern.zig");
 const edges = @import("cfg_lower_llir_edges.zig");
 const emit = @import("cfg_lower_llir_emit.zig");
+const typed = @import("cfg_lower_typed.zig");
 
 const Builder = lower.Builder;
 
@@ -210,20 +211,25 @@ pub fn fusedBranchOperands(cond: *const cfg.Value) ?FusedBranch {
             if (immBranchOf(tag, bin.b, cv, true)) |f| return f;
         }
     }
-    // The register form: both operands are live numeric values.
+    // The register form: both operands are live numeric values. A
+    // bool/str equality condition (`bool_eq`/`bool_ne`/`str_eq`/
+    // `str_ne`, which `cmpSel` selects) has no numeric ordering
+    // branch, so reject it here — the caller tests the condition
+    // against zero (`bne cond, zero` / `beq cond, zero`) instead of
+    // falling through to the unsigned-order branch family
+    // (Instruction Set §5.1).
+    const numeric = Builder.isInteger(bin.a.type_) or bin.a.type_.primitive == .float32 or bin.a.type_.primitive == .float64;
+    if (!numeric) return null;
     if (isConstValue(bin.a) or isConstValue(bin.b)) return null;
     const sel = emit.cmpSel(tag, bin);
     if (!llir.opInfo(sel.op).writes_cond) return null;
     var op: llir.Opcode = undefined;
-    var swap = false;
-    if (Builder.isInteger(bin.a.type_) and (tag == .le or tag == .ge)) {
-        // Integer `le`/`ge` synthesize the single non-strict
-        // `ble`/`bleu`; cmpSel already swapped the integer `le`
-        // operands, so a further swap recovers the natural polarity
-        // — `a <= b` → `ble a, b`, `a >= b` → `ble b, a`
-        // There is no `bge` family.
+    if (typed.isNonStrictInt(tag, bin.a.type_)) {
+        // Integer `le`/`ge` select the single non-strict `ble`/`bleu`.
+        // `cmpSel` already put `ge`'s operands in the `ble`-natural
+        // order (`a <= b` → `ble a, b`, `a >= b` → `ble b, a`), so no
+        // further swap applies. There is no `bge` family.
         op = famOpName(if (bin.a.type_.primitive == .uint32 or bin.a.type_.primitive == .uint64 or bin.a.type_.primitive == .byte) "bleu" else "ble", null) orelse unreachable;
-        swap = true;
     } else if ((bin.a.type_.primitive == .float32 or bin.a.type_.primitive == .float64) and (tag == .le or tag == .ge)) {
         // Float `le`/`ge` share the single `sle` primitive; the
         // fused branch is the non-strict `ble`, the swap for `ge`
@@ -232,9 +238,9 @@ pub fn fusedBranchOperands(cond: *const cfg.Value) ?FusedBranch {
         // No further swap here.
         op = famOpName("ble", llir.repOf(sel.op)) orelse unreachable;
     } else {
-        op = branchOf(sel.op);
+        op = branchOf(sel.op) orelse return null;
     }
-    return .{ .reg = .{ .op = op, .lhs = if (swap) sel.b else sel.a, .rhs = if (swap) sel.a else sel.b } };
+    return .{ .reg = .{ .op = op, .lhs = sel.a, .rhs = sel.b } };
 }
 
 /// The values a fused compare-and-branch of `cond` reads at the
@@ -253,58 +259,34 @@ pub fn fusedBranchReads(cond: *const cfg.Value) ?BranchReads {
     };
 }
 
-/// The imm7 pattern of a constant at a branch's operand type, or
-/// null when the constant does not fit the window. Ordering branches
-/// zero-extend on the unsigned reps (`bltiu`: `[0, 127]`) and
-/// sign-extend on the signed reps (`blti`: `[-64, 63]`); equality
-/// branches (`beqi`/`bnei`) sign-extend on every integer type
-/// (Instruction Set §4) — there is no unsigned equality variant — so
-/// `equality` selects the signed window on the unsigned reps too.
-fn imm7Of(cv: meta.ConstValue, type_: meta.Type, equality: bool) ?u8 {
-    const i = switch (cv) {
-        .int => |i| i,
-        else => return null,
-    };
-    return switch (type_.primitive) {
-        .int32, .int64 => if (i < -64 or i > 63) return null else @intCast(@as(u8, @bitCast(@as(i8, @intCast(i)))) & 0x7f),
-        .uint32, .uint64, .byte => blk: {
-            if (equality) {
-                if (i < -64 or i > 63) break :blk null;
-                break :blk @intCast(@as(u8, @bitCast(@as(i8, @intCast(i)))) & 0x7f);
-            }
-            if (i < 0 or i > 127) break :blk null;
-            break :blk @intCast(i);
-        },
-        else => null,
-    };
-}
-
 /// The immediate-branch selection: `lhs op imm` with the constant on
-/// the right fuses to `blti`/`bgti`/`beqi`/`bnei`; a constant on the
-/// left swaps and flips the operator — `gt` to `blti` (`k > a` ≡
-/// `a < k`) and `lt` to `bgti` (`k < a` ≡ `a > k`). There is no
-/// `le`/`ge` immediate branch, so every other ordering
-/// falls back to the register form with the constant materialized.
-/// The immediate family is chosen by the value operand's type.
+/// the right fuses to `blti`/`bgti`/`beqi`/`bnei`. A constant on the
+/// left swaps and flips the operator first (`k < a` ≡ `a > k`, the shared
+/// `typed.swapRel`). The non-strict `le`/`ge` then fold to their strict
+/// predecessor with the constant adjusted by ±1 at compile time through
+/// the shared `typed.strictFold` (`a <= k` ≡ `a < k+1` → `blti a, k+1`;
+/// `a >= k` ≡ `a > k-1` → `bgti a, k-1`) — the same immediate-only
+/// transform the value form uses, which spares the register form's
+/// materialized constant. The immediate window is the E-type
+/// `typed.immOf` window: `blti`/`bgti` mirror `slti`/`sgti`
+/// (sign-extend), `bltiu`/`bgtiu` `sltiu`/`sgtiu` (zero-extend), and
+/// `beqi`/`bnei` `seqi`/`snei` (sign-extend on every integer type). The
+/// immediate family is chosen by the value operand's type.
 fn immBranchOf(tag: cfg.OpTag, value: *const cfg.Value, cv: meta.ConstValue, const_left: bool) ?FusedBranch {
-    const equality = tag == .eq or tag == .ne;
-    const imm7 = imm7Of(cv, value.type_, equality) orelse return null;
-    const base: ?[]const u8 = if (const_left)
-        switch (tag) {
-            .lt => "bgti", // k < a ≡ a > k
-            .gt => "blti", // k > a ≡ a < k
-            .eq => "beqi",
-            .ne => "bnei",
-            else => null, // le / ge
-        }
-    else switch (tag) {
+    // Move the constant to the right operand position (`k op a` ≡
+    // `a swapRel(op) k`); equality is symmetric.
+    const moved: cfg.OpTag = if (const_left) typed.swapRel(tag) orelse tag else tag;
+    // Fold the non-strict ordering to its strict predecessor, adjusting
+    // the constant at compile time — the shared ±1 transform.
+    const folded = typed.strictFold(moved, cv) orelse return null;
+    const imm7 = typed.immOf(folded.cv, folded.tag, value.type_) orelse return null;
+    const b: []const u8 = switch (folded.tag) {
         .lt => "blti",
         .gt => "bgti", // a > k
         .eq => "beqi",
         .ne => "bnei",
-        else => null, // le / ge
+        else => return null,
     };
-    const b = base orelse return null;
     const unsigned = value.type_.primitive == .uint32 or value.type_.primitive == .uint64 or value.type_.primitive == .byte;
     const name = if (unsigned and std.mem.eql(u8, b, "blti"))
         "bltiu"
@@ -352,10 +334,13 @@ fn isAndOfPow2(v: *const cfg.Value) bool {
 }
 
 /// The E-type comparison → B-Type branch family (`seq`→`beq`,
-/// `sne`→`bne`, `slt`→`blt`, `sltu`→`bltu`; the float `sle` never
-/// reaches here — `le`/`ge` fusion selects `ble` in
-/// `fusedBranchOperands`).
-fn branchOf(op: llir.Opcode) llir.Opcode {
+/// `sne`→`bne`, `slt`→`blt`, `sltu`→`bltu`). Null for any other
+/// family, so a new comparison family cannot silently become `bltu`
+/// (Instruction Set §5.1): the float `sle` never reaches here — the
+/// `le`/`ge` fusion selects `ble` in `fusedBranchOperands` — and a
+/// bool/str equality never reaches here either, because the register
+/// form rejects non-numeric operands before selecting it.
+fn branchOf(op: llir.Opcode) ?llir.Opcode {
     const base = familyOf(op);
     const bbase: []const u8 = if (std.mem.eql(u8, base, "seq"))
         "beq"
@@ -363,9 +348,11 @@ fn branchOf(op: llir.Opcode) llir.Opcode {
         "bne"
     else if (std.mem.eql(u8, base, "slt"))
         "blt"
-    else // "sltu"
-        "bltu";
-    return famOpName(bbase, llir.repOf(op)) orelse unreachable;
+    else if (std.mem.eql(u8, base, "sltu"))
+        "bltu"
+    else
+        return null;
+    return famOpName(bbase, llir.repOf(op));
 }
 
 /// The family prefix of an opcode name (the part before the `.` rep

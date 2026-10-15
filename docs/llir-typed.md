@@ -30,7 +30,7 @@ itself and the immediate-fusion decision it feeds.
 
 `src/passes/cfg_lower_typed.zig` defines:
 
-- `TypedOp` — one logical arithmetic/comparison/cast node: a
+- `TypedOp` — one logical arithmetic/unary/cast node: a
   `TypedKind`, the operand type, the result type (a `cast` result
   differs), the SSA operands, and the result value. Binary ops carry
   `a` and `b`; unary ops (`neg`/`abs`/`clz`/`popcount`) and `cvt`
@@ -39,24 +39,50 @@ itself and the immediate-fusion decision it feeds.
   null for a non-arithmetic type (the typed layer only carries
   arithmetic ops).
 - `typedKindOf(tag)` — the `typed` lowering kind of a CFG op tag, or
-  null for a tag that lowers to a direct opcode or a composite.
-  Centralizes the tag → kind mapping for both the expander and the
-  budget.
-- `immOf(cv, kind, t)` — the 7-bit immediate a constant fuses into for
-  a comparison kind, or null when it does not fit the window
-  (`ge` normalizes to `gt` of the predecessor first).
+  null for a tag that lowers to a direct opcode, a composite, or a
+  comparison (`.compare`). Centralizes the tag → kind mapping for both
+  the expander and the budget.
+- `immOf(cv, tag, t)` — the 7-bit immediate a numeric constant fuses
+  into for the CFG binary `tag`, or null when it does not fit the
+  window. Keyed by the CFG tag because comparisons are not typed ops:
+  the comparison-immediate opcode is `llir.cmpImmOpcode`
+  (`slti`/`sltiu`/`sgti`/`sgtiu`/`seqi`/`snei`), and the non-strict
+  `le`/`ge` convert to the strict predecessor first with the constant
+  adjusted at compile time (`a <= k` ≡ `slti a, k+1`,
+  `a >= k` ≡ `sgti a, k-1`). The `±1` is immediate-only — the register
+  form is the single `sle`/`sleu` opcode, not a synthesized `not`.
 - `shiftImm(op, imm)` — the pre-masked shift count an immediate
   shift opcode carries (the opcode masks the count mod the width
   internally; the immediate form just stores the masked value).
-- `fusedImmR(kind, t, cv)` — the fused `(opcode, imm)` pair for an
-  arithmetic kind whose constant fits the rep's immediate window, or
-  null (the register form stays).
+- `fusedImmR(tag, t, cv)` — the fused `(opcode, imm)` pair for a
+  binary `tag` whose constant fits the rep's immediate window, or
+  null (the register form stays). Comparisons resolve their opcode
+  through `llir.cmpImmOpcode`, the arithmetic kinds through their
+  typed kind's immediate form.
+- The comparison-lowering decisions shared with the fused B-type
+  branch (and the const+op fusion pass): `isIntegerType(t)` (the
+  integer family), `swapRel(tag)` (the operand-swapped relation, used
+  to move a constant to the right operand), `strictFold(tag, cv)` (the
+  compile-time `±1` fold of a non-strict ordering, which `immOf`
+  applies), and `isNonStrictInt(tag, t)` (the integer `le`/`ge`, whose
+  E-type register form selects `sle`/`sleu` through the comparison
+  opcode resolver while the branch selects the real `ble`/`bleu`). The
+  E-type comparison emitter
+  (`cfg_lower_llir_emit.cmpSel`) and the fused branch
+  (`cfg_lower_llir_control.fusedBranchOperands` / `immBranchOf`) both
+  read them, so the four decisions — swap, moving a constant to the
+  right, the `±1` fold, and the non-strict opcode selection — cannot
+  drift between the two layers. `immOf` is also the shared immediate window:
+  `immBranchOf` fuses the B-type `blti`/`bgti`/`beqi`/`bnei` (and the
+  unsigned `bltiu`/`bgtiu`) through it rather than restating the window.
 
 ## 3. The typed-assembly printer (inspection/test surface)
 
 `printTyped(allocator, func)` renders the typed layer one `%d: <type> =
-<op> %a, %b` line per arithmetic/comparison/cast instruction. The op
-spelling carries the type rep — `add.i32`, `mul.u32`, `div.i64`,
+<op> %a, %b` line per arithmetic/unary/cast instruction. Comparisons
+are not typed ops — they lower through the `.compare` rule — so the
+printer emits no comparison line. The op spelling carries the type
+rep — `add.i32`, `mul.u32`, `div.i64`,
 `shr.u32`, `cvt.i32.f32` — the same spelling the LLIR opcode
 serializes to. `typedOps(allocator, func)` returns the same Layer A
 list as the printer's source, so the two stay in lockstep.
@@ -86,10 +112,10 @@ expansion:
 | --- | --- |
 | `add.i32` / `sub.i32` / `mul.i32` / `div.i32` / `rem.i32` / `min.i32` / `max.i32` | the one R-format record |
 | every other typed integer rep (`*.u32`, `*.i64`, `*.u64`) | the one R-format record |
-| `neg.i32` (and the other integer reps) | the one E-type record (selectors 64–107) |
+| `neg.i32` (and the other integer reps) | the one E-type record (selectors 66–109) |
 | `shl`/`shr` (any rep) | the one R-format record; the count masks mod the width inside the opcode |
 | `bitand`/`bitor`/`bitxor` | `and`/`or`/`xor` — widthless, canonicality-preserving, no canonicalization needed |
-| `cvt.*.i32` / `cvt.*.u32` | the E-type cast record (selectors 0–63); the cell is canonical by construction |
+| `cvt.*.i32` / `cvt.*.u32` | the E-type cast record (selectors 0–65); the cell is canonical by construction |
 
 Immediate fusion folds into the same single record: a constant right
 operand inside the rep's immediate window lowers as the immediate form

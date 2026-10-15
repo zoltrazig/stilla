@@ -1656,9 +1656,7 @@ test "LLIR lowering: generic comparisons and casts specialize by type" {
                             try testing.expectEqual(b.slotOf(bin.a), d.a);
                             try testing.expectEqual(b.slotOf(bin.b), d.b);
                             try testing.expectEqual(@as(u32, 0), d.c);
-                            const nrec = image.instructions[pc + 1];
-                            var nd = llir.decode(nrec).?;
-                            if (nd.op == .not) nd = llir.decode(image.instructions[pc + 2]).?;
+                            const nd = llir.decode(image.instructions[pc + 1]).?;
                             try testing.expectEqual(llir.Opcode.copy, nd.op);
                             try testing.expectEqual(b.slotOf(ins.results[0]), nd.a);
                             try testing.expectEqual(llir.cond_reg, nd.b);
@@ -1666,7 +1664,7 @@ test "LLIR lowering: generic comparisons and casts specialize by type" {
                         } else {
                             // The E-type comparison families (implicit
                             // cond): the record carries the two compared
-                            // operands — `gt` and float `ge` swap them
+                            // operands — `gt` and `ge` swap them
                             // (a > b ≡ slt b, a; a >= b ≡ sle b, a) —
                             // and the result slot is materialized by
                             // `copy dst, cond` at pc + 1 (byte lowers
@@ -1690,9 +1688,9 @@ test "LLIR lowering: generic comparisons and casts specialize by type" {
                                     .float32 => .slt_f32,
                                     else => unreachable,
                                 },
-                                .le => switch (prim) {
-                                    .int32 => .slt,
-                                    .uint32, .byte => .sltu,
+                                .le, .ge => switch (prim) {
+                                    .int32 => .sle,
+                                    .uint32, .byte => .sleu,
                                     .float32 => .sle_f32,
                                     else => unreachable,
                                 },
@@ -1702,23 +1700,15 @@ test "LLIR lowering: generic comparisons and casts specialize by type" {
                                     .float32 => .slt_f32,
                                     else => unreachable,
                                 },
-                                .ge => switch (prim) {
-                                    .int32 => .slt,
-                                    .uint32, .byte => .sltu,
-                                    .float32 => .sle_f32,
-                                    else => unreachable,
-                                },
                                 else => unreachable,
                             };
-                            const swapped = (tag == .gt) or (tag == .le and prim != .float32) or (tag == .ge and prim == .float32);
+                            const swapped = (tag == .gt) or (tag == .ge);
                             const a_slot = b.slotOf(if (swapped) bin.b else bin.a);
                             const b_slot = b.slotOf(if (swapped) bin.a else bin.b);
                             try testing.expectEqual(want, d.op);
                             try testing.expectEqual(a_slot, d.a);
                             try testing.expectEqual(b_slot, d.b);
-                            const nrec = image.instructions[pc + 1];
-                            var nd = llir.decode(nrec).?;
-                            if (nd.op == .not) nd = llir.decode(image.instructions[pc + 2]).?;
+                            const nd = llir.decode(image.instructions[pc + 1]).?;
                             try testing.expectEqual(llir.Opcode.copy, nd.op);
                             try testing.expectEqual(b.slotOf(ins.results[0]), nd.a);
                             try testing.expectEqual(llir.cond_reg, nd.b);
@@ -1910,17 +1900,15 @@ test "LLIR lowering: hand-written comparison and cast records, full opcode table
                             try testing.expectEqual(b.slotOf(bin.a), d.a);
                             try testing.expectEqual(b.slotOf(bin.b), d.b);
                             try testing.expectEqual(@as(u32, 0), d.c);
-                            const nrec = image.instructions[pc + 1];
-                            var nd = llir.decode(nrec).?;
-                            if (nd.op == .not) nd = llir.decode(image.instructions[pc + 2]).?;
+                            const nd = llir.decode(image.instructions[pc + 1]).?;
                             try testing.expectEqual(llir.Opcode.copy, nd.op);
                             try testing.expectEqual(b.slotOf(ins.results[0]), nd.a);
                             try testing.expectEqual(llir.cond_reg, nd.b);
                         } else {
                             // The E-type families: the record carries the
-                            // compared operands (`gt`, and float `ge`,
-                            // swap them) and the result slot is
-                            // materialized by `copy dst, cond` at pc + 1.
+                            // compared operands (`gt`, and `ge`, swap
+                            // them) and the result slot is materialized
+                            // by `copy dst, cond` at pc + 1.
                             const want: llir.Opcode = switch (tag) {
                                 .eq => switch (prim) {
                                     .int32 => .seq,
@@ -1940,9 +1928,9 @@ test "LLIR lowering: hand-written comparison and cast records, full opcode table
                                     .float32 => .slt_f32,
                                     else => unreachable,
                                 },
-                                .le => switch (prim) {
-                                    .int32 => .slt,
-                                    .uint32, .byte => .sltu,
+                                .le, .ge => switch (prim) {
+                                    .int32 => .sle,
+                                    .uint32, .byte => .sleu,
                                     .float32 => .sle_f32,
                                     else => unreachable,
                                 },
@@ -1952,23 +1940,15 @@ test "LLIR lowering: hand-written comparison and cast records, full opcode table
                                     .float32 => .slt_f32,
                                     else => unreachable,
                                 },
-                                .ge => switch (prim) {
-                                    .int32 => .slt,
-                                    .uint32, .byte => .sltu,
-                                    .float32 => .sle_f32,
-                                    else => unreachable,
-                                },
                                 else => unreachable,
                             };
-                            const swapped = (tag == .gt) or (tag == .le and prim != .float32) or (tag == .ge and prim == .float32);
+                            const swapped = (tag == .gt) or (tag == .ge);
                             const a_slot = b.slotOf(if (swapped) bin.b else bin.a);
                             const b_slot = b.slotOf(if (swapped) bin.a else bin.b);
                             try testing.expectEqual(want, d.op);
                             try testing.expectEqual(a_slot, d.a);
                             try testing.expectEqual(b_slot, d.b);
-                            const nrec = image.instructions[pc + 1];
-                            var nd = llir.decode(nrec).?;
-                            if (nd.op == .not) nd = llir.decode(image.instructions[pc + 2]).?;
+                            const nd = llir.decode(image.instructions[pc + 1]).?;
                             try testing.expectEqual(llir.Opcode.copy, nd.op);
                             try testing.expectEqual(b.slotOf(ins.results[0]), nd.a);
                             try testing.expectEqual(llir.cond_reg, nd.b);

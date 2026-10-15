@@ -232,8 +232,8 @@ test "LLIR lowering: 64-bit integer and f64 ops specialize by type" {
     // typed matrix: i64/u64 get the typed integer opcodes (the
     // `u` rep split for div/rem/ordering), f64 its own opcode block,
     // and every comparison is a E-type family member writing the
-    // implicit `cond`, materialized by `copy dst, cond` (le/gt are the
-    // operand-swap aliases — no `gtu`+`not` synthesis exists in v9).
+    // implicit `cond`, materialized by `copy dst, cond` (`gt` is the
+    // operand-swap alias; `le` is now the direct `sle`/`sleu`).
     var seen = std.StaticBitSet(512).initEmpty();
     for (program.funcs, 0..) |_, fi| {
         const range = b.block_ranges.items[fi];
@@ -285,8 +285,8 @@ test "LLIR lowering: 64-bit integer and f64 ops specialize by type" {
                             else => unreachable,
                         };
                         const oprim = bin.a.type_.primitive;
-                        // v9: the E-type families — `gt` and float
-                        // `ge` lower through the operand-swap aliases
+                        // The E-type families — `gt` and `ge`
+                        // lower through the operand-swap aliases
                         // (`a > b` ≡ `slt b, a`, `a >= b` ≡ `sle b, a`;
                         // the swap preserves every predicate's NaN
                         // behavior).
@@ -294,28 +294,22 @@ test "LLIR lowering: 64-bit integer and f64 ops specialize by type" {
                             .int64 => switch (tag) {
                                 .eq => .seq,
                                 .ne => .sne,
-                                .lt => .slt,
-                                .gt => .slt,
-                                .le => .slt,
-                                .ge => .slt,
+                                .lt, .gt => .slt,
+                                .le, .ge => .sle,
                                 else => unreachable,
                             },
                             .uint64 => switch (tag) {
                                 .eq => .seq,
                                 .ne => .sne,
-                                .lt => .sltu,
-                                .gt => .sltu,
-                                .le => .sltu,
-                                .ge => .sltu,
+                                .lt, .gt => .sltu,
+                                .le, .ge => .sleu,
                                 else => unreachable,
                             },
                             .float64 => switch (tag) {
                                 .eq => .seq_f64,
                                 .ne => .sne_f64,
-                                .lt => .slt_f64,
-                                .gt => .slt_f64,
-                                .le => .sle_f64,
-                                .ge => .sle_f64,
+                                .lt, .gt => .slt_f64,
+                                .le, .ge => .sle_f64,
                                 else => unreachable,
                             },
                             else => unreachable,
@@ -326,8 +320,7 @@ test "LLIR lowering: 64-bit integer and f64 ops specialize by type" {
                         // Every E-type comparison writes the implicit
                         // `cond`; the SSA bool result is materialized by
                         // `copy dst, cond` right after.
-                        var nd = llir.decode(image.instructions[pc + 1]).?;
-                        if (nd.op == .not) nd = llir.decode(image.instructions[pc + 2]).?;
+                        const nd = llir.decode(image.instructions[pc + 1]).?;
                         try testing.expectEqual(llir.Opcode.copy, nd.op);
                         try testing.expectEqual(b.slotOf(ins.results[0]), nd.a);
                         try testing.expectEqual(llir.cond_reg, nd.b);
@@ -346,7 +339,8 @@ test "LLIR lowering: 64-bit integer and f64 ops specialize by type" {
     // the operand rep — `iadd` is `add.i64`, `usub` `sub.u64`, `udiv`
     // `div.u64`, `ineg` `neg.i64`, `ishl` `shl.i64`, `ushr` `shr.u64`
     // — the bitwise ops stay widthless, and every comparison is a
-    // E-type family member (integer `le`/`ge` synthesize `not(slt)`).
+    // E-type family member (`le`/`ge` select the single `sle`/`sleu`
+    // or `sle.f64`).
     const want_seen = [_]llir.Opcode{
         .add_i64,
         .sub_u64,
@@ -374,6 +368,8 @@ test "LLIR lowering: 64-bit integer and f64 ops specialize by type" {
         .sne_f64,
         .slt,
         .sltu,
+        .sle,
+        .sleu,
         .slt_f64,
         .sle_f64,
         .copy,
@@ -826,13 +822,13 @@ test "LLIR lowering: seq/sne/slt/sle over all six reps write cond, then copy dst
 
     const cases = [_]struct { name: []const u8, want: llir.Opcode, swapped: bool }{
         .{ .name = "app.i32eq", .want = .seq, .swapped = false },     .{ .name = "app.i32ne", .want = .sne, .swapped = false },
-        .{ .name = "app.i32lt", .want = .slt, .swapped = false },     .{ .name = "app.i32ge", .want = .slt, .swapped = false },
+        .{ .name = "app.i32lt", .want = .slt, .swapped = false },     .{ .name = "app.i32ge", .want = .sle, .swapped = true },
         .{ .name = "app.u32eq", .want = .seq, .swapped = false },     .{ .name = "app.u32ne", .want = .sne, .swapped = false },
-        .{ .name = "app.u32lt", .want = .sltu, .swapped = false },    .{ .name = "app.u32ge", .want = .sltu, .swapped = false },
+        .{ .name = "app.u32lt", .want = .sltu, .swapped = false },    .{ .name = "app.u32ge", .want = .sleu, .swapped = true },
         .{ .name = "app.i64eq", .want = .seq, .swapped = false },     .{ .name = "app.i64ne", .want = .sne, .swapped = false },
-        .{ .name = "app.i64lt", .want = .slt, .swapped = false },     .{ .name = "app.i64ge", .want = .slt, .swapped = false },
+        .{ .name = "app.i64lt", .want = .slt, .swapped = false },     .{ .name = "app.i64ge", .want = .sle, .swapped = true },
         .{ .name = "app.u64eq", .want = .seq, .swapped = false },     .{ .name = "app.u64ne", .want = .sne, .swapped = false },
-        .{ .name = "app.u64lt", .want = .sltu, .swapped = false },    .{ .name = "app.u64ge", .want = .sltu, .swapped = false },
+        .{ .name = "app.u64lt", .want = .sltu, .swapped = false },    .{ .name = "app.u64ge", .want = .sleu, .swapped = true },
         .{ .name = "app.f32eq", .want = .seq_f32, .swapped = false }, .{ .name = "app.f32ne", .want = .sne_f32, .swapped = false },
         .{ .name = "app.f32lt", .want = .slt_f32, .swapped = false }, .{ .name = "app.f32ge", .want = .sle_f32, .swapped = true },
         .{ .name = "app.f64eq", .want = .seq_f64, .swapped = false }, .{ .name = "app.f64ne", .want = .sne_f64, .swapped = false },
@@ -860,9 +856,8 @@ test "LLIR lowering: seq/sne/slt/sle over all six reps write cond, then copy dst
                         try testing.expectEqual(a_slot, d.a);
                         try testing.expectEqual(b_slot, d.b);
                         // The materialization record right after:
-                        // `copy dst, cond`.
-                        var cp = llir.decode(image.instructions[pc + 1]).?;
-                        if (cp.op == .not) cp = llir.decode(image.instructions[pc + 2]).?;
+                        // `copy dst, cond` — no `not` invert follows.
+                        const cp = llir.decode(image.instructions[pc + 1]).?;
                         try testing.expectEqual(llir.Opcode.copy, cp.op);
                         try testing.expectEqual(b.slotOf(ins.results[0]), cp.a);
                         try testing.expectEqual(llir.cond_reg, cp.b);
@@ -881,13 +876,13 @@ test "LLIR lowering: seq/sne/slt/sle over all six reps write cond, then copy dst
     }
 }
 
-test "LLIR lowering: gt and integer le swap operands; float le is the direct sle" {
-    // `a > b` ≡ `slt b, a`; integer `le` synthesizes `not(slt b, a)`;
-    // float `le` is the direct `sle a, b` primitive (no `sge` opcode —
-    // `a >= b` ≡ `sle b, a`). The operand swaps preserve the NaN
-    // behavior of every predicate. Checked across an integer rep (i32)
-    // and a float rep (f64), where the ordering is observable in the
-    // record.
+test "LLIR lowering: gt swaps operands; integer le is the direct sle" {
+    // `a > b` ≡ `slt b, a`; integer `le` is the direct `sle a, b`
+    // (`ge` uses the same opcode with a swap — `a >= b` ≡ `sle b, a`);
+    // float `le` is the direct `sle.f32`/`sle.f64` primitive. The
+    // operand swaps preserve the NaN behavior of every predicate.
+    // Checked across an integer rep (i32) and a float rep (f64), where
+    // the ordering is observable in the record.
     const src = try helpers.probeSource("probes/cases", "wide_gt_and_le_operand_swap");
     defer testing.allocator.free(src);
     var c = try compileText("app", &.{.{ "app", src }});
@@ -901,7 +896,7 @@ test "LLIR lowering: gt and integer le swap operands; float le is the direct sle
 
     const cases = [_]struct { name: []const u8, want: llir.Opcode, swapped: bool }{
         .{ .name = "app.i32gt", .want = .slt, .swapped = true },
-        .{ .name = "app.i32le", .want = .slt, .swapped = true },
+        .{ .name = "app.i32le", .want = .sle, .swapped = false },
         .{ .name = "app.f64gt", .want = .slt_f64, .swapped = true },
         .{ .name = "app.f64le", .want = .sle_f64, .swapped = false },
     };
@@ -919,12 +914,18 @@ test "LLIR lowering: gt and integer le swap operands; float le is the direct sle
                     .gt, .le => |bin| {
                         const d = llir.decode(image.instructions[pc]).?;
                         try testing.expectEqual(case_.want, d.op);
-                        // `gt` and integer `le` swap operands (a = rhs,
-                        // b = lhs); float `le` is the direct `sle a, b`.
+                        // `gt` and `ge` swap operands (a = rhs,
+                        // b = lhs); `le` is the direct `sle a, b`.
                         const a_slot = b.slotOf(if (case_.swapped) bin.b else bin.a);
                         const b_slot = b.slotOf(if (case_.swapped) bin.a else bin.b);
                         try testing.expectEqual(a_slot, d.a);
                         try testing.expectEqual(b_slot, d.b);
+                        // One comparison record, then `copy dst, cond` —
+                        // no `not` invert record follows.
+                        const cp = llir.decode(image.instructions[pc + 1]).?;
+                        try testing.expectEqual(llir.Opcode.copy, cp.op);
+                        try testing.expectEqual(b.slotOf(ins.results[0]), cp.a);
+                        try testing.expectEqual(llir.cond_reg, cp.b);
                         n_cmp += 1;
                     },
                     else => {},
@@ -951,11 +952,11 @@ test "LLIR lowering: byte comparisons lower through the u32 variants" {
     var b = cfg_lower_llir.Builder.init(arena.allocator(), program);
     const image = try b.lowerLlir();
 
-    const cases = [_]struct { name: []const u8, want: llir.Opcode }{
-        .{ .name = "app.beq", .want = .seq },
-        .{ .name = "app.bne", .want = .sne },
-        .{ .name = "app.blt", .want = .sltu },
-        .{ .name = "app.bge", .want = .sltu },
+    const cases = [_]struct { name: []const u8, want: llir.Opcode, swapped: bool }{
+        .{ .name = "app.beq", .want = .seq, .swapped = false },
+        .{ .name = "app.bne", .want = .sne, .swapped = false },
+        .{ .name = "app.blt", .want = .sltu, .swapped = false },
+        .{ .name = "app.bge", .want = .sleu, .swapped = true },
     };
     var n_cmp: usize = 0;
     for (cases) |case_| {
@@ -971,8 +972,10 @@ test "LLIR lowering: byte comparisons lower through the u32 variants" {
                     .eq, .ne, .lt, .ge => |bin| {
                         const d = llir.decode(image.instructions[pc]).?;
                         try testing.expectEqual(case_.want, d.op);
-                        try testing.expectEqual(b.slotOf(bin.a), d.a);
-                        try testing.expectEqual(b.slotOf(bin.b), d.b);
+                        const a_slot = b.slotOf(if (case_.swapped) bin.b else bin.a);
+                        const b_slot = b.slotOf(if (case_.swapped) bin.a else bin.b);
+                        try testing.expectEqual(a_slot, d.a);
+                        try testing.expectEqual(b_slot, d.b);
                         n_cmp += 1;
                     },
                     else => {},

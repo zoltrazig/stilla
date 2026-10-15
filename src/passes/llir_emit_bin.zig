@@ -12,12 +12,12 @@
 //! Format (all little-endian, fixed-width, no padding, no pointers):
 //! ```text
 //! u32 magic   = 0x52494c4c ("LLIR" as little-endian bytes)
-//! u32 version = 18
+//! u32 version = 19
 //! module symbol {start, len}: u32, u32  (self_symbol's byte range)
 //! entry member {start, len}: u32, u32   (entry_member's byte range)
 //! {tables.len} × u32 count, one per table, in the LlirProgram field order below
 //! the tables, in the same order: each table is count_i × row bytes
-//!   instructions:    Instr         (4 canonical bytes, v10 encoding)
+//!   instructions:    Instr         (4 canonical bytes, v11 encoding)
 //!   functions:       FunctionDesc  (code_start, code_end, entry_pc,
 //!                    signature_id: u32, f_count: u16, x_count: u32,
 //!                    window_count: u16 — 28 bytes/row)
@@ -80,8 +80,9 @@ pub const magic: u32 = 0x52494c4c;
 /// B 20 / C 42 / E 44 / I 31 / U 4), the I-type keeps its former
 /// `result_take` selector 10 reserved so the `slot_*` encodings never
 /// move, and `take dst, F(L+3+O-A)` replaces the post-call
-/// `result_take dst, W-A`. The instruction encoding itself stays v10
-/// from here on.
+/// `result_take dst, W-A`. The instruction encoding keeps this v10
+/// revision through binary version 18 and becomes v11 at version 19
+/// (the `sle`/`sleu` addition below).
 /// Version 11: `ModuleDesc` gains the module specifier
 /// (`spec_start`/`spec_len` into the `strings` blob — the identity a
 /// host dispatches `HostBinding`s by), two further `u32`s per module
@@ -127,7 +128,12 @@ pub const magic: u32 = 0x52494c4c;
 /// 0–21 are assigned; the logical table is now 271 opcodes). The
 /// instruction encoding changes, so all earlier images are rejected on
 /// the version alone.
-pub const version: u32 = 18;
+/// Version 19: `sle`/`sleu` were added at E-type selectors 10/11 and
+/// every following E selector shifted up by two (the former-E block now
+/// opens at selector 66; the logical table is now 273 opcodes). The
+/// instruction encoding changes, so all earlier images are rejected on
+/// the version alone.
+pub const version: u32 = 19;
 
 /// The scalar header fields serialized inside the table block (count 1
 /// + one value word each) — listed by name because `TypeId == u32`.

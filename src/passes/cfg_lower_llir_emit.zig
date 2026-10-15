@@ -32,7 +32,7 @@ const Builder = lower.Builder;
 /// The cross-module import staging register: the T cell the
 /// `module_ref` + `load_member` import path stages the module handle
 /// through (a cross-module `fn_ref`, and a cross-module direct call).
-/// v10 note: this is no longer the arithmetic staging cell — the typed
+/// v11 note: this is no longer the arithmetic staging cell — the typed
 /// integer opcodes need no staging (Instruction Set §4).
 const norm_stage: u32 = llir.temp_base + (llir.temp_count - 1);
 
@@ -120,7 +120,7 @@ fn emitInterned(bld: *Builder) error{OutOfMemory}!void {
                             bld.setR(blk, idx + 1, .load_member, bld.slotOf(ins.results[0]), norm_stage, desc);
                         }
                     },
-                    // v10+: the operand is the module's `SymbolId` — the
+                    // v11+: the operand is the module's `SymbolId` — the
                     // module's own symbol or an imported module's; the
                     // runtime loads and initializes the target before the
                     // record writes the module handle.
@@ -249,7 +249,7 @@ fn emitArith(bld: *Builder) error{OutOfMemory}!void {
 /// self-canonicalizes its result cell (Instruction Set §4) — exactly
 /// one record, the register form. Const+op immediate fusion is the
 /// fusion pass's job (pass 2b rewrites this record to the immediate
-/// form and kills the const); no staging records exist in v10.
+/// form and kills the const); no staging records exist in v11.
 fn emitBinArith(bld: *Builder, blk: *const cfg.BasicBlock, idx: u32, op: typed.TypedOp) void {
     const t = op.type_;
     const dst = bld.slotOf(op.result);
@@ -269,12 +269,13 @@ fn emitBinArith(bld: *Builder, blk: *const cfg.BasicBlock, idx: u32, op: typed.T
     }
 }
 
-/// Emit the fast-path comparison and cast records — the v9
-/// E-type schema: a comparison writes the implicit `cond` and the
+/// Emit the fast-path comparison and cast records — the E-type
+/// schema: a comparison writes the implicit `cond` and the
 /// lowering materializes the SSA bool result with `copy dst, cond`
-/// right after; `sle` is the float non-strict primitive (`a >= b`
-/// ≡ `sle b, a`, `a > b` ≡ `slt b, a` — the swap preserves the NaN
-/// behavior of every predicate). The
+/// right after (two records, no invert). `sle`/`sleu` are the integer
+/// non-strict primitives and `sle.f32`/`sle.f64` the float ones
+/// (`a >= b` ≡ `sle b, a`, `a > b` ≡ `slt b, a` — the swap preserves
+/// the NaN behavior of every predicate). The
 /// `cvt.<src>.<dst>` casts are the single-record E-type forms.
 fn emitCompare(bld: *Builder) error{OutOfMemory}!void {
     for (bld.ordered_funcs.items, 0..) |_, fi| {
@@ -289,12 +290,7 @@ fn emitCompare(bld: *Builder) error{OutOfMemory}!void {
                         const dst = bld.slotOf(ins.results[0]);
                         const sel = cmpSel(std.meta.activeTag(ins.op), bin);
                         bld.setE(blk, idx, sel.op, bld.slotOf(sel.a), bld.slotOf(sel.b));
-                        if (sel.invert) {
-                            bld.setE(blk, idx + 1, .not, llir.cond_reg, llir.cond_reg);
-                            bld.setE(blk, idx + 2, .copy, dst, llir.cond_reg);
-                        } else {
-                            bld.setE(blk, idx + 1, .copy, dst, llir.cond_reg);
-                        }
+                        bld.setE(blk, idx + 1, .copy, dst, llir.cond_reg);
                     },
                     .num_cast => |v| {
                         const op = castOpcode(v.type_, ins.results[0].type_);
@@ -346,23 +342,26 @@ fn emitSelect(bld: *Builder) error{OutOfMemory}!void {
     }
 }
 
-/// The typed E-type comparison selection for a CFG comparison.
-/// `sle` is the float non-strict primitive (`a <= b` ≡ `sle a, b`,
-/// `a >= b` ≡ `sle b, a` — the swap preserves the NaN behavior),
-/// `gt` is the strict swap alias (`a > b` ≡ `slt b, a`), and
-/// integer `le`/`ge` synthesize `not(slt)`.
-/// `byte` comparisons lower through the `u32` reps.
-/// Shared with the control pass's fused-branch recognition, which
-/// derives the B-type branch form from the same selection.
-pub const CmpSel = struct { op: llir.Opcode, a: *const cfg.Value, b: *const cfg.Value, invert: bool = false };
+/// The E-type comparison selection for a CFG comparison. All six
+/// comparison tags lower through the `.compare` rule: `llir.cmpOpcode`
+/// supplies the base E-type opcode (`seq`/`sne`/`slt`/`sle`), and this
+/// helper owns the operand order. `le` uses `sle`/`sleu` for integers
+/// and `sle.f32`/`sle.f64` for floats (`a <= b` ≡ `sle a, b`), `ge` uses
+/// the same opcode with the operands swapped (`a >= b` ≡ `sle b, a` —
+/// the swap preserves the NaN behavior), and `gt` lowers through the
+/// strict operand swap (`a > b` ≡ `slt b, a`). `byte` comparisons lower
+/// through the `u32` reps. Shared with the control pass's fused-branch
+/// recognition, which derives the B-type branch form from the same
+/// selection.
+pub const CmpSel = struct { op: llir.Opcode, a: *const cfg.Value, b: *const cfg.Value };
 pub fn cmpSel(tag: cfg.OpTag, bin: cfg.Bin) CmpSel {
     return switch (tag) {
-        .eq => .{ .op = llir.typedOpcode(.eq, bin.a.type_, undefined).?, .a = bin.a, .b = bin.b },
-        .ne => .{ .op = llir.typedOpcode(.ne, bin.a.type_, undefined).?, .a = bin.a, .b = bin.b },
-        .lt => .{ .op = llir.typedOpcode(.lt, bin.a.type_, undefined).?, .a = bin.a, .b = bin.b },
-        .le => if (Builder.isInteger(bin.a.type_)) .{ .op = llir.typedOpcode(.lt, bin.a.type_, undefined).?, .a = bin.b, .b = bin.a, .invert = true } else .{ .op = llir.typedOpcode(.le, bin.a.type_, undefined).?, .a = bin.a, .b = bin.b },
-        .gt => .{ .op = llir.typedOpcode(.lt, bin.a.type_, undefined).?, .a = bin.b, .b = bin.a },
-        .ge => if (Builder.isInteger(bin.a.type_)) .{ .op = llir.typedOpcode(.lt, bin.a.type_, undefined).?, .a = bin.a, .b = bin.b, .invert = true } else .{ .op = llir.typedOpcode(.ge, bin.a.type_, undefined).?, .a = bin.b, .b = bin.a },
+        .eq => .{ .op = llir.cmpOpcode(.eq, bin.a.type_).?, .a = bin.a, .b = bin.b },
+        .ne => .{ .op = llir.cmpOpcode(.ne, bin.a.type_).?, .a = bin.a, .b = bin.b },
+        .lt => .{ .op = llir.cmpOpcode(.lt, bin.a.type_).?, .a = bin.a, .b = bin.b },
+        .le => .{ .op = llir.cmpOpcode(.le, bin.a.type_).?, .a = bin.a, .b = bin.b },
+        .gt => .{ .op = llir.cmpOpcode(.lt, bin.a.type_).?, .a = bin.b, .b = bin.a },
+        .ge => .{ .op = llir.cmpOpcode(.le, bin.a.type_).?, .a = bin.b, .b = bin.a },
         else => unreachable,
     };
 }
@@ -532,7 +531,7 @@ fn emitCallInstr(bld: *Builder, blk: *const cfg.BasicBlock, idx: u32, ins: *cons
             }
         },
         .value => |v| {
-            // v10: the function value is an executable entry PC in the
+            // v11: the function value is an executable entry PC in the
             // base register; `jalr ra, base, 0` calls it. The base
             // may be an F/T/zero source; the link is the fixed `ra`.
             bld.setI(blk, call_idx, .jalr, bld.slotOf(v), 0);

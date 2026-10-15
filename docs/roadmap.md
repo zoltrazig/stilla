@@ -368,7 +368,7 @@ rationale; the authoritative design detail stays in this file.
   deliberately deferred until profiling or a feature request provides
   evidence, and must not shape the public API or add fields to every runtime
   object preemptively: true direct threading (per-instruction jump addresses,
-  gated on measurement); a predecode cache (v10 opcodes are already typed, so
+  gated on measurement); a predecode cache (v11 opcodes are already typed, so
   a cache would only save decode, not re-typing — measure first); a stable
   persistence ABI for LLIR binaries; debugger metadata, stepping, snapshots,
   or suspension; asynchronous or reentrant host calls; and JIT compilation,

@@ -19,6 +19,15 @@ The detailed probes cover the source-reachable operation/type matrix:
   they materialize the constant and take the register compare. `main`
   prints each outcome, so the consumers / SEG on-off differentials compare
   the fused and unfused branches' observable behavior
+- `bool_str_branch.st`: the general bool test that a `bool`/`str` equality
+  branch takes
+  ([Stilla LLIR Instruction Set.md](../spec/Stilla%20LLIR%20Instruction%20Set.md)
+  §5.1). A `bool`/`str` `==`/`!=` has no numeric ordering branch, so the
+  register fused form rejects the non-numeric rep and the branch tests the
+  materialized condition against zero (`bne cond, zero` / `beq cond, zero`)
+  instead of selecting `bltu`/`bleu` over the bool/str slots; `main` prints
+  each outcome, so the consumers / SEG on-off differentials compare the
+  fixed branch's observable behavior
 - `comparisons.st`: value and branch comparisons for numeric, byte, bool, and str
 - `casts.st`: the 20 non-identity casts among byte, int32, uint32, float32, and
   float64 (the five-type subset of the full 7-type / 42-cast family); the

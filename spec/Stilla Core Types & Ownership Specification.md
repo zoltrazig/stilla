@@ -1364,7 +1364,7 @@ Core arithmetic is defined as follows:
 - `str + str -> str`;
 - unary `-` accepts `int32`, `uint32`, `int64`, `uint64`, `float32`, or `float64`;
 - `!`, `and`, and `or` accept `bool`;
-- `< <= > >=` accept operands of the same numeric type;
+- `< <= > >=` accept operands of the same numeric type, and also `byte` operands (compared as unsigned 8-bit values);
 - `== !=` are required for `byte`, `int32`, `uint32`, `int64`, `uint64`, `float32`, `float64`, `bool`, and `str`.
 
 Integer `/` truncates toward zero. Integer `/` and `%` by zero trap

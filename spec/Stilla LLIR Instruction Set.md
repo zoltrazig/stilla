@@ -1,6 +1,6 @@
 # Stilla LLIR Instruction Set
 
-> **Version:** v1.3 Draft (v10 encoding)
+> **Version:** v1.3 Draft (v11 encoding)
 >
 > This document is the **canonical, standalone
 > definition of the instruction set** — the 32-bit (4-byte) fixed-width
@@ -14,7 +14,7 @@
 > `Opcode` enum and the shared `encode`/`decode` mapping are exhaustive over
 > the opcode set, so the code and this document must be updated together.
 >
-> In the **v10** encoding, the numeric semantics of
+> In the **v11** encoding, the numeric semantics of
 > every operation are written into the logical opcode at CFG → LLIR lowering
 > time, so the serialized instruction record carries its own
 > numeric semantics — loading decodes each record once into the VM's fixed
@@ -37,8 +37,8 @@
 4. [Opcode tables: R-type](#4-opcode-tables-r-type)
 5. [Opcode tables: B-type](#5-opcode-tables-b-type)
 6. [Opcode tables: I-type](#6-opcode-tables-i-type)
-7. [Opcode tables: E-type — comparisons and casts](#7-opcode-tables-e-type--comparisons-and-casts-selectors-063)
-8. [Opcode tables: E-type — unary, transfer, lifecycle, and control](#8-opcode-tables-e-type--unary-transfer-lifecycle-and-control-selectors-64107)
+7. [Opcode tables: E-type — comparisons and casts](#7-opcode-tables-e-type--comparisons-and-casts-selectors-065)
+8. [Opcode tables: E-type — unary, transfer, lifecycle, and control](#8-opcode-tables-e-type--unary-transfer-lifecycle-and-control-selectors-66109)
 9. [Opcode tables: U-type](#9-opcode-tables-u-type)
 10. [Immediate operands and fusion windows](#10-immediate-operands-and-fusion-windows)
 11. [Control flow, branches, and jumps](#11-control-flow-branches-and-jumps)
@@ -123,29 +123,48 @@ encoded selectors are disjoint spaces that only `opInfo` connects.
 
 ## 2.1 Top-level classification
 
-The top two bits classify every word; there is no fallback format:
+Every word is classified by its leading bits into exactly one of the five
+formats — R, B, I, E, and U — or into the reserved class. There is no
+fallback format, and an ordered decoder produces exactly one format for
+every assigned opcode:
 
-| top 2 bits | class | further decoding |
-| --- | --- | --- |
-| `00` | R-type | `code(9) \| a(7) \| b(7) \| c(7)` (§4) |
-| `01` | B-type | `code(6) \| lhs(7) \| rhs_or_imm7(7) \| offs10` (§5) |
-| `10` | **reserved class** | every word with top bits `10` is rejected |
-| `11` | other | `110` → I-type; `11100` → E-type; `11101`/`11110`/`11111` → the three U-type prefixes — `11101` includes its `a` field, so `ra` selects `jal` and `zero` selects `j` (§6–§9) |
+| format | discriminant | layout | opcode tables |
+| --- | --- | --- | --- |
+| R-type | top 2 bits `00` | `code(9) \| a(7) \| b(7) \| c(7)` | §4 |
+| B-type | top 2 bits `01` | `code(6) \| lhs(7) \| rhs_or_imm7(7) \| offs10` | §5 |
+| I-type | prefix `110` (top 3 bits) | `code(6) \| a(7) \| imm16` | §6 |
+| E-type | prefix `11100` (top 5 bits) | `selector(7) \| reserved(6) = 0 \| a(7) \| b(7)` | §7–§8 |
+| U-type | prefixes `11101`/`11110`/`11111` (top 5 bits) | `op(5) \| a(7) \| imm20` | §9 |
+| reserved class | top 2 bits `10` | every such word is rejected | §14 |
 
-Within `11`, decoding proceeds in order: the 3-bit prefix `110` selects
-I-type; the 5-bit prefix `11100` selects E-type; the
-5-bit prefixes `11101`/`11110`/`11111` select the U-type opcodes, where
-prefix `11101` carries its `a` field in the match — `a = ra` → `jal`,
-`a = zero` (`0x00`) → `j`, any other `a` rejected (§9.1). E-type is a
-single format whose 7-bit selector (bits 26:20) spans `0–127`: the
-selector's top bit (bit 26) splits the comparisons and casts (`0–63`)
-from the unary, transfer, lifecycle, and control opcodes (`64–107`,
-§7–§8). The
-prefixes are pairwise disjoint (the 5-bit E and U prefixes differ in bit
-27 — clear for E, set for U — and `110` is the only 3-bit form), so an
-ordered decoder produces exactly one format for every assigned opcode and
-rejects everything else — including `10`-class words and the unassigned
-code/reserved-field combinations of §14.
+The discriminants are nested: the top two bits select R-type (`00`) and
+B-type (`01`) outright, while `11` covers I, E, and U, whose
+discriminants inspect further prefix bits. Within `11`, decoding proceeds
+in order: the 3-bit prefix `110` selects I-type; the 5-bit prefix
+`11100` selects E-type; the 5-bit prefixes `11101`/`11110`/`11111`
+select the U-type opcodes, where prefix `11101` carries its `a` field in
+the match — `a = ra` → `jal`, `a = zero` (`0x00`) → `j`, any other `a`
+rejected (§9.1). E-type is a single format whose 7-bit selector (bits
+26:20) spans `0–127`: its selector space is contiguous, holding the
+comparisons and casts (`0–65`) and the unary, transfer, lifecycle, and
+control opcodes (`66–109`, §7–§8). The prefixes are pairwise disjoint
+(the 5-bit E and U prefixes differ in bit 27 — clear for E, set for U —
+and `110` is the only 3-bit form), so an ordered decoder produces exactly
+one format for every assigned opcode and rejects everything else —
+including `10`-class words and the unassigned code/reserved-field
+combinations of §14.
+
+**Reserved words.** The `10` class is reserved for a future format: no
+assigned opcode uses it, and a decoder must reject every `10`-class word.
+The remaining reserved positions are alignment holes that hold earlier
+encodings fixed: the E-type selectors `72/73` (the former
+`sext32`/`zext32` slots), `79/81/83/85` (the retired unsigned
+`clz`/`popcount` slots), and the I-type selector 10 (the former
+`result_take` slot). U-type has no reserved position: its three 5-bit
+prefixes (`11101`/`11110`/`11111`) are all assigned, carrying its four
+opcodes. Every other position outside an assigned range is simply
+unassigned — the E selectors `110–127`, the R codes `112–511`, the B codes
+`22–63`, and the I codes `32–63`. §14 lists every rejection.
 
 ## 2.2 The five formats
 
@@ -153,18 +172,17 @@ code/reserved-field combinations of §14.
 R-type: 00 | code(9) | a(7) | b(7) | c(7)        512 codes, 112 assigned
 B-type: 01 | code(6) | lhs(7) | rhs_or_imm7(7) | offs10   64 codes, 22 assigned
 I-type: 110 | code(6) | a(7) | imm16              64 codes, 31 assigned
-E-type: 11100 | selector(7) | reserved(6) = 0 | a(7) | b(7)  128 selectors, 102 assigned
+E-type: 11100 | selector(7) | reserved(6) = 0 | a(7) | b(7)  128 selectors, 104 assigned
 U-type: op(5) | a(7) | imm20                      4 opcodes (11101 (incl. a) ×2 / 11110 / 11111)
 ```
 
 U-type carries four opcodes under three prefixes: `auipc`/`lui` own
 `11110`/`11111`, and prefix `11101` holds both jumps, its `a` field
 part of the prefix match (`ra` = `jal`, `zero` = `j`, §9.1). E-type is one
-format with a contiguous 7-bit selector space: the selector's top bit
-(bit 26) splits the 64 comparisons and casts (`0–63`, all assigned, §7)
-from the 38 unary, transfer, lifecycle, and control opcodes
-(`64–107`, with the holes `70/71/77/79/81/83`; §8). Selectors `108–127`
-are reserved (§14).
+format with a contiguous 7-bit selector space: the comparisons and casts
+(`0–65`, all assigned, §7) precede the 38 unary, transfer, lifecycle, and
+control opcodes (`66–109`, with the holes `72/73/79/81/83/85`; §8).
+Selectors `110–127` are reserved (§14).
 
 The opcode tables' **Behavior** column is normative pseudocode over these
 encoded fields. The surrounding family rules refine rep-dependent arithmetic,
@@ -187,11 +205,11 @@ ownership, trap, and control-flow details.
   `store_member`/the destructures/`switch`/`jr`, base for `jalr`);
   `imm16 = a 16-bit value` (§6).
 - **E**: `a` and `b` are 7-bit fields whose roles are fixed by the opcode
-  and its selector range. In the comparisons and casts (selectors `0–63`,
+  and its selector range. In the comparisons and casts (selectors `0–65`,
   §7), casts read `a = dst, b = src`; register comparisons read `a = lhs,
   b = rhs`; integer immediate comparisons read `a = lhs, b = imm7`; every
   comparison writes the implicit `cond` register. In the unary, transfer,
-  lifecycle, and control ops (selectors `64–107`, §8) the roles are fixed
+  lifecycle, and control ops (selectors `66–109`, §8) the roles are fixed
   per opcode. The six reserved bits are validated to be zero.
 - **U**: `a` is a 7-bit register field that also serves as the low
   discriminant of the `11101` prefix — the link for `jal` (only `ra`),
@@ -411,17 +429,17 @@ bitwise ops (`and`, `or`, `xor`, `andi`, `ori`, `xori`) — while an
 operation whose result canonicalization differs by signedness carries
 the full rep even when the arithmetic itself is sign-agnostic
 (`shl.i32`/`shl.u32`), because the result cell's top half is fixed by
-the rep. The logical values span `1–271` with no holes — by format: R
-`1–112`, B `113–134`, E `135–236`, I `237–267`, U `268–271`
+the rep. The logical values span `1–273` with no holes — by format: R
+`1–112`, B `113–134`, E `135–238`, I `239–269`, U `270–273`
 (sections below follow format class, so the numeric ranges interleave:
 the E-type sections §7–§8 precede I-type §6 in numeric order) — and every
 format's encoded selectors are contiguous except the **reserved holes**:
-R `0–111`, B `0–21`, E `0–127` **with `70/71/77/79/81/83` reserved and
-`108–127` reserved**, and I `0–31` **with selector 10 reserved**; U keeps
+R `0–111`, B `0–21`, E `0–127` **with `72/73/79/81/83/85` reserved and
+`110–127` reserved**, and I `0–31` **with selector 10 reserved**; U keeps
 `jal`/`j` on selector 0 (prefix `11101` matches its `a` field to tell
 them apart), `auipc` 1, `lui` 2. The reserved E-type selectors
-`70/71/77/79/81/83` and the reserved I-type selector 10 are the
-layout's only in-range alignment holes; E selectors `108–127` are simply
+`72/73/79/81/83/85` and the reserved I-type selector 10 are the
+layout's only in-range alignment holes; E selectors `110–127` are simply
 unassigned. `repOf` reads a family member's rep from its `opInfo` row.
 
 **The typed-integer model.** Every integer arithmetic opcode names its
@@ -785,14 +803,16 @@ materializes through `const` (or the move-wide family for `u64` patterns)
 
 **All comparisons** use the E-type comparison families in §7. Integer constants in the
 7-bit immediate window use the E-type `slti`/`sgti`/`seqi`/`snei` families;
-there are no R-type comparison forms. Integer `le`/`ge` have no opcodes:
-the frontend synthesizes them as `not` of a strict comparison —
-`a >= b ≡ !(a < b)`, `a <= b ≡ !(b < a)` (the register families are
-`slt`-shaped, so the register form swaps the operands; the immediate
-families have `sgti`/`sgtiu`, so `a <= k` is `not(sgti a, k)` with no
-swap) — two instructions, the comparison followed by `not` writing the
-result slot read-modify-write. The
-`byte` ordering uses `sltu` (with `not(sltu)` for the `ge` form); equality uses `seq`/`sne`.
+there are no R-type comparison forms. Integer `le`/`ge` are real
+cond-producing E-type comparison opcodes `sle`/`sleu` (the B-type
+`ble`/`bleu` register branches of §5.1 are the branch forms): the register
+form is a single comparison — `a <= b` is `sle`/`sleu a, b`, `a >= b` is
+`sle`/`sleu b, a` (the register families are `slt`-shaped, so `ge` swaps
+the operands). The immediate form folds the constant at compile time:
+`a <= k` → `slti a, k+1` and `a >= k` → `sgti a, k-1` (the `±1` is folded
+by the frontend, never a runtime instruction). The `byte` ordering uses
+`sltu`/`sleu` for the strict and non-strict forms; equality uses
+`seq`/`sne`.
 
 Integer comparison opcodes carry no width variant: the typed arithmetic
 of §4 stores every 32-bit result as its rep's canonical 64-bit cell, so
@@ -831,13 +851,14 @@ compare as signed `i64`, while `bltu`/`bleu` compare the same bits as
 unsigned `u64`.
 The float variants are IEEE ordered
 comparisons with NaN semantics: `beq.f32` is false on NaN, `bne.f32` true,
-`blt.f32`/`ble.f32` false on NaN. There is no `bgt`/`bge` register
-family: the
-greater relations are reached by an **operand swap** (`a > b` ≡ `blt b, a`,
+`blt.f32`/`ble.f32` false on NaN. The register family
+has no greater-than form: the frontend
+reaches the greater relations by **swapping the branch's two registers**
+(`a > b` ≡ `blt b, a`,
 `a >= b` ≡ `ble b, a`; unsigned `a >u b` ≡ `bltu b, a`, `a >=u b` ≡
 `bleu b, a`), which preserves the NaN behavior of every predicate. (The
 strict-`>` immediate forms are the separate `bgti`/`bgtiu` opcodes of
-§5.2; the swap here is what the register form falls back to.)
+§5.2; the register swap here is what the register form falls back to.)
 
 ## 5.2 Immediate compare-and-branches
 
@@ -845,17 +866,18 @@ The immediate families are the ordering `blti`/`bltiu`, the ordering
 `bgti`/`bgtiu`, and the equality `beqi`/`bnei` — six opcodes across three
 families; **no float variants are generated**. A strict `>` against a
 constant selects `bgti`/`bgtiu` directly. The non-strict `>=`/`<=`
-relations normalize to a strict predecessor first: `a >= k` becomes the
-strict `gt` of the predecessor (`sgti`/`sgtiu` with `k - 1`), and
-`a <= k` becomes `slt`/`sltu` followed by `not`; each result is a
-boolean tested against zero (e.g. `bne cond, zero`), not a dedicated
-immediate branch.
+relations normalize to a strict predecessor first, adjusting the constant
+at compile time: `a >= k` becomes the strict greater-than `bgti`/`bgtiu`
+with `k - 1`, and `a <= k` the strict less-than `blti`/`bltiu` with
+`k + 1`. A `<=`/`>=` whose adjusted constant falls outside the window has
+no immediate branch: the comparison materializes and its boolean is
+tested against zero (e.g. `bne cond, zero`).
 The middle field is `imm7`: the signed `blti`/`bgti` sign-extend it (exact
 range `[-64, 63]`); the unsigned `bltiu`/`bgtiu` zero-extend it (exact
 range `[0, 127]`). The frontend selects an immediate branch when an
-integer condition's strict ordering (`<`/`>`) or equality (`eq`/`ne`) has
-a constant operand — on either side — that fits the window; otherwise the
-register form (§5.1) is used.
+integer condition's ordering (`<`/`>`/`<=`/`>=`) or equality (`eq`/`ne`)
+has a constant operand — on either side — that fits the window; otherwise
+the register form (§5.1) is used.
 
 ## 5.3 Bit-test branches
 
@@ -1137,15 +1159,14 @@ The `movwn1`–`movwn3`, `movwz1`–`movwz3`, and `movwk1`–`movwk3` suffixes
 use lanes 1–3 with the same semantics as their lane-0 anchor, per the
 lane table above.
 
-# 7. Opcode tables: E-type — comparisons and casts (selectors 0–63)
+# 7. Opcode tables: E-type — comparisons and casts (selectors 0–65)
 
-These are the E-type selectors `0–63` (the former C-type): the
+These are the E-type selectors `0–65` (the former C-type): the
 comparison/cast half of the one E-type format, sharing the layout
-`11100 | selector(7) | reserved(6) = 0 | a(7) | b(7)` with the selector's
-top bit (bit 26) clear. All 64 selectors in this range are
-assigned. A
+`11100 | selector(7) | reserved(6) = 0 | a(7) | b(7)`. All 66 selectors
+in this range are assigned. A
 nonzero reserved field is rejected by validation. The two operand roles are
-fixed by the opcode group: the 42 casts read `a = dst, b = src`; the 16
+fixed by the opcode group: the 42 casts read `a = dst, b = src`; the 18
 register comparisons read `a = lhs, b = rhs`; the 6 integer immediate
 comparisons read `a = lhs, b = imm7`. Every comparison has an implicit
 destination.
@@ -1164,20 +1185,25 @@ out-of-range values (NaN becomes zero), the 64-bit targets saturating to
 rounds to nearest, ties-to-even; the `b` (byte) forms keep or produce the
 low 8 bits.
 
-**The 22 comparisons** include integer equality (`seq`/`sne`), signed and
-unsigned less-than (`slt`/`sltu`), explicit float variants including
+**The 24 comparisons** include integer equality (`seq`/`sne`), signed and
+unsigned less-than (`slt`/`sltu`), the signed and unsigned non-strict
+integer forms (`sle`/`sleu`), explicit float variants including
 `sle.f32`/`sle.f64`, the immediate forms (`slti`/`sltiu`/`sgti`/`sgtiu`/
-`seqi`/`snei`), plus `bool_eq`/`bool_ne` and
-`str_eq`/`str_ne`.
+`seqi`/`snei`), plus `bool_eq`/`bool_ne` and `str_eq`/`str_ne`.
 They compare `lhs` and `rhs` and **unconditionally
 overwrite `cond`**; the instruction carries no destination field. Signedness
 is explicit in the mnemonic. Every integer operand is already a canonical
-64-bit cell: `slt` compares as signed `i64`, while `sltu` compares the same
-bits as unsigned `u64`. The `byte` ordering uses the unsigned form. The float variants keep IEEE ordered/NaN
+64-bit cell: `slt`/`sle` compare as signed `i64`, while `sltu`/`sleu`
+compare the same bits as unsigned `u64`. The `byte` ordering uses the
+unsigned form. The float variants keep IEEE ordered/NaN
 semantics: `seq` false on NaN, `sne` true, `slt`/`sle` false on NaN.
-`ge`/`gt` are operand-swap aliases: `sge lhs, rhs` ≡ `sle rhs, lhs` and
-`sgt lhs, rhs` ≡ `slt rhs, lhs` (same rep — swap preserves the NaN
-behavior of every predicate); `sge`/`sgt` occupy no logical opcode.
+The comparison set has no greater-than opcode: the frontend lowers `a > b`
+by swapping the operands of `slt`/`sltu`/`slt.f32`/`slt.f64`, and
+`a >= b` by swapping the operands of `sle`/`sleu`/`sle.f32`/`sle.f64` (the
+swap keeps the same rep and preserves the NaN behavior of every
+predicate). Integer `a <= b` is the direct `sle`/`sleu`. The non-strict
+integer relations also appear as the real B-type branches `ble`/`bleu`
+(§5.1), which a compare-and-branch emits directly.
 `sne lhs, rhs` ≡ `not(seq lhs, rhs)` (the `sne` opcode is the
 single-instruction form of that identity).
 
@@ -1197,7 +1223,7 @@ result must become an ordinary SSA value or live across a block, the
 lowering emits `copy dst, cond` in the same block. All calls make `cond`
 unavailable; a callee does not inherit the caller's condition.
 
-#### E-type selectors 0–63 — casts and comparisons — 64 opcodes
+#### E-type selectors 0–65 — casts and comparisons — 66 opcodes
 
 **seq** — integers plus `f32, f64`
 
@@ -1230,12 +1256,14 @@ unavailable; a callee does not inherit the caller's condition.
 | `slt.f32` | <, 32-bit float |
 | `slt.f64` | <, 64-bit double float |
 
-**sle** — float `f32, f64` only
+**sle / sleu** — widthless integers (`sle` signed, `sleu` unsigned) plus `f32, f64`
 
 `cond = (a <= b)`.
 
 | Opcode | Comment |
 | --- | --- |
+| `sle` | signed ≤ |
+| `sleu` | unsigned ≤ |
 | `sle.f32` | ≤, 32-bit float |
 | `sle.f64` | ≤, 64-bit double float |
 
@@ -1306,20 +1334,20 @@ unavailable; a callee does not inherit the caller's condition.
 | `cvt.f64.i64` | `a = cast.f64→i64(b)` | — | — |
 | `cvt.f64.u64` | `a = cast.f64→u64(b)` | — | — |
 
-# 8. Opcode tables: E-type — unary, transfer, lifecycle, and control (selectors 64–107)
+# 8. Opcode tables: E-type — unary, transfer, lifecycle, and control (selectors 66–109)
 
-These are the E-type selectors `64–107` (the former E-type): the
+These are the E-type selectors `66–109` (the former E-type): the
 unary/transfer/lifecycle/control half of the one E-type format, sharing
 the layout `11100 | selector(7) | reserved(6) = 0 | a(7) | b(7)` with the
 selector's top bit (bit 26) set. The 38 assigned opcodes occupy selectors
-`64–107` — the former codes `0–43` shifted by +64 — with the former holes
-`6–7`/`13/15/17/19` now at `70/71/77/79/81/83`; selectors `108–127` are
+`66–109` — the former codes `0–43` shifted by +66 — with the former holes
+`6–7`/`13/15/17/19` now at `72/73/79/81/83/85`; selectors `110–127` are
 reserved. A nonzero reserved field is
-rejected. Renumbering the former codes by +64 gives `neg` 64–69, `abs`
-72–75, `clz` 76/78, `popcount` 80/82, `sqrt` 84–85, `floor` 86–87, `ceil`
-88–89, `trunc` 90–91, `round` 92–93, and the untyped transfer/lifecycle/
-control rows `not` 94 through `take` 107 (`ret` 104, `tailcall_self` 105,
-`trap` 106). The operand roles are fixed per opcode: the unary rows read
+rejected. Renumbering the former codes by +66 gives `neg` 66–71, `abs`
+74–77, `clz` 78/80, `popcount` 82/84, `sqrt` 86–87, `floor` 88–89, `ceil`
+90–91, `trunc` 92–93, `round` 94–95, and the untyped transfer/lifecycle/
+control rows `not` 96 through `take` 109 (`ret` 106, `tailcall_self` 107,
+`trap` 108). The operand roles are fixed per opcode: the unary rows read
 `a = dst, b = src`; the transfer/lifecycle rows vary as listed. The
 E-type holds the typed unary operations (outside the casts), the
 copy/borrow/move/take transfers, the counted lifecycle, and the
@@ -1374,7 +1402,7 @@ void returns write `zero`); `b` is zero (validated). `tailcall_self`
 reuses the current frame, preserves `ra`, and takes no operands (`a`/`b`
 zero). `trap` terminates unconditionally (`a`/`b` zero).
 
-#### E-type selectors 64–107 — unary, transfer, lifecycle, and control — 38 opcodes
+#### E-type selectors 66–109 — unary, transfer, lifecycle, and control — 38 opcodes
 
 **neg** — reps `i32, u32, i64, u64, f32, f64`
 
@@ -1530,8 +1558,9 @@ immediate shifted left 12 as a pc-relative displacement.
 ## 9.1 j — the link-less jump
 
 Conceptually `j` and `jal` differ — a frame call versus an
-intra-function jump — and they remain separate logical opcodes
-(`jal` 268, `j` 269). At the encoding level, however, `j` lives inside
+intra-function jump — and they remain separate logical opcodes (distinct
+`Opcode` members, in the order §9 lists them). At the encoding level,
+however, `j` lives inside
 the U-type `jal` prefix: the decoder matches prefix `11101` together
 with its `a` field, so the same word shape separates the two — `a`
 carrying the `zero` special register (`0x00`) selects `j`:
@@ -1626,12 +1655,12 @@ swap: `!(a<b) ≡ a>=b ≡ ble b,a`), `beqi`↔`bnei` (`blti`/`bltiu`/`bgti`/
 `bgtiu` have no
 inverting complement, §11.1),
 `tbz`↔`tbnz` — and the branch carries the else
-target with the then body falling through. The greater relations (`bgt`/
-`bge`) have no opcode: they are reached by the operand swap, which is what
+target with the then body falling through. The greater relations have no
+opcode: they are reached by the frontend's operand swap, which is what
 makes `blt`↔`ble` complementary. **Float `blt`/`ble` inversion
 is unsafe with NaN** (both are false on NaN, so the inverted branch is not
 the complement), and the immediate `blti`/`bltiu`/`bgti`/`bgtiu` have no
-inverting complement (there is no `bgei`/`blei`): those use the
+inverting complement (no immediate branch supplies the inverse): those use the
 non-inverting trampoline
 below for far branches, never integer-style inversion.
 
@@ -1858,7 +1887,7 @@ trust-boundary list ([LLIR Specification](Stilla%20LLIR%20Specification.md) §8)
 - a word whose top two bits are `10` (the reserved class), a word whose
   top bits are `11` but match no format prefix, an unassigned code in any
   format (R codes 112–511; B codes 22–63; E selectors
-  `70/71/77/79/81/83` and `108–127`;
+  `72/73/79/81/83/85` and `110–127`;
   I codes 32–63 **and the reserved I-type selector 10**), or a `11101`
   word whose `a` field is neither `ra`
   nor `zero`;
@@ -1937,7 +1966,7 @@ representation, the frame/call transfer contract, module-instantiation
 lifecycle, host vtables, GC, concurrency, JIT compilation, source maps,
 debug information, and a stable file format — are listed in [Stilla LLIR
 Specification](Stilla%20LLIR%20Specification.md). This document
-additionally fixes the opcode set: §4–§9 are the complete set — 271
+additionally fixes the opcode set: §4–§9 are the complete set — 273
 logical opcodes — and adding an opcode is a specification change. The
 set is **semantically trusted, structurally validated**: it is not a
 security boundary for arbitrary external LLIR ([LLIR
@@ -1953,7 +1982,7 @@ the four little-endian bytes.
 | Example | Logical opcode | Encoded | Word | Bytes (LE) |
 | --- | --- | --- | --- | --- |
 | normal R-type | `add.i32` | `00` + code 0 + `a=F1,b=F2,c=F3` (`0x14`,`0x15`,`0x16`) | `0x00050a96` | `96 0a 05 00` |
-| E-type comparison (selector 0–63), immediate form | `slti` | `11100` + selector 16 + `a=F0,b=0x7f` | `0xe10009ff` | `ff 09 00 e1` |
+| E-type comparison (selectors 0–65), immediate form | `slti` | `11100` + selector 18 + `a=F0,b=0x7f` | `0xe12009ff` | `ff 09 20 e1` |
 | B-type bit-test | `tbz` | `01` + code 20 + `lhs=F0, bit=5, offs10=-1` | `0x542617ff` | `ff 17 26 54` |
 | negative B conditional offset | `beq` | `01` + code 0 + `lhs=F1, rhs=F2, offs10=-2` | `0x402857fe` | `fe 57 28 40` |
 | B signed imm7 (raw `0x7f` = −1) | `blti` | `01` + code 14 + `lhs=F1, imm7=0x7f, offs10=0` | `0x4e29fc00` | `00 fc 29 4e` |
@@ -1963,18 +1992,19 @@ the four little-endian bytes.
 | negative U `jal ra` | `jal` | `11101` + `a=ra (0x02), imm20=-1` | `0xe82fffff` | `ff ff 2f e8` |
 | Link-less jump | `j` | `11101` + `a=zero, imm20=-4` | `0xe80ffffc` | `fc ff 0f e8` |
 | I-type `jalr` | `jalr` | `110` + code 11 + `a=T0, imm16=-1` | `0xc583ffff` | `ff ff 83 c5` |
-| E-type cast (selector 0–63) | `cvt.i32.u32` | `11100` + selector 27 + `a=F0, b=F1` | `0xe1b00994` | `94 09 b0 e1` |
-| E-type comparison (selector 0–63) | `seq` | `11100` + selector 0 + `a=F1, b=F2` | `0xe0000a15` | `15 0a 00 e0` |
-| E-type unary (selectors 64–107) | `neg.i32` | `11100` + selector 64 + `a=F0, b=F1` | `0xe4000994` | `94 09 00 e4` |
-| E-type return (selectors 64–107) | `ret` | `11100` + selector 104 + `a=0, b=0` | `0xe6800000` | `00 00 80 e6` |
+| E-type cast (selectors 0–65) | `cvt.i32.u32` | `11100` + selector 29 + `a=F0, b=F1` | `0xe1d00994` | `94 09 d0 e1` |
+| E-type comparison (selectors 0–65) | `seq` | `11100` + selector 0 + `a=F1, b=F2` | `0xe0000a15` | `15 0a 00 e0` |
+| E-type unary (selectors 66–109) | `neg.i32` | `11100` + selector 66 + `a=F0, b=F1` | `0xe4200994` | `94 09 20 e4` |
+| E-type return (selectors 66–109) | `ret` | `11100` + selector 106 + `a=0, b=0` | `0xe6a00000` | `00 00 a0 e6` |
 | U-type `lui` | `lui` | `11111` + `a=F0 (0x13), imm20=1` | `0xf9300001` | `01 00 30 f9` |
 | U-type `auipc` | `auipc` | `11110` + `a=F0 (0x13), imm20=-1` | `0xf13fffff` | `ff ff 3f f1` |
 
-The two E-type selector ranges encode identically to the former C/E
-prefixes: an old C word (`111000` + code) is the same 32-bit word as the
-new E-type word with selector `code` (`0–63`), and an old E word
-(`111001` + code) is the new E-type word with selector `code + 64`
-(`64–107`). Every C/E-derived hex word above is therefore unchanged.
+The two E-type selector ranges map to the former C/E
+prefixes: an old C word (`111000` + code) is the new E-type word with
+selector `code` for `code ≤ 9` and `code + 2` for `code ≥ 10`, and an old
+E word (`111001` + code) is the new E-type word with selector `code + 66`
+(`66–109`). The C-derived hex words above whose selector did not move
+(`seq`, selector 0) keep their encoding; the others are recomputed.
 
 Hand check — `seq F1, F2`: `11100` (bits 31–27), selector 0 = `0000000`
 (bits 26–20), reserved `000000` (bits 19–14), `a` = F1 = `0010100` (bits

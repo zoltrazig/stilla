@@ -564,11 +564,11 @@ test "LLIR assembly: direct-call jal prints the callee name and take follows it"
 
 test "LLIR assembly: comparison swaps and the immediate-compare aliases print their fixed forms" {
     // Natural lowering of the non-canonical predicates: signed `>` swaps
-    // to `slt rhs, lhs`, unsigned ">=" lowers to a negated `sltu`, float
-    // equality stays ordered without any swap, and the fused immediate
-    // comparisons (slti/sgti/snei) print their literal values. The
-    // register-form conditional branch is the materialized-bool shape
-    // (`beq reg, zero`) the boolean lowering emits.
+    // to `slt rhs, lhs`, unsigned ">=" lowers to `sleu` with swapped
+    // operands, float equality stays ordered without any swap, and the
+    // fused immediate comparisons (slti/sgti/snei) print their literal
+    // values. The inlined `sum` `n <= 0` guard folds to the fused `blti`
+    // immediate.
     const src = try helpers.probeSource("probes/cases", "llir_asm_comparison_swaps");
     defer testing.allocator.free(src);
     var c = try compileOpt("probe", &.{.{ "probe", src }});
@@ -587,9 +587,13 @@ test "LLIR assembly: comparison swaps and the immediate-compare aliases print th
     // Signed `a > b` === `slt b, a`: params are F0=a, F1=b...
     try testing.expect(std.mem.indexOf(u8, text, "\n    slt r20, r19\n") != null);
 
-    // Unsigned `a >= b` === `not (a < b)`: the u-compare keeps operand
-    // order and the negation rides in `not cond, cond` right after.
-    try testing.expect(std.mem.indexOf(u8, text, "\n    sltu r19, r20\n    not cond, cond\n") != null);
+    // Unsigned `a >= b` === `sleu b, a`: the non-strict compare keeps the
+    // polarity in its opcode and swaps operands; no `not cond, cond`
+    // record follows.
+    try testing.expect(std.mem.indexOf(u8, text, "\n    sleu r20, r19\n") != null);
+    // The integer non-strict comparisons are single records now: no
+    // `not cond, cond` invert appears anywhere in the image.
+    try testing.expect(std.mem.indexOf(u8, text, "not cond, cond") == null);
 
     // Float equality has no swap: ordered `seq.f64 lhs, rhs` verbatim.
     try testing.expect(std.mem.indexOf(u8, text, "\n    seq.f64 r19, r20\n") != null);
@@ -599,8 +603,10 @@ test "LLIR assembly: comparison swaps and the immediate-compare aliases print th
     try testing.expect(std.mem.indexOf(u8, text, "\n    sgti r21, 10\n") != null);
     try testing.expect(std.mem.indexOf(u8, text, "\n    slti r23, 9\n") != null);
 
-    // The register-form branch reads a materialized bool against zero.
-    try testing.expect(std.mem.indexOf(u8, text, "\n    beq r20, zero, $") != null);
+    // The only branch in the image is the inlined `sum` `n <= 0` guard:
+    // it now folds to the fused `blti r19, 1` (±1 `le` immediate), so no
+    // materialized-bool `beq reg, zero` remains here.
+    try testing.expect(std.mem.indexOf(u8, text, "\n    blti r19, 1, $") != null);
 
     try testing.expect(std.mem.indexOf(u8, text, "?target") == null);
 }

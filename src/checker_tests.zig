@@ -423,6 +423,25 @@ test "checker types float literals at the other binary operand's width" {
     defer t.deinit();
 }
 
+test "checker accepts 64-bit and float64 equality and lists all nine types" {
+    // Defect G-8: the equality diagnostic must name every type
+    // `isEqScalar` accepts (Core §16.3). int64/uint64/float64 equality is
+    // legal, and a rejected equality names all nine scalar types.
+    var t = try checkText(
+        \\fn a(x: int64, y: int64) -> bool { x == y }
+        \\fn b(x: uint64, y: uint64) -> bool { x != y }
+        \\fn c(x: float64, y: float64) -> bool { x == y }
+        \\fn d(x: byte, y: byte) -> bool { x != y }
+    );
+    defer t.deinit();
+
+    // `any` has no `==`/`!=` (Core §16.3), and the diagnostic enumerates
+    // the full nine-type equality domain.
+    try expectDiag(
+        \\fn bad(a: any, b: any) -> bool { a == b }
+    , "equality is defined for byte, int32, uint32, int64, uint64, float32, float64, bool, and str only");
+}
+
 test "checker accepts integer shifts and rejects float/byte/mixed shifts" {
     // Core §16.3: `<<`/`>>` take same-type int32/uint32 operands;
     // float32 has no bit pattern to shift and byte has no arithmetic.

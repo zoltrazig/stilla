@@ -776,7 +776,8 @@ fn intBit(comptime T: type, a: meta.ConstValue, b: meta.ConstValue, op: Bit) ?me
 }
 
 /// Fold a binary comparison. `==`/`!=` cover byte, int, float, bool, and
-/// str; the ordering ops cover ints and floats only (Core §16.3).
+/// str; the ordering ops cover byte (as an unsigned 8-bit value) and the
+/// numeric types (Core §16.3). Mirrors `cmpResult` in hir_egraph_rules.zig.
 fn foldCmp(bin: cfg.Bin, op: Cmp) ?meta.ConstValue {
     const a = constOf(bin.a) orelse return null;
     const b = constOf(bin.b) orelse return null;
@@ -784,8 +785,11 @@ fn foldCmp(bin: cfg.Bin, op: Cmp) ?meta.ConstValue {
     const r = switch (kind) {
         .int32 => cmpInt(i32, a, b, op) orelse return null,
         .uint32 => cmpInt(u32, a, b, op) orelse return null,
+        .int64 => cmpInt(i64, a, b, op) orelse return null,
+        .uint64 => cmpInt(u64, a, b, op) orelse return null,
         .byte => cmpByte(a, b, op) orelse return null,
         .float32 => cmpFloat(a, b, op) orelse return null,
+        .float64 => cmpFloat(a, b, op) orelse return null,
         .bool => cmpBool(a, b, op) orelse return null,
         .str => cmpStr(a, b, op) orelse return null,
         else => return null,
@@ -806,11 +810,20 @@ fn cmpInt(comptime T: type, a: meta.ConstValue, b: meta.ConstValue, op: Cmp) ?bo
     };
 }
 
+/// Fold a `byte` comparison as an unsigned 8-bit value: equality and
+/// ordering alike (Core §16.3; the LLIR spec §4 uses `sltu` for byte
+/// ordering). Mirrors `cmpResult`'s `.byte` arm in hir_egraph_rules.zig.
 fn cmpByte(a: meta.ConstValue, b: meta.ConstValue, op: Cmp) ?bool {
-    if (op != .eq and op != .ne) return null;
     const x = intConst(a, u8) orelse return null;
     const y = intConst(b, u8) orelse return null;
-    return if (op == .eq) x == y else x != y;
+    return switch (op) {
+        .eq => x == y,
+        .ne => x != y,
+        .lt => x < y,
+        .le => x <= y,
+        .gt => x > y,
+        .ge => x >= y,
+    };
 }
 
 /// Zig float comparison matches the runtime's IEEE semantics: NaN is not

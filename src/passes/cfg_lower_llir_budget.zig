@@ -91,12 +91,11 @@ fn brTermCons(blk: *const cfg.BasicBlock) u32 {
 }
 
 /// The number of LLIR records one CFG instruction occupies: 1 plus
-/// its call-argument moves, plus one more for an integer
-/// `le`/`ge` whose `not`(gt/lt) synthesis emits a second record,
-/// plus the lifecycle pass's trailing releases after a final use.
-/// Every stage that walks `blk.instrs` with the block-local record
-/// index — emission, the budget sizing, the fusion peephole — advances
-/// by this count so the stages agree on record placement.
+/// its call-argument moves, plus the lifecycle pass's trailing
+/// releases after a final use. Every stage that walks `blk.instrs`
+/// with the block-local record index — emission, the budget sizing,
+/// the fusion peephole — advances by this count so the stages agree
+/// on record placement.
 pub fn recordCount(bld: *Builder, blk: *const cfg.BasicBlock, ins: *const cfg.Instr) error{OutOfMemory}!u32 {
     var n: u32 = try mainRecordCount(bld, blk, ins);
     n += @intCast(lifecycle.trailingOf(bld, ins).len);
@@ -138,15 +137,9 @@ pub fn mainRecordCount(bld: *Builder, blk: *const cfg.BasicBlock, ins: *const cf
     // `take dst, F(L+3+O-A)` after the `jal` (1 extra record) unless
     // the allocator coalesced the result onto the alias (Step 8).
     if (ctypeCmp(ins)) n += 1;
-    switch (ins.op) {
-        .le, .ge => |bin| {
-            if (Builder.isInteger(bin.a.type_)) n += 1;
-        },
-        else => {},
-    }
     // The typed integer arithmetic emits exactly one record (the
     // opcode carries the rep and self-canonicalizes — Instruction Set
-    // §4); no canonicalization records exist in v10.
+    // §4); no canonicalization records exist in v11.
     if (std.meta.activeTag(ins.op) == .call and bld.callNeedsTake(blk, ins)) n += 1;
     // A select is two records: `copy cond_reg, %cond` plus `cmov`.
     if (std.meta.activeTag(ins.op) == .select) n += 1;

@@ -1053,7 +1053,7 @@ pub const handlers: [maxOpcodeValue() + 1]Handler = blk: {
             .andi, .ori, .xori => bitImmHandler(op),
             .madd_i32, .madd_u32, .madd_i64, .madd_u64, .msub_i32, .msub_u32, .msub_i64, .msub_u64, .madd_f32, .madd_f64, .msub_f32, .msub_f64 => fmacHandler(op),
             .neg_i32, .neg_u32, .neg_i64, .neg_u64, .neg_f32, .neg_f64, .abs_i32, .abs_i64, .abs_f32, .abs_f64, .clz_i32, .clz_i64, .popcount_i32, .popcount_i64, .sqrt_f32, .sqrt_f64, .floor_f32, .floor_f64, .ceil_f32, .ceil_f64, .trunc_f32, .trunc_f64, .round_f32, .round_f64 => unaryHandler(op),
-            .seq, .seq_f32, .seq_f64, .sne, .sne_f32, .sne_f64, .slt, .sltu, .slt_f32, .slt_f64, .sle_f32, .sle_f64 => cmpHandler(op),
+            .seq, .seq_f32, .seq_f64, .sne, .sne_f32, .sne_f64, .slt, .sltu, .slt_f32, .slt_f64, .sle, .sleu, .sle_f32, .sle_f64 => cmpHandler(op),
             .seqi, .snei, .slti, .sltiu, .sgti, .sgtiu => cmpImmHandler(op),
             .bool_eq => hBoolEq,
             .bool_ne => hBoolNe,
@@ -1849,7 +1849,7 @@ inline fn familyOf(op: llir.Opcode) Fam {
         .seq, .seq_f32, .seq_f64 => .seq,
         .sne, .sne_f32, .sne_f64 => .sne,
         .slt, .sltu, .slt_f32, .slt_f64 => .slt,
-        .sle_f32, .sle_f64 => .sle,
+        .sle, .sleu, .sle_f32, .sle_f64 => .sle,
         .beq, .beq_f32, .beq_f64 => .beq,
         .bne, .bne_f32, .bne_f64 => .bne,
         .blt, .bltu, .blt_f32, .blt_f64 => .blt,
@@ -2076,9 +2076,9 @@ pub inline fn unOp(self: *VmCtx, op: llir.Opcode, av: Value) Value {
     };
 }
 
-/// The E-type comparison (`seq`/`sne`/`slt`/`sle`, rep-dispatched)
-/// — writes the implicit `cond`. IEEE ordered/NaN semantics: `seq`
-/// false on NaN, `sne` true, `slt`/`sle` false on NaN.
+/// The E-type comparison (`seq`/`sne`/`slt`/`sltu`/`sle`/`sleu`,
+/// rep-dispatched) — writes the implicit `cond`. IEEE ordered/NaN
+/// semantics: `seq` false on NaN, `sne` true, `slt`/`sle` false on NaN.
 pub inline fn cmpC(self: *VmCtx, op: llir.Opcode, a: Value, b: Value) bool {
     _ = self;
     return switch (op) {
@@ -2086,6 +2086,8 @@ pub inline fn cmpC(self: *VmCtx, op: llir.Opcode, a: Value, b: Value) bool {
         .sne => a != b,
         .slt => intOrdCmp(true, false, a, b),
         .sltu => intOrdCmp(true, true, a, b),
+        .sle => !intOrdCmp(false, false, a, b),
+        .sleu => !intOrdCmp(false, true, a, b),
         .seq_f32, .seq_f64 => eqCmp(llir.repOf(op).?, a, b),
         .sne_f32, .sne_f64 => !eqCmp(llir.repOf(op).?, a, b),
         .slt_f32, .slt_f64 => ordCmp(true, llir.repOf(op).?, a, b),
@@ -2117,9 +2119,9 @@ pub inline fn branchCmp(self: *VmCtx, op: llir.Opcode, a: Value, b: Value) bool 
     };
 }
 
-/// The ordered less-or-equal `a <= b` at a rep — IEEE ordered for
-/// floats, false when either operand is NaN (the `sle` primitive
-/// has no integer reps).
+/// The ordered less-or-equal `a <= b` at a float rep — IEEE ordered,
+/// false when either operand is NaN. The integer `sle`/`sleu`
+/// comparisons do not come through here: they use `intOrdCmp`.
 inline fn leCmp(rep: llir.Rep, a: Value, b: Value) bool {
     return switch (rep) {
         .f32 => blk: {

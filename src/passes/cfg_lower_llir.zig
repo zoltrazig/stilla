@@ -62,7 +62,7 @@ pub const EdgeCtx = struct {
 
 // edge planning moved to cfg_lower_llir_edges.zig — EdgeCopy et al.
 
-// fusion helpers moved to llir_fusion.zig — typedKind et al.
+// the const+op fusion helpers moved to llir_fusion.zig — regOpcode et al.
 /// The const+op fusion peephole's before/after density report —
 /// instruction counts and image bytes (4 per instruction record)
 /// of the emitted code table, before and after the pass compacts
@@ -541,22 +541,20 @@ pub const Builder = struct {
         return self.block_pcs.get(blk).?;
     }
 
-    /// The `cfg.OpTag` → `llir.TypedKind` mapping, the typed
-    /// arithmetic/shift/bitwise/extended opcode helpers, and
-    /// `emitArith` moved to cfg_lower_llir_emit.zig.
-    /// Whether `t` is an integer primitive — the `le`/`ge` synthesis
-    /// and the immediate/register fused-branch forms read it. Shared
-    /// with the budgeting pass's record counts.
+    /// The `cfg.OpTag` → `llir.TypedKind` mapping
+    /// (`llir.lower`/`typedKindOf`), the typed opcode helpers,
+    /// `emitArith`, and the comparison `compare` selection (`cmpSel`)
+    /// live in cfg_lower_llir_emit.zig.
+    /// Whether `t` is an integer primitive — the `le`/`ge` register
+    /// comparison selection and the immediate/register fused-branch
+    /// forms read it. Shared with the budgeting pass's record counts.
     pub fn isInteger(t: meta.Type) bool {
-        return switch (t.primitive) {
-            .int32, .uint32, .byte, .int64, .uint64 => true,
-            else => false,
-        };
+        return typed_layer.isIntegerType(t);
     }
 
     /// The number of LLIR records one CFG instruction occupies: 1 plus
-    /// its call-argument moves, plus one more for an integer
-    /// `le`/`ge` whose `not`(gt/lt) synthesis emits a second record.
+    /// its call-argument moves, plus one more for an E-type comparison
+    /// (implicit cond), which emits the comparison plus `copy dst, cond`.
     /// Every stage that walks `blk.instrs` with the block-local record
     /// index — emission, `budget` sizing, the fusion peephole — advances
     /// by this count so the stages agree on record placement.
@@ -806,10 +804,12 @@ pub const Builder = struct {
         return llir_control.fusedBranchOperands(cond);
     }
 
-    /// The immediate/bit-test branch selection helpers (`imm7Of`,
-    /// `immBranchOf`, `bitTestPattern`, `isAndOfPow2`, `branchOf`,
-    /// `familyOf`, `famOpName`) and the constant payload queries
-    /// (`constOf`, `isConstValue`) moved to cfg_lower_llir_control.zig.
+    /// The immediate/bit-test branch selection helpers (`immBranchOf`,
+    /// `bitTestPattern`, `isAndOfPow2`, `branchOf`, `familyOf`,
+    /// `famOpName`) and the constant payload queries (`constOf`,
+    /// `isConstValue`) moved to cfg_lower_llir_control.zig. The shared
+    /// comparison-lowering decisions (`isIntegerType`, `swapRel`,
+    /// `strictFold`, `isNonStrictInt`) live in cfg_lower_typed.zig.
     /// The inverse of a branch: a `(op, swap)` pair. Shared by the
     /// control emission (the inverted one-record form,
     /// `terminatorRecordCount`) and the linearization (the long-branch

@@ -97,7 +97,13 @@ member; air.md), `copy`/`borrow` (Copy vs unique binding use).
 `arithmetic` / `compare` / `logic`. `and` and `or` do **not** become a
 single op — they lower to a `branch_cond` diamond so the right operand
 is evaluated only when required (Runtime): `a and b` evaluates `b`
-only if `a` is `true`.
+only if `a` is `true`. The `compare` family carries no typed opcode of
+its own (all six tags lower through the `.compare` rule): each resolves
+its E-type LLIR opcode by tag, and a constant operand folds to the
+immediate form — the non-strict `le`/`ge` reach the strict immediate
+through a compile-time `±1` (`a <= k` → `slti a, k+1`, `a >= k` →
+`sgti a, k-1`), while the register form selects the single `sle`/`sleu`
+opcode (`ge` swaps its operands).
 
 ### if (Core)
 

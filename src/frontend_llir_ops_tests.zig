@@ -214,7 +214,7 @@ test "LLIR lowering: direct calls, void/value returns, recursion" {
                             try testing.expectEqual(mv.imm, d.imm16);
                         }
                         const rec = llir.decode(image.instructions[pc + @as(u32, @intCast(moves.len))]).?;
-                        // v10: the direct call is `jal ra, addr` — the fixed
+                        // v11: the direct call is `jal ra, addr` — the fixed
                         // link register `ra`, the pc-relative target resolved
                         // to the callee's `entry_pc`; there is no
                         // destination field (a non-void callee's result is
@@ -500,7 +500,7 @@ test "LLIR lowering: register-window argument moves and elision" {
 }
 
 test "LLIR lowering: all four slot_* ownership modes on one call's argument path" {
-    // v10 keeps the `slot_*` writers unchanged — names, encodings,
+    // v11 keeps the `slot_*` writers unchanged — names, encodings,
     // semantics. One call whose four parameters force each transfer
     // mode: the unique `move` box installs `slot_move`, the borrowed
     // view installs `slot_borrow`, the shared counted `str` retains

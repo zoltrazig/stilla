@@ -16,6 +16,7 @@ const cfg = @import("stilla").cfg;
 const meta = @import("stilla").meta;
 const llir = @import("stilla").llir;
 const lower = @import("cfg_lower_llir.zig");
+const emit = @import("cfg_lower_llir_emit.zig");
 const patterns = @import("llir_patterns.zig");
 const typed = @import("cfg_lower_typed.zig");
 
@@ -24,39 +25,16 @@ const FusionMetrics = lower.FusionMetrics;
 
 // --- const+op fusion helpers ------------------------------------------
 
-/// The binary op family of a CFG binary instruction, as a
-/// `llir.TypedKind` (the operand-type index `typedOpcodeImm` keys
-/// on). Only arithmetic/bitwise and comparison binary families fuse; everything else is
+/// The register-form record opcode of a fusable binary CFG op, used to
+/// locate the record within its instruction's n-record expansion. A
+/// comparison selects through `cmpSel` (the `gt`/`ge` swap and the
+/// `le` family — they have no `TypedKind`); the arithmetic/bitwise/
+/// shift families through the typed kind's opcode. Everything else is
 /// unreachable here.
-fn typedKind(tag: cfg.OpTag) llir.TypedKind {
+fn regOpcode(tag: cfg.OpTag, bin: cfg.Bin) ?llir.Opcode {
     return switch (tag) {
-        .add => .add,
-        .sub => .sub,
-        .mul => .mul,
-        .div => .div,
-        .rem => .rem,
-        .shl => .shl,
-        .shr => .shr,
-        .bitand => .bitand,
-        .bitor => .bitor,
-        .bitxor => .bitxor,
-        .eq => .eq,
-        .ne => .ne,
-        .lt => .lt,
-        .le => .le,
-        .gt => .gt,
-        .ge => .ge,
-        else => unreachable,
-    };
-}
-
-fn flipCmp(tag: llir.TypedKind) ?llir.TypedKind {
-    return switch (tag) {
-        .lt => .gt,
-        .le => .ge,
-        .gt => .lt,
-        .ge => .le,
-        else => null,
+        .eq, .ne, .lt, .le, .gt, .ge => emit.cmpSel(tag, bin).op,
+        else => if (typed.typedKindOf(tag)) |k| llir.typedOpcode(k, bin.a.type_, undefined) else null,
     };
 }
 
@@ -64,7 +42,7 @@ fn flipCmp(tag: llir.TypedKind) ?llir.TypedKind {
 /// commute to place a constant in the second operand position —
 /// never the `f32` forms (NaN-payload ordering is observable), and never
 /// `sub`/`div`/`rem` (not commutative).
-fn isCommutative(tag: llir.TypedKind) bool {
+fn isCommutative(tag: cfg.OpTag) bool {
     return switch (tag) {
         // Bitwise and/or/xor are integer ops and commute too — a
         // constant on either side fuses to the immediate form.
@@ -73,7 +51,6 @@ fn isCommutative(tag: llir.TypedKind) bool {
     };
 }
 
-/// The integer types that may commute.
 /// The constant payload of a value whose defining instruction is a
 /// `const_`, or null for every other value.
 fn constOf(v: *const cfg.Value) ?meta.ConstValue {
@@ -84,7 +61,8 @@ fn constOf(v: *const cfg.Value) ?meta.ConstValue {
     };
 }
 
-/// The fused immediate for a numeric constant at operand type `t`, or
+/// The fused immediate for a numeric constant at operand type `t`,
+/// keyed by the CFG binary `tag` (comparisons have no `TypedKind`), or
 /// null when the constant does not fit the v9 7-bit immediate
 /// window — the site stays a `const` + register form
 /// (Instruction Set §3.3, §10). The field is the raw 7-bit pattern,
@@ -99,13 +77,25 @@ fn constOf(v: *const cfg.Value) ?meta.ConstValue {
 /// (`slti`/`sgti`) and equality (`seqi`/`snei`) sign-extend (`[-64,
 /// 63]` — equality has no unsigned variant, so an unsigned equality
 /// constant only fuses inside that window), while the unsigned
-/// ordering (`sltiu`/`sgtiu`) zero-extends (`[0, 127]`). There are
-/// **no float immediate forms** — every float constant materializes
-/// through `const`. Only numeric constants fuse
-/// (`typedOpcodeImm` gates the operand type to the numeric
-/// families first).
-fn immOf(cv: meta.ConstValue, kind: llir.TypedKind, t: meta.Type) ?u8 {
-    return typed.immOf(cv, kind, t);
+/// ordering (`sltiu`/`sgtiu`) zero-extends (`[0, 127]`); the non-strict
+/// `le`/`ge` fuse through the strict predecessor on the ±1-adjusted
+/// constant (`a <= k` ≡ `slti a, k+1`, `a >= k` ≡ `sgti a, k-1`).
+/// There are **no float immediate forms** — every float constant
+/// materializes through `const`. Only numeric constants fuse.
+fn immOf(cv: meta.ConstValue, tag: cfg.OpTag, t: meta.Type) ?u8 {
+    return typed.immOf(cv, tag, t);
+}
+
+/// The immediate opcode for a fusable binary CFG `tag` at operand type
+/// `t`, or null when the op/type has no immediate form. Comparisons
+/// select through the tag-keyed `llir.cmpImmOpcode` (`gt`/`ge` share
+/// the `sgti`/`sgtiu` family); the arithmetic/bitwise/shift families
+/// through the typed kind's immediate form.
+fn immOpcode(tag: cfg.OpTag, t: meta.Type) ?llir.Opcode {
+    return switch (tag) {
+        .eq, .ne, .lt, .le, .gt, .ge => llir.cmpImmOpcode(tag, t),
+        else => if (typed.typedKindOf(tag)) |k| llir.typedOpcodeImm(k, t) else null,
+    };
 }
 
 /// Count one operand reference toward a value's use count. Every value
@@ -234,8 +224,9 @@ fn countTermUses(term: cfg.Terminator, uses: *std.AutoHashMapUnmanaged(*const cf
 /// the bitwise masks, §3.3). The merged int family shares one set of
 /// immediate opcodes: `addi/subi/muli/divi/diviu/remi/remiu`
 /// and `eqi/nei/lti/ltiu/gti/gtiu`, plus `shli/shri/shrui` and
-/// `andi/ori/xori` — integer `le`/`ge` have no immediate forms (they
-/// synthesize to `not`(gt/lt)), and there are **no f32 immediate
+/// `andi/ori/xori` — integer `le`/`ge` have no immediate opcode of their
+/// own (they fold to their strict `±1` predecessor), and there are
+/// **no f32 immediate
 /// forms**: a binary16 constant needs 16 bits, which the 8-bit field
 /// cannot carry, so every f32 constant materializes through `const`
 /// (Instruction Set §7). The fusion is a
@@ -390,9 +381,9 @@ pub fn peephole(b: *Builder) error{OutOfMemory}!FusionMetrics {
                 }
                 switch (ins.op) {
                     .add, .sub, .mul, .div, .rem, .shl, .shr, .bitand, .bitor, .bitxor, .eq, .ne, .lt, .le, .gt, .ge => |bin| {
-                        const tag = typedKind(std.meta.activeTag(ins.op));
+                        const tag = std.meta.activeTag(ins.op);
                         const n = try b.recordCount(blk, ins);
-                        if (try tryFuse(b, blk, @intCast(bi), idx, n, ins.results[0], tag, bin, dead)) |fused| {
+                        if (try tryFuse(b, blk, @intCast(bi), idx, n, ins.results[0], tag, bin)) |fused| {
                             decrementUse(&uses, fused);
                         }
                     },
@@ -454,7 +445,7 @@ pub fn peephole(b: *Builder) error{OutOfMemory}!FusionMetrics {
     return metrics;
 }
 
-/// Fuse `bin` (a one-record arithmetic/comparison instruction at
+/// Fuse `bin` (a one-record arithmetic/comparison CFG `tag` at
 /// block-local index `idx` of `blk`) with a constant operand.
 /// Returns the fused constant's value, or null when no fusion applies.
 /// The constant must sit in the second operand position, or be
@@ -462,17 +453,19 @@ pub fn peephole(b: *Builder) error{OutOfMemory}!FusionMetrics {
 /// ordering comparisons swap and flip.
 /// `f32` never commutes; `sub`/`div`/`rem` are not
 /// commutative at all. The immediate is the constant's raw bit
-/// pattern; the type gates the variant via `typedOpcodeImm` (no
+/// pattern; the tag gates the variant via `immOpcode`/`immOf` (no
 /// float immediate forms, no byte arithmetic, no bool/str forms). The
-/// fused op replaces the instruction's register-form record; a fused
-/// 32-bit shift count is pre-reduced mod 32 (the opcode masks it
-/// again).
-fn tryFuse(b: *Builder, blk: *const cfg.BasicBlock, bi: u32, idx: u32, n: u32, dst: *const cfg.Value, tag: llir.TypedKind, bin: cfg.Bin, dead: [][]bool) error{OutOfMemory}!?*const cfg.Value {
+/// non-strict ordering reaches the strict immediate with a ±1-adjusted
+/// constant (`a <= k` → `slti a, k+1`, `a >= k` → `sgti a, k-1`). The
+/// fused op replaces the instruction's register-form
+/// record; a fused 32-bit shift count is pre-reduced mod 32 (the
+/// opcode masks it again).
+fn tryFuse(b: *Builder, blk: *const cfg.BasicBlock, bi: u32, idx: u32, n: u32, dst: *const cfg.Value, tag: cfg.OpTag, bin: cfg.Bin) error{OutOfMemory}!?*const cfg.Value {
     // The primary record's position: the register-form opcode, when
-    // the family has one (comparisons on integer `gt`/`le`/`ge` lower
-    // through swapped aliases — their E-type record is the base).
+    // the family has one (the `gt`/`le`/`ge` comparisons lower through
+    // swapped aliases — their E-type record is the base).
     const site: u32 = blk: {
-        if (llir.typedOpcode(tag, bin.a.type_, undefined)) |reg| {
+        if (regOpcode(tag, bin)) |reg| {
             for (idx..idx + n) |i| {
                 const d = llir.decode(b.block_records.items[bi].items[i]) orelse continue;
                 if (d.op == reg) break :blk @intCast(i);
@@ -484,25 +477,23 @@ fn tryFuse(b: *Builder, blk: *const cfg.BasicBlock, bi: u32, idx: u32, n: u32, d
     if (constOf(bin.b)) |cv| {
         // Constant on the right: direct fusion when it fits the 8-bit
         // immediate field at the operand type.
-        if (llir.typedOpcodeImm(tag, bin.a.type_)) |op| {
+        if (immOpcode(tag, bin.a.type_)) |op| {
             if (immOf(cv, tag, bin.a.type_)) |imm| {
                 const imm2 = typed.shiftImm(op, imm);
                 if (llir.opInfo(op).writes_cond)
                     b.setE(blk, site, op, b.slotOf(bin.a), imm2)
                 else
                     b.setR(blk, site, op, b.slotOf(dst), b.slotOf(bin.a), imm2);
-                killFusedCmpNot(b, bi, site, tag, bin, dead);
                 return bin.b;
             }
         }
         return null; // this type/op has no immediate form, or the constant does not fit
     }
     if (constOf(bin.a)) |cv| {
-        if (flipCmp(tag)) |flipped| {
-            if (llir.typedOpcodeImm(flipped, bin.b.type_)) |op| {
+        if (typed.swapRel(tag)) |flipped| {
+            if (immOpcode(flipped, bin.b.type_)) |op| {
                 if (immOf(cv, flipped, bin.b.type_)) |imm| {
-                    b.setE(blk, site, op, b.slotOf(bin.b), imm);
-                    killFusedCmpNot(b, bi, site, tag, bin, dead);
+                    b.setE(blk, site, op, b.slotOf(bin.b), typed.shiftImm(op, imm));
                     return bin.a;
                 }
             }
@@ -512,7 +503,7 @@ fn tryFuse(b: *Builder, blk: *const cfg.BasicBlock, bi: u32, idx: u32, n: u32, d
         // `b + k`). Never the f32 forms — NaN-payload ordering is
         // observable and the AIR does not commute floats.
         if (isCommutative(tag) and Builder.isInteger(bin.b.type_)) {
-            if (llir.typedOpcodeImm(tag, bin.b.type_)) |op| {
+            if (immOpcode(tag, bin.b.type_)) |op| {
                 if (immOf(cv, tag, bin.b.type_)) |imm| {
                     const imm2 = typed.shiftImm(op, imm);
                     if (llir.opInfo(op).writes_cond)
@@ -525,21 +516,6 @@ fn tryFuse(b: *Builder, blk: *const cfg.BasicBlock, bi: u32, idx: u32, n: u32, d
         }
     }
     return null;
-}
-
-/// The integer `le`/`ge` comparisons emit as `not(slt)` — the
-/// non-strict predicate is the negation of `lt` (emitCompare's
-/// `cmpSel`, `invert = true`). Fusing such a comparison to its
-/// immediate form leaves the trailing `not cond` behind: the fused op
-/// (e.g. `sgti a, k-1` for `a >= k`) already carries the non-strict
-/// polarity, so the `not` double-negates the result. Mark it dead.
-fn killFusedCmpNot(b: *Builder, bi: u32, site: u32, tag: llir.TypedKind, bin: cfg.Bin, dead: [][]bool) void {
-    const inverts = (tag == .le or tag == .ge) and
-        (Builder.isInteger(bin.a.type_) or Builder.isInteger(bin.b.type_));
-    if (!inverts) return;
-    const nd = llir.decode(b.block_records.items[bi].items[site + 1]) orelse return;
-    if (nd.op != .not) return; // defensive: the not always follows in the invert form
-    dead[bi][site + 1] = true;
 }
 
 /// Fuse a `mul` + `add` pair into a register-form `*_madd` at the

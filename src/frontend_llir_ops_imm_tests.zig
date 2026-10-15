@@ -194,7 +194,7 @@ test "LLIR lowering: u32 div/rem by a const fuses to the typed immediate form" {
     // The typed `div.u32` register form lowers as one record (§4), and
     // the fusion pass rewrites it to `divi.u32` — the immediate
     // reads the dividend's canonical cell directly; no staging record
-    // exists in v10. The fused constant's record is dropped by the
+    // exists in v11. The fused constant's record is dropped by the
     // compaction.
     var t = try cfg_parse.parseText(
         \\module "app" {
@@ -522,6 +522,7 @@ test "LLIR lowering: immediate semantics — raw bit patterns, commute, swap+fli
     var n_f32_mul: usize = 0;
     var n_eqi: usize = 0;
     var n_sltu: usize = 0;
+    var n_sltiu: usize = 0;
     var n_not: usize = 0;
     var n_add: usize = 0;
     for (image.instructions) |rec| {
@@ -565,12 +566,13 @@ test "LLIR lowering: immediate semantics — raw bit patterns, commute, swap+fli
                 try testing.expect(d.b <= 0x7f);
                 try testing.expectEqual(llir.Format.e, d.format);
             },
-            // `9 >= %0` (byte, constant on the left) does not fuse —
-            // integer le/ge have no immediate forms — so the `ge` record
-            // synthesizes `not(sltu %9, %0)` (with the const 9 still
-            // read from its slot), followed by the `copy dst, cond`
-            // materialization.
+            // `9 >= %0` (byte, constant on the left) fuses through the
+            // `le` ±1 mirror: `9 >= %0` ≡ `%0 <= 9` ≡ `%0 < 10` →
+            // `sltiu %0, 10`. No `not` is synthesized and the const 9
+            // record's use here is fused away (the trailing `%5 = eq %3,
+            // %3` still reads %3's slot, so its record survives).
             .sltu => n_sltu += 1,
+            .sltiu => n_sltiu += 1,
             .not => n_not += 1,
             // `%0 + %1` (u32 max, 4294967295) does not fit the 7-bit
             // field, so it stays a register-form `add.u32` reading the
@@ -587,8 +589,9 @@ test "LLIR lowering: immediate semantics — raw bit patterns, commute, swap+fli
     try testing.expectEqual(@as(usize, 1), n_f32_add);
     try testing.expectEqual(@as(usize, 1), n_f32_mul);
     try testing.expectEqual(@as(usize, 2), n_eqi);
-    try testing.expectEqual(@as(usize, 1), n_sltu); // the `9 >= %0` ge lowers as sltu + not
-    try testing.expectEqual(@as(usize, 1), n_not);
+    try testing.expectEqual(@as(usize, 0), n_sltu); // the `9 >= %0` ge now fuses to sltiu
+    try testing.expectEqual(@as(usize, 1), n_sltiu); // `sltiu %0, 10`
+    try testing.expectEqual(@as(usize, 0), n_not); // no invert on the fused le/ge
     try testing.expectEqual(@as(usize, 1), n_add);
 
     // In @m the `%1` const (4294967295) is read by the final `ret` and
@@ -768,30 +771,81 @@ test "LLIR lowering: unsigned comparisons fuse to bltu/bleu" {
     // `then` falls through: the branch block ends where then begins.
     try testing.expectEqual(b.pcOf(findBlock(lt.blocks, "then")), image.blocks[b.block_ids.get(findBlock(lt.blocks, "entry")).?].end_pc);
 
-    // `le %0, %1` (u32) synthesizes `not(sltu)`: `sltu %1, %0` (the
-    // swapped operands — integer le has no comparison opcode,
-    // Instruction Set §7)
-    // plus `not cond` and `copy dst, cond`; the fused branch is
-    // `bleu %0, %1` and the trailing-j elimination inverts it
-    // (`bleu` → `bltu`, operands exchanged) so the branch carries the
-    // else target and `then` falls through.
+    // `le %0, %1` (u32) is the single non-strict `sleu %0, %1`
+    // (integer le now has its own comparison opcode, Instruction Set
+    // §7) plus `copy dst, cond`; the fused branch is `bleu %0, %1` and
+    // the trailing-j elimination inverts it (`bleu` → `bltu`, operands
+    // exchanged) so the branch carries the else target and `then` falls
+    // through.
     const le = program.funcs[1];
     const le_pc = b.pcOf(findBlock(le.blocks, "entry"));
-    const slt_rec = llir.decode(image.instructions[le_pc]).?;
-    try testing.expectEqual(llir.Opcode.sltu, slt_rec.op);
-    try testing.expectEqual(b.slotOf(le.values[1]), slt_rec.a);
-    try testing.expectEqual(b.slotOf(le.values[0]), slt_rec.b);
-    const nrec = llir.decode(image.instructions[le_pc + 1]).?;
-    try testing.expectEqual(llir.Opcode.not, nrec.op);
-    const ncopy = llir.decode(image.instructions[le_pc + 2]).?;
+    const sle_rec = llir.decode(image.instructions[le_pc]).?;
+    try testing.expectEqual(llir.Opcode.sleu, sle_rec.op);
+    try testing.expectEqual(b.slotOf(le.values[0]), sle_rec.a);
+    try testing.expectEqual(b.slotOf(le.values[1]), sle_rec.b);
+    const ncopy = llir.decode(image.instructions[le_pc + 1]).?;
     try testing.expectEqual(llir.Opcode.copy, ncopy.op);
     try testing.expectEqual(b.slotOf(le.values[2]), ncopy.a); // dst = the bool result
     try testing.expectEqual(llir.cond_reg, ncopy.b);
-    const le_blt = llir.decode(image.instructions[le_pc + 3]).?;
+    const le_blt = llir.decode(image.instructions[le_pc + 2]).?;
     try testing.expectEqual(llir.Opcode.bltu, le_blt.op);
     try testing.expectEqual(b.slotOf(le.values[1]), le_blt.a);
     try testing.expectEqual(b.slotOf(le.values[0]), le_blt.b);
-    try testing.expectEqual(b.pcOf(findBlock(le.blocks, "else")), llir.bTypeTarget(le_pc + 3, le_blt.offs10));
+    try testing.expectEqual(b.pcOf(findBlock(le.blocks, "else")), llir.bTypeTarget(le_pc + 2, le_blt.offs10));
+}
+
+test "LLIR lowering: `a <= k` fuses to slti with the compile-time k+1 fold" {
+    // Integer `le` register form selects the single `sle`, but a right
+    // constant fuses to `slti` with the constant
+    // incremented at compile time (`a <= 5` ≡ `a < 6`). The const record
+    // disappears.
+    var t = try cfg_parse.parseText(
+        \\module "app" {
+        \\    func @le(a: int32) -> bool {
+        \\    entry:
+        \\        %1: int32 = const 5
+        \\        %2: bool = le %0, %1
+        \\        ret %2
+        \\    }
+        \\}
+    );
+    defer t.arena.deinit();
+    const program = &t.program;
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var b = cfg_lower_llir.Builder.init(arena.allocator(), program);
+    const image = try b.lowerLlir();
+    if (try llir_validate.validate(&image, testing.allocator)) |msg| {
+        testing.allocator.free(msg);
+        return error.TestUnexpectedResult;
+    }
+
+    const entry = findBlock(program.funcs[0].blocks, "entry");
+    const pc = b.pcOf(entry);
+    const end = image.blocks[b.block_ids.get(entry).?].end_pc;
+    var n_slti: usize = 0;
+    var n_slt: usize = 0;
+    var n_not: usize = 0;
+    var n_const: usize = 0;
+    var i = pc;
+    while (i < end) : (i += 1) {
+        const d = llir.decode(image.instructions[i]).?;
+        switch (d.op) {
+            .slti => {
+                n_slti += 1;
+                try testing.expectEqual(@as(u8, 6), d.b);
+            },
+            .slt => n_slt += 1,
+            .not => n_not += 1,
+            .const_ => n_const += 1,
+            else => {},
+        }
+    }
+    try testing.expectEqual(@as(usize, 1), n_slti);
+    try testing.expectEqual(@as(usize, 0), n_slt);
+    try testing.expectEqual(@as(usize, 0), n_not);
+    try testing.expectEqual(@as(usize, 0), n_const);
 }
 
 test "LLIR lowering: corpus fusion metric" {

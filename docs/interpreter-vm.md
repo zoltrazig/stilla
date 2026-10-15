@@ -1,7 +1,7 @@
 # Stilla Interpreter VM
 
 > **Status:** implementation design for the Stilla v1.3 LLIR interpreter
-> (v10 encoding).
+> (v11 encoding).
 >
 > The LLIR Specification owns the program image, registers, frames, and
 > call/return contract. The LLIR Instruction Set owns instruction encoding,
@@ -29,7 +29,7 @@ The first design should stay deliberately small:
 - lazy module initialization and reverse-order normal teardown;
 - a typed host-call boundary and immediate panic/trap termination.
 
-Three v10 properties are decisive before implementation:
+Three v11 properties are decisive before implementation:
 
 1. **The opcodes carry their numeric semantics.** The integer arithmetic
    families are typed (`add.i32`/`add.u32`/`add.i64`/`add.u64`, …) — the
@@ -80,7 +80,7 @@ The interpreter:
 
 The first version does not include a JIT, concurrency, exceptions, debugger
 snapshots, suspension, a stable binary ABI, or dispatch specialization
-(dispatch specialization is structurally unnecessary in v10 — the opcodes
+(dispatch specialization is structurally unnecessary in v11 — the opcodes
 are already specialized).
 
 ## 3. Core invariants
@@ -576,7 +576,7 @@ fallthrough(n):
 
 The handler table is `[max tag + 1]Handler` indexed by
 `@intFromEnum(op)` — `Opcode` has dense explicit tags (contiguous
-1–271), so the raw array is the index space; the comptime initializer
+1–273), so the raw array is the index space; the comptime initializer
 fills it with an exhaustive per-tag switch, and any tag left
 unassigned fails the compile (the completeness guard, §12). Index 0
 is the only non-tag slot: the generic trap handler is just the
@@ -617,7 +617,7 @@ signatures, stack capacity, and computed control-flow targets.
 Do not repeat the frame arithmetic here. Implement `enterCalleeId`,
 `returnFrom`,
 and `tailcallSelf` directly from the LLIR Specification and keep parity
-tests against `MiniVm` in `frontend_llir_normalize_tests.zig`. The v10 model
+tests against `MiniVm` in `frontend_llir_normalize_tests.zig`. The v11 model
 is the three-cell header `{ saved_fp, saved_fn, saved_ra }` with the
 Itanium-style window overlap. A static `jal`'s callee registry index is
 resolved at load time (publishArtifact rewrites the instruction's operand),
@@ -966,7 +966,7 @@ CLI integration: `stilla --run <input>` executes. An input
 starting with the LLIR magic loads through `readBin` → `validateLlir` →
 `run`, executing from the header's symbolic entry member — the binary
 header carries the module symbol and entry member (binary format version
-18), so a serialized artifact is self-contained and needs no side
+19), so a serialized artifact is self-contained and needs no side
 information. Anything else compiles the whole dependency closure
 (entry plus `-I` imports and the embedded standard library) into one
 per-module artifact bundle and runs the root artifact through
@@ -992,10 +992,10 @@ The acceptance matrix is:
 
 | Area | Required evidence |
 | --- | --- |
-| Load boundary | malformed binary and invalid LLIR are rejected before host callbacks or runtime allocations; a non-v18 input is rejected on magic/version alone; loading decodes exactly one `VmInstr` per record (1:1, order-preserving), and the executed path allocates nothing per instruction |
+| Load boundary | malformed binary and invalid LLIR are rejected before host callbacks or runtime allocations; a non-v19 input is rejected on magic/version alone; loading decodes exactly one `VmInstr` per record (1:1, order-preserving), and the executed path allocates nothing per instruction |
 | Value encoding | canonical scalar bit patterns (bool 0/1, byte high bits zero, `int32` sign-extended to a cell and `uint32` zero-extended, `float32` high bits zero, full-width `i64`/`u64`/`f64`, NaN payload round-trip), rep-resolved typed `zero`, empty-list all-zero encoding, full-cell transfers, pointer cells validated by registry membership before dereference, null-only-for-empty-list traps, and no 48-bit pointer rejection path |
 | Scalars | arithmetic, comparison, the casts, zero/discard (zero read/write), `ret zero`, `copy cond, zero`, and every trap edge — dispatched per rep |
-| Comparisons | E-type comparisons (selectors 0–63) overwrite `cond`; integer opcodes distinguish only signed from unsigned because the `int32` cell is already sign-extended and the `uint32` cell zero-extended; float width remains explicit; NaN boundaries (`seq` false, `sne` true, `slt`/`sle` false); `copy dst, cond` materialization |
+| Comparisons | E-type comparisons (selectors 0–65) overwrite `cond`; the cond-producing integer comparisons `slt`/`sltu`/`sle`/`sleu` distinguish only signed from unsigned because the `int32` cell is already sign-extended and the `uint32` cell zero-extended; float width remains explicit; NaN boundaries (`seq` false, `sne` true, `slt`/`sle` false); `copy dst, cond` materialization |
 | Frames | direct (`jal ra`) and indirect (`jalr`) calls, positive and negative `offs16`, `jalr` base-plus-offset overflow, non-entry targets, nested-call `ra` save/restore, `j` discarding no link, return to F/T/zero, recursion, self-tailcall preserving `ra`, stack-limit atomicity, dynamic take-contract mismatch and failure atomicity, T0–T15 call-clobber, the O aliases' call-clobber, parity with `MiniVm` |
 | Control flow | branches, switch, computed-target success and out-of-range traps |
 | Heap values | string constants, concat, list/box/aggregate construction and projection, consuming destructure |
@@ -1042,7 +1042,7 @@ provides evidence:
 - asynchronous or reentrant host calls;
 - JIT compilation, concurrency, exceptions, or cycle collection;
 - a stable persistence ABI for LLIR binaries;
-- a predecode cache (v10's opcodes are already typed, so a cache would only
+- a predecode cache (v11's opcodes are already typed, so a cache would only
   save decode, not re-typing — measure before adding it).
 
 These features must not shape the first public API or add fields to every

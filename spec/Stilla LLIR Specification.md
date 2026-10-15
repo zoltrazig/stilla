@@ -1,13 +1,13 @@
 # Stilla LLIR Specification
 
-> **Version:** v1.3 Draft (v10 encoding)
+> **Version:** v1.3 Draft (v11 encoding)
 >
 > This document defines the fixed-width LLIR projection of a validated CFG:
 > the program image, registers, frames, and the call/return contract. It is
 > normative for a LLIR backend and interpreter, but does not define a stable
 > on-disk format.
 >
-> In the **v10** encoding, the type of every typed operation is written
+> In the **v11** encoding, the type of every typed operation is written
 > into the logical opcode at lowering time ([Instruction
 > Set](Stilla%20LLIR%20Instruction%20Set.md)), the output window is
 > **register-addressable** — the caller's output window aliases the callee's
@@ -752,13 +752,13 @@ Set](Stilla%20LLIR%20Instruction%20Set.md). This specification references
 it for the instruction-level definitions: the encoding, the operand and
 special-register rules, the format classes (R/B/I/E/U), the opcode
 tables, the descriptor records, and the side-table records. The complete
-set is **271 logical opcodes**: R-type 112, B-type 22, I-type 31, E-type
-102, U-type 4. The E-type is one format spanning selectors `0–127`:
-selectors `0–63` are the comparisons and casts (the former C-type, whose
-64 selectors carry the full 64-bit integer cast matrix, §7), and selectors
-`64–107` the 38 unary, transfer, lifecycle, and control opcodes (with the
-generic `take` at the end and the reserved holes `70/71/77/79/81/83`,
-§8); selectors `108–127` are reserved. The I-type keeps selector 10
+set is **273 logical opcodes**: R-type 112, B-type 22, I-type 31, E-type
+104, U-type 4. The E-type is one format spanning selectors `0–127`:
+selectors `0–65` are the comparisons and casts (the former C-type, whose
+selectors carry the full 64-bit integer cast matrix, §7), and selectors
+`66–109` the 38 unary, transfer, lifecycle, and control opcodes (with the
+generic `take` at the end and the reserved holes `72/73/79/81/83/85`,
+§8); selectors `110–127` are reserved. The I-type keeps selector 10
 reserved so the `slot_*` encodings are unchanged.
 
 # 7. Control flow, effects, and traps
@@ -924,18 +924,20 @@ canonical bytes; little-endian word assembly happens only inside
 representation of Zig `extern struct`s or any Zig ABI layout directly.
 
 **The version number is the format boundary: the binary format version is
-18**, and every earlier image is rejected on the version alone. Version 18
-added `bgti`/`bgtiu` at B-type codes 16/17 and moved `beqi`/`bnei`/`tbz`/
-`tbnz` to 18/19/20/21 (the B-type codes 0–21 are assigned), and the
-logical table is now 271 opcodes. Version 17 retired four R-type opcodes
-and remapped the following sixteen down by four (R-type wire codes 100–115
-become 96–111; the logical table was then 269 opcodes). The instruction
-stream is the Instruction Set's v10 encoding: the bit layouts,
+19**, and every earlier image is rejected on the version alone. Version 19
+added `sle`/`sleu` at E-type selectors 10/11 and shifted every later E
+selector up by two (the former-E block now opens at selector 66; the
+logical table is now 273 opcodes). Version 18 added `bgti`/`bgtiu` at
+B-type codes 16/17 and moved `beqi`/`bnei`/`tbz`/`tbnz` to 18/19/20/21
+(assigning all of the B-type codes 0–21). Version 17 retired four R-type
+opcodes and remapped the following sixteen down by four (R-type wire
+codes 100–115 become 96–111; the logical table was then 269 opcodes). The
+instruction stream is the Instruction Set's v11 encoding: the bit layouts,
 the typed opcode assignment, the register model (`frame_count_max` = 109,
 the fast bank, the specials), the immediate ranges, and the call
 convention of §4–§5; any change to the opcode assignment, the ranges, or
 any table's row layout is a new version. The built-in reader rejects any
-version other than 18 on its magic/version alone, **before the header
+version other than 19 on its magic/version alone, **before the header
 symbols or a single table count is decoded** — and no two readers
 disagree about a version's table set.
 

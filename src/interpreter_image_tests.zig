@@ -335,6 +335,49 @@ test "bgti/bgtiu: greater-than immediate branches take and fall through" {
     }
 }
 
+test "bool/str equality branches run the general bool test, not an unsigned order" {
+    // A `bool`/`str` `==`/`!=` condition has no numeric ordering branch
+    // (Instruction Set §5.1): the lowered branch tests the materialized
+    // condition against zero. A fused `bltu`/`bleu` over the bool/str
+    // slots would compare them as integers and branch the wrong way. The
+    // `then` arm prints, so the branch survives if-conversion and its
+    // decision is observable; the four sums pin each predicate's result.
+    var l = try load(
+        \\const builtin = import("builtin");
+        \\fn bool_eq(a: bool, b: bool, x: int32, y: int32) -> int32 {
+        \\    if (a == b) { builtin.print("t"); x } else { y }
+        \\}
+        \\fn str_eq(a: str, b: str, x: int32, y: int32) -> int32 {
+        \\    if (a == b) { builtin.print("t"); x } else { y }
+        \\}
+        \\fn main() -> int32 {
+        \\    let p = bool_eq(true, true, 10, 20);
+        \\    let q = bool_eq(true, false, 10, 20);
+        \\    let r = str_eq("x", "x", 10, 20);
+        \\    let s = str_eq("x", "y", 10, 20);
+        \\    p + q + r + s
+        \\}
+    , false);
+    defer l.deinit();
+    var out = CaptureAdapter{};
+    var term = try interpreter.runWithEntry(
+        testing.allocator,
+        l.image,
+        try l.fid("main"),
+        .{ .userdata = &out, .invoke = CaptureAdapter.invoke },
+    );
+    defer term.deinit(testing.allocator);
+    switch (term) {
+        .normal => |v| try testing.expectEqual(@as(Value, 10 + 20 + 10 + 20), v),
+        .panic => |m| {
+            std.log.err("unexpected panic: {s}", .{m});
+            return error.TestUnexpectedResult;
+        },
+    }
+    // The two true equalities print; the two false ones do not.
+    try testing.expectEqualStrings("t\nt\n", out.buffer[0..out.len]);
+}
+
 test "f64 arithmetic: IEEE division, remainder, NaN equality — no traps" {
     var l = try load(
         \\fn half(x: float64) -> float64 { x / 2.0 }
@@ -469,9 +512,10 @@ fn runIntCmp(op: llir.Opcode, a: Value, b: Value, rows: []const llir.TypeDesc) !
 }
 
 test "integer E-type comparisons write cond (signed/unsigned, 32/64-bit)" {
-    // All four integer comparison opcodes, the only integer E-type
-    // comparison set. `slt` is signed; `sltu` unsigned. 32-bit operands
-    // are sign-extended cells; 64-bit are full-width.
+    // The strict integer ordering opcodes: `slt` is signed; `sltu`
+    // unsigned. (`sle`/`sleu` cover the non-strict relations in the next
+    // test.) 32-bit operands are sign-extended cells; 64-bit are
+    // full-width.
     const i32_rows = [_]llir.TypeDesc{ primType(.int32), primType(.int32), primType(.bool) };
     // -1 (as a sign-extended cell) < 0 → true
     try testing.expectEqual(@as(Value, 1), try runIntCmp(.slt, 0xffff_ffff_ffff_ffff, 0, &i32_rows));
@@ -491,6 +535,31 @@ test "integer E-type comparisons write cond (signed/unsigned, 32/64-bit)" {
     try testing.expectEqual(@as(Value, 0), try runIntCmp(.sltu, min64, 0, &i64_rows));
     try testing.expectEqual(@as(Value, 0), try runIntCmp(.slt, 0, min64, &i64_rows));
     try testing.expectEqual(@as(Value, 1), try runIntCmp(.sltu, 0, min64, &i64_rows));
+}
+
+test "integer sle/sleu write cond (signed/unsigned non-strict)" {
+    // The non-strict integer ordering opcodes: `sle` reads the operands
+    // as signed `i64` cells, `sleu` as unsigned — the same bits, a
+    // different `<=`. 32-bit operands are sign-extended cells; 64-bit are
+    // full-width.
+    const i32_rows = [_]llir.TypeDesc{ primType(.int32), primType(.int32), primType(.bool) };
+    // -1 <= 0 signed → true; unsigned -1 is max → false.
+    try testing.expectEqual(@as(Value, 1), try runIntCmp(.sle, 0xffff_ffff_ffff_ffff, 0, &i32_rows));
+    try testing.expectEqual(@as(Value, 0), try runIntCmp(.sleu, 0xffff_ffff_ffff_ffff, 0, &i32_rows));
+    // Equal operands are `<=` in both readings.
+    try testing.expectEqual(@as(Value, 1), try runIntCmp(.sle, 0x1234, 0x1234, &i32_rows));
+    try testing.expectEqual(@as(Value, 1), try runIntCmp(.sleu, 0x1234, 0x1234, &i32_rows));
+    // 0 <= -1 is false signed; unsigned 0 sits below the huge value.
+    try testing.expectEqual(@as(Value, 0), try runIntCmp(.sle, 0, 0xffff_ffff_ffff_ffff, &i32_rows));
+    try testing.expectEqual(@as(Value, 1), try runIntCmp(.sleu, 0, 0xffff_ffff_ffff_ffff, &i32_rows));
+
+    const i64_rows = [_]llir.TypeDesc{ primType(.int64), primType(.int64), primType(.bool) };
+    // 1 << 63 is i64 min (signed) → `<= 0` true; as unsigned it is huge.
+    const min64: Value = 0x8000_0000_0000_0000;
+    try testing.expectEqual(@as(Value, 1), try runIntCmp(.sle, min64, 0, &i64_rows));
+    try testing.expectEqual(@as(Value, 0), try runIntCmp(.sleu, min64, 0, &i64_rows));
+    try testing.expectEqual(@as(Value, 0), try runIntCmp(.sle, 0, min64, &i64_rows));
+    try testing.expectEqual(@as(Value, 1), try runIntCmp(.sleu, 0, min64, &i64_rows));
 }
 
 // clz/popcount harness: load `a` into F0 (the 64-bit movw sequence), run

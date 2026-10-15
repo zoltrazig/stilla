@@ -578,9 +578,44 @@ test "constant folding folds uint32 arithmetic and ordering" {
     try testing.expectEqual(false, instrs[11].op.const_.bool);
 }
 
+test "constant folding folds int64, uint64, and float64 comparisons" {
+    // Defect G-6: the AIR peephole must fold 64-bit comparisons just as
+    // the HIR egraph rules (hir_egraph_rules.zig `cmpResult`) do.
+    // `foldProgram` applies only `cfg_lower_emit.tryFoldOp`, so this
+    // exercises the peephole alone, without HIR or SEG.
+    var t = try cfg_parse.parseText(
+        \\module "app" {
+        \\func @f() -> bool {
+        \\entry:
+        \\    %0: int64 = const -5
+        \\    %1: int64 = const 7
+        \\    %2: bool = lt %0, %1
+        \\    %3: uint64 = const 5
+        \\    %4: uint64 = const 7
+        \\    %5: bool = gt %3, %4
+        \\    %6: float64 = const 1.5
+        \\    %7: float64 = const 2.5
+        \\    %8: bool = le %6, %7
+        \\    ret %2
+        \\}
+        \\}
+    );
+    defer t.arena.deinit();
+    foldProgram(&t.program);
+
+    const instrs = t.program.funcs[0].entry.instrs;
+    try testing.expect(instrs[2].op == .const_);
+    try testing.expectEqual(true, instrs[2].op.const_.bool);
+    try testing.expect(instrs[5].op == .const_);
+    try testing.expectEqual(false, instrs[5].op.const_.bool);
+    try testing.expect(instrs[8].op == .const_);
+    try testing.expectEqual(true, instrs[8].op.const_.bool);
+}
+
 test "constant folding folds equality over byte, bool, and str" {
-    // Core §16.3: ==/!= span byte, bool, and str; the ordering ops are
-    // numeric-only, so `lt` on byte and str stays unfolded.
+    // Core §16.3: ==/!= span byte, bool, and str; byte ordering folds as
+    // unsigned 8-bit (200 < 5 is false), while str has no ordering op,
+    // so `lt` on str stays unfolded.
     var t = try cfg_parse.parseText(
         \\module "app" {
         \\func @f() -> bool {
@@ -612,7 +647,8 @@ test "constant folding folds equality over byte, bool, and str" {
     try testing.expectEqual(true, instrs[2].op.const_.bool);
     try testing.expect(instrs[4].op == .const_);
     try testing.expectEqual(true, instrs[4].op.const_.bool);
-    try testing.expect(instrs[5].op == .lt);
+    try testing.expect(instrs[5].op == .const_);
+    try testing.expectEqual(false, instrs[5].op.const_.bool);
     try testing.expect(instrs[7].op == .const_);
     try testing.expectEqual(true, instrs[7].op.const_.bool);
     try testing.expect(instrs[8].op == .const_);
